@@ -1,4 +1,4 @@
-﻿# LifeLens Agent Instructions
+﻿# Lumi Agent Instructions
 
 - Build continuously toward the complete hero scenario.
 - Prefer working functionality over unnecessary abstraction.
