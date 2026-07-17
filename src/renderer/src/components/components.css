@@ -1,0 +1,183 @@
+.lifelens-explanation-card,
+.lifelens-tool-confirmation-card {
+  margin: 12px 0 0;
+  padding: 13px;
+  border: 1px solid rgba(179, 211, 255, 0.17);
+  border-radius: 14px;
+  color: #eaf2ff;
+  background: rgba(7, 15, 47, 0.58);
+}
+
+.lifelens-tool-confirmation-card {
+  border-color: rgba(130, 239, 255, 0.32);
+  background: linear-gradient(135deg, rgba(33, 88, 130, 0.37), rgba(43, 28, 91, 0.44));
+}
+
+.lifelens-card-eyebrow {
+  margin: 0 0 4px;
+  color: #9ec5ff;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.13em;
+}
+
+.lifelens-card-heading {
+  margin: 0 0 8px;
+  color: #f7fbff;
+  font-size: 16px;
+  line-height: 1.2;
+}
+
+.lifelens-explanation-summary,
+.lifelens-tool-reason,
+.lifelens-confirmation-notice {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.lifelens-tool-reason {
+  color: #eaf2ff;
+}
+
+.lifelens-signal-section {
+  margin-top: 11px;
+}
+
+.lifelens-signal-section h3,
+.lifelens-source-context h3 {
+  margin: 0 0 5px;
+  color: #8fefff;
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+.lifelens-signal-section ul,
+.lifelens-source-context ul {
+  display: grid;
+  gap: 5px;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+
+.lifelens-signal-section li,
+.lifelens-source-context li {
+  color: #c7dcff;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.lifelens-signal-label {
+  margin-right: 5px;
+  color: #b9cced;
+  font-weight: 650;
+}
+
+.lifelens-link-value,
+.lifelens-action-details code {
+  overflow-wrap: anywhere;
+  color: #9df5ff;
+  font: inherit;
+}
+
+.lifelens-action-details {
+  display: grid;
+  gap: 7px;
+  margin: 12px 0 0;
+}
+
+.lifelens-action-details div {
+  display: grid;
+  grid-template-columns: minmax(82px, 0.8fr) minmax(0, 1.7fr);
+  gap: 9px;
+}
+
+.lifelens-action-details dt {
+  color: #b8c9e4;
+  font-size: 12px;
+}
+
+.lifelens-action-details dd {
+  min-width: 0;
+  margin: 0;
+  color: #f2f7ff;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.lifelens-source-context {
+  margin-top: 11px;
+  padding: 10px;
+  border: 1px solid rgba(181, 218, 255, 0.16);
+  border-radius: 10px;
+  background: rgba(1, 7, 28, 0.24);
+}
+
+.lifelens-source-context p {
+  margin: 0 0 8px;
+  color: #d8e7fb;
+  font-size: 12px;
+  line-height: 1.42;
+}
+
+.lifelens-source-context li span {
+  color: #8fefff;
+  font-weight: 650;
+}
+
+.lifelens-confirmation-notice {
+  margin-top: 12px;
+  color: #b8c9e4;
+  font-size: 11px;
+}
+
+.lifelens-confirmation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 11px;
+}
+
+.lifelens-confirm-button,
+.lifelens-dismiss-button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 12px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 760;
+  cursor: pointer;
+}
+
+.lifelens-confirm-button {
+  flex: 1 1 140px;
+  padding: 9px 12px;
+  color: #061129;
+  background: linear-gradient(135deg, #79efff, #a9abff);
+}
+
+.lifelens-dismiss-button {
+  flex: 0 1 auto;
+  padding: 8px 11px;
+  color: #cbd9f2;
+  background: transparent;
+}
+
+.lifelens-confirm-button:hover:not(:disabled),
+.lifelens-dismiss-button:hover:not(:disabled) {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
+.lifelens-confirm-button:focus-visible,
+.lifelens-dismiss-button:focus-visible {
+  outline: 2px solid #9df5ff;
+  outline-offset: 2px;
+}
+
+.lifelens-confirm-button:disabled,
+.lifelens-dismiss-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
