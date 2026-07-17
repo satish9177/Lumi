@@ -1,4 +1,16 @@
-import { extractSignals, type CaptureResult, type CompanionState, type Explanation, type RealtimeSessionCredential, type ToolExecutionResult, type ToolProposal } from '../../shared/contracts'
+import {
+  extractSignals,
+  parseToolProposal,
+  type ApprovedDocumentRoot,
+  type CaptureResult,
+  type CompanionState,
+  type Explanation,
+  type RealtimeSessionCredential,
+  type SourceContext,
+  type ToolExecutionResult,
+  type ToolName,
+  type ToolProposal
+} from '../../shared/contracts'
 
 interface RealtimeCallbacks {
   onState: (state: CompanionState) => void
@@ -12,26 +24,85 @@ const SYSTEM_INSTRUCTIONS = [
   'You are LifeLens, a concise, supportive floating desktop companion.',
   'Explain captured screen content in simple English; use Telugu-English only if the user does.',
   'State important dates, links, and concrete next actions plainly.',
-  'Never claim you performed an external or state-changing action.',
-  'If a reminder would help, call create_reminder with a precise title and ISO 8601 due_at.',
-  'Keep a visible text version of your answer under 120 words.'
+  'Every function is only a proposal. Never claim an action was performed until the application returns its result.',
+  'Use only the supplied approved-folder identifiers; never ask for or invent a local file path.',
+  'Keep a visible text version of each answer under 120 words.'
 ].join(' ')
 
-const REMINDER_TOOL = {
-  type: 'function',
-  name: 'create_reminder',
-  description: 'Propose a reminder for a date or next action visible in the current screen context. The user must confirm it before it is saved.',
-  parameters: {
-    type: 'object',
-    additionalProperties: false,
-    properties: {
-      title: { type: 'string', description: 'Short reminder title.' },
-      due_at: { type: 'string', description: 'ISO 8601 date-time for the reminder.' },
-      reason: { type: 'string', description: 'Why this reminder is useful.' }
-    },
-    required: ['title', 'due_at', 'reason']
+const TOOL_DEFINITIONS = [
+  {
+    type: 'function',
+    name: 'create_reminder',
+    description: 'Propose a reminder for a date or next action visible in the current screen context. The user must confirm it before it is saved.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        title: { type: 'string', description: 'Short reminder title.' },
+        due_at: { type: 'string', description: 'ISO 8601 date-time for the reminder.' },
+        reason: { type: 'string', description: 'Why this reminder is useful.' }
+      },
+      required: ['title', 'due_at', 'reason']
+    }
+  },
+  {
+    type: 'function',
+    name: 'search_documents',
+    description: 'Propose a filename search within one currently approved folder. The user must confirm it before the folder is searched.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        root_id: { type: 'string', description: 'An approved folder identifier supplied in the session context.' },
+        query: { type: 'string', description: 'A short filename query such as resume.' },
+        reason: { type: 'string', description: 'Why this approved-folder search helps.' }
+      },
+      required: ['root_id', 'query', 'reason']
+    }
+  },
+  {
+    type: 'function',
+    name: 'open_file',
+    description: 'Propose opening one result identifier returned by an approved document search. The user must confirm it.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        result_id: { type: 'string', description: 'A result identifier returned by LifeLens.' },
+        reason: { type: 'string', description: 'Why this file should be opened.' }
+      },
+      required: ['result_id', 'reason']
+    }
+  },
+  {
+    type: 'function',
+    name: 'open_url',
+    description: 'Propose opening an http or https link visible in the current context. The user must confirm it.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        url: { type: 'string', description: 'The exact http or https link to open.' },
+        reason: { type: 'string', description: 'Why this link should be opened.' }
+      },
+      required: ['url', 'reason']
+    }
+  },
+  {
+    type: 'function',
+    name: 'save_context',
+    description: 'Propose saving the minimal current screen context for later reference. The user must confirm it.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        label: { type: 'string', description: 'A short label for the saved context.' },
+        reason: { type: 'string', description: 'Why preserving this context helps.' }
+      },
+      required: ['label', 'reason']
+    }
   }
-}
+]
 
 export class RealtimeClient {
   private dataChannel: RTCDataChannel | undefined
@@ -39,15 +110,18 @@ export class RealtimeClient {
   private localAudio: MediaStream | undefined
   private remoteAudio: HTMLAudioElement | undefined
   private currentCapture: CaptureResult | undefined
+  private currentExplanation: Explanation | undefined
   private textBuffer = ''
   private connected = false
   private model = 'gpt-realtime-2.1'
   private mode: 'live' | 'mock' = 'mock'
+  private approvedRoots: ApprovedDocumentRoot[] = []
   private readonly completedCallIds = new Set<string>()
 
   constructor(private readonly callbacks: RealtimeCallbacks) {}
 
   async connect(credential: RealtimeSessionCredential): Promise<void> {
+    this.disconnect()
     this.mode = credential.mode
     this.model = credential.model
 
@@ -64,7 +138,19 @@ export class RealtimeClient {
       throw new Error('LifeLens received an incomplete Realtime credential.')
     }
 
-    await this.connectLive(credential.token)
+    try {
+      await this.connectLive(credential.token)
+    } catch (error) {
+      this.disconnect()
+      throw error
+    }
+  }
+
+  setApprovedRoots(roots: ApprovedDocumentRoot[]): void {
+    this.approvedRoots = roots
+    if (this.mode === 'live' && this.dataChannel?.readyState === 'open') {
+      this.sendEvent({ type: 'session.update', session: { instructions: this.sessionInstructions() } })
+    }
   }
 
   async sendCapture(capture: CaptureResult, question: string): Promise<void> {
@@ -73,12 +159,14 @@ export class RealtimeClient {
     }
 
     this.currentCapture = capture
+    this.currentExplanation = undefined
     this.textBuffer = ''
     this.callbacks.onState('thinking')
 
     if (this.mode === 'mock') {
       await delay(550)
       const explanation = createMockExplanation(capture, question)
+      this.currentExplanation = explanation
       this.callbacks.onExplanation(explanation)
       this.callbacks.onTranscript(explanation.summary)
       this.callbacks.onToolProposal(createMockReminderProposal(explanation, capture))
@@ -112,15 +200,11 @@ export class RealtimeClient {
       return
     }
 
-    this.sendEvent({
-      type: 'conversation.item.create',
-      item: {
-        type: 'function_call_output',
-        call_id: proposal.callId,
-        output: JSON.stringify({ ok: result.ok, message: result.message })
-      }
-    })
-    this.sendEvent({ type: 'response.create' })
+    this.sendFunctionCallOutput(proposal.callId, result)
+  }
+
+  declineToolProposal(proposal: ToolProposal): void {
+    this.sendToolResult(proposal, { ok: false, message: 'The user declined this action.' })
   }
 
   disconnect(): void {
@@ -154,6 +238,7 @@ export class RealtimeClient {
       if (this.peerConnection?.connectionState === 'failed') {
         this.callbacks.onError('The Realtime voice connection failed.')
         this.callbacks.onState('error')
+        this.disconnect()
       }
     }
 
@@ -165,20 +250,8 @@ export class RealtimeClient {
 
     this.dataChannel = this.peerConnection.createDataChannel('oai-events')
     this.dataChannel.onmessage = (event) => this.handleServerEvent(event.data)
-    const opened = new Promise<void>((resolve, reject) => {
-      const timeout = window.setTimeout(() => reject(new Error('Timed out while opening the Realtime event channel.')), 15_000)
-      this.dataChannel!.onopen = () => {
-        window.clearTimeout(timeout)
-        this.connected = true
-        this.configureLiveSession()
-        this.callbacks.onState('listening')
-        resolve()
-      }
-      this.dataChannel!.onerror = () => {
-        window.clearTimeout(timeout)
-        reject(new Error('The Realtime event channel could not be opened.'))
-      }
-    })
+    const opened = this.waitForDataChannel(this.dataChannel)
+    void opened.catch(() => undefined)
 
     const offer = await this.peerConnection.createOffer()
     if (!offer.sdp) {
@@ -201,15 +274,42 @@ export class RealtimeClient {
     await opened
   }
 
+  private waitForDataChannel(channel: RTCDataChannel): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      const timeout = window.setTimeout(() => reject(new Error('Timed out while opening the Realtime event channel.')), 15_000)
+      channel.onopen = () => {
+        window.clearTimeout(timeout)
+        try {
+          this.connected = true
+          this.configureLiveSession()
+          this.callbacks.onState('listening')
+          resolve()
+        } catch (error) {
+          reject(error)
+        }
+      }
+      channel.onerror = () => {
+        window.clearTimeout(timeout)
+        reject(new Error('The Realtime event channel could not be opened.'))
+      }
+      channel.onclose = () => {
+        window.clearTimeout(timeout)
+        if (!this.connected) {
+          reject(new Error('The Realtime event channel closed before it opened.'))
+        }
+      }
+    })
+  }
+
   private configureLiveSession(): void {
     this.sendEvent({
       type: 'session.update',
       session: {
         type: 'realtime',
         model: this.model,
-        instructions: SYSTEM_INSTRUCTIONS,
+        instructions: this.sessionInstructions(),
         audio: { output: { voice: 'marin' } },
-        tools: [REMINDER_TOOL],
+        tools: TOOL_DEFINITIONS,
         tool_choice: 'auto'
       }
     })
@@ -222,11 +322,36 @@ export class RealtimeClient {
     })
   }
 
+  private sessionInstructions(): string {
+    if (this.approvedRoots.length === 0) {
+      return `${SYSTEM_INSTRUCTIONS} No folder is approved for document search right now.`
+    }
+
+    const roots = this.approvedRoots.map((root) => `${root.label} (${root.id})`).join(', ')
+    return `${SYSTEM_INSTRUCTIONS} Approved folders available for search: ${roots}.`
+  }
+
   private sendEvent(event: unknown): void {
     if (this.dataChannel?.readyState !== 'open') {
       throw new Error('The Realtime event channel is not ready.')
     }
     this.dataChannel.send(JSON.stringify(event))
+  }
+
+  private sendFunctionCallOutput(callId: string, result: ToolExecutionResult): void {
+    try {
+      this.sendEvent({
+        type: 'conversation.item.create',
+        item: {
+          type: 'function_call_output',
+          call_id: callId,
+          output: JSON.stringify({ ok: result.ok, message: result.message, searchResults: result.searchResults })
+        }
+      })
+      this.sendEvent({ type: 'response.create' })
+    } catch (error) {
+      this.callbacks.onError(error instanceof Error ? error.message : 'Could not return the action result to Realtime.')
+    }
   }
 
   private handleServerEvent(serializedEvent: unknown): void {
@@ -253,7 +378,7 @@ export class RealtimeClient {
       return
     }
 
-    if (type === 'response.output_text.delta' || type === 'response.text.delta' || type === 'response.audio_transcript.delta') {
+    if (type === 'response.output_text.delta' || type === 'response.text.delta' || type === 'response.output_audio_transcript.delta') {
       const delta = typeof event.delta === 'string' ? event.delta : ''
       if (delta) {
         this.textBuffer += delta
@@ -263,7 +388,7 @@ export class RealtimeClient {
     }
 
     if (type === 'response.function_call_arguments.done') {
-      this.handleReminderCall(event)
+      this.handleToolCall(event)
       return
     }
 
@@ -285,61 +410,101 @@ export class RealtimeClient {
     const output = Array.isArray(response.output) ? response.output : []
     for (const item of output) {
       if (isRecord(item) && item.type === 'function_call') {
-        this.handleReminderCall(item)
+        this.handleToolCall(item)
       }
     }
 
     if (this.currentCapture && this.textBuffer.trim()) {
-      this.callbacks.onExplanation({
+      this.currentExplanation = {
         summary: this.textBuffer.trim(),
         sourceCaptureId: this.currentCapture.id,
         signals: extractSignals(this.textBuffer)
-      })
+      }
+      this.callbacks.onExplanation(this.currentExplanation)
     }
     this.callbacks.onState('listening')
   }
 
-  private handleReminderCall(event: Record<string, unknown>): void {
-    const name = typeof event.name === 'string' ? event.name : ''
+  private handleToolCall(event: Record<string, unknown>): void {
+    const name = typeof event.name === 'string' && isToolName(event.name) ? event.name : undefined
     const callId = typeof event.call_id === 'string' ? event.call_id : typeof event.callId === 'string' ? event.callId : ''
-    if (name !== 'create_reminder' || !callId || this.completedCallIds.has(callId) || !this.currentCapture) {
+    if (!name || !callId || this.completedCallIds.has(callId)) {
       return
     }
 
-    const argumentsJson = typeof event.arguments === 'string' ? event.arguments : ''
-    let parsedArguments: Record<string, unknown> = {}
-    try {
-      const parsed: unknown = JSON.parse(argumentsJson)
-      if (isRecord(parsed)) {
-        parsedArguments = parsed
-      }
-    } catch {
-      this.callbacks.onError('LifeLens received malformed reminder details from Realtime.')
-      return
-    }
-
-    const title = typeof parsedArguments.title === 'string' && parsedArguments.title.trim() ? parsedArguments.title.trim() : 'Follow up on this screen'
-    const dueAt = normalizeDueAt(parsedArguments.due_at)
-    const reason = typeof parsedArguments.reason === 'string' && parsedArguments.reason.trim() ? parsedArguments.reason.trim() : 'A follow-up was identified in the captured screen.'
-    const summary = this.textBuffer.trim() || reason
     this.completedCallIds.add(callId)
-    this.callbacks.onToolProposal({
-      id: crypto.randomUUID(),
-      callId,
-      toolName: 'create_reminder',
-      reason,
-      requiresConfirmation: true,
-      arguments: {
-        title,
-        dueAt,
-        sourceContext: {
-          captureId: this.currentCapture.id,
-          summary,
-          capturedAt: this.currentCapture.capturedAt,
-          signals: extractSignals(summary)
-        }
+    const argumentsJson = typeof event.arguments === 'string' ? event.arguments : ''
+    try {
+      const parsed = JSON.parse(argumentsJson) as unknown
+      if (!isRecord(parsed)) {
+        throw new Error('Realtime supplied non-object function arguments.')
       }
-    })
+
+      this.callbacks.onToolProposal(this.createToolProposal(name, callId, parsed))
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'LifeLens received malformed tool details from Realtime.'
+      this.callbacks.onError(message)
+      this.sendFunctionCallOutput(callId, { ok: false, message })
+    }
+  }
+
+  private createToolProposal(name: ToolName, callId: string, argumentsValue: Record<string, unknown>): ToolProposal {
+    const reason = requiredArgument(argumentsValue, 'reason', 'The model identified a useful follow-up.')
+    const common = { id: crypto.randomUUID(), callId, toolName: name, reason, requiresConfirmation: true as const }
+
+    switch (name) {
+      case 'create_reminder':
+        return parseToolProposal({
+          ...common,
+          arguments: {
+            title: requiredArgument(argumentsValue, 'title', 'Follow up on this screen'),
+            dueAt: normalizeDueAt(argumentsValue.due_at),
+            sourceContext: this.currentSourceContext(reason)
+          }
+        })
+      case 'search_documents': {
+        const requestedRootId = optionalArgument(argumentsValue, 'root_id') ?? optionalArgument(argumentsValue, 'rootId')
+        const rootId = requestedRootId || (this.approvedRoots.length === 1 ? this.approvedRoots[0].id : '')
+        if (!rootId || !this.approvedRoots.some((root) => root.id === rootId)) {
+          throw new Error('Realtime requested a document search without an approved folder.')
+        }
+
+        return parseToolProposal({
+          ...common,
+          arguments: { rootId, query: requiredArgument(argumentsValue, 'query') }
+        })
+      }
+      case 'open_file':
+        return parseToolProposal({
+          ...common,
+          arguments: { resultId: requiredArgument(argumentsValue, 'result_id') }
+        })
+      case 'open_url':
+        return parseToolProposal({
+          ...common,
+          arguments: { url: requiredArgument(argumentsValue, 'url') }
+        })
+      case 'save_context':
+        return parseToolProposal({
+          ...common,
+          arguments: { label: requiredArgument(argumentsValue, 'label', 'LifeLens screen context'), sourceContext: this.currentSourceContext(reason) }
+        })
+    }
+  }
+
+  private currentSourceContext(fallbackSummary: string): SourceContext {
+    if (!this.currentCapture) {
+      throw new Error('Realtime cannot propose this action before a screen capture exists.')
+    }
+
+    const explanation = this.currentExplanation
+    const summary = explanation?.summary || this.textBuffer.trim() || fallbackSummary
+    return {
+      captureId: this.currentCapture.id,
+      summary,
+      capturedAt: this.currentCapture.capturedAt,
+      signals: explanation?.signals ?? extractSignals(summary)
+    }
   }
 
   private speakMock(text: string): void {
@@ -390,6 +555,22 @@ function createMockReminderProposal(explanation: Explanation, capture: CaptureRe
   }
 }
 
+function requiredArgument(argumentsValue: Record<string, unknown>, name: string, fallback?: string): string {
+  const value = optionalArgument(argumentsValue, name)
+  if (value) {
+    return value
+  }
+  if (fallback) {
+    return fallback
+  }
+  throw new Error(`Realtime did not provide ${name} for its requested action.`)
+}
+
+function optionalArgument(argumentsValue: Record<string, unknown>, name: string): string | undefined {
+  const value = argumentsValue[name]
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
 function normalizeDueAt(value: unknown): string {
   if (typeof value === 'string' && Number.isFinite(Date.parse(value))) {
     return new Date(value).toISOString()
@@ -409,16 +590,32 @@ function extractResponseText(response: Record<string, unknown>): string {
   const output = Array.isArray(response.output) ? response.output : []
   const parts: string[] = []
   for (const item of output) {
-    if (!isRecord(item) || !Array.isArray(item.content)) {
+    if (!isRecord(item)) {
+      continue
+    }
+    if (typeof item.transcript === 'string') {
+      parts.push(item.transcript)
+    }
+    if (!Array.isArray(item.content)) {
       continue
     }
     for (const content of item.content) {
-      if (isRecord(content) && typeof content.text === 'string') {
+      if (!isRecord(content)) {
+        continue
+      }
+      if (typeof content.text === 'string') {
         parts.push(content.text)
+      }
+      if (typeof content.transcript === 'string') {
+        parts.push(content.transcript)
       }
     }
   }
   return parts.join(' ').trim()
+}
+
+function isToolName(value: string): value is ToolName {
+  return value === 'create_reminder' || value === 'search_documents' || value === 'open_file' || value === 'open_url' || value === 'save_context'
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

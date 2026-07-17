@@ -1,13 +1,14 @@
-import { app, BrowserWindow, ipcMain, screen } from 'electron'
-import { join } from 'node:path'
-import { IPC_CHANNELS } from '../shared/contracts'
-import { capturePrimaryScreen } from './services/capture'
+import { app, BrowserWindow, dialog, ipcMain, screen } from 'electron'
+import { basename, join } from 'node:path'
+import { IPC_CHANNELS, parseToolProposal, type CaptureResult, type ToolProposal } from '../shared/contracts'
+import { captureScreen, listCaptureSources } from './services/capture'
 import { createRealtimeSessionCredential } from './services/realtime'
 import { LocalStore } from './services/store'
 import { executeConfirmedTool, restoreReminderTimers } from './services/tools'
 
 let mainWindow: BrowserWindow | undefined
 let localStore: LocalStore
+const captures = new Map<string, CaptureResult>()
 
 const CLOSED_WINDOW_SIZE = { width: 88, height: 88 }
 const OPEN_WINDOW_SIZE = { width: 390, height: 640 }
@@ -29,7 +30,7 @@ function createWindow(): BrowserWindow {
       preload: join(__dirname, '../preload/index.mjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   })
 
@@ -43,6 +44,9 @@ function createWindow(): BrowserWindow {
   } else {
     void window.loadFile(join(__dirname, '../renderer/index.html'))
   }
+
+  window.webContents.on('will-navigate', (event) => event.preventDefault())
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
 
   return window
 }
@@ -73,9 +77,20 @@ function requireMainWindow(event: Electron.IpcMainInvokeEvent | Electron.IpcMain
 }
 
 function registerIpcHandlers(): void {
-  ipcMain.handle(IPC_CHANNELS.captureScreen, async (event) => {
+  ipcMain.handle(IPC_CHANNELS.listCaptureSources, async (event) => {
     requireMainWindow(event)
-    return capturePrimaryScreen()
+    return listCaptureSources()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.captureScreen, async (event, sourceId: unknown) => {
+    requireMainWindow(event)
+    if (sourceId !== undefined && (typeof sourceId !== 'string' || sourceId.length === 0 || sourceId.length > 500)) {
+      throw new Error('Capture source must be a short source identifier.')
+    }
+
+    const capture = await captureScreen(sourceId)
+    rememberCapture(capture)
+    return capture
   })
 
   ipcMain.handle(IPC_CHANNELS.createRealtimeSession, async (event) => {
@@ -85,7 +100,37 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.executeConfirmedTool, async (event, proposal: unknown) => {
     requireMainWindow(event)
-    return executeConfirmedTool(localStore, proposal)
+    const parsed = parseToolProposal(proposal)
+    validateCaptureProvenance(parsed)
+    if (!(await confirmToolProposal(parsed))) {
+      return { ok: false, message: 'Action cancelled. Nothing was changed or opened.' }
+    }
+
+    return executeConfirmedTool(localStore, parsed)
+  })
+
+  ipcMain.handle(IPC_CHANNELS.chooseDocumentRoot, async (event) => {
+    requireMainWindow(event)
+    if (!mainWindow) {
+      throw new Error('LifeLens window is unavailable.')
+    }
+
+    const selection = await dialog.showOpenDialog(mainWindow, {
+      title: 'Choose a folder LifeLens may search',
+      buttonLabel: 'Approve this folder',
+      properties: ['openDirectory']
+    })
+    if (selection.canceled || !selection.filePaths[0]) {
+      return undefined
+    }
+
+    const path = selection.filePaths[0]
+    return localStore.addDocumentRoot(path, basename(path) || 'Approved folder')
+  })
+
+  ipcMain.handle(IPC_CHANNELS.listDocumentRoots, async (event) => {
+    requireMainWindow(event)
+    return localStore.listDocumentRoots()
   })
 
   ipcMain.handle(IPC_CHANNELS.listReminders, async (event) => {
@@ -101,6 +146,61 @@ function registerIpcHandlers(): void {
 
     setPanelOpen(open)
   })
+}
+
+function rememberCapture(capture: CaptureResult): void {
+  captures.set(capture.id, capture)
+  while (captures.size > 12) {
+    const oldestId = captures.keys().next().value
+    if (!oldestId) {
+      break
+    }
+    captures.delete(oldestId)
+  }
+}
+
+function validateCaptureProvenance(proposal: ToolProposal): void {
+  if (proposal.toolName !== 'create_reminder' && proposal.toolName !== 'save_context') {
+    return
+  }
+
+  const captured = captures.get(proposal.arguments.sourceContext.captureId)
+  if (!captured || captured.capturedAt !== proposal.arguments.sourceContext.capturedAt) {
+    throw new Error('The requested action does not refer to a screen capture from this LifeLens session.')
+  }
+}
+
+async function confirmToolProposal(proposal: ToolProposal): Promise<boolean> {
+  if (!mainWindow) {
+    return false
+  }
+
+  const confirmation = await dialog.showMessageBox(mainWindow, {
+    type: 'question',
+    title: 'Confirm LifeLens action',
+    message: confirmationMessage(proposal),
+    detail: `${proposal.reason}\n\nLifeLens will act only after you select Confirm.`,
+    buttons: ['Cancel', 'Confirm'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true
+  })
+  return confirmation.response === 1
+}
+
+function confirmationMessage(proposal: ToolProposal): string {
+  switch (proposal.toolName) {
+    case 'create_reminder':
+      return `Create reminder: ${proposal.arguments.title}`
+    case 'search_documents':
+      return `Search the approved folder for: ${proposal.arguments.query}`
+    case 'open_file':
+      return 'Open the selected search result with its default application'
+    case 'open_url':
+      return `Open this link in your browser: ${proposal.arguments.url}`
+    case 'save_context':
+      return `Save context: ${proposal.arguments.label}`
+  }
 }
 
 app.whenReady().then(async () => {

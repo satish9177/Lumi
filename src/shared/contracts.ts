@@ -1,7 +1,10 @@
 export const IPC_CHANNELS = {
   captureScreen: 'lifelens:capture-screen',
+  listCaptureSources: 'lifelens:list-capture-sources',
   createRealtimeSession: 'lifelens:create-realtime-session',
   executeConfirmedTool: 'lifelens:execute-confirmed-tool',
+  chooseDocumentRoot: 'lifelens:choose-document-root',
+  listDocumentRoots: 'lifelens:list-document-roots',
   listReminders: 'lifelens:list-reminders',
   setPanelOpen: 'lifelens:set-panel-open'
 } as const
@@ -11,11 +14,22 @@ export type CompanionState = (typeof COMPANION_STATES)[number]
 
 export type RealtimeMode = 'live' | 'mock'
 
-export interface CaptureResult {
+export type CaptureSourceKind = 'screen' | 'window'
+
+export interface CaptureSource {
   id: string
   label: string
+  kind: CaptureSourceKind
+  thumbnailDataUrl: string
+}
+
+export interface CaptureResult {
+  id: string
+  sourceId: string
+  sourceKind: CaptureSourceKind
+  label: string
   dataUrl: string
-  mimeType: 'image/png'
+  mimeType: 'image/png' | 'image/jpeg'
   width: number
   height: number
   capturedAt: string
@@ -73,6 +87,26 @@ export interface SaveContextInput {
   sourceContext: SourceContext
 }
 
+export interface ApprovedDocumentRoot {
+  id: string
+  label: string
+}
+
+export interface DocumentSearchResult {
+  id: string
+  rootId: string
+  name: string
+  relativePath: string
+  modifiedAt: string
+}
+
+export interface SavedContextRecord {
+  id: string
+  label: string
+  sourceContext: SourceContext
+  createdAt: string
+}
+
 export const TOOL_NAMES = ['create_reminder', 'search_documents', 'open_file', 'open_url', 'save_context'] as const
 export type ToolName = (typeof TOOL_NAMES)[number]
 
@@ -104,12 +138,19 @@ export interface ToolExecutionResult {
   ok: boolean
   message: string
   reminder?: ReminderRecord
+  searchResults?: DocumentSearchResult[]
+  openedResultId?: string
+  openedUrl?: string
+  savedContext?: SavedContextRecord
 }
 
 export interface LifeLensApi {
-  captureScreen: () => Promise<CaptureResult>
+  listCaptureSources: () => Promise<CaptureSource[]>
+  captureScreen: (sourceId?: string) => Promise<CaptureResult>
   createRealtimeSession: () => Promise<RealtimeSessionCredential>
   executeConfirmedTool: (proposal: ToolProposal) => Promise<ToolExecutionResult>
+  chooseDocumentRoot: () => Promise<ApprovedDocumentRoot | undefined>
+  listDocumentRoots: () => Promise<ApprovedDocumentRoot[]>
   listReminders: () => Promise<ReminderRecord[]>
   setPanelOpen: (open: boolean) => void
 }
