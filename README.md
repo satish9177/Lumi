@@ -4,13 +4,15 @@ LifeLens is a Windows desktop companion for short, user-requested screen underst
 
 ## Current state
 
-The first deterministic vertical slice is working:
+The MVP now implements the bounded LifeLens workflow:
 
 - a transparent, draggable, always-on-top companion opens a compact panel;
-- mock voice connects when no key is configured;
-- the user can capture the primary display;
-- the app shows an interview-email explanation with a date, link, and next action; and
-- a visible confirmation saves a mock reminder together with its source context.
+- deterministic mock voice works without credentials, and the live path uses OpenAI Realtime over WebRTC;
+- the user can choose a screen or window, capture it once, and receive an explanation with date, link, and next-action signals;
+- the model can propose each bounded tool: `create_reminder`, `search_documents`, `open_file`, `open_url`, and `save_context`;
+- the renderer presents a confirmation card and the main process presents a second native confirmation before every state-changing or external action;
+- document search is bounded to explicitly approved folders, and a file can be opened only if it came from a previous approved search; and
+- reminders retain the source summary and signals used to explain the later notification.
 
 The production Realtime path uses WebRTC. The permanent `OPENAI_API_KEY` remains in the Electron main process, which exchanges it for a short-lived renderer credential; it is never bundled into renderer code.
 
@@ -44,25 +46,25 @@ Create a Windows installer with:
 npm.cmd run package
 ```
 
+The build produces an NSIS installer and an unpacked executable under `release/0.1.0/`. This repository does not include a signing certificate. On the current Windows host, Smart App Control correctly blocks the unsigned executable, so a trusted Authenticode signing step is required before claiming a packaged-launch pass. Do not disable or bypass Windows protection for this app.
+
 ## Safety model
 
 - Capture is explicitly user initiated.
 - The renderer has a narrow typed bridge, not Node or generic Electron IPC.
 - The renderer presents every state-changing or external tool action for visible confirmation.
-- The main process validates a confirmed proposal again before it acts.
-- Future document search is restricted to folders selected by the user; whole-drive scanning is not in scope.
+- The main process validates a confirmed proposal and asks for a native confirmation again before it acts.
+- Document search is restricted to folders selected by the user; whole-drive scanning is not in scope.
 - Reminder source context is stored so a later notification can explain why it exists.
 
-## Not supported yet
+## Remaining acceptance work
 
-This repository does **not** yet claim a finished MVP or a packaged-app smoke test. The following hero-scenario work is still pending:
+This repository does **not** yet claim the definition of done. The remaining acceptance work is:
 
-- selected-window capture and a capture picker;
-- live Realtime smoke testing with a configured API key;
-- approved-folder selection, document search, and selected-result opening;
-- confirmed `open_url` and `save_context` execution;
-- full live tool-call handling for all five supported proposal types; and
-- five consecutive complete hero-scenario passes.
+- sign the Windows release with a trusted certificate and repeat the packaged-app smoke test;
+- exercise a live Realtime session with an operator-provided API key and microphone permission;
+- complete the full interview-email hero scenario, including approved-folder search and selected file/URL opening, five consecutive times; and
+- record those five runs in the demo checklist.
 
 LifeLens deliberately does not support continuous screen monitoring, arbitrary computer control, message sending, payments, credentials, OTPs, mobile clients, cloud sync, or whole-drive scanning.
 

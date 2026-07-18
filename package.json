@@ -2,7 +2,8 @@
   "name": "lifelens",
   "version": "0.1.0",
   "description": "A safe floating AI desktop companion for Windows",
-  "main": "./out/main/index.js",
+  "author": "LifeLens",
+  "main": "./out/main/index.cjs",
   "private": true,
   "type": "module",
   "scripts": {

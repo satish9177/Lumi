@@ -39,6 +39,18 @@ Use a small JSON store inside Electron's `userData` directory for the MVP. It is
 - the `LifeLensApi` preload surface; and
 - runtime validation functions for all IPC arguments and responses.
 
+## Sandboxed Electron entrypoints
+
+The main and preload bundles use explicit `.cjs` entrypoints. Electron's sandboxed preload environment does not support an ESM preload bridge, while the bounded bridge needs `require('electron')` for `contextBridge` and `ipcRenderer`. Keeping both privileged entrypoints CommonJS preserves `sandbox: true`, `contextIsolation: true`, and `nodeIntegration: false` without relying on an unsandboxed renderer.
+
+## Confirmation and provenance
+
+Renderer confirmation is useful interaction feedback but is not trusted as the final authority. The main process parses every proposal again, checks capture provenance before `create_reminder` or `save_context`, and displays a native confirmation dialog before it creates a reminder, searches an approved folder, opens a returned file, opens a URL, or stores context.
+
+## Release signing
+
+Electron Builder produces the Windows installer and unpacked executable, but the repository deliberately contains no certificate or private signing material. A trusted Authenticode signing process is an external release prerequisite: Windows Smart App Control will block an unsigned release and must not be disabled or bypassed as part of LifeLens validation.
+
 ## UI design
 
 The main BrowserWindow is transparent, frameless, always on top, and contains a CSS draggable companion. Its compact panel is not draggable, so buttons and input remain usable. The companion is deliberately lightweight: a colored orb with six observable states rather than an animated 3D pet.

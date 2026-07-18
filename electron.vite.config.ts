@@ -4,10 +4,29 @@ import react from '@vitejs/plugin-react'
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()]
+    plugins: [externalizeDepsPlugin()],
+    build: {
+      lib: {
+        entry: resolve('src/main/index.ts'),
+        formats: ['cjs'],
+        fileName: 'index.cjs'
+      }
+    }
   },
   preload: {
-    plugins: [externalizeDepsPlugin()]
+    plugins: [externalizeDepsPlugin()],
+    build: {
+      lib: {
+        entry: resolve('src/preload/index.ts'),
+        formats: ['cjs'],
+        fileName: 'index.cjs'
+      },
+      rollupOptions: {
+        output: {
+          inlineDynamicImports: true
+        }
+      }
+    }
   },
   renderer: {
     resolve: {

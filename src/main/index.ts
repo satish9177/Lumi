@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, screen } from 'electron'
 import { basename, join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { IPC_CHANNELS, parseToolProposal, type CaptureResult, type ToolProposal } from '../shared/contracts'
 import { captureScreen, listCaptureSources } from './services/capture'
 import { createRealtimeSessionCredential } from './services/realtime'
@@ -16,6 +17,7 @@ const WINDOW_MARGIN = 20
 
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
+    title: 'LifeLens',
     width: CLOSED_WINDOW_SIZE.width,
     height: CLOSED_WINDOW_SIZE.height,
     show: false,
@@ -27,7 +29,7 @@ function createWindow(): BrowserWindow {
     hasShadow: true,
     backgroundColor: '#00000000',
     webPreferences: {
-      preload: join(__dirname, '../preload/index.mjs'),
+      preload: join(__dirname, '../preload/index.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
@@ -45,7 +47,12 @@ function createWindow(): BrowserWindow {
     void window.loadFile(join(__dirname, '../renderer/index.html'))
   }
 
-  window.webContents.on('will-navigate', (event) => event.preventDefault())
+  window.webContents.on('will-navigate', (event, url) => {
+    const expectedRendererUrl = process.env.ELECTRON_RENDERER_URL ?? pathToFileURL(join(__dirname, '../renderer/index.html')).toString()
+    if (!url.startsWith(expectedRendererUrl)) {
+      event.preventDefault()
+    }
+  })
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
 
   return window
