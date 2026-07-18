@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import QRCode from 'qrcode'
 import type {
   ApprovedDocumentRoot,
   CaptureResult,
@@ -8,6 +9,8 @@ import type {
   Explanation,
   RealtimeMode,
   SourceContext,
+  TelegramRecipient,
+  TelegramStatus,
   ToolExecutionResult,
   ToolProposal
 } from '../../shared/contracts'
@@ -47,6 +50,19 @@ export default function LifeLensApp() {
   const [isConfirming, setIsConfirming] = useState(false)
   const [isChoosingFolder, setIsChoosingFolder] = useState(false)
   const [pendingScreenCaptureCallId, setPendingScreenCaptureCallId] = useState<string | null | undefined>()
+  const [telegramStatus, setTelegramStatus] = useState<TelegramStatus>({ state: 'disconnected' })
+  const [telegramQuery, setTelegramQuery] = useState('')
+  const [telegramRecipients, setTelegramRecipients] = useState<TelegramRecipient[]>([])
+  const [selectedTelegramRecipientId, setSelectedTelegramRecipientId] = useState<string>()
+  const [telegramMessage, setTelegramMessage] = useState('')
+  const [telegramPassword, setTelegramPassword] = useState('')
+  const [isTelegramWorking, setIsTelegramWorking] = useState(false)
+
+  const clearExpiredTelegramQr = useCallback((qrUrl: string): void => {
+    setTelegramStatus((current) => current.qrUrl === qrUrl
+      ? { state: 'connecting', message: 'This Telegram QR code expired. Waiting for a refreshed code.' }
+      : current)
+  }, [])
 
   useEffect(() => {
     window.lifeLens.setPanelOpen(expanded)
@@ -54,7 +70,21 @@ export default function LifeLensApp() {
 
   useEffect(() => {
     void refreshDocumentRoots()
-    return () => clientRef.current?.disconnect()
+    void refreshTelegramStatus()
+    const removeTelegramListener = window.lifeLens.onTelegramAuthUpdate((status) => {
+      setTelegramStatus(status)
+      if (status.state !== 'connected') {
+        setTelegramRecipients([])
+        setSelectedTelegramRecipientId(undefined)
+      }
+      if (status.state === 'connected') {
+        setTelegramPassword('')
+      }
+    })
+    return () => {
+      removeTelegramListener()
+      clientRef.current?.disconnect()
+    }
   }, [])
 
   const appendTranscript = (text: string): void => {
@@ -75,6 +105,14 @@ export default function LifeLensApp() {
     }
   }
 
+  async function refreshTelegramStatus(): Promise<void> {
+    try {
+      setTelegramStatus(await window.lifeLens.getTelegramStatus())
+    } catch (telegramError) {
+      setError(messageFrom(telegramError))
+    }
+  }
+
   const connectVoice = async (): Promise<void> => {
     setError(undefined)
     setIsConnecting(true)
@@ -87,6 +125,7 @@ export default function LifeLensApp() {
         onTranscript: appendTranscript,
         onExplanation: setExplanation,
         onCaptureContextRequest: requestScreenContext,
+        onTelegramRecipientSearch: requestTelegramRecipientSearch,
         onToolProposal: setProposal,
         onError: setError
       })
@@ -267,6 +306,111 @@ export default function LifeLensApp() {
     })
   }
 
+  const connectTelegram = async (): Promise<void> => {
+    setError(undefined)
+    setIsTelegramWorking(true)
+    try {
+      setTelegramStatus(await window.lifeLens.connectTelegram())
+    } catch (telegramError) {
+      setError(messageFrom(telegramError))
+    } finally {
+      setIsTelegramWorking(false)
+    }
+  }
+
+  const cancelTelegramConnect = async (): Promise<void> => {
+    setIsTelegramWorking(true)
+    try {
+      setTelegramStatus(await window.lifeLens.cancelTelegramConnect())
+    } catch (telegramError) {
+      setError(messageFrom(telegramError))
+    } finally {
+      setIsTelegramWorking(false)
+    }
+  }
+
+  const submitTelegramPassword = async (): Promise<void> => {
+    if (!telegramPassword) {
+      return
+    }
+    setIsTelegramWorking(true)
+    try {
+      setTelegramStatus(await window.lifeLens.submitTelegramPassword(telegramPassword))
+      setTelegramPassword('')
+    } catch (telegramError) {
+      setError(messageFrom(telegramError))
+    } finally {
+      setIsTelegramWorking(false)
+    }
+  }
+
+  const logoutTelegram = async (): Promise<void> => {
+    setIsTelegramWorking(true)
+    try {
+      setTelegramStatus(await window.lifeLens.logoutTelegram())
+      setTelegramRecipients([])
+      setSelectedTelegramRecipientId(undefined)
+      setTelegramMessage('')
+    } catch (telegramError) {
+      setError(messageFrom(telegramError))
+    } finally {
+      setIsTelegramWorking(false)
+    }
+  }
+
+  const searchTelegramRecipients = async (): Promise<void> => {
+    if (!telegramQuery.trim()) {
+      setError('Enter a recipient name to search Telegram.')
+      return
+    }
+    setError(undefined)
+    setIsTelegramWorking(true)
+    try {
+      const recipients = await window.lifeLens.searchTelegramRecipients(telegramQuery)
+      setTelegramRecipients(recipients)
+      setSelectedTelegramRecipientId(undefined)
+    } catch (telegramError) {
+      setError(messageFrom(telegramError))
+    } finally {
+      setIsTelegramWorking(false)
+    }
+  }
+
+  const requestTelegramRecipientSearch = (query: string, callId: string): void => {
+    setTelegramQuery(query)
+    setError(undefined)
+    setIsTelegramWorking(true)
+    void window.lifeLens.searchTelegramRecipients(query).then((recipients) => {
+      setTelegramRecipients(recipients)
+      setSelectedTelegramRecipientId(undefined)
+      clientRef.current?.completeTelegramRecipientSearch(callId, recipients.length)
+    }).catch((telegramError) => {
+      const message = messageFrom(telegramError)
+      setError(message)
+      clientRef.current?.completeTelegramRecipientSearch(callId, 0)
+    }).finally(() => setIsTelegramWorking(false))
+  }
+
+  const proposeTelegramMessage = (): void => {
+    if (!selectedTelegramRecipientId || !telegramMessage.trim()) {
+      setError('Choose one Telegram recipient and enter the full message first.')
+      return
+    }
+    const recipient = telegramRecipients.find((candidate) => candidate.resultId === selectedTelegramRecipientId)
+    if (!recipient) {
+      setError('That Telegram recipient is no longer available. Search again.')
+      return
+    }
+    setToolResult(undefined)
+    setProposal({
+      id: crypto.randomUUID(),
+      toolName: 'send_telegram_message',
+      reason: 'Send this one plain-text message from your connected personal Telegram account.',
+      requiresConfirmation: true,
+      arguments: { recipientResultId: recipient.resultId, message: telegramMessage.trim() }
+    })
+  }
+
   const confirmProposal = async (proposalToConfirm: ToolProposal): Promise<void> => {
     setError(undefined)
     setIsConfirming(true)
@@ -443,6 +587,65 @@ export default function LifeLensApp() {
             )}
           </section>
 
+          <section className="telegram-workspace" aria-label="Telegram integration">
+            <div className="section-heading-row">
+              <div><p className="eyebrow">INTEGRATIONS</p><h2>Telegram <span className="unofficial-label">Unofficial</span></h2></div>
+              {telegramStatus.state === 'connected' ? (
+                <button className="text-button" type="button" disabled={isTelegramWorking} onClick={() => void logoutTelegram()}>Log out</button>
+              ) : (
+                <button className="text-button" type="button" disabled={isTelegramWorking || telegramStatus.state === 'connecting'} onClick={() => void connectTelegram()}>
+                  {isTelegramWorking || telegramStatus.state === 'connecting' ? 'Connecting...' : 'Connect Telegram'}
+                </button>
+              )}
+            </div>
+            {telegramStatus.state === 'disconnected' && <p className="workspace-note">Connect a personal account to search recipient metadata locally and send one confirmed plain-text message.</p>}
+            {(telegramStatus.state === 'connecting' || telegramStatus.state === 'awaiting_2fa') && (
+              <div className="telegram-auth-card">
+                {telegramStatus.qrUrl ? (
+                  <>
+                    <p>Open Telegram on your phone: <strong>Settings → Devices → Link Desktop Device</strong>, then scan the current login QR token.</p>
+                    <TelegramLoginQr qrUrl={telegramStatus.qrUrl} expiresAt={telegramStatus.expiresAt} onExpire={clearExpiredTelegramQr} />
+                  </>
+                ) : <p>{telegramStatus.message ?? 'Preparing a Telegram QR token…'}</p>}
+                {telegramStatus.state === 'awaiting_2fa' && (
+                  <form className="telegram-password-row" onSubmit={(event) => { event.preventDefault(); void submitTelegramPassword() }}>
+                    <input type="password" autoComplete="current-password" value={telegramPassword} onChange={(event) => setTelegramPassword(event.target.value)} placeholder="Telegram two-step password" aria-label="Telegram two-step verification password" />
+                    <button className="secondary-button" type="submit" disabled={!telegramPassword || isTelegramWorking}>Continue</button>
+                  </form>
+                )}
+                <button className="text-button" type="button" disabled={isTelegramWorking} onClick={() => void cancelTelegramConnect()}>Cancel</button>
+              </div>
+            )}
+            {telegramStatus.state === 'error' && <p className="notice error-notice">{telegramStatus.message}</p>}
+            {telegramStatus.state === 'connected' && (
+              <>
+                <p className="workspace-note">Connected as <strong>{formatTelegramAccount(telegramStatus)}</strong>. Recipient names and chat metadata stay local to Lumi.</p>
+                <div className="document-search-row">
+                  <input value={telegramQuery} onChange={(event) => setTelegramQuery(event.target.value)} placeholder="Recipient name" aria-label="Telegram recipient name" />
+                  <button className="secondary-button" type="button" disabled={isTelegramWorking} onClick={() => void searchTelegramRecipients()}>Find</button>
+                </div>
+                {telegramRecipients.length > 0 && (
+                  <ul className="telegram-recipients">
+                    {telegramRecipients.map((recipient) => (
+                      <li key={recipient.resultId}>
+                        <label>
+                          <input type="radio" name="telegram-recipient" checked={selectedTelegramRecipientId === recipient.resultId} onChange={() => setSelectedTelegramRecipientId(recipient.resultId)} />
+                          <span><strong>{recipient.displayName}</strong>{recipient.username && <small>@{recipient.username}</small>}<small>{recipient.kind}</small></span>
+                        </label>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {telegramQuery && telegramRecipients.length === 0 && <p className="workspace-note">Search returns up to ten local dialog/contact matches. Nothing is sent to OpenAI.</p>}
+                <label className="telegram-message-field">
+                  <span>Message to send</span>
+                  <textarea value={telegramMessage} maxLength={4096} onChange={(event) => setTelegramMessage(event.target.value)} placeholder="Write the complete message" />
+                </label>
+                <button className="secondary-button" type="button" onClick={proposeTelegramMessage}>Review Telegram message</button>
+              </>
+            )}
+          </section>
+
           <details className="troubleshooting">
             <summary>More / Troubleshooting</summary>
             <div className="actions">
@@ -461,6 +664,8 @@ export default function LifeLensApp() {
               proposal={proposal}
               approvedRoots={documentRoots}
               searchResults={searchResults}
+              telegramAccount={telegramStatus.account}
+              telegramRecipients={telegramRecipients}
               isConfirming={isConfirming}
               onConfirm={confirmProposal}
               onDismiss={dismissProposal}
@@ -493,6 +698,70 @@ function currentSourceContext(capture: CaptureResult | undefined, explanation: E
 
 function messageFrom(error: unknown): string {
   return error instanceof Error ? error.message : 'LifeLens encountered an unexpected error.'
+}
+
+function formatTelegramAccount(status: TelegramStatus): string {
+  const account = status.account
+  if (!account) {
+    return 'your personal account'
+  }
+  return account.username ? `${account.displayName} (@${account.username})` : account.displayName
+}
+
+function TelegramLoginQr({
+  qrUrl,
+  expiresAt,
+  onExpire
+}: {
+  qrUrl: string
+  expiresAt?: string
+  onExpire: (qrUrl: string) => void
+}) {
+  const [imageUrl, setImageUrl] = useState<string>()
+  const [renderError, setRenderError] = useState<string>()
+
+  useEffect(() => {
+    let active = true
+    setImageUrl(undefined)
+    setRenderError(undefined)
+    void QRCode.toDataURL(qrUrl, {
+      width: 208,
+      margin: 1,
+      errorCorrectionLevel: 'M',
+      color: { dark: '#09142e', light: '#f7fbff' }
+    }).then((nextImageUrl) => {
+      if (active) {
+        setImageUrl(nextImageUrl)
+      }
+    }).catch(() => {
+      if (active) {
+        setRenderError('LifeLens could not render this Telegram QR code. Wait for a refreshed code and try again.')
+      }
+    })
+
+    const expiration = expiresAt ? Date.parse(expiresAt) : Number.NaN
+    const timeout = Number.isFinite(expiration)
+      ? window.setTimeout(() => onExpire(qrUrl), Math.max(0, expiration - Date.now()))
+      : undefined
+    return () => {
+      active = false
+      setImageUrl(undefined)
+      if (timeout !== undefined) {
+        window.clearTimeout(timeout)
+      }
+    }
+  }, [expiresAt, onExpire, qrUrl])
+
+  if (renderError) {
+    return <p className="notice error-notice">{renderError}</p>
+  }
+
+  return (
+    <div className="telegram-qr-code" aria-live="polite">
+      {imageUrl ? <img src={imageUrl} alt="Scan this temporary Telegram login QR code with Telegram on your phone." /> : <p>Rendering a local QR code…</p>}
+      {expiresAt && <p className="workspace-note">This code refreshes automatically. Current code expires {new Date(expiresAt).toLocaleTimeString()}.</p>}
+    </div>
+  )
 }
 
 function isSelectedSourceUnavailable(error: unknown): boolean {

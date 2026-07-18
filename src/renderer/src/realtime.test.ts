@@ -59,6 +59,28 @@ describe('RealtimeClient server events', () => {
     expect(proposals).toEqual([])
   })
 
+  it('routes Telegram recipient lookup locally without exposing any recipient metadata', () => {
+    const searches: Array<{ query: string; callId: string }> = []
+    const client = new RealtimeClient({
+      onState: () => undefined,
+      onTranscript: () => undefined,
+      onExplanation: () => undefined,
+      onCaptureContextRequest: () => undefined,
+      onTelegramRecipientSearch: (query, callId) => searches.push({ query, callId }),
+      onToolProposal: () => undefined,
+      onError: () => undefined
+    })
+    const handleServerEvent = (client as unknown as { handleServerEvent: (serializedEvent: unknown) => void }).handleServerEvent
+    handleServerEvent.call(client, JSON.stringify({
+      type: 'response.function_call_arguments.done',
+      name: 'telegram_search_recipients',
+      call_id: 'telegram-search-1',
+      arguments: JSON.stringify({ query: 'Ravi' })
+    }))
+
+    expect(searches).toEqual([{ query: 'Ravi', callId: 'telegram-search-1' }])
+  })
+
   it('sends a complete session payload and waits for session.updated before greeting', () => {
     const events: Array<Record<string, unknown>> = []
     const client = new RealtimeClient({

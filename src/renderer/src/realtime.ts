@@ -17,11 +17,13 @@ interface RealtimeCallbacks {
   onTranscript: (text: string) => void
   onExplanation: (explanation: Explanation) => void
   onCaptureContextRequest: (callId?: string) => void
+  onTelegramRecipientSearch?: (query: string, callId: string) => void
   onToolProposal: (proposal: ToolProposal) => void
   onError: (message: string) => void
 }
 
 const CAPTURE_CONTEXT_TOOL = 'capture_screen_context'
+const TELEGRAM_RECIPIENT_SEARCH_TOOL = 'telegram_search_recipients'
 const SCREEN_CONTEXT_TTL_MS = 10 * 60 * 1_000
 
 const SYSTEM_INSTRUCTIONS = [
@@ -30,6 +32,7 @@ const SYSTEM_INSTRUCTIONS = [
   'State important dates, links, and concrete next actions plainly.',
   'Every function is only a proposal. Never claim an action was performed until the application returns its result.',
   'Use only the supplied approved-folder identifiers; never ask for or invent a local file path.',
+  'Telegram contact and dialog metadata are local-only. You may request a local recipient search from the user\'s spoken recipient name, but never receive, repeat, or infer Telegram names, usernames, phone numbers, peer identifiers, or search results.',
   'Do not capture a screen when the panel opens or during a general greeting.',
   'When a user request needs visible-screen context and there is no current screen context, call capture_screen_context once. The user making that screen-relative request is consent for this one-time capture.',
   'When a current screen context is available, answer follow-up questions from it and do not call capture_screen_context again unless the user asks to refresh, says the screen changed, refers to a new visible item, or you cannot answer reliably.',
@@ -119,6 +122,34 @@ const TOOL_DEFINITIONS = [
         reason: { type: 'string', description: 'Why preserving this context helps.' }
       },
       required: ['label', 'reason']
+    }
+  },
+  {
+    type: 'function',
+    name: TELEGRAM_RECIPIENT_SEARCH_TOOL,
+    description: 'Request a local-only recipient lookup using the name in the user\'s own request. Recipient metadata and identifiers stay in LifeLens and are never returned to you. The user selects a recipient locally before any message can be proposed.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        query: { type: 'string', description: 'The recipient name from the user\'s request.' }
+      },
+      required: ['query']
+    }
+  },
+  {
+    type: 'function',
+    name: 'send_telegram_message',
+    description: 'Propose sending one plain-text Telegram message to an opaque recipient result identifier selected locally by the user. The user must confirm it before it sends. Never use a username, phone number, chat ID, or raw peer.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        recipient_result_id: { type: 'string', description: 'An opaque recipient result identifier supplied by LifeLens after local selection.' },
+        message: { type: 'string', description: 'The complete plain-text message to send.' },
+        reason: { type: 'string', description: 'Why this message is being proposed.' }
+      },
+      required: ['recipient_result_id', 'message', 'reason']
     }
   }
 ]
@@ -294,6 +325,15 @@ export class RealtimeClient {
 
   declineToolProposal(proposal: ToolProposal): void {
     this.sendToolResult(proposal, { ok: false, message: 'The user declined this action.' })
+  }
+
+  completeTelegramRecipientSearch(callId: string, foundCount: number): void {
+    this.sendFunctionCallOutput(callId, {
+      ok: foundCount > 0,
+      message: foundCount > 0
+        ? 'Local recipient choices are displayed to the user. Do not request names or identifiers; wait for their local selection.'
+        : 'No local recipient choices matched. Ask the user to try another name.'
+    })
   }
 
   disconnect(): void {
@@ -577,6 +617,25 @@ export class RealtimeClient {
       return
     }
 
+    if (rawName === TELEGRAM_RECIPIENT_SEARCH_TOOL) {
+      try {
+        const parsed = JSON.parse(typeof event.arguments === 'string' ? event.arguments : '') as unknown
+        if (!isRecord(parsed)) {
+          throw new Error('Realtime supplied non-object recipient search details.')
+        }
+        const query = requiredArgument(parsed, 'query')
+        if (!this.callbacks.onTelegramRecipientSearch) {
+          throw new Error('Telegram recipient search is unavailable in this companion view.')
+        }
+        this.callbacks.onTelegramRecipientSearch(query, callId)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'LifeLens received malformed Telegram recipient search details.'
+        this.callbacks.onError(message)
+        this.sendFunctionCallOutput(callId, { ok: false, message })
+      }
+      return
+    }
+
     const name = isToolName(rawName) ? rawName : undefined
     if (!name) {
       return
@@ -636,6 +695,14 @@ export class RealtimeClient {
         return parseToolProposal({
           ...common,
           arguments: { label: requiredArgument(argumentsValue, 'label', 'LifeLens screen context'), sourceContext: this.currentSourceContext(reason) }
+        })
+      case 'send_telegram_message':
+        return parseToolProposal({
+          ...common,
+          arguments: {
+            recipientResultId: requiredArgument(argumentsValue, 'recipient_result_id'),
+            message: requiredArgument(argumentsValue, 'message')
+          }
         })
     }
   }
@@ -800,7 +867,7 @@ function extractResponseText(response: Record<string, unknown>): string {
 }
 
 function isToolName(value: string): value is ToolName {
-  return value === 'create_reminder' || value === 'search_documents' || value === 'open_file' || value === 'open_url' || value === 'save_context'
+  return value === 'create_reminder' || value === 'search_documents' || value === 'open_file' || value === 'open_url' || value === 'save_context' || value === 'send_telegram_message'
 }
 
 function likelyNeedsScreenContext(request: string): boolean {

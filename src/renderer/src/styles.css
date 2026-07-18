@@ -20,7 +20,8 @@ body,
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -449,6 +450,7 @@ button:disabled {
 .source-picker,
 .context-actions,
 .document-workspace,
+.telegram-workspace,
 .troubleshooting {
   margin-top: 12px;
   padding: 12px;
@@ -602,6 +604,116 @@ button:disabled {
   min-height: 36px;
   padding: 8px 10px;
   font-size: 11px;
+}
+
+.unofficial-label {
+  display: inline-block;
+  padding: 2px 5px;
+  border-radius: 999px;
+  color: #c9dbf7;
+  background: rgba(153, 194, 255, 0.14);
+  font-size: 9px;
+  font-weight: 600;
+  vertical-align: middle;
+}
+
+.telegram-auth-card,
+.telegram-message-field {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  color: #c8d8f2;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.telegram-auth-card p {
+  margin: 0;
+}
+
+.telegram-qr-code {
+  display: grid;
+  justify-items: center;
+  padding: 10px;
+  border: 1px dashed rgba(115, 244, 255, 0.4);
+  border-radius: 12px;
+  background: rgba(0, 5, 24, 0.38);
+}
+
+.telegram-qr-code img {
+  display: block;
+  width: min(208px, 100%);
+  height: auto;
+  padding: 6px;
+  border-radius: 7px;
+  background: #f7fbff;
+}
+
+.telegram-qr-code > p {
+  margin: 0;
+}
+
+.telegram-password-row {
+  display: flex;
+  gap: 7px;
+}
+
+.telegram-password-row input,
+.telegram-message-field textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 9px;
+  color: #f3f8ff;
+  border: 1px solid rgba(174, 209, 255, 0.22);
+  border-radius: 10px;
+  background: rgba(1, 7, 28, 0.45);
+  font: inherit;
+}
+
+.telegram-message-field textarea {
+  min-height: 72px;
+  resize: vertical;
+}
+
+.telegram-password-row .secondary-button {
+  flex: 0 0 auto;
+}
+
+.telegram-recipients {
+  display: grid;
+  gap: 6px;
+  padding: 0;
+  margin: 10px 0 0;
+  list-style: none;
+}
+
+.telegram-recipients li {
+  border: 1px solid rgba(179, 211, 255, 0.13);
+  border-radius: 9px;
+  background: rgba(2, 10, 35, 0.3);
+}
+
+.telegram-recipients label {
+  display: flex;
+  gap: 8px;
+  padding: 8px;
+  cursor: pointer;
+}
+
+.telegram-recipients span,
+.telegram-recipients small {
+  display: block;
+}
+
+.telegram-recipients strong {
+  color: #eaf3ff;
+  font-size: 12px;
+}
+
+.telegram-recipients small {
+  margin-top: 2px;
+  color: #9db4d7;
+  font-size: 10px;
 }
 
 .search-results {

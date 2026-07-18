@@ -1,14 +1,16 @@
-import { app, BrowserWindow, dialog, ipcMain, screen } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, safeStorage, screen } from 'electron'
 import { basename, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { IPC_CHANNELS, parseToolProposal, type CaptureResult, type ToolProposal } from '../shared/contracts'
+import { IPC_CHANNELS, parseToolProposal, type CaptureResult, type TelegramStatus, type ToolProposal } from '../shared/contracts'
 import { captureScreen, listCaptureSources } from './services/capture'
 import { createRealtimeSessionCredential } from './services/realtime'
 import { LocalStore } from './services/store'
 import { executeToolAfterConfirmation, restoreReminderTimers } from './services/tools'
+import { executeTelegramAfterConfirmation, TelegramService } from './services/telegram'
 
 let mainWindow: BrowserWindow | undefined
 let localStore: LocalStore
+let telegramService: TelegramService
 const captures = new Map<string, Pick<CaptureResult, 'capturedAt'>>()
 
 const CLOSED_WINDOW_SIZE = { width: 88, height: 88 }
@@ -138,7 +140,11 @@ function registerIpcHandlers(): void {
     requireMainWindow(event)
     const parsed = parseToolProposal(proposal)
     validateCaptureProvenance(parsed)
-    return executeToolAfterConfirmation(localStore, parsed, await confirmToolProposal(parsed))
+    const confirmed = await confirmToolProposal(parsed)
+    if (parsed.toolName === 'send_telegram_message') {
+      return executeTelegramAfterConfirmation(telegramService, confirmed, parsed.callId, parsed.arguments.recipientResultId, parsed.arguments.message)
+    }
+    return executeToolAfterConfirmation(localStore, parsed, confirmed)
   })
 
   ipcMain.handle(IPC_CHANNELS.chooseDocumentRoot, async (event) => {
@@ -168,6 +174,42 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.listReminders, async (event) => {
     requireMainWindow(event)
     return localStore.listReminders()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.getTelegramStatus, (event) => {
+    requireMainWindow(event)
+    return telegramService.getStatus()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.connectTelegram, async (event) => {
+    requireMainWindow(event)
+    return telegramService.connect()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.cancelTelegramConnect, async (event) => {
+    requireMainWindow(event)
+    return telegramService.cancelLogin()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.submitTelegramPassword, (event, password: unknown) => {
+    requireMainWindow(event)
+    if (typeof password !== 'string' || password.length === 0 || password.length > 1_000) {
+      throw new Error('Telegram password must be a short non-empty value.')
+    }
+    return telegramService.submitPassword(password)
+  })
+
+  ipcMain.handle(IPC_CHANNELS.logoutTelegram, async (event) => {
+    requireMainWindow(event)
+    return telegramService.logout()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.searchTelegramRecipients, async (event, query: unknown) => {
+    requireMainWindow(event)
+    if (typeof query !== 'string' || query.trim().length === 0 || query.length > 250) {
+      throw new Error('Enter a short recipient name to search Telegram.')
+    }
+    return telegramService.searchRecipients(query)
   })
 
   ipcMain.on(IPC_CHANNELS.setPanelOpen, (event, open: unknown) => {
@@ -246,6 +288,16 @@ async function confirmationMessage(proposal: ToolProposal): Promise<string> {
       return `Open this link in your browser: ${proposal.arguments.url}`
     case 'save_context':
       return `Save context: ${proposal.arguments.label}`
+    case 'send_telegram_message': {
+      const recipient = telegramService.getRecipient(proposal.arguments.recipientResultId)
+      const account = telegramService.getStatus().account
+      if (!recipient || !account) {
+        return 'Send a Telegram message to an unavailable recipient'
+      }
+      const accountLabel = account.username ? `${account.displayName} (@${account.username})` : account.displayName
+      const recipientLabel = recipient.username ? `${recipient.displayName} (@${recipient.username})` : recipient.displayName
+      return `Send Telegram message from ${accountLabel}\nTo: ${recipientLabel}\n\n${proposal.arguments.message}`
+    }
   }
 }
 
@@ -257,15 +309,27 @@ function formatDateTime(value: string): string {
 app.whenReady().then(async () => {
   app.setAppUserModelId('com.lifelens.app')
   localStore = new LocalStore(app.getPath('userData'))
+  telegramService = new TelegramService(app.getPath('userData'), safeStorage, emitTelegramStatus)
   registerIpcHandlers()
   mainWindow = createWindow()
   await restoreReminderTimers(localStore)
+  await telegramService.initialize()
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       mainWindow = createWindow()
     }
   })
+})
+
+function emitTelegramStatus(status: TelegramStatus): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.telegramAuthUpdate, status)
+  }
+}
+
+app.on('before-quit', () => {
+  void telegramService?.shutdown()
 })
 
 app.on('window-all-closed', () => {

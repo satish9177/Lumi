@@ -6,6 +6,13 @@ export const IPC_CHANNELS = {
   chooseDocumentRoot: 'lifelens:choose-document-root',
   listDocumentRoots: 'lifelens:list-document-roots',
   listReminders: 'lifelens:list-reminders',
+  getTelegramStatus: 'lifelens:get-telegram-status',
+  connectTelegram: 'lifelens:connect-telegram',
+  cancelTelegramConnect: 'lifelens:cancel-telegram-connect',
+  submitTelegramPassword: 'lifelens:submit-telegram-password',
+  logoutTelegram: 'lifelens:logout-telegram',
+  searchTelegramRecipients: 'lifelens:search-telegram-recipients',
+  telegramAuthUpdate: 'lifelens:telegram-auth-update',
   setPanelOpen: 'lifelens:set-panel-open'
 } as const
 
@@ -87,6 +94,34 @@ export interface SaveContextInput {
   sourceContext: SourceContext
 }
 
+export interface SendTelegramMessageInput {
+  recipientResultId: string
+  message: string
+}
+
+export interface TelegramAccount {
+  displayName: string
+  username?: string
+}
+
+export interface TelegramRecipient {
+  resultId: string
+  displayName: string
+  username?: string
+  kind: 'user' | 'group' | 'channel'
+  recentRank: number
+}
+
+export type TelegramConnectionState = 'disconnected' | 'connecting' | 'awaiting_2fa' | 'connected' | 'error'
+
+export interface TelegramStatus {
+  state: TelegramConnectionState
+  account?: TelegramAccount
+  qrUrl?: string
+  expiresAt?: string
+  message?: string
+}
+
 export interface ApprovedDocumentRoot {
   id: string
   label: string
@@ -107,7 +142,7 @@ export interface SavedContextRecord {
   createdAt: string
 }
 
-export const TOOL_NAMES = ['create_reminder', 'search_documents', 'open_file', 'open_url', 'save_context'] as const
+export const TOOL_NAMES = ['create_reminder', 'search_documents', 'open_file', 'open_url', 'save_context', 'send_telegram_message'] as const
 export type ToolName = (typeof TOOL_NAMES)[number]
 
 export interface ToolArguments {
@@ -116,6 +151,7 @@ export interface ToolArguments {
   open_file: OpenFileInput
   open_url: OpenUrlInput
   save_context: SaveContextInput
+  send_telegram_message: SendTelegramMessageInput
 }
 
 export type ToolProposal<T extends ToolName = ToolName> = {
@@ -142,6 +178,7 @@ export interface ToolExecutionResult {
   openedResultId?: string
   openedUrl?: string
   savedContext?: SavedContextRecord
+  telegramSent?: boolean
 }
 
 export interface LifeLensApi {
@@ -152,6 +189,13 @@ export interface LifeLensApi {
   chooseDocumentRoot: () => Promise<ApprovedDocumentRoot | undefined>
   listDocumentRoots: () => Promise<ApprovedDocumentRoot[]>
   listReminders: () => Promise<ReminderRecord[]>
+  getTelegramStatus: () => Promise<TelegramStatus>
+  connectTelegram: () => Promise<TelegramStatus>
+  cancelTelegramConnect: () => Promise<TelegramStatus>
+  submitTelegramPassword: (password: string) => Promise<TelegramStatus>
+  logoutTelegram: () => Promise<TelegramStatus>
+  searchTelegramRecipients: (query: string) => Promise<TelegramRecipient[]>
+  onTelegramAuthUpdate: (listener: (status: TelegramStatus) => void) => () => void
   setPanelOpen: (open: boolean) => void
 }
 
@@ -277,6 +321,17 @@ function parseSaveContextInput(value: unknown): SaveContextInput {
   }
 }
 
+function parseSendTelegramMessageInput(value: unknown): SendTelegramMessageInput {
+  if (!isRecord(value)) {
+    throw new PayloadValidationError('Telegram message arguments must be an object.')
+  }
+
+  return {
+    recipientResultId: requiredString(value.recipientResultId, 'recipientResultId', 250),
+    message: requiredString(value.message, 'message', 4_096)
+  }
+}
+
 export function parseToolProposal(value: unknown): ToolProposal {
   if (!isRecord(value)) {
     throw new PayloadValidationError('A tool proposal must be an object.')
@@ -304,6 +359,8 @@ export function parseToolProposal(value: unknown): ToolProposal {
       return { ...common, toolName, arguments: parseOpenUrlInput(value.arguments) }
     case 'save_context':
       return { ...common, toolName, arguments: parseSaveContextInput(value.arguments) }
+    case 'send_telegram_message':
+      return { ...common, toolName, arguments: parseSendTelegramMessageInput(value.arguments) }
     default:
       throw new PayloadValidationError('The requested tool is not allowed.')
   }

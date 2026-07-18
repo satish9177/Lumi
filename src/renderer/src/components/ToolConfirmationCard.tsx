@@ -1,11 +1,13 @@
 import { useId } from 'react'
-import type { ApprovedDocumentRoot, DocumentSearchResult, SourceContext, ToolProposal } from '../../../shared/contracts'
+import type { ApprovedDocumentRoot, DocumentSearchResult, SourceContext, TelegramAccount, TelegramRecipient, ToolProposal } from '../../../shared/contracts'
 import './components.css'
 
 export interface ToolConfirmationCardProps {
   proposal: ToolProposal
   approvedRoots?: ApprovedDocumentRoot[]
   searchResults?: DocumentSearchResult[]
+  telegramAccount?: TelegramAccount
+  telegramRecipients?: TelegramRecipient[]
   isConfirming?: boolean
   onConfirm: (proposal: ToolProposal) => void | Promise<void>
   onDismiss: () => void
@@ -19,6 +21,8 @@ export function ToolConfirmationCard({
   proposal,
   approvedRoots = [],
   searchResults = [],
+  telegramAccount,
+  telegramRecipients = [],
   isConfirming = false,
   onConfirm,
   onDismiss
@@ -37,7 +41,7 @@ export function ToolConfirmationCard({
       <h2 id={headingId} className="lifelens-card-heading">{actionLabel}</h2>
       <p id={descriptionId} className="lifelens-tool-reason">{proposal.reason}</p>
 
-      <ToolProposalDetails proposal={proposal} approvedRoots={approvedRoots} searchResults={searchResults} />
+      <ToolProposalDetails proposal={proposal} approvedRoots={approvedRoots} searchResults={searchResults} telegramAccount={telegramAccount} telegramRecipients={telegramRecipients} />
 
       <p className="lifelens-confirmation-notice">
         LifeLens will not run this action until you select {actionLabel}.
@@ -62,8 +66,10 @@ export function ToolConfirmationCard({
 function ToolProposalDetails({
   proposal,
   approvedRoots = [],
-  searchResults = []
-}: Pick<ToolConfirmationCardProps, 'proposal' | 'approvedRoots' | 'searchResults'>) {
+  searchResults = [],
+  telegramAccount,
+  telegramRecipients = []
+}: Pick<ToolConfirmationCardProps, 'proposal' | 'approvedRoots' | 'searchResults' | 'telegramAccount' | 'telegramRecipients'>) {
   switch (proposal.toolName) {
     case 'create_reminder':
       return (
@@ -110,6 +116,17 @@ function ToolProposalDetails({
           <SourceContextPreview context={proposal.arguments.sourceContext} />
         </>
       )
+    case 'send_telegram_message':
+      {
+        const recipient = telegramRecipients.find((candidate) => candidate.resultId === proposal.arguments.recipientResultId)
+      return (
+        <dl className="lifelens-action-details">
+          <div><dt>Account</dt><dd>{telegramAccount ? accountLabel(telegramAccount) : 'Connected Telegram account'}</dd></div>
+          <div><dt>Recipient</dt><dd>{recipient ? accountLabel(recipient) : 'Unavailable selected recipient'}</dd></div>
+          <div><dt>Message</dt><dd>{proposal.arguments.message}</dd></div>
+        </dl>
+      )
+      }
   }
 }
 
@@ -143,7 +160,13 @@ function confirmationLabel(proposal: ToolProposal): string {
       return 'Open website'
     case 'save_context':
       return 'Save context'
+    case 'send_telegram_message':
+      return 'Send Telegram message'
   }
+}
+
+function accountLabel(value: { displayName: string; username?: string }): string {
+  return value.username ? `${value.displayName} (@${value.username})` : value.displayName
 }
 
 function formatDateTime(value: string): string {
