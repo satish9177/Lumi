@@ -3,13 +3,33 @@ import type { RealtimeSessionCredential } from '../../shared/contracts'
 
 export const REALTIME_MODEL = process.env.LIFELENS_REALTIME_MODEL?.trim() || 'gpt-realtime-2.1'
 const REQUEST_TIMEOUT_MS = 10_000
+const REALTIME_REASONING_EFFORTS = ['low', 'medium', 'high'] as const
+
+export type RealtimeReasoningEffort = (typeof REALTIME_REASONING_EFFORTS)[number]
+
+export function getRealtimeReasoningEffort(value = process.env.LIFELENS_REALTIME_REASONING): RealtimeReasoningEffort {
+  const normalized = value?.trim().toLowerCase()
+  if (!normalized) {
+    return 'low'
+  }
+
+  if (REALTIME_REASONING_EFFORTS.includes(normalized as RealtimeReasoningEffort)) {
+    return normalized as RealtimeReasoningEffort
+  }
+
+  throw new Error(
+    `Invalid LIFELENS_REALTIME_REASONING. Expected one of: ${REALTIME_REASONING_EFFORTS.join(', ')}.`
+  )
+}
 
 export async function createRealtimeSessionCredential(safetySeed: string): Promise<RealtimeSessionCredential> {
+  const reasoningEffort = getRealtimeReasoningEffort()
   const apiKey = process.env.OPENAI_API_KEY?.trim()
   if (!apiKey) {
     return { mode: 'mock', model: REALTIME_MODEL }
   }
 
+  console.info(`Realtime reasoning effort: ${reasoningEffort}`)
   const safetyIdentifier = createHash('sha256').update(safetySeed).digest('hex')
   let response: Response
   try {
@@ -24,6 +44,7 @@ export async function createRealtimeSessionCredential(safetySeed: string): Promi
         session: {
           type: 'realtime',
           model: REALTIME_MODEL,
+          reasoning: { effort: reasoningEffort },
           audio: { output: { voice: 'marin' } }
         }
       })

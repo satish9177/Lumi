@@ -107,6 +107,7 @@ describe('RealtimeClient server events', () => {
     })
     expect((events[0]?.session as Record<string, unknown>).model).toBeUndefined()
     expect((events[0]?.session as Record<string, unknown>).audio).toBeUndefined()
+    expect((events[0]?.session as Record<string, unknown>).reasoning).toBeUndefined()
 
     handleServerEvent.call(client, JSON.stringify({ type: 'session.updated' }))
 

@@ -7,6 +7,7 @@ import type {
   CompanionState,
   DocumentSearchResult,
   Explanation,
+  PendingActionPreview,
   RealtimeMode,
   SourceContext,
   TelegramRecipient,
@@ -37,7 +38,8 @@ export default function LifeLensApp() {
   const [capturePickerOpen, setCapturePickerOpen] = useState(false)
   const [selectedCaptureSourceId, setSelectedCaptureSourceId] = useState<string>()
   const [explanation, setExplanation] = useState<Explanation>()
-  const [proposal, setProposal] = useState<ToolProposal>()
+  const [pendingAction, setPendingAction] = useState<PendingActionPreview>()
+  const pendingProposalsRef = useRef(new Map<string, ToolProposal>())
   const [toolResult, setToolResult] = useState<ToolExecutionResult>()
   const [transcript, setTranscript] = useState<string[]>([])
   const [documentRoots, setDocumentRoots] = useState<ApprovedDocumentRoot[]>([])
@@ -126,7 +128,7 @@ export default function LifeLensApp() {
         onExplanation: setExplanation,
         onCaptureContextRequest: requestScreenContext,
         onTelegramRecipientSearch: requestTelegramRecipientSearch,
-        onToolProposal: setProposal,
+        onToolProposal: (proposal) => { void preparePendingAction(proposal) },
         onError: setError
       })
       client.setApprovedRoots(documentRoots)
@@ -179,7 +181,7 @@ export default function LifeLensApp() {
       const nextCapture = await window.lifeLens.captureScreen(sourceId)
       setCapture(nextCapture)
       setExplanation(undefined)
-      setProposal(undefined)
+      setPendingAction(undefined)
       setToolResult(undefined)
       setSearchResults([])
       await client.provideScreenContext(nextCapture, callId)
@@ -257,8 +259,7 @@ export default function LifeLensApp() {
       return
     }
 
-    setToolResult(undefined)
-    setProposal({
+    void preparePendingAction({
       id: crypto.randomUUID(),
       toolName: 'search_documents',
       reason: `Search only the selected approved folder for files matching "${query}".`,
@@ -268,8 +269,7 @@ export default function LifeLensApp() {
   }
 
   const proposeOpenFile = (result: DocumentSearchResult): void => {
-    setToolResult(undefined)
-    setProposal({
+    void preparePendingAction({
       id: crypto.randomUUID(),
       toolName: 'open_file',
       reason: `Open ${result.name}, which was returned by your approved-folder search.`,
@@ -279,8 +279,7 @@ export default function LifeLensApp() {
   }
 
   const proposeOpenUrl = (url: string): void => {
-    setToolResult(undefined)
-    setProposal({
+    void preparePendingAction({
       id: crypto.randomUUID(),
       toolName: 'open_url',
       reason: 'Open the link extracted from the captured screen in your default browser.',
@@ -296,8 +295,7 @@ export default function LifeLensApp() {
       return
     }
 
-    setToolResult(undefined)
-    setProposal({
+    void preparePendingAction({
       id: crypto.randomUUID(),
       toolName: 'save_context',
       reason: 'Keep the interview summary and extracted signals for a later reminder or follow-up.',
@@ -401,8 +399,7 @@ export default function LifeLensApp() {
       setError('That Telegram recipient is no longer available. Search again.')
       return
     }
-    setToolResult(undefined)
-    setProposal({
+    void preparePendingAction({
       id: crypto.randomUUID(),
       toolName: 'send_telegram_message',
       reason: 'Send this one plain-text message from your connected personal Telegram account.',
@@ -411,14 +408,31 @@ export default function LifeLensApp() {
     })
   }
 
-  const confirmProposal = async (proposalToConfirm: ToolProposal): Promise<void> => {
+  const preparePendingAction = async (proposal: ToolProposal): Promise<void> => {
+    setError(undefined)
+    setToolResult(undefined)
+    try {
+      const action = await window.lifeLens.createPendingAction(proposal)
+      pendingProposalsRef.current.set(action.approvalId, proposal)
+      setPendingAction(action)
+    } catch (pendingError) {
+      const message = messageFrom(pendingError)
+      clientRef.current?.sendToolResult(proposal, { ok: false, message })
+      setCompanionState('error')
+      setError(message)
+    }
+  }
+
+  const confirmPendingAction = async (approvalId: string): Promise<void> => {
+    const proposal = pendingProposalsRef.current.get(approvalId)
     setError(undefined)
     setIsConfirming(true)
     try {
-      const result = await window.lifeLens.executeConfirmedTool(proposalToConfirm)
+      const result = await window.lifeLens.approvePendingAction(approvalId)
       setToolResult(result)
-      clientRef.current?.sendToolResult(proposalToConfirm, result)
-      setProposal((current) => current?.id === proposalToConfirm.id ? undefined : current)
+      if (proposal) clientRef.current?.sendToolResult(proposal, result)
+      pendingProposalsRef.current.delete(approvalId)
+      setPendingAction((current) => current?.approvalId === approvalId ? undefined : current)
       if (result.searchResults) {
         setSearchResults(result.searchResults)
       }
@@ -432,7 +446,7 @@ export default function LifeLensApp() {
       }
     } catch (toolError) {
       const message = messageFrom(toolError)
-      clientRef.current?.sendToolResult(proposalToConfirm, { ok: false, message })
+      if (proposal) clientRef.current?.sendToolResult(proposal, { ok: false, message })
       setCompanionState('error')
       setError(message)
     } finally {
@@ -440,15 +454,18 @@ export default function LifeLensApp() {
     }
   }
 
-  const dismissProposal = (): void => {
-    if (!proposal) {
-      return
+  const dismissPendingAction = async (approvalId: string): Promise<void> => {
+    const proposal = pendingProposalsRef.current.get(approvalId)
+    try {
+      await window.lifeLens.cancelPendingAction(approvalId)
+      if (proposal) clientRef.current?.declineToolProposal(proposal)
+      pendingProposalsRef.current.delete(approvalId)
+      setPendingAction((current) => current?.approvalId === approvalId ? undefined : current)
+      setToolResult({ ok: false, message: 'Cancelled. Nothing was changed, opened, or sent.' })
+      setCompanionState('listening')
+    } catch (cancelError) {
+      setError(messageFrom(cancelError))
     }
-
-    clientRef.current?.declineToolProposal(proposal)
-    setToolResult({ ok: false, message: 'Action declined. Nothing was changed or opened.' })
-    setProposal(undefined)
-    setCompanionState('listening')
   }
 
   const selectCaptureSource = (source: CaptureSource): void => {
@@ -571,7 +588,7 @@ export default function LifeLensApp() {
                 </label>
                 <div className="document-search-row">
                   <input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="resume" aria-label="Filename query" />
-                  <button className="secondary-button" type="button" onClick={proposeDocumentSearch}>Search (confirm)</button>
+                  <button className="secondary-button" type="button" onClick={proposeDocumentSearch}>Search folder</button>
                 </div>
               </>
             )}
@@ -580,7 +597,7 @@ export default function LifeLensApp() {
                 {searchResults.map((result) => (
                   <li key={result.id}>
                     <div><strong>{result.name}</strong><span>{result.relativePath}</span></div>
-                    <button className="text-button" type="button" onClick={() => proposeOpenFile(result)}>Open (confirm)</button>
+                    <button className="text-button" type="button" onClick={() => proposeOpenFile(result)}>Open file</button>
                   </li>
                 ))}
               </ul>
@@ -641,7 +658,7 @@ export default function LifeLensApp() {
                   <span>Message to send</span>
                   <textarea value={telegramMessage} maxLength={4096} onChange={(event) => setTelegramMessage(event.target.value)} placeholder="Write the complete message" />
                 </label>
-                <button className="secondary-button" type="button" onClick={proposeTelegramMessage}>Review Telegram message</button>
+                <button className="secondary-button" type="button" onClick={proposeTelegramMessage}>Send message</button>
               </>
             )}
           </section>
@@ -659,16 +676,12 @@ export default function LifeLensApp() {
             </div>
           </details>
 
-          {proposal && (
+          {pendingAction && (
             <ToolConfirmationCard
-              proposal={proposal}
-              approvedRoots={documentRoots}
-              searchResults={searchResults}
-              telegramAccount={telegramStatus.account}
-              telegramRecipients={telegramRecipients}
+              action={pendingAction}
               isConfirming={isConfirming}
-              onConfirm={confirmProposal}
-              onDismiss={dismissProposal}
+              onConfirm={confirmPendingAction}
+              onDismiss={dismissPendingAction}
             />
           )}
           {toolResult && <p className={`notice ${toolResult.ok ? 'success-notice' : 'error-notice'}`}>{toolResult.message}</p>}

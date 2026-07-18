@@ -1,16 +1,18 @@
 import { app, BrowserWindow, dialog, ipcMain, safeStorage, screen } from 'electron'
 import { basename, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { IPC_CHANNELS, parseToolProposal, type CaptureResult, type TelegramStatus, type ToolProposal } from '../shared/contracts'
+import { IPC_CHANNELS, type CaptureResult, type TelegramStatus, type ToolProposal } from '../shared/contracts'
 import { captureScreen, listCaptureSources } from './services/capture'
 import { createRealtimeSessionCredential } from './services/realtime'
 import { LocalStore } from './services/store'
-import { executeToolAfterConfirmation, restoreReminderTimers } from './services/tools'
-import { executeTelegramAfterConfirmation, TelegramService } from './services/telegram'
+import { restoreReminderTimers } from './services/tools'
+import { TelegramService } from './services/telegram'
+import { PendingActionStore } from './services/pending-actions'
 
 let mainWindow: BrowserWindow | undefined
 let localStore: LocalStore
 let telegramService: TelegramService
+let pendingActions: PendingActionStore
 const captures = new Map<string, Pick<CaptureResult, 'capturedAt'>>()
 
 const CLOSED_WINDOW_SIZE = { width: 88, height: 88 }
@@ -136,15 +138,19 @@ function registerIpcHandlers(): void {
     return createRealtimeSessionCredential(app.getPath('userData'))
   })
 
-  ipcMain.handle(IPC_CHANNELS.executeConfirmedTool, async (event, proposal: unknown) => {
+  ipcMain.handle(IPC_CHANNELS.createPendingAction, async (event, proposal: unknown) => {
     requireMainWindow(event)
-    const parsed = parseToolProposal(proposal)
-    validateCaptureProvenance(parsed)
-    const confirmed = await confirmToolProposal(parsed)
-    if (parsed.toolName === 'send_telegram_message') {
-      return executeTelegramAfterConfirmation(telegramService, confirmed, parsed.callId, parsed.arguments.recipientResultId, parsed.arguments.message)
-    }
-    return executeToolAfterConfirmation(localStore, parsed, confirmed)
+    return pendingActions.create(proposal)
+  })
+
+  ipcMain.handle(IPC_CHANNELS.approvePendingAction, async (event, approvalId: unknown) => {
+    requireMainWindow(event)
+    return pendingActions.approve(approvalId)
+  })
+
+  ipcMain.handle(IPC_CHANNELS.cancelPendingAction, (event, approvalId: unknown) => {
+    requireMainWindow(event)
+    pendingActions.cancel(approvalId)
   })
 
   ipcMain.handle(IPC_CHANNELS.chooseDocumentRoot, async (event) => {
@@ -188,6 +194,7 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.cancelTelegramConnect, async (event) => {
     requireMainWindow(event)
+    pendingActions.clearTelegram()
     return telegramService.cancelLogin()
   })
 
@@ -201,6 +208,7 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.logoutTelegram, async (event) => {
     requireMainWindow(event)
+    pendingActions.clearTelegram()
     return telegramService.logout()
   })
 
@@ -250,66 +258,11 @@ function validateCaptureProvenance(proposal: ToolProposal): void {
   }
 }
 
-async function confirmToolProposal(proposal: ToolProposal): Promise<boolean> {
-  if (!mainWindow) {
-    return false
-  }
-
-  const confirmation = await dialog.showMessageBox(mainWindow, {
-    type: 'question',
-    title: 'Confirm LifeLens action',
-    message: await confirmationMessage(proposal),
-    detail: `${proposal.reason}\n\nLifeLens will act only after you select Confirm.`,
-    buttons: ['Cancel', 'Confirm'],
-    defaultId: 0,
-    cancelId: 0,
-    noLink: true
-  })
-  return confirmation.response === 1
-}
-
-async function confirmationMessage(proposal: ToolProposal): Promise<string> {
-  switch (proposal.toolName) {
-    case 'create_reminder':
-      return `Create reminder: ${proposal.arguments.title}\nDue: ${formatDateTime(proposal.arguments.dueAt)}`
-    case 'search_documents': {
-      const root = await localStore.getDocumentRoot(proposal.arguments.rootId)
-      return root
-        ? `Search ${root.label} for: ${proposal.arguments.query}`
-        : `Search an unavailable approved folder for: ${proposal.arguments.query}`
-    }
-    case 'open_file': {
-      const result = await localStore.getSearchResult(proposal.arguments.resultId)
-      return result
-        ? `Open file: ${result.name}\nLocation: ${result.relativePath}`
-        : 'Open an unavailable selected file result'
-    }
-    case 'open_url':
-      return `Open this link in your browser: ${proposal.arguments.url}`
-    case 'save_context':
-      return `Save context: ${proposal.arguments.label}`
-    case 'send_telegram_message': {
-      const recipient = telegramService.getRecipient(proposal.arguments.recipientResultId)
-      const account = telegramService.getStatus().account
-      if (!recipient || !account) {
-        return 'Send a Telegram message to an unavailable recipient'
-      }
-      const accountLabel = account.username ? `${account.displayName} (@${account.username})` : account.displayName
-      const recipientLabel = recipient.username ? `${recipient.displayName} (@${recipient.username})` : recipient.displayName
-      return `Send Telegram message from ${accountLabel}\nTo: ${recipientLabel}\n\n${proposal.arguments.message}`
-    }
-  }
-}
-
-function formatDateTime(value: string): string {
-  const date = new Date(value)
-  return Number.isNaN(date.valueOf()) ? value : date.toLocaleString()
-}
-
 app.whenReady().then(async () => {
   app.setAppUserModelId('com.lifelens.app')
   localStore = new LocalStore(app.getPath('userData'))
   telegramService = new TelegramService(app.getPath('userData'), safeStorage, emitTelegramStatus)
+  pendingActions = new PendingActionStore(localStore, telegramService, validateCaptureProvenance)
   registerIpcHandlers()
   mainWindow = createWindow()
   await restoreReminderTimers(localStore)
@@ -323,12 +276,16 @@ app.whenReady().then(async () => {
 })
 
 function emitTelegramStatus(status: TelegramStatus): void {
+  if (status.state !== 'connected') {
+    pendingActions?.clearTelegram()
+  }
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(IPC_CHANNELS.telegramAuthUpdate, status)
   }
 }
 
 app.on('before-quit', () => {
+  pendingActions?.clearAll()
   void telegramService?.shutdown()
 })
 

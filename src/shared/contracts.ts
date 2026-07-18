@@ -2,7 +2,9 @@ export const IPC_CHANNELS = {
   captureScreen: 'lifelens:capture-screen',
   listCaptureSources: 'lifelens:list-capture-sources',
   createRealtimeSession: 'lifelens:create-realtime-session',
-  executeConfirmedTool: 'lifelens:execute-confirmed-tool',
+  createPendingAction: 'lifelens:create-pending-action',
+  approvePendingAction: 'lifelens:approve-pending-action',
+  cancelPendingAction: 'lifelens:cancel-pending-action',
   chooseDocumentRoot: 'lifelens:choose-document-root',
   listDocumentRoots: 'lifelens:list-document-roots',
   listReminders: 'lifelens:list-reminders',
@@ -181,11 +183,33 @@ export interface ToolExecutionResult {
   telegramSent?: boolean
 }
 
+interface PendingActionBase {
+  approvalId: string
+  actionType: ToolName
+  createdAt: string
+  expiresAt: string
+}
+
+export type PendingActionPreview =
+  | (PendingActionBase & { actionType: 'create_reminder'; title: string; dueAt: string; sourceContextSummary: string })
+  | (PendingActionBase & { actionType: 'search_documents'; folderLabel: string; query: string })
+  | (PendingActionBase & { actionType: 'open_file'; fileName: string; relativePath: string; folderLabel: string })
+  | (PendingActionBase & { actionType: 'open_url'; url: string; domain: string })
+  | (PendingActionBase & { actionType: 'save_context'; label: string; summary: string })
+  | (PendingActionBase & {
+    actionType: 'send_telegram_message'
+    account: TelegramAccount
+    recipient: Pick<TelegramRecipient, 'displayName' | 'username'>
+    message: string
+  })
+
 export interface LifeLensApi {
   listCaptureSources: () => Promise<CaptureSource[]>
   captureScreen: (sourceId?: string) => Promise<CaptureResult>
   createRealtimeSession: () => Promise<RealtimeSessionCredential>
-  executeConfirmedTool: (proposal: ToolProposal) => Promise<ToolExecutionResult>
+  createPendingAction: (proposal: ToolProposal) => Promise<PendingActionPreview>
+  approvePendingAction: (approvalId: string) => Promise<ToolExecutionResult>
+  cancelPendingAction: (approvalId: string) => Promise<void>
   chooseDocumentRoot: () => Promise<ApprovedDocumentRoot | undefined>
   listDocumentRoots: () => Promise<ApprovedDocumentRoot[]>
   listReminders: () => Promise<ReminderRecord[]>
