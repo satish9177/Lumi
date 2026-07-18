@@ -1,17 +1,19 @@
-import { Notification, shell } from 'electron'
-import { stat } from 'node:fs/promises'
+import { nativeImage, Notification, shell } from 'electron'
+import { extname } from 'node:path'
 import {
   canonicalizeApprovedRoots,
-  resolveApprovedDocumentPath,
-  searchApprovedDocuments,
-  type DocumentSearchRecord
+  resolveApprovedDocumentPath
 } from '../../features/document-tools/search'
+import { isImageExtension } from '../../shared/search-query'
+import { encodeCaptureImage, type CaptureImage } from './capture'
+import { resolveTrustedResultPath } from './thumbnails'
 import {
   parseToolProposal,
-  type DocumentSearchResult,
   type ReminderRecord,
   type ToolExecutionResult
 } from '../../shared/contracts'
+import { normalizeSearchQuery } from '../../shared/search-query'
+import { runDocumentSearch } from './document-search'
 import { LocalStore } from './store'
 
 const MAX_TIMER_DELAY = 2_147_000_000
@@ -31,22 +33,20 @@ export async function executeConfirmedTool(store: LocalStore, rawProposal: unkno
       }
     }
     case 'search_documents': {
-      const root = await store.getDocumentRoot(proposal.arguments.rootId)
-      if (!root) {
-        return { ok: false, message: 'That approved folder is no longer available. Choose a folder again.' }
+      const roots = await store.listDocumentRoots()
+      if (roots.length === 0) {
+        return { ok: false, message: 'No folder is approved yet. Approve a folder before searching.' }
       }
 
-      const approvedRoots = await canonicalizeApprovedRoots([root.path])
-      const search = await searchApprovedDocuments(approvedRoots, proposal.arguments.query, { maxDepth: 4, maxResults: 20 })
-      const candidates = await toStoredSearchResults(search.results)
-      candidates.sort((left, right) => right.modifiedAt.localeCompare(left.modifiedAt))
-      const searchResults = await store.saveSearchResults(root.id, candidates)
+      const search = await runDocumentSearch(store, normalizeSearchQuery(proposal.arguments))
       return {
         ok: true,
-        message: searchResults.length === 1
-          ? 'Found 1 matching file in the approved folder.'
-          : `Found ${searchResults.length} matching files in the approved folder.`,
-        searchResults
+        message: search.fallback
+          ? `No filename matched. Showing ${search.results.length} recent possible matches.`
+          : `Found ${search.results.length} matching ${search.results.length === 1 ? 'file' : 'files'}.`,
+        searchResults: search.results,
+        compactResults: search.compactResults,
+        searchFallback: search.fallback
       }
     }
     case 'open_file': {
@@ -73,6 +73,50 @@ export async function executeConfirmedTool(store: LocalStore, rawProposal: unkno
 
       return { ok: true, message: `Opened ${storedResult.name}.`, openedResultId: storedResult.id }
     }
+    case 'analyze_photo': {
+      const storedResult = await store.getSearchResult(proposal.arguments.resultId)
+      if (!storedResult) {
+        return { ok: false, message: 'That photo is not a result from an approved search. Search again first.' }
+      }
+
+      // Everything is re-derived from trusted state: the renderer supplied only
+      // an opaque result identifier, never a path, a filename, or image bytes.
+      const safePath = await resolveTrustedResultPath(store, proposal.arguments.resultId)
+      if (!safePath) {
+        return { ok: false, message: 'That photo is no longer available inside its approved folder.' }
+      }
+
+      if (!isImageExtension(extname(safePath))) {
+        return { ok: false, message: 'That result is not an image Lumi can analyse.' }
+      }
+
+      const image = loadImageForAnalysis(safePath)
+      if (!image) {
+        return { ok: false, message: 'Lumi could not read that image. It may be corrupt or an unsupported format.' }
+      }
+
+      let encoded: { dataUrl: string; width: number; height: number }
+      try {
+        // The same bounded ladder used for screen captures: the original
+        // full-resolution file is never uploaded.
+        encoded = encodeCaptureImage(image)
+      } catch {
+        return { ok: false, message: 'That photo is too large to share safely. Try a smaller image.' }
+      }
+
+      return {
+        ok: true,
+        message: `Prepared ${storedResult.name} for one analysis.`,
+        analysisImage: {
+          resultId: storedResult.id,
+          name: storedResult.name,
+          dataUrl: encoded.dataUrl,
+          mimeType: 'image/jpeg',
+          width: encoded.width,
+          height: encoded.height
+        }
+      }
+    }
     case 'open_url': {
       await shell.openExternal(proposal.arguments.url)
       return { ok: true, message: 'Opened the confirmed link in your default browser.', openedUrl: proposal.arguments.url }
@@ -98,6 +142,16 @@ export async function executeToolAfterConfirmation(
   }
 
   return executeConfirmedTool(store, rawProposal)
+}
+
+/** Overridable so tests can exercise the approval path without Electron. */
+let loadImageForAnalysis: (path: string) => CaptureImage | undefined = (path) => {
+  const image = nativeImage.createFromPath(path)
+  return image.isEmpty() ? undefined : (image as unknown as CaptureImage)
+}
+
+export function setAnalysisImageLoader(loader: (path: string) => CaptureImage | undefined): void {
+  loadImageForAnalysis = loader
 }
 
 export function scheduleReminder(reminder: ReminderRecord): void {
@@ -135,24 +189,3 @@ export async function restoreReminderTimers(store: LocalStore): Promise<void> {
   }
 }
 
-async function toStoredSearchResults(records: readonly DocumentSearchRecord[]): Promise<Array<Omit<DocumentSearchResult, 'id' | 'rootId'> & { absolutePath: string }>> {
-  const results = await Promise.all(records.map(async (record) => {
-    try {
-      const details = await stat(record.path)
-      if (!details.isFile()) {
-        return undefined
-      }
-
-      return {
-        name: record.name,
-        relativePath: record.relativePath,
-        modifiedAt: details.mtime.toISOString(),
-        absolutePath: record.path
-      }
-    } catch {
-      return undefined
-    }
-  }))
-
-  return results.filter((result): result is Omit<DocumentSearchResult, 'id' | 'rootId'> & { absolutePath: string } => Boolean(result))
-}

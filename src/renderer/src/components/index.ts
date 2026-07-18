@@ -1,4 +1,6 @@
 export { ExplanationCard } from './ExplanationCard'
 export type { ExplanationCardProps } from './ExplanationCard'
+export { PhotoResultGrid } from './PhotoResultGrid'
+export type { PhotoResultGridProps } from './PhotoResultGrid'
 export { ToolConfirmationCard } from './ToolConfirmationCard'
 export type { ToolConfirmationCardProps } from './ToolConfirmationCard'

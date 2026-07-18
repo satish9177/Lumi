@@ -1,10 +1,24 @@
 import { app, BrowserWindow, dialog, ipcMain, safeStorage, screen } from 'electron'
+import { existsSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { IPC_CHANNELS, type CaptureResult, type TelegramStatus, type ToolProposal } from '../shared/contracts'
+import {
+  IPC_CHANNELS,
+  parseFileSearchRequest,
+  type CaptureResult,
+  type PendingSearchResolution,
+  type TelegramStatus,
+  type ToolProposal
+} from '../shared/contracts'
+import { GUARDED_TOOLS, type GuardedTool } from '../shared/intent'
+import type { NormalizedSearchQuery } from '../shared/search-query'
 import { captureScreen, listCaptureSources } from './services/capture'
+import { runDocumentSearch } from './services/document-search'
+import { IntentTracker } from './services/intent-policy'
 import { createRealtimeSessionCredential } from './services/realtime'
+import { SearchOrchestrator } from './services/search-orchestrator'
 import { LocalStore } from './services/store'
+import { createResultThumbnails, MAX_THUMBNAILS } from './services/thumbnails'
 import { restoreReminderTimers } from './services/tools'
 import { TelegramService } from './services/telegram'
 import { PendingActionStore } from './services/pending-actions'
@@ -13,6 +27,8 @@ let mainWindow: BrowserWindow | undefined
 let localStore: LocalStore
 let telegramService: TelegramService
 let pendingActions: PendingActionStore
+let intentTracker: IntentTracker
+let searchOrchestrator: SearchOrchestrator
 const captures = new Map<string, Pick<CaptureResult, 'capturedAt'>>()
 
 const CLOSED_WINDOW_SIZE = { width: 88, height: 88 }
@@ -138,6 +154,23 @@ function registerIpcHandlers(): void {
     return createRealtimeSessionCredential(app.getPath('userData'))
   })
 
+  ipcMain.handle(IPC_CHANNELS.noteUserRequest, (event, request: unknown) => {
+    requireMainWindow(event)
+    if (typeof request !== 'string' || request.trim().length === 0 || request.length > 4_000) {
+      throw new Error('A user request must be a short non-empty text.')
+    }
+    return intentTracker.noteUserRequest(request)
+  })
+
+  ipcMain.handle(IPC_CHANNELS.evaluateToolRequest, async (event, toolName: unknown) => {
+    requireMainWindow(event)
+    if (typeof toolName !== 'string' || !GUARDED_TOOLS.includes(toolName as GuardedTool)) {
+      throw new Error('Tool policy evaluation is only available for guarded tools.')
+    }
+    const hasApprovedFolder = (await localStore.listDocumentRoots()).length > 0
+    return intentTracker.evaluateToolRequest(toolName as GuardedTool, hasApprovedFolder)
+  })
+
   ipcMain.handle(IPC_CHANNELS.createPendingAction, async (event, proposal: unknown) => {
     requireMainWindow(event)
     return pendingActions.create(proposal)
@@ -162,14 +195,44 @@ function registerIpcHandlers(): void {
     const selection = await dialog.showOpenDialog(mainWindow, {
       title: 'Choose a folder LifeLens may search',
       buttonLabel: 'Approve this folder',
-      properties: ['openDirectory']
+      properties: ['openDirectory'],
+      // Only where the chooser opens. Access still comes from the user's pick.
+      defaultPath: suggestedFolderHint()
     })
     if (selection.canceled || !selection.filePaths[0]) {
+      searchOrchestrator.notifyFolderDeclined()
       return undefined
     }
 
     const path = selection.filePaths[0]
-    return localStore.addDocumentRoot(path, basename(path) || 'Approved folder')
+    const root = await localStore.addDocumentRoot(path, basename(path) || 'Approved folder')
+    // Approving a folder is what the held search was waiting for; it resumes
+    // here so the user never repeats the original request.
+    await searchOrchestrator.notifyFolderApproved()
+    return root
+  })
+
+  ipcMain.handle(IPC_CHANNELS.beginFileSearch, async (event, request: unknown) => {
+    requireMainWindow(event)
+    return searchOrchestrator.begin(parseFileSearchRequest(request))
+  })
+
+  ipcMain.handle(IPC_CHANNELS.cancelFileSearch, (event) => {
+    requireMainWindow(event)
+    searchOrchestrator.clear()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.getResultThumbnails, async (event, resultIds: unknown) => {
+    requireMainWindow(event)
+    if (!Array.isArray(resultIds) || resultIds.length > MAX_THUMBNAILS) {
+      throw new Error('Thumbnails are only available for a short list of search results.')
+    }
+    return createResultThumbnails(localStore, resultIds as string[])
+  })
+
+  ipcMain.handle(IPC_CHANNELS.cancelPhotoAnalysis, (event) => {
+    requireMainWindow(event)
+    pendingActions.clearPhotoAnalysis()
   })
 
   ipcMain.handle(IPC_CHANNELS.listDocumentRoots, async (event) => {
@@ -230,6 +293,28 @@ function registerIpcHandlers(): void {
   })
 }
 
+/**
+ * Opens the chooser near where the requested files usually live. This is a
+ * starting location only; nothing is approved until the user picks a folder.
+ */
+function suggestedFolderHint(): string | undefined {
+  const kind = searchOrchestrator.pendingSearch()?.query.kind
+  if (kind !== 'photo' && kind !== 'screenshot') {
+    return undefined
+  }
+
+  try {
+    const pictures = app.getPath('pictures')
+    if (kind === 'screenshot') {
+      const screenshots = join(pictures, 'Screenshots')
+      return existsSync(screenshots) ? screenshots : pictures
+    }
+    return pictures
+  } catch {
+    return undefined
+  }
+}
+
 function waitForDesktopRepaint(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 150))
 }
@@ -263,6 +348,14 @@ app.whenReady().then(async () => {
   localStore = new LocalStore(app.getPath('userData'))
   telegramService = new TelegramService(app.getPath('userData'), safeStorage, emitTelegramStatus)
   pendingActions = new PendingActionStore(localStore, telegramService, validateCaptureProvenance)
+  intentTracker = new IntentTracker()
+  searchOrchestrator = new SearchOrchestrator({
+    listRoots: () => localStore.listDocumentRoots(),
+    runSearch: (query) => runDocumentSearch(localStore, query),
+    isTrustedIntent: (query) => intentTracker.supportsFileSearch(query),
+    waitForTrust: waitForTrustedIntent,
+    emit: emitFileSearchResolution
+  })
   registerIpcHandlers()
   mainWindow = createWindow()
   await restoreReminderTimers(localStore)
@@ -275,6 +368,38 @@ app.whenReady().then(async () => {
   })
 })
 
+// A model search can outrun its own voice transcript, so the trusted intent may
+// register a beat after the request arrives. These bound how long the search
+// waits for that late transcript before it falls back to a confirmation card.
+const TRUST_GRACE_MS = 600
+const TRUST_POLL_MS = 50
+
+/**
+ * Polls the trusted intent tracker briefly so a late voice transcript's
+ * noteUserRequest, processed on the main event loop while this awaits, can flip
+ * the request to trusted before the orchestrator fails closed. Returns as soon
+ * as the intent lands, or when the grace window elapses.
+ */
+async function waitForTrustedIntent(query: NormalizedSearchQuery): Promise<void> {
+  const deadline = Date.now() + TRUST_GRACE_MS
+  while (Date.now() < deadline) {
+    if (intentTracker.supportsFileSearch(query)) {
+      return
+    }
+    await delay(Math.min(TRUST_POLL_MS, Math.max(0, deadline - Date.now())))
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function emitFileSearchResolution(resolution: PendingSearchResolution): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.fileSearchResolved, resolution)
+  }
+}
+
 function emitTelegramStatus(status: TelegramStatus): void {
   if (status.state !== 'connected') {
     pendingActions?.clearTelegram()
@@ -286,6 +411,7 @@ function emitTelegramStatus(status: TelegramStatus): void {
 
 app.on('before-quit', () => {
   pendingActions?.clearAll()
+  searchOrchestrator?.clear()
   void telegramService?.shutdown()
 })
 

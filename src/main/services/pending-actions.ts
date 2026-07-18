@@ -6,6 +6,7 @@ import {
 } from '../../shared/contracts'
 import { LocalStore } from './store'
 import { TelegramService } from './telegram'
+import { createResultThumbnails } from './thumbnails'
 import { executeConfirmedTool } from './tools'
 
 const DEFAULT_TTL_MS = 2 * 60 * 1_000
@@ -26,7 +27,8 @@ export class PendingActionStore {
     private readonly telegram: TelegramService,
     private readonly validateCapture: (proposal: ToolProposal) => void,
     private readonly now: () => number = () => Date.now(),
-    private readonly ttlMs = DEFAULT_TTL_MS
+    private readonly ttlMs = DEFAULT_TTL_MS,
+    private readonly createThumbnails: typeof createResultThumbnails = createResultThumbnails
   ) {}
 
   async create(rawProposal: unknown): Promise<PendingActionPreview> {
@@ -66,8 +68,17 @@ export class PendingActionStore {
   }
 
   clearTelegram(): void {
+    this.clearByTool('send_telegram_message')
+  }
+
+  /** Called when the Realtime session ends: no image may outlive the session. */
+  clearPhotoAnalysis(): void {
+    this.clearByTool('analyze_photo')
+  }
+
+  private clearByTool(toolName: ToolProposal['toolName']): void {
     for (const [approvalId, action] of this.actions) {
-      if (action.proposal.toolName === 'send_telegram_message') {
+      if (action.proposal.toolName === toolName) {
         this.actions.delete(approvalId)
       }
     }
@@ -90,9 +101,14 @@ export class PendingActionStore {
           sourceContextSummary: proposal.arguments.sourceContext.summary
         }
       case 'search_documents': {
-        const root = await this.store.getDocumentRoot(proposal.arguments.rootId)
-        if (!root) throw new Error('That approved folder is no longer available. Choose a folder again.')
-        return { ...common, actionType: proposal.toolName, folderLabel: root.label, query: proposal.arguments.query }
+        const roots = await this.store.listDocumentRoots()
+        if (roots.length === 0) throw new Error('No folder is approved for search yet. Approve a folder first.')
+        return {
+          ...common,
+          actionType: proposal.toolName,
+          folderLabel: roots.map((root) => root.label).join(', '),
+          query: proposal.arguments.queryTerms
+        }
       }
       case 'open_file': {
         const result = await this.store.getSearchResult(proposal.arguments.resultId)
@@ -113,6 +129,24 @@ export class PendingActionStore {
       }
       case 'save_context':
         return { ...common, actionType: proposal.toolName, label: proposal.arguments.label, summary: proposal.arguments.sourceContext.summary }
+      case 'analyze_photo': {
+        const result = await this.store.getSearchResult(proposal.arguments.resultId)
+        if (!result) throw new Error('That photo is not a result from an approved search. Search again first.')
+        const root = await this.store.getDocumentRoot(result.rootId)
+        if (!root) throw new Error('The folder that produced this photo is no longer approved.')
+        // The preview is generated here from trusted state so the card cannot
+        // show a filename or image the renderer chose.
+        const [preview] = await this.createThumbnails(this.store, [result.id])
+        return {
+          ...common,
+          actionType: proposal.toolName,
+          fileName: result.name,
+          relativePath: result.relativePath,
+          folderLabel: root.label,
+          question: proposal.arguments.question ?? 'What is in this photo?',
+          previewDataUrl: preview?.status === 'ok' ? preview.dataUrl : undefined
+        }
+      }
       case 'send_telegram_message': {
         const account = this.telegram.getStatus().account
         const recipient = this.telegram.getRecipient(proposal.arguments.recipientResultId)

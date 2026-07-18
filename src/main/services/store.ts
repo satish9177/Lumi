@@ -9,13 +9,19 @@ import type {
   SaveContextInput,
   SavedContextRecord
 } from '../../shared/contracts'
+import type { FileKind } from '../../shared/search-query'
 
-interface StoredDocumentRoot extends ApprovedDocumentRoot {
+export interface StoredDocumentRoot extends ApprovedDocumentRoot {
   path: string
   createdAt: string
 }
 
-interface StoredSearchResult extends DocumentSearchResult {
+/** A result awaiting storage. Absolute paths never leave the main process. */
+export type SearchResultInput = Omit<DocumentSearchResult, 'id'> & { absolutePath: string }
+
+interface StoredSearchResult extends Omit<DocumentSearchResult, 'kind'> {
+  /** Optional so a state file written before kinds existed still loads. */
+  kind?: FileKind
   absolutePath: string
   createdAt: string
 }
@@ -60,6 +66,12 @@ export class LocalStore {
     return state.documentRoots.map(toPublicDocumentRoot)
   }
 
+  /** Main-process only: includes the approved absolute path. */
+  async listStoredDocumentRoots(): Promise<StoredDocumentRoot[]> {
+    const state = await this.readState()
+    return [...state.documentRoots]
+  }
+
   async addDocumentRoot(path: string, label: string): Promise<ApprovedDocumentRoot> {
     const state = await this.readState()
     const normalizedPath = path.trim()
@@ -84,23 +96,26 @@ export class LocalStore {
     return state.documentRoots.find((root) => root.id === rootId)
   }
 
-  async saveSearchResults(
-    rootId: string,
-    results: Array<Omit<DocumentSearchResult, 'id' | 'rootId'> & { absolutePath: string }>
-  ): Promise<DocumentSearchResult[]> {
+  /**
+   * Replaces the previous result set. Ordinals shown to the user always refer
+   * to the most recent search, so a stale result can never be reopened by
+   * position.
+   */
+  async saveSearchResults(results: readonly SearchResultInput[]): Promise<DocumentSearchResult[]> {
     const state = await this.readState()
     const createdAt = new Date().toISOString()
     const stored = results.slice(0, MAX_STORED_SEARCH_RESULTS).map<StoredSearchResult>((result) => ({
       id: randomUUID(),
-      rootId,
+      rootId: result.rootId,
       name: result.name,
       relativePath: result.relativePath,
       modifiedAt: result.modifiedAt,
+      kind: result.kind,
       absolutePath: result.absolutePath,
       createdAt
     }))
 
-    state.searchResults = [...stored, ...state.searchResults.filter((result) => result.rootId !== rootId)].slice(0, MAX_STORED_SEARCH_RESULTS)
+    state.searchResults = stored
     await this.writeState(state)
     return stored.map(toPublicSearchResult)
   }
@@ -157,7 +172,8 @@ function toPublicSearchResult(result: StoredSearchResult): DocumentSearchResult 
     rootId: result.rootId,
     name: result.name,
     relativePath: result.relativePath,
-    modifiedAt: result.modifiedAt
+    modifiedAt: result.modifiedAt,
+    kind: result.kind ?? 'other'
   }
 }
 

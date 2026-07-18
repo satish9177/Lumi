@@ -33,6 +33,23 @@ export function ToolConfirmationCard({ action, isConfirming = false, onConfirm, 
 
 function ActionDetails({ action }: { action: PendingActionPreview }) {
   switch (action.actionType) {
+    case 'analyze_photo':
+      return (
+        <>
+          {action.previewDataUrl && (
+            <img className="lifelens-photo-preview" src={action.previewDataUrl} alt={`Preview of ${action.fileName}`} />
+          )}
+          <Details rows={[
+            ['Photo', action.fileName],
+            ['Location', action.relativePath],
+            ['Approved folder', action.folderLabel],
+            ['Question', action.question]
+          ]} />
+          <p className="lifelens-upload-notice">
+            This one photo will be sent to OpenAI so Lumi can answer. No other photo leaves your computer.
+          </p>
+        </>
+      )
     case 'send_telegram_message':
       return <Details rows={[
         ['Account', accountLabel(action.account)],
@@ -62,6 +79,7 @@ function Details({ rows }: { rows: Array<[string, string]> }) {
 
 function actionLabel(action: PendingActionPreview): string {
   switch (action.actionType) {
+    case 'analyze_photo': return 'Analyse photo'
     case 'send_telegram_message': return 'Send message'
     case 'create_reminder': return 'Create reminder'
     case 'search_documents': return 'Search folder'
@@ -73,6 +91,7 @@ function actionLabel(action: PendingActionPreview): string {
 
 function pendingLabel(action: PendingActionPreview): string {
   switch (action.actionType) {
+    case 'analyze_photo': return 'Sending photo…'
     case 'send_telegram_message': return 'Sending…'
     case 'create_reminder': return 'Creating…'
     case 'search_documents': return 'Searching…'

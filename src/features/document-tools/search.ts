@@ -2,9 +2,13 @@ import { createHash } from 'node:crypto'
 import type { Dirent } from 'node:fs'
 import { lstat, readdir, realpath, stat } from 'node:fs/promises'
 import { basename, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { classifyFileKind, type FileKind, type NormalizedSearchQuery } from '../../shared/search-query'
+import { rankCandidates, recentCandidatesOfKind, type CandidateScore, type RankableCandidate } from './ranking'
 
-const DEFAULT_MAX_DEPTH = 4
-const DEFAULT_MAX_RESULTS = 20
+const DEFAULT_MAX_DEPTH = 6
+const DEFAULT_MAX_ENTRIES = 20_000
+const DEFAULT_MAX_CANDIDATES = 500
+const DEFAULT_MAX_RESULTS = 10
 const HARD_MAX_DEPTH = 8
 const HARD_MAX_RESULTS = 100
 
@@ -20,26 +24,34 @@ export interface ApprovedDocumentRoot {
 export interface DocumentSearchOptions {
   /** Root itself is depth 0; descendants deeper than this value are not visited. */
   maxDepth?: number
-  /** The search stops after this many matches. */
+  /** Enumeration stops after visiting this many directory entries. */
+  maxEntries?: number
+  /** At most this many files are held for ranking. */
+  maxCandidates?: number
+  /** Ranked results are truncated to this many entries after ranking. */
   maxResults?: number
+  /** Injectable clock so recency scoring is testable. */
+  now?: () => number
 }
 
-export interface DocumentSearchRecord {
+export interface DocumentSearchRecord extends RankableCandidate, CandidateScore {
   /** Stable for a canonical path while it remains under the same approved root. */
   id: string
   rootId: string
   rootPath: string
   /** Canonical filesystem path. Revalidate immediately before opening. */
   path: string
-  /** Slash-separated path relative to root, suitable for stable display. */
-  relativePath: string
-  name: string
-  extension: string
 }
 
 export interface DocumentSearchResponse {
   approvedRoots: readonly ApprovedDocumentRoot[]
   results: readonly DocumentSearchRecord[]
+  /** True when no filename was plausible and recent files are offered instead. */
+  fallback: boolean
+  /** Total plausible matches found before truncation. */
+  totalMatches: number
+  /** True when a traversal cap stopped enumeration early. */
+  truncatedTraversal: boolean
 }
 
 export class DocumentSearchValidationError extends Error {
@@ -48,6 +60,19 @@ export class DocumentSearchValidationError extends Error {
     this.name = 'DocumentSearchValidationError'
   }
 }
+
+// Directories that only add traversal cost inside an approved folder.
+const SKIPPED_DIRECTORIES = new Set([
+  'node_modules', '.git', '.svn', '.cache', '$recycle.bin', 'system volume information',
+  'appdata', '.venv', 'venv', '__pycache__'
+])
+
+// Transient artefacts that are never a file the user asked for.
+const SKIPPED_EXTENSIONS = new Set([
+  '.tmp', '.temp', '.crdownload', '.part', '.partial', '.download', '.lock', '.swp', '.swo'
+])
+
+const SKIPPED_NAMES = new Set(['thumbs.db', 'desktop.ini', '.ds_store'])
 
 /**
  * Resolves user-selected folders once before persisting them as approved roots.
@@ -85,30 +110,47 @@ export async function canonicalizeApprovedRoots(
 }
 
 /**
- * Searches only refreshed canonical approved roots. The query must be non-empty
- * to avoid treating this narrow, user-approved operation as a folder listing.
+ * Searches only refreshed canonical approved roots. Enumeration collects every
+ * reachable file within the traversal caps, ranking runs over the whole
+ * candidate set, and truncation happens last, so the newest plausible match is
+ * never lost to an early traversal cut-off.
  */
 export async function searchApprovedDocuments(
   approvedRoots: readonly ApprovedDocumentRoot[],
-  query: string,
+  query: NormalizedSearchQuery,
   options: DocumentSearchOptions = {}
 ): Promise<DocumentSearchResponse> {
-  const normalizedQuery = normalizeQuery(query)
   const maxDepth = normalizeBoundedInteger(options.maxDepth, DEFAULT_MAX_DEPTH, 0, HARD_MAX_DEPTH, 'maxDepth')
+  const maxEntries = normalizeBoundedInteger(options.maxEntries, DEFAULT_MAX_ENTRIES, 1, 200_000, 'maxEntries')
+  const maxCandidates = normalizeBoundedInteger(options.maxCandidates, DEFAULT_MAX_CANDIDATES, 1, 5_000, 'maxCandidates')
   const maxResults = normalizeBoundedInteger(options.maxResults, DEFAULT_MAX_RESULTS, 1, HARD_MAX_RESULTS, 'maxResults')
+  const nowMs = options.now?.() ?? Date.now()
+
   const refreshedRoots = await refreshApprovedRoots(approvedRoots)
-  const results: DocumentSearchRecord[] = []
+  const budget = { entriesVisited: 0, maxEntries, truncated: false }
+  const candidates: EnumeratedFile[] = []
 
   for (const root of refreshedRoots) {
-    if (results.length >= maxResults) {
-      break
-    }
-
     const visitedDirectories = new Set<string>()
-    await searchDirectory(root.canonicalPath, root, 0, normalizedQuery, maxDepth, maxResults, visitedDirectories, results)
+    await enumerateDirectory(root.canonicalPath, root, 0, maxDepth, budget, visitedDirectories, candidates)
   }
 
-  return { approvedRoots: refreshedRoots, results }
+  const ranked = rankCandidates(candidates, query, nowMs)
+  const totalMatches = ranked.length
+  const fallback = totalMatches === 0
+  const selected = fallback
+    ? recentCandidatesOfKind(candidates, query)
+      .slice(0, maxResults)
+      .map((candidate) => ({ ...candidate, score: 0, matchScore: 0, plausible: false }))
+    : ranked.slice(0, Math.min(maxResults, maxCandidates))
+
+  return {
+    approvedRoots: refreshedRoots,
+    results: selected.map(toSearchRecord),
+    fallback,
+    totalMatches,
+    truncatedTraversal: budget.truncated
+  }
 }
 
 /**
@@ -154,16 +196,32 @@ export function isPathWithinRoot(candidatePath: string, canonicalRootPath: strin
   )
 }
 
-async function searchDirectory(
+interface EnumeratedFile extends RankableCandidate {
+  rootId: string
+  rootPath: string
+  path: string
+}
+
+interface TraversalBudget {
+  entriesVisited: number
+  maxEntries: number
+  truncated: boolean
+}
+
+async function enumerateDirectory(
   directoryPath: string,
   root: ApprovedDocumentRoot,
   depth: number,
-  normalizedQuery: string,
   maxDepth: number,
-  maxResults: number,
+  budget: TraversalBudget,
   visitedDirectories: Set<string>,
-  results: DocumentSearchRecord[]
+  candidates: EnumeratedFile[]
 ): Promise<void> {
+  if (budget.entriesVisited >= budget.maxEntries) {
+    budget.truncated = true
+    return
+  }
+
   const canonicalDirectory = await safelyRealpath(directoryPath)
   if (!canonicalDirectory || !isPathWithinRoot(canonicalDirectory, root.canonicalPath)) {
     return
@@ -182,77 +240,101 @@ async function searchDirectory(
     return
   }
 
+  const subdirectories: string[] = []
   for (const entry of [...entries].sort(compareDirectoryEntries)) {
-    if (results.length >= maxResults) {
+    if (budget.entriesVisited >= budget.maxEntries) {
+      budget.truncated = true
       return
     }
+    budget.entriesVisited += 1
 
-    const candidatePath = join(canonicalDirectory, entry.name)
-    const candidate = await inspectCandidate(candidatePath, root.canonicalPath)
-    if (!candidate) {
+    // Reparse points, junctions, and symlinks are never traversed or ranked.
+    if (entry.isSymbolicLink()) {
       continue
     }
 
-    if (candidate.kind === 'directory') {
-      if (depth < maxDepth) {
-        await searchDirectory(
-          candidate.canonicalPath,
-          root,
-          depth + 1,
-          normalizedQuery,
-          maxDepth,
-          maxResults,
-          visitedDirectories,
-          results
-        )
+    if (entry.isDirectory()) {
+      if (depth < maxDepth && !isSkippedDirectory(entry.name)) {
+        subdirectories.push(join(canonicalDirectory, entry.name))
       }
       continue
     }
 
-    if (candidate.kind === 'file' && candidate.name.toLocaleLowerCase('en-US').includes(normalizedQuery)) {
-      const relativePath = toStableRelativePath(root.canonicalPath, candidate.canonicalPath)
-      results.push({
-        id: stableId(`${root.id}\u0000${relativePath}`),
-        rootId: root.id,
-        rootPath: root.canonicalPath,
-        path: candidate.canonicalPath,
-        relativePath,
-        name: candidate.name,
-        extension: extname(candidate.name).toLocaleLowerCase('en-US')
-      })
+    if (!entry.isFile() || isSkippedFile(entry.name)) {
+      continue
     }
+
+    const candidate = await describeFile(join(canonicalDirectory, entry.name), root)
+    if (candidate) {
+      candidates.push(candidate)
+    }
+  }
+
+  for (const subdirectory of subdirectories) {
+    await enumerateDirectory(subdirectory, root, depth + 1, maxDepth, budget, visitedDirectories, candidates)
   }
 }
 
-async function inspectCandidate(
-  candidatePath: string,
-  canonicalRootPath: string
-): Promise<{ canonicalPath: string; kind: 'directory' | 'file'; name: string } | undefined> {
+async function describeFile(filePath: string, root: ApprovedDocumentRoot): Promise<EnumeratedFile | undefined> {
   try {
-    // Skip symlinks/reparse points rather than traversing a mutable alias. We
-    // still resolve every ordinary candidate to protect against junctions.
-    const linkStats = await lstat(candidatePath)
-    if (linkStats.isSymbolicLink()) {
+    // lstat both confirms the entry is a real file and supplies the size and
+    // modification time ranking needs, without following any link.
+    const details = await lstat(filePath)
+    if (!details.isFile()) {
       return undefined
     }
 
-    const canonicalPath = await realpath(candidatePath)
-    if (!isPathWithinRoot(canonicalPath, canonicalRootPath)) {
-      return undefined
-    }
+    const name = basename(filePath)
+    const relativePath = toStableRelativePath(root.canonicalPath, filePath)
+    const extension = extname(name).toLocaleLowerCase('en-US')
+    const parents = relativePath.split('/').slice(0, -1)
 
-    const candidateStats = await stat(canonicalPath)
-    if (candidateStats.isDirectory()) {
-      return { canonicalPath, kind: 'directory', name: basename(canonicalPath) }
-    }
-    if (candidateStats.isFile()) {
-      return { canonicalPath, kind: 'file', name: basename(canonicalPath) }
+    return {
+      rootId: root.id,
+      rootPath: root.canonicalPath,
+      path: filePath,
+      relativePath,
+      name,
+      extension,
+      kind: classifyFileKind(name, extension, parents),
+      modifiedAtMs: details.mtimeMs,
+      sizeBytes: details.size
     }
   } catch {
     // Files can disappear or become inaccessible while a search is running.
+    return undefined
   }
+}
 
-  return undefined
+function toSearchRecord(candidate: EnumeratedFile & CandidateScore): DocumentSearchRecord {
+  return {
+    id: stableId(`${candidate.rootId}::${candidate.relativePath}`),
+    rootId: candidate.rootId,
+    rootPath: candidate.rootPath,
+    path: candidate.path,
+    relativePath: candidate.relativePath,
+    name: candidate.name,
+    extension: candidate.extension,
+    kind: candidate.kind,
+    modifiedAtMs: candidate.modifiedAtMs,
+    sizeBytes: candidate.sizeBytes,
+    score: candidate.score,
+    matchScore: candidate.matchScore,
+    plausible: candidate.plausible
+  }
+}
+
+function isSkippedDirectory(name: string): boolean {
+  const normalized = name.toLocaleLowerCase('en-US')
+  return normalized.startsWith('.') || SKIPPED_DIRECTORIES.has(normalized)
+}
+
+function isSkippedFile(name: string): boolean {
+  const normalized = name.toLocaleLowerCase('en-US')
+  if (SKIPPED_NAMES.has(normalized) || normalized.startsWith('~$') || normalized.startsWith('.~')) {
+    return true
+  }
+  return SKIPPED_EXTENSIONS.has(extname(normalized))
 }
 
 async function refreshApprovedRoots(
@@ -262,9 +344,28 @@ async function refreshApprovedRoots(
     throw new DocumentSearchValidationError('At least one approved folder is required.')
   }
 
-  return canonicalizeApprovedRoots(
-    approvedRoots.map((root) => (root && typeof root.canonicalPath === 'string' ? root.canonicalPath : ''))
-  )
+  const refreshed: ApprovedDocumentRoot[] = []
+  for (const root of approvedRoots) {
+    const canonicalPath = await resolveExistingDirectory(
+      root && typeof root.canonicalPath === 'string' ? root.canonicalPath : ''
+    )
+    refreshed.push({ id: root.id, canonicalPath, label: root.label })
+  }
+
+  const seen = new Set<string>()
+  return refreshed.filter((root, index) => {
+    const key = normalizeForComparison(root.canonicalPath)
+    if (seen.has(key)) {
+      return false
+    }
+    seen.add(key)
+    return !refreshed.some(
+      (candidate, candidateIndex) =>
+        candidateIndex !== index &&
+        normalizeForComparison(candidate.canonicalPath) !== key &&
+        isPathWithinRoot(root.canonicalPath, candidate.canonicalPath)
+    )
+  })
 }
 
 async function resolveExistingDirectory(candidatePath: string): Promise<string> {
@@ -310,13 +411,6 @@ function deduplicateRoots(roots: readonly ApprovedDocumentRoot[]): ApprovedDocum
     seen.add(key)
     return true
   })
-}
-
-function normalizeQuery(query: string): string {
-  if (typeof query !== 'string' || query.trim().length === 0) {
-    throw new DocumentSearchValidationError('A non-empty document search query is required.')
-  }
-  return query.trim().toLocaleLowerCase('en-US')
 }
 
 function normalizeBoundedInteger(

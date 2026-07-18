@@ -2,41 +2,67 @@ import {
   extractSignals,
   parseToolProposal,
   type ApprovedDocumentRoot,
+  type ApprovedImagePayload,
   type CaptureResult,
+  type CompactSearchResult,
   type CompanionState,
   type Explanation,
   type RealtimeSessionCredential,
+  type SearchDocumentsInput,
   type SourceContext,
   type ToolExecutionResult,
   type ToolName,
   type ToolProposal
 } from '../../shared/contracts'
+import { isSearchKind, isSearchRecency } from '../../shared/search-query'
+import {
+  classifyUserIntent,
+  evaluateGuardedToolRequest,
+  type GuardedTool,
+  type ToolPolicyDecision
+} from '../../shared/intent'
 
 interface RealtimeCallbacks {
   onState: (state: CompanionState) => void
   onTranscript: (text: string) => void
   onExplanation: (explanation: Explanation) => void
   onCaptureContextRequest: (callId?: string) => void
+  onFileSearchRequest: (request: SearchDocumentsInput, callId?: string) => void
+  /** Completed speech, forwarded so the trusted intent tracker sees it. */
+  onUserTranscript?: (text: string) => Promise<void> | void
   onTelegramRecipientSearch?: (query: string, callId: string) => void
   onToolProposal: (proposal: ToolProposal) => void
   onError: (message: string) => void
+  evaluateToolPolicy?: (toolName: GuardedTool) => Promise<ToolPolicyDecision>
 }
 
 const CAPTURE_CONTEXT_TOOL = 'capture_screen_context'
 const TELEGRAM_RECIPIENT_SEARCH_TOOL = 'telegram_search_recipients'
 const SCREEN_CONTEXT_TTL_MS = 10 * 60 * 1_000
+const INPUT_TRANSCRIPTION_MODEL = 'whisper-1'
+const SERVER_TURN_DETECTION = { type: 'server_vad' } as const
 
 const SYSTEM_INSTRUCTIONS = [
   'You are LifeLens, a concise, supportive floating desktop companion.',
   'Explain captured screen content in simple English; use Telugu-English only if the user does.',
   'State important dates, links, and concrete next actions plainly.',
   'Every function is only a proposal. Never claim an action was performed until the application returns its result.',
-  'Use only the supplied approved-folder identifiers; never ask for or invent a local file path.',
+  'Never ask for, invent, or repeat a local file path, folder name, or folder identifier. LifeLens chooses the folders.',
+  'search_documents finds stored files, such as a resume, CV, PDF, certificate, photo, or screenshot, inside the folders the user has approved. When the user wants to find, locate, search for, or open a stored file, call search_documents immediately as your first action.',
+  'Give search_documents one to three useful topic words from the user\'s own request, such as "resume" or "offer letter". Do not include words like my, latest, or file.',
+  'Never ask the user for an exact filename or which folder to search before calling search_documents. Call it even when no folder is approved yet: LifeLens asks the user to approve a folder and then runs your search automatically.',
+  'LifeLens shows the user the matching files and gives you a short numbered list. Refer to results only by their number and name, and offer to open one with open_file.',
+  'search_documents matches only file names, folder names, and dates. You never see inside a photo or a document through it, and you cannot recognise people, faces, or objects across a folder. Never claim or imply that you can.',
+  'When the user asks for a photo by what is in it, say plainly that you can match names, folders, and dates but cannot recognise photo contents automatically, offer the closest local matches, and tell them to choose one photo for you to look at.',
+  'When the user explicitly chooses one photo, LifeLens sends you that single image. Answer their question about it, and answer later follow-ups from that same image without asking for it again.',
+  'If the result list is described as recent possibilities rather than matches, say so honestly and offer the numbered options instead of asking for a filename.',
+  'capture_screen_context only inspects content already visible on the user\'s screen, such as "this email", "this image", "this page", "this error", or "what is on my screen". It is never a fallback for finding stored files.',
+  'If a document request such as "check my resume" does not say whether the document is visible on screen or stored in a folder, ask exactly: Should I inspect the resume currently visible, or find it in your approved folder? Substitute the document the user named.',
   'Telegram contact and dialog metadata are local-only. You may request a local recipient search from the user\'s spoken recipient name, but never receive, repeat, or infer Telegram names, usernames, phone numbers, peer identifiers, or search results.',
   'Do not capture a screen when the panel opens or during a general greeting.',
   'When a user request needs visible-screen context and there is no current screen context, call capture_screen_context once. The user making that screen-relative request is consent for this one-time capture.',
   'When a current screen context is available, answer follow-up questions from it and do not call capture_screen_context again unless the user asks to refresh, says the screen changed, refers to a new visible item, or you cannot answer reliably.',
-  'If it is unclear whether the user means their screen, ask exactly: Should I look at your screen?',
+  'If it is unclear whether the user means their screen and no stored document is involved, ask exactly: Should I look at your screen?',
   'When analyzing a capture, focus on visible page or document content. Ignore browser tabs, address bars, bookmarks, taskbars, and window chrome.',
   'Keep a visible text version of each answer under 120 words.'
 ].join(' ')
@@ -45,7 +71,7 @@ const TOOL_DEFINITIONS = [
   {
     type: 'function',
     name: CAPTURE_CONTEXT_TOOL,
-    description: 'Internally request one user-approved screenshot of the currently selected screen or window. Use only when the current user request needs visible-screen context and no usable context is already available. Do not use for greetings or general questions.',
+    description: 'Internally request one user-approved screenshot of the currently selected screen or window. Use only when the user asks about content already visible on screen, such as "this email", "this page", or "what is on my screen", and no usable context is already available. Never use it to find, locate, or open stored files; use search_documents for that. Do not use for greetings or general questions.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -70,30 +96,31 @@ const TOOL_DEFINITIONS = [
   {
     type: 'function',
     name: 'search_documents',
-    description: 'Propose a filename search within one currently approved folder. The user must confirm it before the folder is searched.',
+    description: 'Find stored files, such as a resume, CV, PDF, certificate, photo, or screenshot, inside the folders the user has approved. Call this immediately whenever the user wants to find, locate, search for, or open a stored file. It is safe to call when no folder is approved yet: LifeLens requests approval once and then runs this search automatically. Never ask for a filename or a folder first.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        root_id: { type: 'string', description: 'An approved folder identifier supplied in the session context.' },
-        query: { type: 'string', description: 'A short filename query such as resume.' },
+        query_terms: { type: 'string', description: 'One to three topic words from the user\'s request, such as "resume" or "offer letter". No paths, no words like my or latest.' },
+        kind: { type: 'string', enum: ['document', 'photo', 'screenshot', 'any'], description: 'The kind of file the user asked for, when they said.' },
+        recency: { type: 'string', enum: ['latest', 'any'], description: 'Use latest when the user asked for the latest, newest, or most recent one.' },
         reason: { type: 'string', description: 'Why this approved-folder search helps.' }
       },
-      required: ['root_id', 'query', 'reason']
+      required: ['query_terms', 'reason']
     }
   },
   {
     type: 'function',
     name: 'open_file',
-    description: 'Propose opening one result identifier returned by an approved document search. The user must confirm it.',
+    description: 'Propose opening one numbered result from the most recent search. The user must confirm it before anything opens.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        result_id: { type: 'string', description: 'A result identifier returned by LifeLens.' },
+        ordinal: { type: 'integer', minimum: 1, maximum: 5, description: 'The number of the result to open, as listed to you.' },
         reason: { type: 'string', description: 'Why this file should be opened.' }
       },
-      required: ['result_id', 'reason']
+      required: ['ordinal', 'reason']
     }
   },
   {
@@ -167,8 +194,16 @@ export class RealtimeClient {
   private mode: 'live' | 'mock' = 'mock'
   private approvedRoots: ApprovedDocumentRoot[] = []
   private readonly completedCallIds = new Set<string>()
+  private readonly answeredCallIds = new Set<string>()
   private lastUserRequest = ''
   private awaitingInitialSessionUpdate = false
+  private listening = true
+  /** The one photo the user approved for this session, if any. */
+  private selectedPhoto: { resultId: string; name: string } | undefined
+  /** Ordinal-to-result mapping stays local; the model only ever sees numbers. */
+  private resultOrdinals: string[] = []
+  /** Serializes transcript-driven intent updates ahead of guarded tool calls. */
+  private intentUpdate: Promise<void> = Promise.resolve()
 
   constructor(private readonly callbacks: RealtimeCallbacks) {}
 
@@ -206,6 +241,110 @@ export class RealtimeClient {
     return this.connected
   }
 
+  /**
+   * Stops or restores microphone streaming. Collapsing the companion must never
+   * leave an ambient open microphone behind the orb.
+   */
+  setListening(enabled: boolean): void {
+    this.listening = enabled
+    this.localAudio?.getAudioTracks().forEach((track) => {
+      track.enabled = enabled
+    })
+
+    if (this.mode === 'live' && this.dataChannel?.readyState === 'open') {
+      this.sendEvent({
+        type: 'session.update',
+        session: { type: 'realtime', audio: { input: { turn_detection: enabled ? SERVER_TURN_DETECTION : null } } }
+      })
+    }
+  }
+
+  isListening(): boolean {
+    return this.listening
+  }
+
+  /** Maps the numbers shown to the model onto local result identifiers. */
+  setSearchOrdinals(resultIds: readonly string[]): void {
+    this.resultOrdinals = [...resultIds]
+  }
+
+  /**
+   * Sends the one image the user approved, through the existing image-input
+   * path. Choosing another photo replaces this context; follow-up questions
+   * reuse the image already in the conversation rather than uploading again.
+   */
+  async analyzeSelectedPhoto(image: ApprovedImagePayload, question: string): Promise<void> {
+    if (!this.connected) {
+      throw new Error('Connect voice before asking Lumi about a photo.')
+    }
+
+    const request = question.trim() || 'What is in this photo?'
+    this.selectedPhoto = { resultId: image.resultId, name: image.name }
+    this.lastUserRequest = request
+    this.callbacks.onState('thinking')
+
+    if (this.mode === 'mock') {
+      this.callbacks.onTranscript(`Demo mode: Lumi would look at ${image.name} and answer "${request}".`)
+      this.callbacks.onState('listening')
+      return
+    }
+
+    if (this.responseActive) {
+      this.sendEvent({ type: 'response.cancel' })
+      this.responseActive = false
+    }
+
+    this.updateLiveSessionInstructions()
+    this.sendEvent({
+      type: 'conversation.item.create',
+      item: {
+        type: 'message',
+        role: 'user',
+        content: [
+          { type: 'input_text', text: `${request} The user selected this one photo, named ${image.name}, for you to look at.` },
+          { type: 'input_image', image_url: image.dataUrl }
+        ]
+      }
+    })
+    this.sendEvent({ type: 'response.create', response: { output_modalities: ['audio'] } })
+  }
+
+  hasSelectedPhoto(): boolean {
+    return this.selectedPhoto !== undefined
+  }
+
+  clearSelectedPhoto(): void {
+    if (!this.selectedPhoto) {
+      return
+    }
+    this.selectedPhoto = undefined
+    this.updateLiveSessionInstructions()
+  }
+
+  /**
+   * Returns one terminal result for a held search call. The model receives only
+   * ordinals, filenames, and coarse ages; identifiers and paths stay local.
+   */
+  completeFileSearch(
+    callId: string | undefined,
+    result: { ok: boolean; message: string; compactResults?: CompactSearchResult[]; resultIds?: string[] }
+  ): void {
+    if (result.resultIds) {
+      this.setSearchOrdinals(result.resultIds)
+    }
+
+    if (this.mode !== 'live' || !callId || this.answeredCallIds.has(callId)) {
+      return
+    }
+
+    this.answeredCallIds.add(callId)
+    this.sendFunctionCallOutput(callId, {
+      ok: result.ok,
+      message: result.message,
+      compactResults: result.compactResults
+    })
+  }
+
   async sendUserRequest(request: string): Promise<void> {
     if (!this.connected) {
       throw new Error('Connect voice before asking Lumi a question.')
@@ -218,15 +357,7 @@ export class RealtimeClient {
 
     this.lastUserRequest = trimmedRequest
     if (this.mode === 'mock') {
-      if (this.hasActiveScreenContext()) {
-        this.callbacks.onTranscript(this.currentExplanation?.summary ?? 'I will use the screen context already captured for this conversation.')
-        this.callbacks.onState('listening')
-      } else if (likelyNeedsScreenContext(trimmedRequest)) {
-        this.callbacks.onCaptureContextRequest()
-      } else {
-        this.callbacks.onTranscript('Should I look at your screen?')
-        this.callbacks.onState('listening')
-      }
+      this.handleMockUserRequest(trimmedRequest)
       return
     }
 
@@ -244,6 +375,31 @@ export class RealtimeClient {
       }
     })
     this.sendEvent({ type: 'response.create', response: { output_modalities: ['audio'] } })
+  }
+
+  private handleMockUserRequest(request: string): void {
+    if (this.hasActiveScreenContext()) {
+      this.callbacks.onTranscript(this.currentExplanation?.summary ?? 'I will use the screen context already captured for this conversation.')
+      this.callbacks.onState('listening')
+      return
+    }
+
+    const classified = classifyUserIntent(request)
+    if (classified.intent === 'visible_screen_question') {
+      this.callbacks.onCaptureContextRequest()
+      return
+    }
+
+    if (classified.intent === 'local_file_search') {
+      // Mock mode takes the same orchestrated path as live voice, including
+      // folder approval and automatic resume.
+      this.callbacks.onFileSearchRequest({ queryTerms: classified.fileQuery ?? request })
+      this.callbacks.onState('listening')
+      return
+    }
+
+    this.callbacks.onTranscript(classified.clarification ?? 'Should I look at your screen?')
+    this.callbacks.onState('listening')
   }
 
   async provideScreenContext(capture: CaptureResult, callId?: string): Promise<void> {
@@ -303,7 +459,7 @@ export class RealtimeClient {
         content: [
           {
             type: 'input_text',
-            text: `${question.trim() || 'What is this screen about?'} Review the attached screen capture and give a short answer with dates, links, and next actions.`
+            text: `${question.trim() || 'What is this screen about?'} Review the attached screen capture, taken at ${capture.capturedAt}, and give a short answer with dates, links, and next actions.`
           },
           { type: 'input_image', image_url: capture.dataUrl }
         ]
@@ -343,6 +499,9 @@ export class RealtimeClient {
     this.currentCapture = undefined
     this.currentExplanation = undefined
     this.lastUserRequest = ''
+    this.resultOrdinals = []
+    this.selectedPhoto = undefined
+    this.listening = true
     this.dataChannel?.close()
     this.peerConnection?.close()
     this.localAudio?.getTracks().forEach((track) => track.stop())
@@ -458,14 +617,23 @@ export class RealtimeClient {
     })
   }
 
+  /**
+   * Deliberately free of timestamps and identifiers so the instruction prefix
+   * stays stable and cacheable across a session. Capture-specific times travel
+   * with the capture message instead.
+   */
   private sessionInstructions(): string {
     const folderInstructions = this.approvedRoots.length === 0
-      ? 'No folder is approved for document search right now.'
-      : `Approved folders available for search: ${this.approvedRoots.map((root) => `${root.label} (${root.id})`).join(', ')}.`
+      ? 'No folder is approved for file search yet. Still call search_documents when the user wants a stored file; LifeLens will ask for approval and run the search.'
+      : 'The user has approved at least one folder. LifeLens searches all of them.'
     const contextInstructions = this.hasActiveScreenContext()
-      ? `A current screen context was captured at ${this.currentCapture?.capturedAt} and expires at ${new Date(Date.parse(this.currentCapture!.capturedAt) + SCREEN_CONTEXT_TTL_MS).toISOString()}; use it for follow-ups until then.`
+      ? 'A recent screen context from this conversation is available; use it for follow-ups.'
       : 'There is no current screen context.'
-    return `${SYSTEM_INSTRUCTIONS} ${folderInstructions} ${contextInstructions}`
+    // A boolean, never the filename, so the cacheable prefix stays stable.
+    const photoInstructions = this.selectedPhoto
+      ? 'The user has selected one photo in this conversation; answer follow-up questions about it from that image.'
+      : 'No photo has been selected for analysis.'
+    return `${SYSTEM_INSTRUCTIONS} ${folderInstructions} ${contextInstructions} ${photoInstructions}`
   }
 
   private updateLiveSessionInstructions(): void {
@@ -481,7 +649,15 @@ export class RealtimeClient {
         type: 'realtime',
         instructions: this.sessionInstructions(),
         tools: TOOL_DEFINITIONS,
-        tool_choice: 'auto'
+        tool_choice: 'auto',
+        audio: {
+          input: {
+            // Completed transcripts feed the trusted main-process intent
+            // tracker, so spoken and typed requests get identical policy.
+            transcription: { model: INPUT_TRANSCRIPTION_MODEL },
+            turn_detection: this.listening ? SERVER_TURN_DETECTION : null
+          }
+        }
       }
     })
   }
@@ -500,7 +676,14 @@ export class RealtimeClient {
         item: {
           type: 'function_call_output',
           call_id: callId,
-          output: JSON.stringify({ ok: result.ok, message: result.message, searchResults: result.searchResults })
+          // Only the redacted compact view may leave the machine. Trusted
+          // results carry identifiers and paths and are never serialized here.
+          output: JSON.stringify({
+            ok: result.ok,
+            message: result.message,
+            code: result.code,
+            results: result.compactResults
+          })
         }
       })
       if (createResponse) {
@@ -540,6 +723,11 @@ export class RealtimeClient {
         this.awaitingInitialSessionUpdate = false
         this.requestGreeting()
       }
+      return
+    }
+
+    if (type === 'conversation.item.input_audio_transcription.completed') {
+      this.handleUserTranscript(typeof event.transcript === 'string' ? event.transcript : '')
       return
     }
 
@@ -599,6 +787,29 @@ export class RealtimeClient {
     this.callbacks.onState('listening')
   }
 
+  /**
+   * A completed spoken request is classified before any guarded tool call runs,
+   * so a spoken "find my latest resume" is governed by the same trusted policy
+   * as the typed request and can never reach the screen-capture path.
+   */
+  private handleUserTranscript(transcript: string): void {
+    const text = transcript.trim()
+    if (!text) {
+      return
+    }
+
+    this.lastUserRequest = text
+    const notify = this.callbacks.onUserTranscript
+    if (!notify) {
+      return
+    }
+
+    this.intentUpdate = this.intentUpdate
+      .then(() => notify(text))
+      .catch(() => undefined)
+      .then(() => undefined)
+  }
+
   private handleToolCall(event: Record<string, unknown>): void {
     const rawName = typeof event.name === 'string' ? event.name : ''
     const callId = typeof event.call_id === 'string' ? event.call_id : typeof event.callId === 'string' ? event.callId : ''
@@ -611,8 +822,7 @@ export class RealtimeClient {
       if (this.hasActiveScreenContext()) {
         this.sendFunctionCallOutput(callId, { ok: false, message: 'A current screen context is already available for this conversation.' })
       } else {
-        this.callbacks.onState('thinking')
-        this.callbacks.onCaptureContextRequest(callId)
+        this.withPolicyDecision(CAPTURE_CONTEXT_TOOL, (decision) => this.handleCaptureDecision(callId, decision))
       }
       return
     }
@@ -647,12 +857,57 @@ export class RealtimeClient {
         throw new Error('Realtime supplied non-object function arguments.')
       }
 
+      if (name === 'search_documents') {
+        this.requestFileSearch(callId, parsed)
+        return
+      }
+
       this.callbacks.onToolProposal(this.createToolProposal(name, callId, parsed))
     } catch (error) {
       const message = error instanceof Error ? error.message : 'LifeLens received malformed tool details from Realtime.'
       this.callbacks.onError(message)
       this.sendFunctionCallOutput(callId, { ok: false, message })
     }
+  }
+
+  private withPolicyDecision(toolName: GuardedTool, handler: (decision: ToolPolicyDecision) => void): void {
+    // Without a trusted policy channel, fall back to renderer-known state so the
+    // decision stays synchronous and deterministic.
+    const fallbackDecision = evaluateGuardedToolRequest(toolName, { intent: 'unknown', hasApprovedFolder: this.approvedRoots.length > 0 })
+    const evaluate = this.callbacks.evaluateToolPolicy
+    if (!evaluate) {
+      handler(fallbackDecision)
+      return
+    }
+
+    evaluate(toolName).then(handler, () => handler(fallbackDecision))
+  }
+
+  private handleCaptureDecision(callId: string, decision: ToolPolicyDecision): void {
+    if (!decision.allowed) {
+      this.sendFunctionCallOutput(callId, { ok: false, code: decision.code, message: decision.message })
+      return
+    }
+
+    this.callbacks.onState('thinking')
+    this.callbacks.onCaptureContextRequest(callId)
+  }
+
+  /**
+   * Hands the search to the main process without answering the call. Main may
+   * hold it until a folder is approved; the single terminal result arrives
+   * later through completeFileSearch.
+   */
+  private requestFileSearch(callId: string, argumentsValue: Record<string, unknown>): void {
+    void this.intentUpdate.then(() => {
+      try {
+        this.callbacks.onFileSearchRequest(parseSearchArguments(argumentsValue), callId)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'LifeLens received malformed search details from Realtime.'
+        this.callbacks.onError(message)
+        this.completeFileSearch(callId, { ok: false, message })
+      }
+    })
   }
 
   private createToolProposal(name: ToolName, callId: string, argumentsValue: Record<string, unknown>): ToolProposal {
@@ -669,23 +924,19 @@ export class RealtimeClient {
             sourceContext: this.currentSourceContext(reason)
           }
         })
-      case 'search_documents': {
-        const requestedRootId = optionalArgument(argumentsValue, 'root_id') ?? optionalArgument(argumentsValue, 'rootId')
-        const rootId = requestedRootId || (this.approvedRoots.length === 1 ? this.approvedRoots[0].id : '')
-        if (!rootId || !this.approvedRoots.some((root) => root.id === rootId)) {
-          throw new Error('Realtime requested a document search without an approved folder.')
+      case 'search_documents':
+        return parseToolProposal({ ...common, arguments: parseSearchArguments(argumentsValue) })
+      case 'open_file': {
+        // The model only ever knows result numbers; the identifier is resolved
+        // from the local mapping of the most recent search.
+        const ordinal = Number(argumentsValue.ordinal)
+        const resultId = Number.isInteger(ordinal) ? this.resultOrdinals[ordinal - 1] : undefined
+        if (!resultId) {
+          throw new Error('Realtime asked to open a result number that does not exist. Search again first.')
         }
 
-        return parseToolProposal({
-          ...common,
-          arguments: { rootId, query: requiredArgument(argumentsValue, 'query') }
-        })
+        return parseToolProposal({ ...common, arguments: { resultId } })
       }
-      case 'open_file':
-        return parseToolProposal({
-          ...common,
-          arguments: { resultId: requiredArgument(argumentsValue, 'result_id') }
-        })
       case 'open_url':
         return parseToolProposal({
           ...common,
@@ -704,6 +955,10 @@ export class RealtimeClient {
             message: requiredArgument(argumentsValue, 'message')
           }
         })
+      case 'analyze_photo':
+        // Unreachable through isToolName: sending a photo is a user action and
+        // is never offered to the model as a tool.
+        throw new Error('Photo analysis is only started by the user, never by a model request.')
     }
   }
 
@@ -742,7 +997,7 @@ export class RealtimeClient {
         type: 'message',
         role: 'user',
         content: [
-          { type: 'input_text', text: 'A one-time user-approved screen capture is attached. Use it to answer the user\'s current request.' },
+          { type: 'input_text', text: `A one-time user-approved screen capture, taken at ${capture.capturedAt}, is attached. Use it to answer the user's current request.` },
           { type: 'input_image', image_url: capture.dataUrl }
         ]
       }
@@ -807,6 +1062,22 @@ function createMockReminderProposal(explanation: Explanation, capture: CaptureRe
   }
 }
 
+/** Closed-schema read of the model's search arguments. */
+function parseSearchArguments(argumentsValue: Record<string, unknown>): SearchDocumentsInput {
+  const queryTerms = optionalArgument(argumentsValue, 'query_terms') ?? optionalArgument(argumentsValue, 'queryTerms')
+  if (!queryTerms) {
+    throw new Error('Realtime did not provide query_terms for its requested search.')
+  }
+
+  const kind = optionalArgument(argumentsValue, 'kind')
+  const recency = optionalArgument(argumentsValue, 'recency')
+  return {
+    queryTerms,
+    kind: isSearchKind(kind) ? kind : undefined,
+    recency: isSearchRecency(recency) ? recency : undefined
+  }
+}
+
 function requiredArgument(argumentsValue: Record<string, unknown>, name: string, fallback?: string): string {
   const value = optionalArgument(argumentsValue, name)
   if (value) {
@@ -866,14 +1137,12 @@ function extractResponseText(response: Record<string, unknown>): string {
   return parts.join(' ').trim()
 }
 
+/**
+ * analyze_photo is deliberately absent: sending a photo is a user action, never
+ * a model-initiated one, so a model-authored call is not a recognised tool.
+ */
 function isToolName(value: string): value is ToolName {
   return value === 'create_reminder' || value === 'search_documents' || value === 'open_file' || value === 'open_url' || value === 'save_context' || value === 'send_telegram_message'
-}
-
-function likelyNeedsScreenContext(request: string): boolean {
-  const normalized = request.toLocaleLowerCase()
-  return /\b(screen|page|email|document|message|deadline|visible|looking at|this|that|here)\b/.test(normalized) &&
-    /\b(what|when|where|who|why|how|explain|read|deadline|prepare|should|looking|is)\b/.test(normalized)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

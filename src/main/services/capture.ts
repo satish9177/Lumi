@@ -8,10 +8,12 @@ const MAX_CAPTURE_HEIGHT = 1_000
 export const MAX_CAPTURE_BYTES = 180_000
 const MIN_CAPTURE_WIDTH = 560
 
-interface CaptureImage {
+/** The minimal image surface shared by native images and test doubles. */
+export interface CaptureImage {
   toJPEG: (quality: number) => Buffer
   getSize: () => { width: number; height: number }
   resize: (size: { width: number }) => CaptureImage
+  isEmpty?: () => boolean
 }
 
 export async function listCaptureSources(): Promise<CaptureSource[]> {

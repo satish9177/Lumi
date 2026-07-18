@@ -7,15 +7,19 @@ import type {
   CompanionState,
   DocumentSearchResult,
   Explanation,
+  FileSearchResults,
   PendingActionPreview,
   RealtimeMode,
+  ResultThumbnail,
   SourceContext,
   TelegramRecipient,
   TelegramStatus,
   ToolExecutionResult,
   ToolProposal
 } from '../../shared/contracts'
-import { ExplanationCard, ToolConfirmationCard } from './components'
+import { fileKindLabel } from '../../shared/search-query'
+import { ExplanationCard, PhotoResultGrid, ToolConfirmationCard } from './components'
+import { FileSearchController, type SearchConfirmationRequest } from './file-search-controller'
 import { RealtimeClient } from './realtime'
 
 const STATUS_LABELS: Record<CompanionState, string> = {
@@ -29,6 +33,7 @@ const STATUS_LABELS: Record<CompanionState, string> = {
 
 export default function LifeLensApp() {
   const clientRef = useRef<RealtimeClient | undefined>(undefined)
+  const controllerRef = useRef<FileSearchController>(undefined)
   const [expanded, setExpanded] = useState(false)
   const [companionState, setCompanionState] = useState<CompanionState>('idle')
   const [mode, setMode] = useState<RealtimeMode | undefined>()
@@ -39,13 +44,16 @@ export default function LifeLensApp() {
   const [selectedCaptureSourceId, setSelectedCaptureSourceId] = useState<string>()
   const [explanation, setExplanation] = useState<Explanation>()
   const [pendingAction, setPendingAction] = useState<PendingActionPreview>()
+  const [searchConfirmation, setSearchConfirmation] = useState<SearchConfirmationRequest | undefined>()
   const pendingProposalsRef = useRef(new Map<string, ToolProposal>())
   const [toolResult, setToolResult] = useState<ToolExecutionResult>()
   const [transcript, setTranscript] = useState<string[]>([])
   const [documentRoots, setDocumentRoots] = useState<ApprovedDocumentRoot[]>([])
-  const [selectedRootId, setSelectedRootId] = useState<string>()
   const [searchQuery, setSearchQuery] = useState('resume')
   const [searchResults, setSearchResults] = useState<DocumentSearchResult[]>([])
+  const [searchFallback, setSearchFallback] = useState(false)
+  const [thumbnails, setThumbnails] = useState<Map<string, ResultThumbnail>>(new Map())
+  const [isSearching, setIsSearching] = useState(false)
   const [error, setError] = useState<string>()
   const [isConnecting, setIsConnecting] = useState(false)
   const [isCapturing, setIsCapturing] = useState(false)
@@ -68,11 +76,14 @@ export default function LifeLensApp() {
 
   useEffect(() => {
     window.lifeLens.setPanelOpen(expanded)
+    // Collapsing the companion must not leave an open microphone behind the orb.
+    clientRef.current?.setListening(expanded)
   }, [expanded])
 
   useEffect(() => {
     void refreshDocumentRoots()
     void refreshTelegramStatus()
+    const removeSearchListener = window.lifeLens.onFileSearchResolved((resolution) => controllerRef.current?.resolve(resolution))
     const removeTelegramListener = window.lifeLens.onTelegramAuthUpdate((status) => {
       setTelegramStatus(status)
       if (status.state !== 'connected') {
@@ -84,7 +95,11 @@ export default function LifeLensApp() {
       }
     })
     return () => {
+      removeSearchListener()
       removeTelegramListener()
+      void window.lifeLens.cancelFileSearch()
+      // No approved-but-unsent photo may outlive the session.
+      void window.lifeLens.cancelPhotoAnalysis()
       clientRef.current?.disconnect()
     }
   }, [])
@@ -95,7 +110,6 @@ export default function LifeLensApp() {
 
   const updateDocumentRoots = (roots: ApprovedDocumentRoot[]): void => {
     setDocumentRoots(roots)
-    setSelectedRootId((current) => current && roots.some((root) => root.id === current) ? current : roots[0]?.id)
     clientRef.current?.setApprovedRoots(roots)
   }
 
@@ -120,6 +134,7 @@ export default function LifeLensApp() {
     setIsConnecting(true)
     setCompanionState('thinking')
     clientRef.current?.disconnect()
+    void window.lifeLens.cancelPhotoAnalysis()
     try {
       const credential = await window.lifeLens.createRealtimeSession()
       const client = new RealtimeClient({
@@ -127,9 +142,12 @@ export default function LifeLensApp() {
         onTranscript: appendTranscript,
         onExplanation: setExplanation,
         onCaptureContextRequest: requestScreenContext,
+        onFileSearchRequest: (request, callId) => { void controllerRef.current?.run(request, callId) },
+        onUserTranscript: (text) => window.lifeLens.noteUserRequest(text).then(() => undefined, () => undefined),
         onTelegramRecipientSearch: requestTelegramRecipientSearch,
         onToolProposal: (proposal) => { void preparePendingAction(proposal) },
-        onError: setError
+        onError: setError,
+        evaluateToolPolicy: (toolName) => window.lifeLens.evaluateToolRequest(toolName)
       })
       client.setApprovedRoots(documentRoots)
       clientRef.current = client
@@ -227,6 +245,11 @@ export default function LifeLensApp() {
 
     try {
       setError(undefined)
+      try {
+        await window.lifeLens.noteUserRequest(question)
+      } catch {
+        // Intent tracking is advisory; the request itself still proceeds.
+      }
       await client.sendUserRequest(question)
       setQuestion('')
     } catch (requestError) {
@@ -241,9 +264,7 @@ export default function LifeLensApp() {
     try {
       const root = await window.lifeLens.chooseDocumentRoot()
       if (root) {
-        const roots = await window.lifeLens.listDocumentRoots()
-        updateDocumentRoots(roots)
-        setSelectedRootId(root.id)
+        updateDocumentRoots(await window.lifeLens.listDocumentRoots())
       }
     } catch (folderError) {
       setError(messageFrom(folderError))
@@ -252,20 +273,67 @@ export default function LifeLensApp() {
     }
   }
 
-  const proposeDocumentSearch = (): void => {
-    const query = searchQuery.trim()
-    if (!selectedRootId || !query) {
-      setError('Choose an approved folder and enter a filename query first.')
+  const applySearchResults = (payload: FileSearchResults): void => {
+    setSearchResults(payload.results)
+    setSearchFallback(payload.fallback)
+    setThumbnails(new Map())
+    clientRef.current?.setSearchOrdinals(payload.results.map((result) => result.id))
+    void loadThumbnails(payload.results)
+  }
+
+  /** Previews are built in main and stay local; nothing here reaches the model. */
+  async function loadThumbnails(results: DocumentSearchResult[]): Promise<void> {
+    const imageResults = results.filter((result) => result.kind === 'photo' || result.kind === 'screenshot')
+    if (imageResults.length === 0) {
       return
     }
 
+    try {
+      const loaded = await window.lifeLens.getResultThumbnails(imageResults.map((result) => result.id))
+      setThumbnails(new Map(loaded.map((thumbnail) => [thumbnail.resultId, thumbnail])))
+    } catch {
+      // A preview failure must never break the result list itself.
+      setThumbnails(new Map(imageResults.map((result) => [result.id, { resultId: result.id, status: 'unavailable' as const }])))
+    }
+  }
+
+  /** One explicit in-app confirmation before a single photo is ever sent. */
+  const proposeAnalyzePhoto = (result: DocumentSearchResult): void => {
     void preparePendingAction({
       id: crypto.randomUUID(),
-      toolName: 'search_documents',
-      reason: `Search only the selected approved folder for files matching "${query}".`,
+      toolName: 'analyze_photo',
+      reason: `Send only ${result.name} to OpenAI so Lumi can answer your question about it.`,
       requiresConfirmation: true,
-      arguments: { rootId: selectedRootId, query }
+      arguments: { resultId: result.id, question: question.trim() || 'What is in this photo?' }
     })
+  }
+
+  // The single entry point for every stored-file search: model tool calls, mock
+  // voice, and the panel field. It keeps a folderless search off the generic
+  // create-pending-action path and routes a fail-closed search to its own
+  // confirmation, which re-enters the orchestrator rather than assuming a root.
+  if (!controllerRef.current) {
+    controllerRef.current = new FileSearchController({
+      begin: (request) => window.lifeLens.beginFileSearch(request),
+      chooseFolder: () => chooseDocumentRoot(),
+      completeCall: (callId, result) => clientRef.current?.completeFileSearch(callId, result),
+      applyResults: (results) => applySearchResults(results),
+      presentConfirmation: (request) => setSearchConfirmation(request),
+      setSearching: (searching) => setIsSearching(searching),
+      setError: (message) => setError(message),
+      setListening: () => setCompanionState('listening')
+    })
+  }
+  const controller = controllerRef.current
+
+  const proposeDocumentSearch = (): void => {
+    const query = searchQuery.trim()
+    if (!query) {
+      setError('Enter what you are looking for first.')
+      return
+    }
+
+    void controller.run({ queryTerms: query }, undefined, 'user')
   }
 
   const proposeOpenFile = (result: DocumentSearchResult): void => {
@@ -434,7 +502,18 @@ export default function LifeLensApp() {
       pendingProposalsRef.current.delete(approvalId)
       setPendingAction((current) => current?.approvalId === approvalId ? undefined : current)
       if (result.searchResults) {
-        setSearchResults(result.searchResults)
+        applySearchResults({
+          results: result.searchResults,
+          compactResults: result.compactResults ?? [],
+          fallback: result.searchFallback ?? false,
+          message: result.message
+        })
+      }
+
+      // Main approved exactly one image for this turn; send it through the
+      // existing Realtime image path with the user's own question.
+      if (result.analysisImage && proposal?.toolName === 'analyze_photo') {
+        await clientRef.current?.analyzeSelectedPhoto(result.analysisImage, proposal.arguments.question ?? '')
       }
 
       if (result.ok) {
@@ -481,6 +560,10 @@ export default function LifeLensApp() {
     }
   }
 
+  // A result set is a photo set when every result is an image, so a mixed
+  // document search keeps its list view.
+  const showsImageResults = searchResults.length > 0 &&
+    searchResults.every((result) => result.kind === 'photo' || result.kind === 'screenshot')
   const applicationWindows = captureSources.filter((source) => source.kind === 'window')
   const entireDisplays = captureSources.filter((source) => source.kind === 'screen')
   const visibleLinks = explanation?.signals.filter((signal) => signal.kind === 'link') ?? []
@@ -578,29 +661,47 @@ export default function LifeLensApp() {
                 {isChoosingFolder ? 'Choosing...' : 'Approve folder'}
               </button>
             </div>
-            {documentRoots.length === 0 ? <p className="workspace-note">LifeLens cannot search until you explicitly approve one folder.</p> : (
-              <>
-                <label className="root-select-field">
-                  <span>Approved folder</span>
-                  <select value={selectedRootId ?? ''} onChange={(event) => setSelectedRootId(event.target.value)}>
-                    {documentRoots.map((root) => <option key={root.id} value={root.id}>{root.label}</option>)}
-                  </select>
-                </label>
-                <div className="document-search-row">
-                  <input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="resume" aria-label="Filename query" />
-                  <button className="secondary-button" type="button" onClick={proposeDocumentSearch}>Search folder</button>
-                </div>
-              </>
-            )}
+            {documentRoots.length === 0
+              ? <p className="workspace-note">LifeLens cannot search until you approve a folder. Ask for a file and it will offer the folder chooser once.</p>
+              : <p className="workspace-note">Searching {documentRoots.map((root) => root.label).join(', ')}.</p>}
+            <div className="document-search-row">
+              <input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="resume" aria-label="What to look for" />
+              <button className="secondary-button" type="button" disabled={isSearching} onClick={proposeDocumentSearch}>
+                {isSearching ? 'Searching...' : 'Search files'}
+              </button>
+            </div>
             {searchResults.length > 0 && (
-              <ul className="search-results">
-                {searchResults.map((result) => (
-                  <li key={result.id}>
-                    <div><strong>{result.name}</strong><span>{result.relativePath}</span></div>
-                    <button className="text-button" type="button" onClick={() => proposeOpenFile(result)}>Open file</button>
-                  </li>
-                ))}
-              </ul>
+              <>
+                <p className="workspace-note">
+                  {showsImageResults
+                    ? 'I can search photo names, folders, and dates, but I cannot recognise the contents of every photo automatically. Here are the closest local matches. Choose one and I can look at that selected photo.'
+                    : searchFallback
+                      ? 'No filename matched, so these are possible recent matches, newest first.'
+                      : 'Best matches, newest first.'}
+                </p>
+                {showsImageResults ? (
+                  <PhotoResultGrid
+                    results={searchResults}
+                    thumbnails={thumbnails}
+                    fallback={searchFallback}
+                    onOpen={proposeOpenFile}
+                    onAnalyze={proposeAnalyzePhoto}
+                  />
+                ) : (
+                  <ul className="search-results">
+                    {searchResults.map((result, index) => (
+                      <li key={result.id}>
+                        <div>
+                          <strong>{index + 1}. {result.name}</strong>
+                          <span>{result.relativePath}</span>
+                          <span>{fileKindLabel(result.kind)} · {new Date(result.modifiedAt).toLocaleDateString()}</span>
+                        </div>
+                        <button className="text-button" type="button" onClick={() => proposeOpenFile(result)}>Open file</button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </>
             )}
           </section>
 
@@ -676,6 +777,13 @@ export default function LifeLensApp() {
             </div>
           </details>
 
+          {searchConfirmation && (
+            <SearchConfirmationCard
+              request={searchConfirmation}
+              onConfirm={() => void controller.confirm(searchConfirmation)}
+              onDismiss={() => controller.decline(searchConfirmation)}
+            />
+          )}
           {pendingAction && (
             <ToolConfirmationCard
               action={pendingAction}
@@ -711,6 +819,33 @@ function currentSourceContext(capture: CaptureResult | undefined, explanation: E
 
 function messageFrom(error: unknown): string {
   return error instanceof Error ? error.message : 'LifeLens encountered an unexpected error.'
+}
+
+/**
+ * The approval surface for a search LifeLens could not yet trust (a late voice
+ * transcript, or a model-initiated request). Approving it continues through the
+ * SearchOrchestrator as an explicit request, including opening the folder
+ * chooser when none is approved; it never touches the create-pending-action path.
+ */
+function SearchConfirmationCard({
+  request,
+  onConfirm,
+  onDismiss
+}: {
+  request: SearchConfirmationRequest
+  onConfirm: () => void
+  onDismiss: () => void
+}) {
+  return (
+    <article className="notice" aria-label="Confirm a stored-file search">
+      <p className="eyebrow">READY TO SEARCH</p>
+      <p>Search your approved folders for <strong>{request.input.queryTerms}</strong>? If no folder is approved yet, you will choose one next. LifeLens searches only if you confirm.</p>
+      <div className="actions">
+        <button className="secondary-button" type="button" onClick={onConfirm}>Search files</button>
+        <button className="text-button" type="button" onClick={onDismiss}>Cancel</button>
+      </div>
+    </article>
+  )
 }
 
 function formatTelegramAccount(status: TelegramStatus): string {

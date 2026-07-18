@@ -181,3 +181,91 @@
   cursor: wait;
   opacity: 0.55;
 }
+
+.lifelens-photo-preview {
+  display: block;
+  width: 100%;
+  max-width: 240px;
+  height: auto;
+  margin: 0 0 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(157, 245, 255, 0.25);
+}
+
+.lifelens-upload-notice {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #ffd9a8;
+}
+
+.lifelens-photo-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lifelens-photo-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px;
+  border-radius: 12px;
+  background: rgba(9, 20, 46, 0.55);
+  border: 1px solid rgba(157, 245, 255, 0.18);
+}
+
+.lifelens-photo-frame {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  aspect-ratio: 4 / 3;
+  overflow: hidden;
+  border-radius: 8px;
+  background: rgba(4, 10, 26, 0.7);
+}
+
+.lifelens-photo-frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.lifelens-photo-placeholder {
+  padding: 6px;
+  font-size: 11px;
+  text-align: center;
+  color: #8fa6c8;
+}
+
+.lifelens-photo-name {
+  margin: 6px 0 0;
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #eaf3ff;
+}
+
+.lifelens-photo-meta {
+  margin: 0;
+  font-size: 11px;
+  color: #8fa6c8;
+}
+
+.lifelens-photo-match {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: #9df5ff;
+}
+
+.lifelens-photo-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}

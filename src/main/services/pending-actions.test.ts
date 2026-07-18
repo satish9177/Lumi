@@ -11,6 +11,7 @@ vi.mock('electron', () => ({
 
 import { LocalStore } from './store'
 import { PendingActionStore } from './pending-actions'
+import type { createResultThumbnails } from './thumbnails'
 
 const folders: string[] = []
 const sourceContext = {
@@ -31,13 +32,17 @@ async function createStore(): Promise<LocalStore> {
   return new LocalStore(folder)
 }
 
-function createPendingStore(store: LocalStore, options: { now?: () => number; ttlMs?: number; telegram?: object } = {}): PendingActionStore {
+function createPendingStore(
+  store: LocalStore,
+  options: { now?: () => number; ttlMs?: number; telegram?: object; thumbnails?: typeof createResultThumbnails } = {}
+): PendingActionStore {
   const telegram = options.telegram ?? {
     getStatus: () => ({ state: 'connected', account: { displayName: 'Lumi', username: 'lumi' } }),
     getRecipient: () => ({ displayName: 'Ravi', username: 'ravi' }),
     sendConfirmed: vi.fn(async () => undefined)
   }
-  return new PendingActionStore(store, telegram as never, () => undefined, options.now, options.ttlMs)
+  const thumbnails = options.thumbnails ?? (async () => [])
+  return new PendingActionStore(store, telegram as never, () => undefined, options.now, options.ttlMs, thumbnails)
 }
 
 describe('PendingActionStore', () => {
@@ -81,8 +86,9 @@ describe('PendingActionStore', () => {
   it('uses trusted folder and file records instead of renderer-supplied labels or paths', async () => {
     const store = await createStore()
     const root = await store.addDocumentRoot('C:\\approved', 'Approved resumes')
-    const [result] = await store.saveSearchResults(root.id, [{
-      name: 'resume.pdf', relativePath: '2026/resume.pdf', modifiedAt: '2026-07-18T09:00:00.000Z', absolutePath: 'C:\\approved\\2026\\resume.pdf'
+    const [result] = await store.saveSearchResults([{
+      rootId: root.id, name: 'resume.pdf', relativePath: '2026/resume.pdf', kind: 'document',
+      modifiedAt: '2026-07-18T09:00:00.000Z', absolutePath: 'C:\\approved\\2026\\resume.pdf'
     }])
     const pending = createPendingStore(store)
     const preview = await pending.create({
@@ -91,6 +97,85 @@ describe('PendingActionStore', () => {
     })
     expect(preview).toMatchObject({ actionType: 'open_file', fileName: 'resume.pdf', relativePath: '2026/resume.pdf', folderLabel: 'Approved resumes' })
     expect(JSON.stringify(preview)).not.toContain('C:\\approved')
+  })
+
+  it('shows trusted photo details and a main-built preview, ignoring renderer-supplied fields', async () => {
+    const store = await createStore()
+    const root = await store.addDocumentRoot('C:\\approved', 'Approved photos')
+    const [result] = await store.saveSearchResults([{
+      rootId: root.id, name: 'beach.jpg', relativePath: 'trips/beach.jpg', kind: 'photo',
+      modifiedAt: '2026-07-18T09:00:00.000Z', absolutePath: 'C:\\approved\\trips\\beach.jpg'
+    }])
+    const pending = createPendingStore(store, {
+      thumbnails: async () => [{ resultId: result!.id, status: 'ok', dataUrl: 'data:image/jpeg;base64,QUJD', width: 240, height: 180 }]
+    })
+
+    const preview = await pending.create({
+      id: 'photo-proposal', toolName: 'analyze_photo', reason: 'Look at it.', requiresConfirmation: true,
+      arguments: {
+        resultId: result!.id,
+        question: 'Who is in this photo?',
+        // A renderer cannot smuggle its own filename, path, or image bytes.
+        fileName: 'attacker.jpg',
+        absolutePath: 'C:\\Windows\\secret.png',
+        dataUrl: 'data:image/jpeg;base64,ZZZZ'
+      }
+    })
+
+    expect(preview).toMatchObject({
+      actionType: 'analyze_photo',
+      fileName: 'beach.jpg',
+      relativePath: 'trips/beach.jpg',
+      folderLabel: 'Approved photos',
+      question: 'Who is in this photo?',
+      previewDataUrl: 'data:image/jpeg;base64,QUJD'
+    })
+    const serialized = JSON.stringify(preview)
+    expect(serialized).not.toContain('attacker.jpg')
+    expect(serialized).not.toContain('C:\\Windows')
+    expect(serialized).not.toContain('C:\\approved')
+  })
+
+  it('uploads one photo exactly once and refuses a duplicate or cancelled approval', async () => {
+    const store = await createStore()
+    const root = await store.addDocumentRoot('C:\\approved', 'Approved photos')
+    const [result] = await store.saveSearchResults([{
+      rootId: root.id, name: 'beach.jpg', relativePath: 'beach.jpg', kind: 'photo',
+      modifiedAt: '2026-07-18T09:00:00.000Z', absolutePath: 'C:\\approved\\beach.jpg'
+    }])
+    const pending = createPendingStore(store)
+    const proposal = {
+      id: 'photo-approve', toolName: 'analyze_photo', reason: 'Look at it.', requiresConfirmation: true,
+      arguments: { resultId: result!.id, question: 'What is this?' }
+    }
+
+    const preview = await pending.create(proposal)
+    // The path does not exist in this fixture, so execution stops safely; what
+    // matters is that a second approval can never run at all.
+    await pending.approve(preview.approvalId)
+    await expect(pending.approve(preview.approvalId)).rejects.toThrow(/already handled/i)
+
+    const cancelled = await pending.create(proposal)
+    pending.cancel(cancelled.approvalId)
+    await expect(pending.approve(cancelled.approvalId)).rejects.toThrow(/already handled/i)
+  })
+
+  it('clears an approved-but-unsent photo when the session ends', async () => {
+    const store = await createStore()
+    const root = await store.addDocumentRoot('C:\\approved', 'Approved photos')
+    const [result] = await store.saveSearchResults([{
+      rootId: root.id, name: 'beach.jpg', relativePath: 'beach.jpg', kind: 'photo',
+      modifiedAt: '2026-07-18T09:00:00.000Z', absolutePath: 'C:\\approved\\beach.jpg'
+    }])
+    const pending = createPendingStore(store)
+    const preview = await pending.create({
+      id: 'photo-session', toolName: 'analyze_photo', reason: 'Look at it.', requiresConfirmation: true,
+      arguments: { resultId: result!.id, question: 'What is this?' }
+    })
+
+    pending.clearPhotoAnalysis()
+
+    await expect(pending.approve(preview.approvalId)).rejects.toThrow(/invalid/i)
   })
 
   it('sends no Telegram message before the one stored approval and clears relevant pending actions', async () => {
