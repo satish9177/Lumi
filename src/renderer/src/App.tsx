@@ -50,6 +50,7 @@ export default function App() {
         onState: setCompanionState,
         onTranscript: appendTranscript,
         onExplanation: setExplanation,
+        onCaptureContextRequest: () => void captureScreen(),
         onToolProposal: setProposal,
         onError: setError
       })

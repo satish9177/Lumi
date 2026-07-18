@@ -28,7 +28,7 @@ export default function LifeLensApp() {
   const [expanded, setExpanded] = useState(false)
   const [companionState, setCompanionState] = useState<CompanionState>('idle')
   const [mode, setMode] = useState<RealtimeMode | undefined>()
-  const [question, setQuestion] = useState('What is this email about?')
+  const [question, setQuestion] = useState('')
   const [capture, setCapture] = useState<CaptureResult>()
   const [captureSources, setCaptureSources] = useState<CaptureSource[]>([])
   const [capturePickerOpen, setCapturePickerOpen] = useState(false)
@@ -46,6 +46,7 @@ export default function LifeLensApp() {
   const [isCapturing, setIsCapturing] = useState(false)
   const [isConfirming, setIsConfirming] = useState(false)
   const [isChoosingFolder, setIsChoosingFolder] = useState(false)
+  const [pendingScreenCaptureCallId, setPendingScreenCaptureCallId] = useState<string | null | undefined>()
 
   useEffect(() => {
     window.lifeLens.setPanelOpen(expanded)
@@ -85,6 +86,7 @@ export default function LifeLensApp() {
         onState: setCompanionState,
         onTranscript: appendTranscript,
         onExplanation: setExplanation,
+        onCaptureContextRequest: requestScreenContext,
         onToolProposal: setProposal,
         onError: setError
       })
@@ -102,8 +104,18 @@ export default function LifeLensApp() {
     }
   }
 
-  const loadCaptureSources = async (): Promise<void> => {
+  const openCompanion = (): void => {
+    setExpanded(true)
+    if (!clientRef.current?.isConnected()) {
+      void connectVoice()
+    }
+  }
+
+  const loadCaptureSources = async (callId?: string): Promise<void> => {
     setError(undefined)
+    if (callId !== undefined) {
+      setPendingScreenCaptureCallId(callId)
+    }
     try {
       const sources = await window.lifeLens.listCaptureSources()
       setCaptureSources(sources)
@@ -113,7 +125,7 @@ export default function LifeLensApp() {
     }
   }
 
-  const captureScreen = async (): Promise<void> => {
+  const captureScreen = async (callId?: string, sourceId = selectedCaptureSourceId): Promise<void> => {
     const client = clientRef.current
     if (!client) {
       setCompanionState('error')
@@ -125,18 +137,60 @@ export default function LifeLensApp() {
     setIsCapturing(true)
     setCompanionState('thinking')
     try {
-      const nextCapture = await window.lifeLens.captureScreen(selectedCaptureSourceId)
+      const nextCapture = await window.lifeLens.captureScreen(sourceId)
       setCapture(nextCapture)
       setExplanation(undefined)
       setProposal(undefined)
       setToolResult(undefined)
       setSearchResults([])
-      await client.sendCapture(nextCapture, question)
+      await client.provideScreenContext(nextCapture, callId)
     } catch (captureError) {
-      setCompanionState('error')
-      setError(messageFrom(captureError))
+      if (sourceId && isSelectedSourceUnavailable(captureError)) {
+        setSelectedCaptureSourceId(undefined)
+        client.invalidateScreenContext()
+        setCapture(undefined)
+        setExplanation(undefined)
+        setPendingScreenCaptureCallId(callId ?? null)
+        void loadCaptureSources()
+      } else {
+        setCompanionState('error')
+        setError(messageFrom(captureError))
+      }
     } finally {
       setIsCapturing(false)
+    }
+  }
+
+  const requestScreenContext = (callId?: string): void => {
+    const client = clientRef.current
+    if (!client) {
+      setError('Connect voice first, then ask Lumi about the visible screen.')
+      return
+    }
+
+    if (!selectedCaptureSourceId) {
+      setPendingScreenCaptureCallId(callId ?? null)
+      void loadCaptureSources()
+      return
+    }
+
+    void captureScreen(callId)
+  }
+
+  const askQuestion = async (): Promise<void> => {
+    const client = clientRef.current
+    if (!client) {
+      setError('Connect voice first, then ask Lumi a question.')
+      return
+    }
+
+    try {
+      setError(undefined)
+      await client.sendUserRequest(question)
+      setQuestion('')
+    } catch (requestError) {
+      setCompanionState('error')
+      setError(messageFrom(requestError))
     }
   }
 
@@ -253,13 +307,27 @@ export default function LifeLensApp() {
     setCompanionState('listening')
   }
 
-  const selectedSource = captureSources.find((source) => source.id === selectedCaptureSourceId)
+  const selectCaptureSource = (source: CaptureSource): void => {
+    setSelectedCaptureSourceId(source.id)
+    setCapturePickerOpen(false)
+    clientRef.current?.invalidateScreenContext()
+    setCapture(undefined)
+    setExplanation(undefined)
+    const callId = pendingScreenCaptureCallId ?? undefined
+    setPendingScreenCaptureCallId(undefined)
+    if (pendingScreenCaptureCallId !== undefined) {
+      void captureScreen(callId, source.id)
+    }
+  }
+
+  const applicationWindows = captureSources.filter((source) => source.kind === 'window')
+  const entireDisplays = captureSources.filter((source) => source.kind === 'screen')
   const visibleLinks = explanation?.signals.filter((signal) => signal.kind === 'link') ?? []
 
   return (
     <main className={`app-shell ${expanded ? 'is-open' : 'is-closed'}`}>
       <div className="companion-shell" title="Drag the outer ring to move LifeLens">
-        <button className={`companion-core state-${companionState}`} type="button" aria-label="Open LifeLens" onClick={() => setExpanded(true)}>
+        <button className={`companion-core state-${companionState}`} type="button" aria-label="Open LifeLens" onClick={openCompanion}>
           <span className="companion-eye left" />
           <span className="companion-eye right" />
           <span className="companion-glow" />
@@ -282,46 +350,44 @@ export default function LifeLensApp() {
             {mode && <span className="mode-badge">{mode === 'live' ? 'Realtime voice' : 'Mock voice'}</span>}
           </div>
 
-          <label className="question-field">
-            <span>Ask about what is on screen</span>
+          <form className="question-field" onSubmit={(event) => { event.preventDefault(); void askQuestion() }}>
+            <span>Ask Lumi</span>
             <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="What is this email about?" />
-          </label>
-
-          <div className="actions">
-            <button className="primary-button" type="button" onClick={connectVoice} disabled={isConnecting}>
-              {isConnecting ? 'Connecting...' : mode ? 'Reconnect voice' : 'Connect voice'}
-            </button>
-            <button className="secondary-button" type="button" onClick={captureScreen} disabled={!clientRef.current || isCapturing}>
-              {isCapturing ? 'Capturing...' : selectedSource ? `Capture ${selectedSource.kind}` : 'Capture screen'}
-            </button>
-          </div>
-          <button className="text-button compact-action" type="button" onClick={() => void loadCaptureSources()}>Choose screen or window</button>
+            <button className="primary-button" type="submit" disabled={!clientRef.current || !question.trim()}>Ask Lumi</button>
+          </form>
 
           {capturePickerOpen && (
             <section className="source-picker" aria-label="Choose a screen or window to capture">
               <div className="section-heading-row">
                 <div><p className="eyebrow">CAPTURE SOURCE</p><h2>Choose once, then capture</h2></div>
-                <button className="text-button" type="button" onClick={() => setCapturePickerOpen(false)}>Close</button>
+                <button className="text-button" type="button" onClick={() => {
+                  clientRef.current?.declineScreenContext(pendingScreenCaptureCallId ?? undefined)
+                  setPendingScreenCaptureCallId(undefined)
+                  setCapturePickerOpen(false)
+                }}>Close</button>
               </div>
               {captureSources.length === 0 ? <p className="notice">No capturable sources are available right now.</p> : (
-                <div className="source-grid">
-                  {captureSources.map((source) => (
-                    <button
-                      className={`source-option ${source.id === selectedCaptureSourceId ? 'is-selected' : ''}`}
-                      type="button"
-                      key={source.id}
-                      onClick={() => { setSelectedCaptureSourceId(source.id); setCapturePickerOpen(false) }}
-                    >
-                      <img src={source.thumbnailDataUrl} alt="" />
-                      <span>{source.kind === 'screen' ? 'Screen' : 'Window'}: {source.label}</span>
-                    </button>
-                  ))}
-                </div>
+                <>
+                  <CaptureSourceSection
+                    title="Application windows"
+                    sources={applicationWindows}
+                    selectedSourceId={selectedCaptureSourceId}
+                    recommended={!selectedCaptureSourceId}
+                    onSelect={selectCaptureSource}
+                  />
+                  <CaptureSourceSection
+                    title="Entire displays"
+                    sources={entireDisplays}
+                    selectedSourceId={selectedCaptureSourceId}
+                    onSelect={selectCaptureSource}
+                  />
+                </>
               )}
             </section>
           )}
 
           {error && <p className="notice error-notice">{error}</p>}
+          {isCapturing && <p className="notice privacy-notice"><strong>Looking at your screen</strong> once to answer this request. Lumi does not save or continuously monitor it.</p>}
           {mode === 'mock' && <p className="notice">Demo mode is active because no API key is configured. It exercises the same capture and confirmation path.</p>}
 
           {capture && (
@@ -377,7 +443,29 @@ export default function LifeLensApp() {
             )}
           </section>
 
-          {proposal && <ToolConfirmationCard proposal={proposal} isConfirming={isConfirming} onConfirm={confirmProposal} onDismiss={dismissProposal} />}
+          <details className="troubleshooting">
+            <summary>More / Troubleshooting</summary>
+            <div className="actions">
+              <button className="secondary-button" type="button" onClick={connectVoice} disabled={isConnecting}>
+                {isConnecting ? 'Connecting...' : 'Connect voice'}
+              </button>
+              <button className="secondary-button" type="button" onClick={() => requestScreenContext()} disabled={!clientRef.current || isCapturing}>
+                {isCapturing ? 'Looking...' : capture ? 'Refresh screen' : 'Capture screen'}
+              </button>
+              <button className="text-button" type="button" onClick={() => void loadCaptureSources()}>Change screen</button>
+            </div>
+          </details>
+
+          {proposal && (
+            <ToolConfirmationCard
+              proposal={proposal}
+              approvedRoots={documentRoots}
+              searchResults={searchResults}
+              isConfirming={isConfirming}
+              onConfirm={confirmProposal}
+              onDismiss={dismissProposal}
+            />
+          )}
           {toolResult && <p className={`notice ${toolResult.ok ? 'success-notice' : 'error-notice'}`}>{toolResult.message}</p>}
           {transcript.length > 0 && (
             <details className="transcript">
@@ -405,4 +493,45 @@ function currentSourceContext(capture: CaptureResult | undefined, explanation: E
 
 function messageFrom(error: unknown): string {
   return error instanceof Error ? error.message : 'LifeLens encountered an unexpected error.'
+}
+
+function isSelectedSourceUnavailable(error: unknown): boolean {
+  return error instanceof Error && /selected capture source is no longer available/i.test(error.message)
+}
+
+function CaptureSourceSection({
+  title,
+  sources,
+  selectedSourceId,
+  recommended = false,
+  onSelect
+}: {
+  title: string
+  sources: CaptureSource[]
+  selectedSourceId: string | undefined
+  recommended?: boolean
+  onSelect: (source: CaptureSource) => void
+}) {
+  if (sources.length === 0) {
+    return null
+  }
+
+  return (
+    <section className="capture-source-section" aria-label={title}>
+      <h3>{title}{recommended && <span>Recommended</span>}</h3>
+      <div className="source-grid">
+        {sources.map((source, index) => (
+          <button
+            className={`source-option ${source.id === selectedSourceId ? 'is-selected' : ''} ${recommended && index === 0 ? 'is-recommended' : ''}`}
+            type="button"
+            key={source.id}
+            onClick={() => onSelect(source)}
+          >
+            <img src={source.thumbnailDataUrl} alt="" />
+            <span>{source.label}{recommended && index === 0 ? ' (recommended)' : ''}</span>
+          </button>
+        ))}
+      </div>
+    </section>
+  )
 }

@@ -14,6 +14,15 @@
 10. Select **Approve folder**, choose a deliberately approved test folder, search for `resume`, confirm the search, and verify returned results remain inside that folder.
 11. Confirm opening one returned result. If the explanation offers a link, confirm opening the extracted `http` or `https` link.
 
+## Current verification record
+
+- [x] No-key mock client flow: greeting, capture explanation, one reminder proposal, and retained capture source context (offline deterministic test).
+- [x] A rejected reminder writes nothing, an unknown file result performs no file open, and a confirmed reminder persists its source context (offline tests).
+- [x] Large 4K-sized capture input is compressed below the 180,000-byte JPEG cap; unsafe URL schemes, store corruption, date/time-zone conversion, and duplicate Realtime tool calls are covered by focused offline tests.
+- [x] Renderer/native confirmation implementation resolves folder labels and selected filenames/relative paths from trusted local store records; reminder dates are formatted in both surfaces.
+- [x] No permanent API key appears in renderer source or test output.
+- [ ] Manual transparent-window interaction: move the companion to the centre, open/close it without a position jump, and inspect the native dialogs. The no-key Electron app launched on 18 July 2026, but the automated desktop host could not target its transparent always-on-top window because the underlying Codex window received the click.
+
 ## Full hero scenario acceptance
 
 1. Show an interview email containing a date, preparation request, and link.

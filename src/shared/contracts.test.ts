@@ -26,7 +26,7 @@ describe('parseToolProposal', () => {
     expect(proposal.arguments).toMatchObject({ title: 'Prepare for interview' })
   })
 
-  it('rejects an unconfirmed action and unsafe URL', () => {
+  it('rejects an unconfirmed action and dangerous URL schemes', () => {
     expect(() =>
       parseToolProposal({
         id: 'proposal-2',
@@ -37,15 +37,36 @@ describe('parseToolProposal', () => {
       })
     ).toThrow('explicitly require confirmation')
 
-    expect(() =>
-      parseToolProposal({
-        id: 'proposal-3',
-        toolName: 'open_url',
-        reason: 'Open this.',
-        requiresConfirmation: true,
-        arguments: { url: 'file:///C:/secret.txt' }
-      })
-    ).toThrow('Only http and https URLs')
+    for (const url of ['file:///C:/secret.txt', 'javascript:alert(1)', 'data:text/html,unsafe', 'mailto:test@example.com']) {
+      expect(() =>
+        parseToolProposal({
+          id: `proposal-${url}`,
+          toolName: 'open_url',
+          reason: 'Open this.',
+          requiresConfirmation: true,
+          arguments: { url }
+        })
+      ).toThrow('Only http and https URLs')
+    }
+  })
+
+  it('normalizes reminder due dates to an instant while retaining the submitted timezone meaning', () => {
+    const proposal = parseToolProposal({
+      id: 'proposal-timezone',
+      toolName: 'create_reminder',
+      reason: 'The interview needs preparation.',
+      requiresConfirmation: true,
+      arguments: {
+        title: 'Prepare for interview',
+        dueAt: '2026-07-20T09:00:00+05:30',
+        sourceContext
+      }
+    })
+
+    expect(proposal.toolName).toBe('create_reminder')
+    if (proposal.toolName === 'create_reminder') {
+      expect(proposal.arguments.dueAt).toBe('2026-07-20T03:30:00.000Z')
+    }
   })
 })
 

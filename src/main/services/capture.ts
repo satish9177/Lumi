@@ -5,7 +5,14 @@ import type { CaptureResult, CaptureSource, CaptureSourceKind } from '../../shar
 const SOURCE_PREVIEW_SIZE = { width: 320, height: 180 }
 const MAX_CAPTURE_WIDTH = 1_600
 const MAX_CAPTURE_HEIGHT = 1_000
-const MAX_CAPTURE_BYTES = 3_500_000
+export const MAX_CAPTURE_BYTES = 180_000
+const MIN_CAPTURE_WIDTH = 560
+
+interface CaptureImage {
+  toJPEG: (quality: number) => Buffer
+  getSize: () => { width: number; height: number }
+  resize: (size: { width: number }) => CaptureImage
+}
 
 export async function listCaptureSources(): Promise<CaptureSource[]> {
   const sources = await desktopCapturer.getSources({
@@ -14,15 +21,27 @@ export async function listCaptureSources(): Promise<CaptureSource[]> {
     fetchWindowIcons: false
   })
 
-  return sources
+  return orderCaptureSources(sources
     .filter((source) => !source.thumbnail.isEmpty())
-    .slice(0, 16)
     .map((source) => ({
       id: source.id,
       label: source.name || (sourceKindFor(source.id) === 'screen' ? 'Screen' : 'Window'),
       kind: sourceKindFor(source.id),
       thumbnailDataUrl: source.thumbnail.toDataURL()
     }))
+    .filter((source) => !isCompanionCaptureLabel(source.label))
+  ).slice(0, 16)
+}
+
+export function orderCaptureSources(sources: readonly CaptureSource[]): CaptureSource[] {
+  return [...sources].sort((left, right) => {
+    const kindOrder = (left.kind === 'window' ? 0 : 1) - (right.kind === 'window' ? 0 : 1)
+    return kindOrder || left.label.localeCompare(right.label)
+  })
+}
+
+export function isCompanionCaptureLabel(label: string): boolean {
+  return /\b(?:lifelens|lumi)\b/i.test(label)
 }
 
 export async function captureScreen(sourceId?: string): Promise<CaptureResult> {
@@ -60,21 +79,28 @@ function sourceKindFor(sourceId: string): CaptureSourceKind {
   return sourceId.startsWith('screen:') ? 'screen' : 'window'
 }
 
-function encodeCaptureImage(sourceImage: NativeImage): { dataUrl: string; width: number; height: number } {
-  let image = sourceImage
-  for (const quality of [82, 72, 62]) {
-    const jpeg = image.toJPEG(quality)
-    if (jpeg.byteLength <= MAX_CAPTURE_BYTES) {
-      const size = image.getSize()
-      return {
-        dataUrl: `data:image/jpeg;base64,${jpeg.toString('base64')}`,
-        width: size.width,
-        height: size.height
+export function encodeCaptureImage(sourceImage: NativeImage | CaptureImage): { dataUrl: string; width: number; height: number } {
+  let image: CaptureImage = sourceImage
+  for (;;) {
+    for (const quality of [72, 62, 52, 42]) {
+      const jpeg = image.toJPEG(quality)
+      if (jpeg.byteLength <= MAX_CAPTURE_BYTES) {
+        const size = image.getSize()
+        return {
+          dataUrl: `data:image/jpeg;base64,${jpeg.toString('base64')}`,
+          width: size.width,
+          height: size.height
+        }
       }
     }
 
     const size = image.getSize()
-    image = image.resize({ width: Math.max(640, Math.round(size.width * 0.72)), height: Math.max(400, Math.round(size.height * 0.72)) })
+    if (size.width <= MIN_CAPTURE_WIDTH) {
+      break
+    }
+
+    // Supplying only width keeps the source image aspect ratio intact.
+    image = image.resize({ width: Math.max(MIN_CAPTURE_WIDTH, Math.round(size.width * 0.72)) })
   }
 
   throw new Error('The selected screen is too large to send safely. Choose a smaller window and try again.')

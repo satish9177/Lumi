@@ -16,9 +16,13 @@ interface RealtimeCallbacks {
   onState: (state: CompanionState) => void
   onTranscript: (text: string) => void
   onExplanation: (explanation: Explanation) => void
+  onCaptureContextRequest: (callId?: string) => void
   onToolProposal: (proposal: ToolProposal) => void
   onError: (message: string) => void
 }
+
+const CAPTURE_CONTEXT_TOOL = 'capture_screen_context'
+const SCREEN_CONTEXT_TTL_MS = 10 * 60 * 1_000
 
 const SYSTEM_INSTRUCTIONS = [
   'You are LifeLens, a concise, supportive floating desktop companion.',
@@ -26,10 +30,25 @@ const SYSTEM_INSTRUCTIONS = [
   'State important dates, links, and concrete next actions plainly.',
   'Every function is only a proposal. Never claim an action was performed until the application returns its result.',
   'Use only the supplied approved-folder identifiers; never ask for or invent a local file path.',
+  'Do not capture a screen when the panel opens or during a general greeting.',
+  'When a user request needs visible-screen context and there is no current screen context, call capture_screen_context once. The user making that screen-relative request is consent for this one-time capture.',
+  'When a current screen context is available, answer follow-up questions from it and do not call capture_screen_context again unless the user asks to refresh, says the screen changed, refers to a new visible item, or you cannot answer reliably.',
+  'If it is unclear whether the user means their screen, ask exactly: Should I look at your screen?',
+  'When analyzing a capture, focus on visible page or document content. Ignore browser tabs, address bars, bookmarks, taskbars, and window chrome.',
   'Keep a visible text version of each answer under 120 words.'
 ].join(' ')
 
 const TOOL_DEFINITIONS = [
+  {
+    type: 'function',
+    name: CAPTURE_CONTEXT_TOOL,
+    description: 'Internally request one user-approved screenshot of the currently selected screen or window. Use only when the current user request needs visible-screen context and no usable context is already available. Do not use for greetings or general questions.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {}
+    }
+  },
   {
     type: 'function',
     name: 'create_reminder',
@@ -112,18 +131,19 @@ export class RealtimeClient {
   private currentCapture: CaptureResult | undefined
   private currentExplanation: Explanation | undefined
   private textBuffer = ''
+  private responseActive = false
   private connected = false
-  private model = 'gpt-realtime-2.1'
   private mode: 'live' | 'mock' = 'mock'
   private approvedRoots: ApprovedDocumentRoot[] = []
   private readonly completedCallIds = new Set<string>()
+  private lastUserRequest = ''
+  private awaitingInitialSessionUpdate = false
 
   constructor(private readonly callbacks: RealtimeCallbacks) {}
 
   async connect(credential: RealtimeSessionCredential): Promise<void> {
     this.disconnect()
     this.mode = credential.mode
-    this.model = credential.model
 
     if (credential.mode === 'mock') {
       this.connected = true
@@ -148,9 +168,71 @@ export class RealtimeClient {
 
   setApprovedRoots(roots: ApprovedDocumentRoot[]): void {
     this.approvedRoots = roots
-    if (this.mode === 'live' && this.dataChannel?.readyState === 'open') {
-      this.sendEvent({ type: 'session.update', session: { instructions: this.sessionInstructions() } })
+    this.updateLiveSessionInstructions()
+  }
+
+  isConnected(): boolean {
+    return this.connected
+  }
+
+  async sendUserRequest(request: string): Promise<void> {
+    if (!this.connected) {
+      throw new Error('Connect voice before asking Lumi a question.')
     }
+
+    const trimmedRequest = request.trim()
+    if (!trimmedRequest) {
+      return
+    }
+
+    this.lastUserRequest = trimmedRequest
+    if (this.mode === 'mock') {
+      if (this.hasActiveScreenContext()) {
+        this.callbacks.onTranscript(this.currentExplanation?.summary ?? 'I will use the screen context already captured for this conversation.')
+        this.callbacks.onState('listening')
+      } else if (likelyNeedsScreenContext(trimmedRequest)) {
+        this.callbacks.onCaptureContextRequest()
+      } else {
+        this.callbacks.onTranscript('Should I look at your screen?')
+        this.callbacks.onState('listening')
+      }
+      return
+    }
+
+    if (this.responseActive) {
+      this.sendEvent({ type: 'response.cancel' })
+      this.responseActive = false
+    }
+    this.callbacks.onState('thinking')
+    this.sendEvent({
+      type: 'conversation.item.create',
+      item: {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: trimmedRequest }]
+      }
+    })
+    this.sendEvent({ type: 'response.create', response: { output_modalities: ['audio'] } })
+  }
+
+  async provideScreenContext(capture: CaptureResult, callId?: string): Promise<void> {
+    if (callId) {
+      await this.sendCaptureForRequest(capture, callId)
+      return
+    }
+    await this.sendCapture(capture, this.lastUserRequest)
+  }
+
+  declineScreenContext(callId?: string): void {
+    if (this.mode === 'live' && callId) {
+      this.sendFunctionCallOutput(callId, { ok: false, message: 'The user did not select a screen or window to share.' })
+    }
+  }
+
+  invalidateScreenContext(): void {
+    this.currentCapture = undefined
+    this.currentExplanation = undefined
+    this.updateLiveSessionInstructions()
   }
 
   async sendCapture(capture: CaptureResult, question: string): Promise<void> {
@@ -175,6 +257,13 @@ export class RealtimeClient {
       return
     }
 
+    this.updateLiveSessionInstructions()
+
+    if (this.responseActive) {
+      this.sendEvent({ type: 'response.cancel' })
+      this.responseActive = false
+    }
+
     this.sendEvent({
       type: 'conversation.item.create',
       item: {
@@ -191,7 +280,7 @@ export class RealtimeClient {
     })
     this.sendEvent({
       type: 'response.create',
-      response: { output_modalities: ['audio', 'text'] }
+      response: { output_modalities: ['audio'] }
     })
   }
 
@@ -209,6 +298,11 @@ export class RealtimeClient {
 
   disconnect(): void {
     this.connected = false
+    this.responseActive = false
+    this.awaitingInitialSessionUpdate = false
+    this.currentCapture = undefined
+    this.currentExplanation = undefined
+    this.lastUserRequest = ''
     this.dataChannel?.close()
     this.peerConnection?.close()
     this.localAudio?.getTracks().forEach((track) => track.stop())
@@ -258,14 +352,22 @@ export class RealtimeClient {
       throw new Error('Could not create a WebRTC session description.')
     }
     await this.peerConnection.setLocalDescription(offer)
-    const response = await fetch('https://api.openai.com/v1/realtime/calls', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/sdp'
-      },
-      body: offer.sdp
-    })
+    let response: Response
+    try {
+      response = await fetchWithTimeout('https://api.openai.com/v1/realtime/calls', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/sdp'
+        },
+        body: offer.sdp
+      })
+    } catch (error) {
+      if (isTimeoutError(error)) {
+        throw new Error('Realtime connection timed out while negotiating audio.')
+      }
+      throw error
+    }
     if (!response.ok) {
       throw new Error(`Realtime WebRTC connection failed (status ${response.status}).`)
     }
@@ -302,33 +404,46 @@ export class RealtimeClient {
   }
 
   private configureLiveSession(): void {
-    this.sendEvent({
-      type: 'session.update',
-      session: {
-        type: 'realtime',
-        model: this.model,
-        instructions: this.sessionInstructions(),
-        audio: { output: { voice: 'marin' } },
-        tools: TOOL_DEFINITIONS,
-        tool_choice: 'auto'
-      }
-    })
+    this.awaitingInitialSessionUpdate = true
+    this.sendSessionUpdate()
+  }
+
+  private requestGreeting(): void {
     this.sendEvent({
       type: 'response.create',
       response: {
         instructions: 'Greet the user briefly, then invite them to capture a screen or ask a question.',
-        output_modalities: ['audio', 'text']
+        output_modalities: ['audio']
       }
     })
   }
 
   private sessionInstructions(): string {
-    if (this.approvedRoots.length === 0) {
-      return `${SYSTEM_INSTRUCTIONS} No folder is approved for document search right now.`
-    }
+    const folderInstructions = this.approvedRoots.length === 0
+      ? 'No folder is approved for document search right now.'
+      : `Approved folders available for search: ${this.approvedRoots.map((root) => `${root.label} (${root.id})`).join(', ')}.`
+    const contextInstructions = this.hasActiveScreenContext()
+      ? `A current screen context was captured at ${this.currentCapture?.capturedAt} and expires at ${new Date(Date.parse(this.currentCapture!.capturedAt) + SCREEN_CONTEXT_TTL_MS).toISOString()}; use it for follow-ups until then.`
+      : 'There is no current screen context.'
+    return `${SYSTEM_INSTRUCTIONS} ${folderInstructions} ${contextInstructions}`
+  }
 
-    const roots = this.approvedRoots.map((root) => `${root.label} (${root.id})`).join(', ')
-    return `${SYSTEM_INSTRUCTIONS} Approved folders available for search: ${roots}.`
+  private updateLiveSessionInstructions(): void {
+    if (this.mode === 'live' && this.dataChannel?.readyState === 'open') {
+      this.sendSessionUpdate()
+    }
+  }
+
+  private sendSessionUpdate(): void {
+    this.sendEvent({
+      type: 'session.update',
+      session: {
+        type: 'realtime',
+        instructions: this.sessionInstructions(),
+        tools: TOOL_DEFINITIONS,
+        tool_choice: 'auto'
+      }
+    })
   }
 
   private sendEvent(event: unknown): void {
@@ -338,7 +453,7 @@ export class RealtimeClient {
     this.dataChannel.send(JSON.stringify(event))
   }
 
-  private sendFunctionCallOutput(callId: string, result: ToolExecutionResult): void {
+  private sendFunctionCallOutput(callId: string, result: ToolExecutionResult, createResponse = true): void {
     try {
       this.sendEvent({
         type: 'conversation.item.create',
@@ -348,7 +463,9 @@ export class RealtimeClient {
           output: JSON.stringify({ ok: result.ok, message: result.message, searchResults: result.searchResults })
         }
       })
-      this.sendEvent({ type: 'response.create' })
+      if (createResponse) {
+        this.sendEvent({ type: 'response.create' })
+      }
     } catch (error) {
       this.callbacks.onError(error instanceof Error ? error.message : 'Could not return the action result to Realtime.')
     }
@@ -378,11 +495,24 @@ export class RealtimeClient {
       return
     }
 
+    if (type === 'session.updated') {
+      if (this.awaitingInitialSessionUpdate) {
+        this.awaitingInitialSessionUpdate = false
+        this.requestGreeting()
+      }
+      return
+    }
+
+    if (type === 'response.created') {
+      this.responseActive = true
+      this.textBuffer = ''
+      return
+    }
+
     if (type === 'response.output_text.delta' || type === 'response.text.delta' || type === 'response.output_audio_transcript.delta') {
       const delta = typeof event.delta === 'string' ? event.delta : ''
       if (delta) {
         this.textBuffer += delta
-        this.callbacks.onTranscript(delta)
       }
       return
     }
@@ -398,6 +528,7 @@ export class RealtimeClient {
   }
 
   private handleResponseDone(event: Record<string, unknown>): void {
+    this.responseActive = false
     if (!isRecord(event.response)) {
       return
     }
@@ -422,17 +553,34 @@ export class RealtimeClient {
       }
       this.callbacks.onExplanation(this.currentExplanation)
     }
+    if (this.textBuffer.trim()) {
+      this.callbacks.onTranscript(this.textBuffer.trim())
+    }
     this.callbacks.onState('listening')
   }
 
   private handleToolCall(event: Record<string, unknown>): void {
-    const name = typeof event.name === 'string' && isToolName(event.name) ? event.name : undefined
+    const rawName = typeof event.name === 'string' ? event.name : ''
     const callId = typeof event.call_id === 'string' ? event.call_id : typeof event.callId === 'string' ? event.callId : ''
-    if (!name || !callId || this.completedCallIds.has(callId)) {
+    if (!rawName || !callId || this.completedCallIds.has(callId)) {
       return
     }
 
     this.completedCallIds.add(callId)
+    if (rawName === CAPTURE_CONTEXT_TOOL) {
+      if (this.hasActiveScreenContext()) {
+        this.sendFunctionCallOutput(callId, { ok: false, message: 'A current screen context is already available for this conversation.' })
+      } else {
+        this.callbacks.onState('thinking')
+        this.callbacks.onCaptureContextRequest(callId)
+      }
+      return
+    }
+
+    const name = isToolName(rawName) ? rawName : undefined
+    if (!name) {
+      return
+    }
     const argumentsJson = typeof event.arguments === 'string' ? event.arguments : ''
     try {
       const parsed = JSON.parse(argumentsJson) as unknown
@@ -493,7 +641,7 @@ export class RealtimeClient {
   }
 
   private currentSourceContext(fallbackSummary: string): SourceContext {
-    if (!this.currentCapture) {
+    if (!this.currentCapture || !this.hasActiveScreenContext()) {
       throw new Error('Realtime cannot propose this action before a screen capture exists.')
     }
 
@@ -505,6 +653,43 @@ export class RealtimeClient {
       capturedAt: this.currentCapture.capturedAt,
       signals: explanation?.signals ?? extractSignals(summary)
     }
+  }
+
+  private async sendCaptureForRequest(capture: CaptureResult, callId: string): Promise<void> {
+    if (!this.connected) {
+      throw new Error('Connect voice before capturing a screen.')
+    }
+
+    this.currentCapture = capture
+    this.currentExplanation = undefined
+    this.textBuffer = ''
+    this.updateLiveSessionInstructions()
+    if (this.mode === 'mock') {
+      await this.sendCapture(capture, this.lastUserRequest)
+      return
+    }
+
+    this.sendEvent({
+      type: 'conversation.item.create',
+      item: {
+        type: 'message',
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'A one-time user-approved screen capture is attached. Use it to answer the user\'s current request.' },
+          { type: 'input_image', image_url: capture.dataUrl }
+        ]
+      }
+    })
+    this.sendFunctionCallOutput(callId, { ok: true, message: 'A one-time screen capture is available for the current request.' }, false)
+    this.sendEvent({ type: 'response.create', response: { output_modalities: ['audio'] } })
+  }
+
+  private hasActiveScreenContext(): boolean {
+    if (!this.currentCapture) {
+      return false
+    }
+    const capturedAt = Date.parse(this.currentCapture.capturedAt)
+    return Number.isFinite(capturedAt) && Date.now() - capturedAt < SCREEN_CONTEXT_TTL_MS
   }
 
   private speakMock(text: string): void {
@@ -618,10 +803,30 @@ function isToolName(value: string): value is ToolName {
   return value === 'create_reminder' || value === 'search_documents' || value === 'open_file' || value === 'open_url' || value === 'save_context'
 }
 
+function likelyNeedsScreenContext(request: string): boolean {
+  const normalized = request.toLocaleLowerCase()
+  return /\b(screen|page|email|document|message|deadline|visible|looking at|this|that|here)\b/.test(normalized) &&
+    /\b(what|when|where|who|why|how|explain|read|deadline|prepare|should|looking|is)\b/.test(normalized)
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds))
+}
+
+async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit): Promise<Response> {
+  const controller = new AbortController()
+  const timeout = window.setTimeout(() => controller.abort(), 10_000)
+  try {
+    return await fetch(input, { ...init, signal: controller.signal })
+  } finally {
+    window.clearTimeout(timeout)
+  }
+}
+
+function isTimeoutError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError'
 }

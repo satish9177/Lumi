@@ -321,6 +321,12 @@ button:disabled {
   line-height: 1.4;
 }
 
+.privacy-notice {
+  color: #c9f8ff;
+  border-color: rgba(115, 244, 255, 0.35);
+  background: rgba(57, 184, 212, 0.16);
+}
+
 .error-notice {
   color: #ffd6dd;
   border-color: rgba(255, 121, 143, 0.32);
@@ -442,12 +448,29 @@ button:disabled {
 
 .source-picker,
 .context-actions,
-.document-workspace {
+.document-workspace,
+.troubleshooting {
   margin-top: 12px;
   padding: 12px;
   border: 1px solid rgba(179, 211, 255, 0.16);
   border-radius: 14px;
   background: rgba(1, 7, 28, 0.27);
+}
+
+.troubleshooting {
+  margin-top: 12px;
+  color: #c9dbf7;
+  font-size: 12px;
+}
+
+.troubleshooting summary {
+  cursor: pointer;
+  color: #9ec5ff;
+  font-weight: 680;
+}
+
+.troubleshooting .actions {
+  margin-top: 10px;
 }
 
 .section-heading-row {
@@ -471,6 +494,33 @@ button:disabled {
   margin-top: 9px;
 }
 
+.capture-source-section + .capture-source-section {
+  margin-top: 14px;
+}
+
+.capture-source-section h3 {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  color: #dcecff;
+  font-size: 12px;
+}
+
+.capture-source-section h3 span {
+  padding: 2px 6px;
+  border-radius: 999px;
+  color: #08223d;
+  background: #83efff;
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.capture-source-section .source-grid {
+  margin-top: 7px;
+}
+
 .source-option {
   min-width: 0;
   overflow: hidden;
@@ -485,6 +535,10 @@ button:disabled {
 .source-option.is-selected {
   border-color: #83efff;
   box-shadow: 0 0 0 1px rgba(131, 239, 255, 0.32);
+}
+
+.source-option.is-recommended:not(.is-selected) {
+  border-color: rgba(131, 239, 255, 0.62);
 }
 
 .source-option img {

@@ -84,6 +84,18 @@ export async function executeConfirmedTool(store: LocalStore, rawProposal: unkno
   }
 }
 
+export async function executeToolAfterConfirmation(
+  store: LocalStore,
+  rawProposal: unknown,
+  confirmed: boolean
+): Promise<ToolExecutionResult> {
+  if (!confirmed) {
+    return { ok: false, message: 'Action cancelled. Nothing was changed or opened.' }
+  }
+
+  return executeConfirmedTool(store, rawProposal)
+}
+
 export function scheduleReminder(reminder: ReminderRecord): void {
   if (reminderTimers.has(reminder.id)) {
     return

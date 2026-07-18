@@ -5,11 +5,11 @@ import { IPC_CHANNELS, parseToolProposal, type CaptureResult, type ToolProposal 
 import { captureScreen, listCaptureSources } from './services/capture'
 import { createRealtimeSessionCredential } from './services/realtime'
 import { LocalStore } from './services/store'
-import { executeConfirmedTool, restoreReminderTimers } from './services/tools'
+import { executeToolAfterConfirmation, restoreReminderTimers } from './services/tools'
 
 let mainWindow: BrowserWindow | undefined
 let localStore: LocalStore
-const captures = new Map<string, CaptureResult>()
+const captures = new Map<string, Pick<CaptureResult, 'capturedAt'>>()
 
 const CLOSED_WINDOW_SIZE = { width: 88, height: 88 }
 const OPEN_WINDOW_SIZE = { width: 390, height: 640 }
@@ -74,7 +74,25 @@ function setPanelOpen(open: boolean): void {
     return
   }
 
-  positionWindow(mainWindow, open ? OPEN_WINDOW_SIZE : CLOSED_WINDOW_SIZE)
+  resizeWindowAtCurrentPosition(mainWindow, open ? OPEN_WINDOW_SIZE : CLOSED_WINDOW_SIZE)
+}
+
+function resizeWindowAtCurrentPosition(window: BrowserWindow, requestedSize: { width: number; height: number }): void {
+  const currentBounds = window.getBounds()
+  const display = screen.getDisplayMatching(currentBounds)
+  const workArea = display.workArea
+  const width = Math.min(requestedSize.width, workArea.width)
+  const height = Math.min(requestedSize.height, workArea.height)
+  window.setBounds({
+    x: clamp(currentBounds.x, workArea.x, workArea.x + workArea.width - width),
+    y: clamp(currentBounds.y, workArea.y, workArea.y + workArea.height - height),
+    width,
+    height
+  })
+}
+
+function clamp(value: number, minimum: number, maximum: number): number {
+  return Math.min(Math.max(value, minimum), maximum)
 }
 
 function requireMainWindow(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): void {
@@ -95,9 +113,20 @@ function registerIpcHandlers(): void {
       throw new Error('Capture source must be a short source identifier.')
     }
 
-    const capture = await captureScreen(sourceId)
-    rememberCapture(capture)
-    return capture
+    const shouldRestoreWindow = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible())
+    try {
+      if (shouldRestoreWindow) {
+        mainWindow?.hide()
+        await waitForDesktopRepaint()
+      }
+      const capture = await captureScreen(sourceId)
+      rememberCapture(capture)
+      return capture
+    } finally {
+      if (shouldRestoreWindow && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.showInactive()
+      }
+    }
   })
 
   ipcMain.handle(IPC_CHANNELS.createRealtimeSession, async (event) => {
@@ -109,11 +138,7 @@ function registerIpcHandlers(): void {
     requireMainWindow(event)
     const parsed = parseToolProposal(proposal)
     validateCaptureProvenance(parsed)
-    if (!(await confirmToolProposal(parsed))) {
-      return { ok: false, message: 'Action cancelled. Nothing was changed or opened.' }
-    }
-
-    return executeConfirmedTool(localStore, parsed)
+    return executeToolAfterConfirmation(localStore, parsed, await confirmToolProposal(parsed))
   })
 
   ipcMain.handle(IPC_CHANNELS.chooseDocumentRoot, async (event) => {
@@ -155,8 +180,14 @@ function registerIpcHandlers(): void {
   })
 }
 
+function waitForDesktopRepaint(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 150))
+}
+
 function rememberCapture(capture: CaptureResult): void {
-  captures.set(capture.id, capture)
+  // The renderer keeps only the active, in-session image context. Main retains
+  // just enough provenance to validate a confirmed reminder or saved context.
+  captures.set(capture.id, { capturedAt: capture.capturedAt })
   while (captures.size > 12) {
     const oldestId = captures.keys().next().value
     if (!oldestId) {
@@ -185,7 +216,7 @@ async function confirmToolProposal(proposal: ToolProposal): Promise<boolean> {
   const confirmation = await dialog.showMessageBox(mainWindow, {
     type: 'question',
     title: 'Confirm LifeLens action',
-    message: confirmationMessage(proposal),
+    message: await confirmationMessage(proposal),
     detail: `${proposal.reason}\n\nLifeLens will act only after you select Confirm.`,
     buttons: ['Cancel', 'Confirm'],
     defaultId: 0,
@@ -195,19 +226,32 @@ async function confirmToolProposal(proposal: ToolProposal): Promise<boolean> {
   return confirmation.response === 1
 }
 
-function confirmationMessage(proposal: ToolProposal): string {
+async function confirmationMessage(proposal: ToolProposal): Promise<string> {
   switch (proposal.toolName) {
     case 'create_reminder':
-      return `Create reminder: ${proposal.arguments.title}`
-    case 'search_documents':
-      return `Search the approved folder for: ${proposal.arguments.query}`
-    case 'open_file':
-      return 'Open the selected search result with its default application'
+      return `Create reminder: ${proposal.arguments.title}\nDue: ${formatDateTime(proposal.arguments.dueAt)}`
+    case 'search_documents': {
+      const root = await localStore.getDocumentRoot(proposal.arguments.rootId)
+      return root
+        ? `Search ${root.label} for: ${proposal.arguments.query}`
+        : `Search an unavailable approved folder for: ${proposal.arguments.query}`
+    }
+    case 'open_file': {
+      const result = await localStore.getSearchResult(proposal.arguments.resultId)
+      return result
+        ? `Open file: ${result.name}\nLocation: ${result.relativePath}`
+        : 'Open an unavailable selected file result'
+    }
     case 'open_url':
       return `Open this link in your browser: ${proposal.arguments.url}`
     case 'save_context':
       return `Save context: ${proposal.arguments.label}`
   }
+}
+
+function formatDateTime(value: string): string {
+  const date = new Date(value)
+  return Number.isNaN(date.valueOf()) ? value : date.toLocaleString()
 }
 
 app.whenReady().then(async () => {

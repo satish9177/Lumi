@@ -222,7 +222,7 @@ function parseReminderInput(value: unknown): ReminderInput {
 
   return {
     title: requiredString(value.title, 'title', 250),
-    dueAt,
+    dueAt: new Date(dueAt).toISOString(),
     sourceContext: parseSourceContext(value.sourceContext)
   }
 }

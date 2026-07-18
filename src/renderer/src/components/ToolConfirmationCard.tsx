@@ -1,9 +1,11 @@
 import { useId } from 'react'
-import type { SourceContext, ToolProposal } from '../../../shared/contracts'
+import type { ApprovedDocumentRoot, DocumentSearchResult, SourceContext, ToolProposal } from '../../../shared/contracts'
 import './components.css'
 
 export interface ToolConfirmationCardProps {
   proposal: ToolProposal
+  approvedRoots?: ApprovedDocumentRoot[]
+  searchResults?: DocumentSearchResult[]
   isConfirming?: boolean
   onConfirm: (proposal: ToolProposal) => void | Promise<void>
   onDismiss: () => void
@@ -15,6 +17,8 @@ export interface ToolConfirmationCardProps {
  */
 export function ToolConfirmationCard({
   proposal,
+  approvedRoots = [],
+  searchResults = [],
   isConfirming = false,
   onConfirm,
   onDismiss
@@ -33,7 +37,7 @@ export function ToolConfirmationCard({
       <h2 id={headingId} className="lifelens-card-heading">{actionLabel}</h2>
       <p id={descriptionId} className="lifelens-tool-reason">{proposal.reason}</p>
 
-      <ToolProposalDetails proposal={proposal} />
+      <ToolProposalDetails proposal={proposal} approvedRoots={approvedRoots} searchResults={searchResults} />
 
       <p className="lifelens-confirmation-notice">
         LifeLens will not run this action until you select {actionLabel}.
@@ -55,7 +59,11 @@ export function ToolConfirmationCard({
   )
 }
 
-function ToolProposalDetails({ proposal }: Pick<ToolConfirmationCardProps, 'proposal'>) {
+function ToolProposalDetails({
+  proposal,
+  approvedRoots = [],
+  searchResults = []
+}: Pick<ToolConfirmationCardProps, 'proposal' | 'approvedRoots' | 'searchResults'>) {
   switch (proposal.toolName) {
     case 'create_reminder':
       return (
@@ -68,18 +76,25 @@ function ToolProposalDetails({ proposal }: Pick<ToolConfirmationCardProps, 'prop
         </>
       )
     case 'search_documents':
+      {
+        const root = approvedRoots.find((candidate) => candidate.id === proposal.arguments.rootId)
       return (
         <dl className="lifelens-action-details">
-          <div><dt>Approved folder</dt><dd>{proposal.arguments.rootId}</dd></div>
+          <div><dt>Approved folder</dt><dd>{root?.label ?? 'Unavailable approved folder'}</dd></div>
           <div><dt>Search for</dt><dd>{proposal.arguments.query}</dd></div>
         </dl>
       )
+      }
     case 'open_file':
+      {
+        const result = searchResults.find((candidate) => candidate.id === proposal.arguments.resultId)
       return (
         <dl className="lifelens-action-details">
-          <div><dt>Selected file</dt><dd>{proposal.arguments.resultId}</dd></div>
+          <div><dt>Selected file</dt><dd>{result?.name ?? 'Unavailable selected file'}</dd></div>
+          {result && <div><dt>Location</dt><dd>{result.relativePath}</dd></div>}
         </dl>
       )
+      }
     case 'open_url':
       return (
         <dl className="lifelens-action-details">
