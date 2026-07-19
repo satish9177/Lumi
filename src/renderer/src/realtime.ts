@@ -22,25 +22,61 @@ import {
   type ToolPolicyDecision
 } from '../../shared/intent'
 
+export interface RealtimeServerCall {
+  readonly callId: string
+  readonly generation: number
+}
+
 interface RealtimeCallbacks {
   onState: (state: CompanionState) => void
   onTranscript: (text: string) => void
   onExplanation: (explanation: Explanation) => void
-  onCaptureContextRequest: (callId?: string) => void
-  onFileSearchRequest: (request: SearchDocumentsInput, callId?: string) => void
+  onCaptureContextRequest: (serverCall?: RealtimeServerCall) => void
+  onFileSearchRequest: (request: SearchDocumentsInput, serverCall?: RealtimeServerCall) => void
   /** Completed speech, forwarded so the trusted intent tracker sees it. */
   onUserTranscript?: (text: string) => Promise<void> | void
-  onTelegramRecipientSearch?: (query: string, callId: string) => void
-  onToolProposal: (proposal: ToolProposal) => void
+  onTelegramRecipientSearch?: (query: string, serverCall: RealtimeServerCall) => void
+  onToolProposal: (proposal: ToolProposal, serverCall?: RealtimeServerCall) => void
   onError: (message: string) => void
+  onSessionEnded?: (reason: 'idle' | 'collapsed' | 'error', generation: number) => void
   evaluateToolPolicy?: (toolName: GuardedTool) => Promise<ToolPolicyDecision>
 }
 
 const CAPTURE_CONTEXT_TOOL = 'capture_screen_context'
 const TELEGRAM_RECIPIENT_SEARCH_TOOL = 'telegram_search_recipients'
 const SCREEN_CONTEXT_TTL_MS = 10 * 60 * 1_000
-const INPUT_TRANSCRIPTION_MODEL = 'whisper-1'
-const SERVER_TURN_DETECTION = { type: 'server_vad' } as const
+export const COLLAPSE_DISCONNECT_MS = 60_000
+export const IDLE_DISCONNECT_MS = 4 * 60_000
+export const MAX_PENDING_WORK_EXTENSION_MS = 2 * 60_000
+const INPUT_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe'
+// Tuned conservatively for a laptop microphone. These are operational knobs,
+// not universal constants: retain genuine barge-in while rejecting more room
+// noise than the Realtime defaults.
+const SERVER_TURN_DETECTION = {
+  type: 'server_vad',
+  threshold: 0.7,
+  prefix_padding_ms: 300,
+  silence_duration_ms: 650,
+  create_response: true,
+  interrupt_response: true
+} as const
+const RESPONSE_BUDGETS = {
+  confirmation: 192,
+  searchResults: 512,
+  normal: 512,
+  longForm: 2048
+} as const
+const MAX_NARRATED_SEARCH_RESULTS = 3
+const MAX_NARRATED_FILENAME_LENGTH = 96
+export const LAPTOP_MIC_CONSTRAINTS = {
+  audio: {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl: true
+  }
+} as const
+const LONG_FORM_CUE = /\b(?:explain in detail|in detail|detailed|article|story|summari[sz]e (?:this|the) (?:page|article|screen)|walk me through|step by step)\b/i
+let nextRealtimeSessionGeneration = 0
 
 const SYSTEM_INSTRUCTIONS = [
   'You are LifeLens, a concise, supportive floating desktop companion.',
@@ -51,7 +87,7 @@ const SYSTEM_INSTRUCTIONS = [
   'search_documents finds stored files, such as a resume, CV, PDF, certificate, photo, or screenshot, inside the folders the user has approved. When the user wants to find, locate, search for, or open a stored file, call search_documents immediately as your first action.',
   'Give search_documents one to three useful topic words from the user\'s own request, such as "resume" or "offer letter". Do not include words like my, latest, or file.',
   'Never ask the user for an exact filename or which folder to search before calling search_documents. Call it even when no folder is approved yet: LifeLens asks the user to approve a folder and then runs your search automatically.',
-  'LifeLens shows the user the matching files and gives you a short numbered list. Refer to results only by their number and name, and offer to open one with open_file.',
+  'LifeLens shows the complete matching-file list in the UI. After a search result, state the total result count, mention at most the first three returned names, say the complete list is visible in the UI, and offer to hear more when there are additional results. Refer to results only by their number and name, and offer to open one with open_file.',
   'search_documents matches only file names, folder names, and dates. You never see inside a photo or a document through it, and you cannot recognise people, faces, or objects across a folder. Never claim or imply that you can.',
   'When the user asks for a photo by what is in it, say plainly that you can match names, folders, and dates but cannot recognise photo contents automatically, offer the closest local matches, and tell them to choose one photo for you to look at.',
   'When the user explicitly chooses one photo, LifeLens sends you that single image. Answer their question about it, and answer later follow-ups from that same image without asking for it again.',
@@ -64,7 +100,9 @@ const SYSTEM_INSTRUCTIONS = [
   'When a current screen context is available, answer follow-up questions from it and do not call capture_screen_context again unless the user asks to refresh, says the screen changed, refers to a new visible item, or you cannot answer reliably.',
   'If it is unclear whether the user means their screen and no stored document is involved, ask exactly: Should I look at your screen?',
   'When analyzing a capture, focus on visible page or document content. Ignore browser tabs, address bars, bookmarks, taskbars, and window chrome.',
-  'Keep a visible text version of each answer under 120 words.'
+  'For simple requests, answer naturally in one or two short sentences.',
+  'For article, screen, story, or explicitly detailed requests, give a complete structured explanation without omitting necessary context.',
+  'Do not repeat the user\'s question.'
 ].join(' ')
 
 const TOOL_DEFINITIONS = [
@@ -195,9 +233,19 @@ export class RealtimeClient {
   private approvedRoots: ApprovedDocumentRoot[] = []
   private readonly completedCallIds = new Set<string>()
   private readonly answeredCallIds = new Set<string>()
+  private readonly pendingCallGenerations = new Map<string, number>()
   private lastUserRequest = ''
   private awaitingInitialSessionUpdate = false
+  private greetAfterInitialSessionUpdate = true
   private listening = true
+  private idleTimer: number | undefined
+  private collapseTimer: number | undefined
+  private deferredDisconnectTimer: number | undefined
+  private deferredDisconnectReason: 'idle' | 'collapsed' | undefined
+  private deferredDisconnectDeadline: number | undefined
+  private activeGeneration: number | undefined
+  private dataChannelGeneration: number | undefined
+  private lastSentInstructions: string | undefined
   /** The one photo the user approved for this session, if any. */
   private selectedPhoto: { resultId: string; name: string } | undefined
   /** Ordinal-to-result mapping stays local; the model only ever sees numbers. */
@@ -207,9 +255,10 @@ export class RealtimeClient {
 
   constructor(private readonly callbacks: RealtimeCallbacks) {}
 
-  async connect(credential: RealtimeSessionCredential): Promise<void> {
+  async connect(credential: RealtimeSessionCredential, options: { greet?: boolean } = {}): Promise<void> {
     this.disconnect()
     this.mode = credential.mode
+    this.greetAfterInitialSessionUpdate = options.greet ?? true
 
     if (credential.mode === 'mock') {
       this.connected = true
@@ -224,8 +273,10 @@ export class RealtimeClient {
       throw new Error('LifeLens received an incomplete Realtime credential.')
     }
 
+    const generation = ++nextRealtimeSessionGeneration
+    this.activeGeneration = generation
     try {
-      await this.connectLive(credential.token)
+      await this.connectLive(credential.token, generation)
     } catch (error) {
       this.disconnect()
       throw error
@@ -239,6 +290,43 @@ export class RealtimeClient {
 
   isConnected(): boolean {
     return this.connected
+  }
+
+  isLiveConnected(): boolean {
+    return this.mode === 'live' && this.connected
+  }
+
+  getActiveSessionGeneration(): number | undefined {
+    return this.activeGeneration
+  }
+
+  isServerCallActive(serverCall: RealtimeServerCall): boolean {
+    return this.isServerCallCurrent(serverCall) &&
+      this.pendingCallGenerations.get(serverCall.callId) === serverCall.generation &&
+      this.dataChannel?.readyState === 'open'
+  }
+
+  /** Starts the one absolute collapse deadline; repeated calls never extend it. */
+  startCollapseDisconnect(collapsedAt = Date.now()): void {
+    if (!this.isLiveConnected() || this.collapseTimer !== undefined || this.deferredDisconnectReason === 'collapsed') {
+      return
+    }
+    const normalDeadline = collapsedAt + COLLAPSE_DISCONNECT_MS
+    this.collapseTimer = window.setTimeout(() => {
+      this.collapseTimer = undefined
+      this.disconnectOrDefer('collapsed', normalDeadline + MAX_PENDING_WORK_EXTENSION_MS)
+    }, Math.max(0, normalDeadline - Date.now()))
+  }
+
+  cancelCollapseDisconnect(): void {
+    if (this.collapseTimer !== undefined) {
+      window.clearTimeout(this.collapseTimer)
+      this.collapseTimer = undefined
+    }
+    if (this.deferredDisconnectReason === 'collapsed') {
+      this.clearDeferredDisconnect()
+    }
+    this.touchActivity()
   }
 
   /**
@@ -279,6 +367,7 @@ export class RealtimeClient {
     }
 
     const request = question.trim() || 'What is in this photo?'
+    this.touchActivity()
     this.selectedPhoto = { resultId: image.resultId, name: image.name }
     this.lastUserRequest = request
     this.callbacks.onState('thinking')
@@ -302,11 +391,14 @@ export class RealtimeClient {
         role: 'user',
         content: [
           { type: 'input_text', text: `${request} The user selected this one photo, named ${image.name}, for you to look at.` },
-          { type: 'input_image', image_url: image.dataUrl }
+          { type: 'input_image', image_url: image.dataUrl, detail: 'low' }
         ]
       }
     })
-    this.sendEvent({ type: 'response.create', response: { output_modalities: ['audio'] } })
+    this.sendEvent({
+      type: 'response.create',
+      response: { output_modalities: ['audio'], max_output_tokens: pickResponseBudget('long-form') }
+    })
   }
 
   hasSelectedPhoto(): boolean {
@@ -326,23 +418,27 @@ export class RealtimeClient {
    * ordinals, filenames, and coarse ages; identifiers and paths stay local.
    */
   completeFileSearch(
-    callId: string | undefined,
-    result: { ok: boolean; message: string; compactResults?: CompactSearchResult[]; resultIds?: string[] }
+    serverCall: RealtimeServerCall | undefined,
+    result: { ok: boolean; message: string; compactResults?: CompactSearchResult[]; resultIds?: string[]; resultCount?: number }
   ): void {
-    if (result.resultIds) {
-      this.setSearchOrdinals(result.resultIds)
-    }
-
-    if (this.mode !== 'live' || !callId || this.answeredCallIds.has(callId)) {
+    if (serverCall && !this.isServerCallActive(serverCall)) {
       return
     }
 
-    this.answeredCallIds.add(callId)
-    this.sendFunctionCallOutput(callId, {
-      ok: result.ok,
-      message: result.message,
-      compactResults: result.compactResults
-    })
+    this.touchActivity()
+    if (result.resultIds) {
+      this.setSearchOrdinals(result.resultIds)
+    }
+    if (!serverCall) {
+      return
+    }
+
+    const key = serverCallKey(serverCall)
+    if (this.answeredCallIds.has(key)) {
+      return
+    }
+    this.answeredCallIds.add(key)
+    this.sendFunctionCallOutput(serverCall, createSearchNarrationResult(result), true, 'search-results')
   }
 
   async sendUserRequest(request: string): Promise<void> {
@@ -355,6 +451,7 @@ export class RealtimeClient {
       return
     }
 
+    this.touchActivity()
     this.lastUserRequest = trimmedRequest
     if (this.mode === 'mock') {
       this.handleMockUserRequest(trimmedRequest)
@@ -374,7 +471,10 @@ export class RealtimeClient {
         content: [{ type: 'input_text', text: trimmedRequest }]
       }
     })
-    this.sendEvent({ type: 'response.create', response: { output_modalities: ['audio'] } })
+    this.sendEvent({
+      type: 'response.create',
+      response: { output_modalities: ['audio'], max_output_tokens: pickResponseBudget('question', trimmedRequest) }
+    })
   }
 
   private handleMockUserRequest(request: string): void {
@@ -402,17 +502,17 @@ export class RealtimeClient {
     this.callbacks.onState('listening')
   }
 
-  async provideScreenContext(capture: CaptureResult, callId?: string): Promise<void> {
-    if (callId) {
-      await this.sendCaptureForRequest(capture, callId)
+  async provideScreenContext(capture: CaptureResult, serverCall?: RealtimeServerCall): Promise<void> {
+    if (serverCall) {
+      await this.sendCaptureForRequest(capture, serverCall)
       return
     }
     await this.sendCapture(capture, this.lastUserRequest)
   }
 
-  declineScreenContext(callId?: string): void {
-    if (this.mode === 'live' && callId) {
-      this.sendFunctionCallOutput(callId, { ok: false, message: 'The user did not select a screen or window to share.' })
+  declineScreenContext(serverCall?: RealtimeServerCall): void {
+    if (serverCall) {
+      this.sendFunctionCallOutput(serverCall, { ok: false, message: 'The user did not select a screen or window to share.' })
     }
   }
 
@@ -427,6 +527,7 @@ export class RealtimeClient {
       throw new Error('Connect voice before capturing a screen.')
     }
 
+    this.touchActivity()
     this.currentCapture = capture
     this.currentExplanation = undefined
     this.textBuffer = ''
@@ -459,32 +560,32 @@ export class RealtimeClient {
         content: [
           {
             type: 'input_text',
-            text: `${question.trim() || 'What is this screen about?'} Review the attached screen capture, taken at ${capture.capturedAt}, and give a short answer with dates, links, and next actions.`
+            text: `${question.trim() || 'What is this screen about?'} Review the attached screen capture, taken at ${capture.capturedAt}, and include useful dates, links, and next actions.`
           },
-          { type: 'input_image', image_url: capture.dataUrl }
+          { type: 'input_image', image_url: capture.dataUrl, detail: 'auto' }
         ]
       }
     })
     this.sendEvent({
       type: 'response.create',
-      response: { output_modalities: ['audio'] }
+      response: { output_modalities: ['audio'], max_output_tokens: pickResponseBudget('long-form') }
     })
   }
 
-  sendToolResult(proposal: ToolProposal, result: ToolExecutionResult): void {
-    if (this.mode !== 'live' || !proposal.callId) {
+  sendToolResult(proposal: ToolProposal, result: ToolExecutionResult, serverCall?: RealtimeServerCall): void {
+    if (!serverCall || proposal.callId !== serverCall.callId) {
       return
     }
 
-    this.sendFunctionCallOutput(proposal.callId, result)
+    this.sendFunctionCallOutput(serverCall, result)
   }
 
-  declineToolProposal(proposal: ToolProposal): void {
-    this.sendToolResult(proposal, { ok: false, message: 'The user declined this action.' })
+  declineToolProposal(proposal: ToolProposal, serverCall?: RealtimeServerCall): void {
+    this.sendToolResult(proposal, { ok: false, message: 'The user declined this action.' }, serverCall)
   }
 
-  completeTelegramRecipientSearch(callId: string, foundCount: number): void {
-    this.sendFunctionCallOutput(callId, {
+  completeTelegramRecipientSearch(serverCall: RealtimeServerCall, foundCount: number): void {
+    this.sendFunctionCallOutput(serverCall, {
       ok: foundCount > 0,
       message: foundCount > 0
         ? 'Local recipient choices are displayed to the user. Do not request names or identifiers; wait for their local selection.'
@@ -492,10 +593,20 @@ export class RealtimeClient {
     })
   }
 
-  disconnect(): void {
+  disconnect(): number | undefined {
+    const endedGeneration = this.activeGeneration
+    this.activeGeneration = undefined
+    this.dataChannelGeneration = undefined
+    this.clearIdleTimer()
+    this.clearCollapseTimer()
+    this.clearDeferredDisconnect()
     this.connected = false
     this.responseActive = false
     this.awaitingInitialSessionUpdate = false
+    this.pendingCallGenerations.clear()
+    this.completedCallIds.clear()
+    this.answeredCallIds.clear()
+    this.lastSentInstructions = undefined
     this.currentCapture = undefined
     this.currentExplanation = undefined
     this.lastUserRequest = ''
@@ -511,12 +622,11 @@ export class RealtimeClient {
     this.peerConnection = undefined
     this.localAudio = undefined
     this.remoteAudio = undefined
+    return endedGeneration
   }
 
-  private async connectLive(token: string): Promise<void> {
-    this.localAudio = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-    })
+  private async connectLive(token: string, generation: number): Promise<void> {
+    this.localAudio = await navigator.mediaDevices.getUserMedia(LAPTOP_MIC_CONSTRAINTS)
     this.peerConnection = new RTCPeerConnection()
     this.remoteAudio = document.createElement('audio')
     this.remoteAudio.autoplay = true
@@ -527,11 +637,10 @@ export class RealtimeClient {
         this.remoteAudio.srcObject = event.streams[0]
       }
     }
+    const peerConnection = this.peerConnection
     this.peerConnection.onconnectionstatechange = () => {
-      if (this.peerConnection?.connectionState === 'failed') {
-        this.callbacks.onError('The Realtime voice connection failed.')
-        this.callbacks.onState('error')
-        this.disconnect()
+      if (this.peerConnection === peerConnection && this.activeGeneration === generation && peerConnection.connectionState === 'failed') {
+        this.failLiveConnection(generation)
       }
     }
 
@@ -539,11 +648,18 @@ export class RealtimeClient {
     if (!track) {
       throw new Error('Microphone access did not return an audio track.')
     }
+    track.enabled = this.listening
     this.peerConnection.addTrack(track, this.localAudio)
 
     this.dataChannel = this.peerConnection.createDataChannel('oai-events')
-    this.dataChannel.onmessage = (event) => this.handleServerEvent(event.data)
-    const opened = this.waitForDataChannel(this.dataChannel)
+    const dataChannel = this.dataChannel
+    this.dataChannelGeneration = generation
+    dataChannel.onmessage = (event) => {
+      if (this.dataChannel === dataChannel) {
+        this.handleServerEvent(event.data, generation)
+      }
+    }
+    const opened = this.waitForDataChannel(dataChannel, generation)
     void opened.catch(() => undefined)
 
     const offer = await this.peerConnection.createOffer()
@@ -575,14 +691,19 @@ export class RealtimeClient {
     await opened
   }
 
-  private waitForDataChannel(channel: RTCDataChannel): Promise<void> {
+  private waitForDataChannel(channel: RTCDataChannel, generation: number): Promise<void> {
     return new Promise<void>((resolve, reject) => {
       const timeout = window.setTimeout(() => reject(new Error('Timed out while opening the Realtime event channel.')), 15_000)
       channel.onopen = () => {
         window.clearTimeout(timeout)
         try {
+          if (this.dataChannel !== channel || this.activeGeneration !== generation) {
+            reject(new Error('The Realtime session was replaced before its event channel opened.'))
+            return
+          }
           this.connected = true
           this.configureLiveSession()
+          this.touchActivity()
           this.callbacks.onState('listening')
           resolve()
         } catch (error) {
@@ -612,7 +733,8 @@ export class RealtimeClient {
       type: 'response.create',
       response: {
         instructions: 'Greet the user briefly, then invite them to capture a screen or ask a question.',
-        output_modalities: ['audio']
+        output_modalities: ['audio'],
+        max_output_tokens: pickResponseBudget('confirmation')
       }
     })
   }
@@ -638,20 +760,45 @@ export class RealtimeClient {
 
   private updateLiveSessionInstructions(): void {
     if (this.mode === 'live' && this.dataChannel?.readyState === 'open') {
-      this.sendSessionUpdate()
+      const instructions = this.sessionInstructions()
+      if (instructions === this.lastSentInstructions) {
+        return
+      }
+      this.sendEvent({
+        type: 'session.update',
+        session: { type: 'realtime', instructions }
+      })
+      this.lastSentInstructions = instructions
+    }
+  }
+
+  private failLiveConnection(generation: number): void {
+    if (this.activeGeneration !== generation) {
+      return
+    }
+    this.callbacks.onError('The Realtime voice connection failed.')
+    this.callbacks.onState('error')
+    const endedGeneration = this.disconnect()
+    if (endedGeneration !== undefined) {
+      this.callbacks.onSessionEnded?.('error', endedGeneration)
     }
   }
 
   private sendSessionUpdate(): void {
+    const instructions = this.sessionInstructions()
     this.sendEvent({
       type: 'session.update',
       session: {
         type: 'realtime',
-        instructions: this.sessionInstructions(),
+        instructions,
         tools: TOOL_DEFINITIONS,
         tool_choice: 'auto',
+        // VAD-created spoken responses have no response.create override, so
+        // this ceiling is intentionally high enough for legitimate long-form audio.
+        max_output_tokens: 1024,
         audio: {
           input: {
+            noise_reduction: { type: 'far_field' },
             // Completed transcripts feed the trusted main-process intent
             // tracker, so spoken and typed requests get identical policy.
             transcription: { model: INPUT_TRANSCRIPTION_MODEL },
@@ -660,6 +807,7 @@ export class RealtimeClient {
         }
       }
     })
+    this.lastSentInstructions = instructions
   }
 
   private sendEvent(event: unknown): void {
@@ -669,13 +817,24 @@ export class RealtimeClient {
     this.dataChannel.send(JSON.stringify(event))
   }
 
-  private sendFunctionCallOutput(callId: string, result: ToolExecutionResult, createResponse = true): void {
+  private sendFunctionCallOutput(
+    serverCall: RealtimeServerCall,
+    result: ToolExecutionResult,
+    createResponse = true,
+    responseKind: 'confirmation' | 'search-results' = 'confirmation'
+  ): void {
+    if (!this.isServerCallActive(serverCall)) {
+      return
+    }
+
+    this.pendingCallGenerations.delete(serverCall.callId)
+    this.touchActivity()
     try {
       this.sendEvent({
         type: 'conversation.item.create',
         item: {
           type: 'function_call_output',
-          call_id: callId,
+          call_id: serverCall.callId,
           // Only the redacted compact view may leave the machine. Trusted
           // results carry identifiers and paths and are never serialized here.
           output: JSON.stringify({
@@ -687,15 +846,26 @@ export class RealtimeClient {
         }
       })
       if (createResponse) {
-        this.sendEvent({ type: 'response.create' })
+        const searchNarration = responseKind === 'search-results'
+          ? createExactSearchNarration(result)
+          : undefined
+        this.sendEvent({
+          type: 'response.create',
+          response: {
+            output_modalities: ['audio'],
+            max_output_tokens: pickResponseBudget(responseKind),
+            ...(searchNarration ? { instructions: `Speak exactly this short search summary and nothing else: ${searchNarration}` } : {})
+          }
+        })
+        this.responseActive = true
       }
     } catch (error) {
       this.callbacks.onError(error instanceof Error ? error.message : 'Could not return the action result to Realtime.')
     }
   }
 
-  private handleServerEvent(serializedEvent: unknown): void {
-    if (typeof serializedEvent !== 'string') {
+  private handleServerEvent(serializedEvent: unknown, generation: number): void {
+    if (typeof serializedEvent !== 'string' || this.activeGeneration !== generation || this.dataChannelGeneration !== generation) {
       return
     }
 
@@ -721,8 +891,16 @@ export class RealtimeClient {
     if (type === 'session.updated') {
       if (this.awaitingInitialSessionUpdate) {
         this.awaitingInitialSessionUpdate = false
-        this.requestGreeting()
+        if (this.greetAfterInitialSessionUpdate && !this.responseActive) {
+          this.requestGreeting()
+        }
       }
+      return
+    }
+
+    if (type === 'input_audio_buffer.speech_started') {
+      this.responseActive = true
+      this.touchActivity()
       return
     }
 
@@ -746,17 +924,21 @@ export class RealtimeClient {
     }
 
     if (type === 'response.function_call_arguments.done') {
-      this.handleToolCall(event)
+      this.handleToolCall(event, generation)
       return
     }
 
     if (type === 'response.done') {
-      this.handleResponseDone(event)
+      this.handleResponseDone(event, generation)
     }
   }
 
-  private handleResponseDone(event: Record<string, unknown>): void {
+  private handleResponseDone(event: Record<string, unknown>, generation: number): void {
+    if (this.activeGeneration !== generation) {
+      return
+    }
     this.responseActive = false
+    this.touchActivity()
     if (!isRecord(event.response)) {
       return
     }
@@ -769,7 +951,7 @@ export class RealtimeClient {
     const output = Array.isArray(response.output) ? response.output : []
     for (const item of output) {
       if (isRecord(item) && item.type === 'function_call') {
-        this.handleToolCall(item)
+        this.handleToolCall(item, generation)
       }
     }
 
@@ -785,6 +967,7 @@ export class RealtimeClient {
       this.callbacks.onTranscript(this.textBuffer.trim())
     }
     this.callbacks.onState('listening')
+    this.finishDeferredDisconnectIfIdle()
   }
 
   /**
@@ -798,6 +981,7 @@ export class RealtimeClient {
       return
     }
 
+    this.touchActivity()
     this.lastUserRequest = text
     const notify = this.callbacks.onUserTranscript
     if (!notify) {
@@ -810,19 +994,26 @@ export class RealtimeClient {
       .then(() => undefined)
   }
 
-  private handleToolCall(event: Record<string, unknown>): void {
+  private handleToolCall(event: Record<string, unknown>, generation: number): void {
+    if (this.activeGeneration !== generation) {
+      return
+    }
     const rawName = typeof event.name === 'string' ? event.name : ''
     const callId = typeof event.call_id === 'string' ? event.call_id : typeof event.callId === 'string' ? event.callId : ''
-    if (!rawName || !callId || this.completedCallIds.has(callId)) {
+    const serverCall = { callId, generation }
+    const callKey = serverCallKey(serverCall)
+    if (!rawName || !callId || this.completedCallIds.has(callKey)) {
       return
     }
 
-    this.completedCallIds.add(callId)
+    this.touchActivity()
+    this.completedCallIds.add(callKey)
+    this.pendingCallGenerations.set(callId, generation)
     if (rawName === CAPTURE_CONTEXT_TOOL) {
       if (this.hasActiveScreenContext()) {
-        this.sendFunctionCallOutput(callId, { ok: false, message: 'A current screen context is already available for this conversation.' })
+        this.sendFunctionCallOutput(serverCall, { ok: false, message: 'A current screen context is already available for this conversation.' })
       } else {
-        this.withPolicyDecision(CAPTURE_CONTEXT_TOOL, (decision) => this.handleCaptureDecision(callId, decision))
+        this.withPolicyDecision(serverCall, CAPTURE_CONTEXT_TOOL, (decision) => this.handleCaptureDecision(serverCall, decision))
       }
       return
     }
@@ -837,17 +1028,19 @@ export class RealtimeClient {
         if (!this.callbacks.onTelegramRecipientSearch) {
           throw new Error('Telegram recipient search is unavailable in this companion view.')
         }
-        this.callbacks.onTelegramRecipientSearch(query, callId)
+        this.callbacks.onTelegramRecipientSearch(query, serverCall)
       } catch (error) {
         const message = error instanceof Error ? error.message : 'LifeLens received malformed Telegram recipient search details.'
         this.callbacks.onError(message)
-        this.sendFunctionCallOutput(callId, { ok: false, message })
+        this.sendFunctionCallOutput(serverCall, { ok: false, message })
       }
       return
     }
 
     const name = isToolName(rawName) ? rawName : undefined
     if (!name) {
+      this.pendingCallGenerations.delete(callId)
+      this.finishDeferredDisconnectIfIdle()
       return
     }
     const argumentsJson = typeof event.arguments === 'string' ? event.arguments : ''
@@ -858,39 +1051,44 @@ export class RealtimeClient {
       }
 
       if (name === 'search_documents') {
-        this.requestFileSearch(callId, parsed)
+        this.requestFileSearch(serverCall, parsed)
         return
       }
 
-      this.callbacks.onToolProposal(this.createToolProposal(name, callId, parsed))
+      this.callbacks.onToolProposal(this.createToolProposal(name, callId, parsed), serverCall)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'LifeLens received malformed tool details from Realtime.'
       this.callbacks.onError(message)
-      this.sendFunctionCallOutput(callId, { ok: false, message })
+      this.sendFunctionCallOutput(serverCall, { ok: false, message })
     }
   }
 
-  private withPolicyDecision(toolName: GuardedTool, handler: (decision: ToolPolicyDecision) => void): void {
+  private withPolicyDecision(serverCall: RealtimeServerCall, toolName: GuardedTool, handler: (decision: ToolPolicyDecision) => void): void {
     // Without a trusted policy channel, fall back to renderer-known state so the
     // decision stays synchronous and deterministic.
     const fallbackDecision = evaluateGuardedToolRequest(toolName, { intent: 'unknown', hasApprovedFolder: this.approvedRoots.length > 0 })
     const evaluate = this.callbacks.evaluateToolPolicy
+    const handleIfCurrent = (decision: ToolPolicyDecision): void => {
+      if (this.isServerCallActive(serverCall)) {
+        handler(decision)
+      }
+    }
     if (!evaluate) {
-      handler(fallbackDecision)
+      handleIfCurrent(fallbackDecision)
       return
     }
 
-    evaluate(toolName).then(handler, () => handler(fallbackDecision))
+    evaluate(toolName).then(handleIfCurrent, () => handleIfCurrent(fallbackDecision))
   }
 
-  private handleCaptureDecision(callId: string, decision: ToolPolicyDecision): void {
+  private handleCaptureDecision(serverCall: RealtimeServerCall, decision: ToolPolicyDecision): void {
     if (!decision.allowed) {
-      this.sendFunctionCallOutput(callId, { ok: false, code: decision.code, message: decision.message })
+      this.sendFunctionCallOutput(serverCall, { ok: false, code: decision.code, message: decision.message })
       return
     }
 
     this.callbacks.onState('thinking')
-    this.callbacks.onCaptureContextRequest(callId)
+    this.callbacks.onCaptureContextRequest(serverCall)
   }
 
   /**
@@ -898,14 +1096,17 @@ export class RealtimeClient {
    * hold it until a folder is approved; the single terminal result arrives
    * later through completeFileSearch.
    */
-  private requestFileSearch(callId: string, argumentsValue: Record<string, unknown>): void {
+  private requestFileSearch(serverCall: RealtimeServerCall, argumentsValue: Record<string, unknown>): void {
     void this.intentUpdate.then(() => {
+      if (!this.isServerCallActive(serverCall)) {
+        return
+      }
       try {
-        this.callbacks.onFileSearchRequest(parseSearchArguments(argumentsValue), callId)
+        this.callbacks.onFileSearchRequest(parseSearchArguments(argumentsValue), serverCall)
       } catch (error) {
         const message = error instanceof Error ? error.message : 'LifeLens received malformed search details from Realtime.'
         this.callbacks.onError(message)
-        this.completeFileSearch(callId, { ok: false, message })
+        this.completeFileSearch(serverCall, { ok: false, message })
       }
     })
   }
@@ -977,11 +1178,12 @@ export class RealtimeClient {
     }
   }
 
-  private async sendCaptureForRequest(capture: CaptureResult, callId: string): Promise<void> {
-    if (!this.connected) {
-      throw new Error('Connect voice before capturing a screen.')
+  private async sendCaptureForRequest(capture: CaptureResult, serverCall: RealtimeServerCall): Promise<void> {
+    if (!this.isServerCallActive(serverCall)) {
+      return
     }
 
+    this.touchActivity()
     this.currentCapture = capture
     this.currentExplanation = undefined
     this.textBuffer = ''
@@ -998,12 +1200,119 @@ export class RealtimeClient {
         role: 'user',
         content: [
           { type: 'input_text', text: `A one-time user-approved screen capture, taken at ${capture.capturedAt}, is attached. Use it to answer the user's current request.` },
-          { type: 'input_image', image_url: capture.dataUrl }
+          { type: 'input_image', image_url: capture.dataUrl, detail: 'auto' }
         ]
       }
     })
-    this.sendFunctionCallOutput(callId, { ok: true, message: 'A one-time screen capture is available for the current request.' }, false)
-    this.sendEvent({ type: 'response.create', response: { output_modalities: ['audio'] } })
+    this.sendFunctionCallOutput(serverCall, { ok: true, message: 'A one-time screen capture is available for the current request.' }, false)
+    if (!this.isServerCallCurrent(serverCall)) {
+      return
+    }
+    this.sendEvent({
+      type: 'response.create',
+      response: { output_modalities: ['audio'], max_output_tokens: pickResponseBudget('long-form') }
+    })
+    this.responseActive = true
+  }
+
+  private touchActivity(): void {
+    if (!this.isLiveConnected()) {
+      return
+    }
+    if (this.deferredDisconnectReason !== undefined) {
+      return
+    }
+    this.clearIdleTimer()
+    this.idleTimer = window.setTimeout(() => this.handleIdleTimeout(), IDLE_DISCONNECT_MS)
+  }
+
+  private handleIdleTimeout(): void {
+    this.idleTimer = undefined
+    if (!this.isLiveConnected()) {
+      return
+    }
+    if (this.hasPendingWork()) {
+      this.disconnectOrDefer('idle', Date.now() + MAX_PENDING_WORK_EXTENSION_MS)
+      return
+    }
+    this.endLiveSession('idle')
+  }
+
+  private hasPendingWork(): boolean {
+    return this.responseActive || this.pendingCallGenerations.size > 0
+  }
+
+  private endLiveSession(reason: 'idle' | 'collapsed'): void {
+    const endedGeneration = this.disconnect()
+    this.callbacks.onState('idle')
+    if (endedGeneration !== undefined) {
+      this.callbacks.onSessionEnded?.(reason, endedGeneration)
+    }
+  }
+
+  private disconnectOrDefer(reason: 'idle' | 'collapsed', hardDeadline: number): void {
+    if (!this.isLiveConnected()) {
+      return
+    }
+    if (!this.hasPendingWork()) {
+      this.endLiveSession(reason)
+      return
+    }
+
+    if (this.deferredDisconnectDeadline !== undefined && this.deferredDisconnectDeadline <= hardDeadline) {
+      return
+    }
+    this.clearDeferredDisconnect()
+    this.deferredDisconnectReason = reason
+    this.deferredDisconnectDeadline = hardDeadline
+    this.deferredDisconnectTimer = window.setTimeout(() => {
+      this.deferredDisconnectTimer = undefined
+      const deferredReason = this.deferredDisconnectReason
+      this.deferredDisconnectReason = undefined
+      this.deferredDisconnectDeadline = undefined
+      if (deferredReason && this.isLiveConnected()) {
+        this.endLiveSession(deferredReason)
+      }
+    }, Math.max(0, hardDeadline - Date.now()))
+  }
+
+  private finishDeferredDisconnectIfIdle(): void {
+    if (!this.deferredDisconnectReason || this.hasPendingWork()) {
+      return
+    }
+    const reason = this.deferredDisconnectReason
+    this.clearDeferredDisconnect()
+    this.endLiveSession(reason)
+  }
+
+  private isServerCallCurrent(serverCall: RealtimeServerCall): boolean {
+    return this.mode === 'live' &&
+      this.activeGeneration === serverCall.generation &&
+      this.dataChannelGeneration === serverCall.generation &&
+      this.dataChannel?.readyState === 'open'
+  }
+
+  private clearIdleTimer(): void {
+    if (this.idleTimer !== undefined) {
+      window.clearTimeout(this.idleTimer)
+      this.idleTimer = undefined
+    }
+  }
+
+  private clearCollapseTimer(): void {
+    if (this.collapseTimer !== undefined) {
+      window.clearTimeout(this.collapseTimer)
+      this.collapseTimer = undefined
+    }
+  }
+
+  private clearDeferredDisconnect(): void {
+    if (this.deferredDisconnectTimer !== undefined) {
+      window.clearTimeout(this.deferredDisconnectTimer)
+      this.deferredDisconnectTimer = undefined
+    }
+    this.deferredDisconnectReason = undefined
+    this.deferredDisconnectDeadline = undefined
   }
 
   private hasActiveScreenContext(): boolean {
@@ -1027,6 +1336,78 @@ export class RealtimeClient {
     window.speechSynthesis.cancel()
     window.speechSynthesis.speak(utterance)
   }
+}
+
+function createSearchNarrationResult(result: {
+  ok: boolean
+  message: string
+  compactResults?: CompactSearchResult[]
+  resultCount?: number
+}): ToolExecutionResult {
+  const compactResults = result.compactResults?.slice(0, MAX_NARRATED_SEARCH_RESULTS).map((entry) => ({
+    ...entry,
+    name: shortenFilenameForNarration(entry.name)
+  }))
+  if (!result.ok || !compactResults) {
+    return { ok: result.ok, message: result.message, compactResults }
+  }
+
+  const resultCount = Math.max(result.resultCount ?? compactResults.length, compactResults.length)
+  const moreResults = resultCount > compactResults.length
+  const narrationRule = [
+    `For the spoken response, say there are ${resultCount} total result${resultCount === 1 ? '' : 's'}.`,
+    `Mention no more than these ${compactResults.length} displayed result${compactResults.length === 1 ? '' : 's'}.`,
+    'Say the complete list is visible in the UI.',
+    moreResults ? 'End by asking exactly: "Would you like to hear more results?"' : undefined
+  ].filter((part): part is string => Boolean(part)).join(' ')
+
+  return {
+    ok: true,
+    message: `${result.message} ${narrationRule}`.trim(),
+    compactResults
+  }
+}
+
+function createExactSearchNarration(result: ToolExecutionResult): string | undefined {
+  const results = result.compactResults
+  if (!result.ok || !results?.length) {
+    return undefined
+  }
+  const resultCount = Number.parseInt(result.message.match(/\b(\d+)\b/)?.[1] ?? '', 10)
+  const total = Number.isFinite(resultCount) && resultCount >= results.length ? resultCount : results.length
+  const names = results.map((entry) => `“${entry.name}”`).join(', ')
+  const more = total > results.length ? ' Would you like to hear more results?' : ''
+  return `I found ${total} matching result${total === 1 ? '' : 's'}: ${names}. The complete list is visible in the UI.${more}`
+}
+
+function shortenFilenameForNarration(name: string): string {
+  if (name.length <= MAX_NARRATED_FILENAME_LENGTH) {
+    return name
+  }
+
+  const candidate = name.slice(0, MAX_NARRATED_FILENAME_LENGTH + 1)
+  const boundary = Math.max(candidate.lastIndexOf(' '), candidate.lastIndexOf('_'), candidate.lastIndexOf('-'), candidate.lastIndexOf('.'))
+  const shortened = boundary > Math.floor(MAX_NARRATED_FILENAME_LENGTH * 0.6)
+    ? candidate.slice(0, boundary)
+    : candidate.slice(0, MAX_NARRATED_FILENAME_LENGTH)
+  return `${shortened}…`
+}
+
+function pickResponseBudget(kind: 'confirmation' | 'search-results' | 'question' | 'long-form', request = ''): number {
+  if (kind === 'confirmation') {
+    return RESPONSE_BUDGETS.confirmation
+  }
+  if (kind === 'search-results') {
+    return RESPONSE_BUDGETS.searchResults
+  }
+  if (kind === 'long-form' || LONG_FORM_CUE.test(request)) {
+    return RESPONSE_BUDGETS.longForm
+  }
+  return RESPONSE_BUDGETS.normal
+}
+
+function serverCallKey(serverCall: RealtimeServerCall): string {
+  return `${serverCall.generation}:${serverCall.callId}`
 }
 
 function createMockExplanation(capture: CaptureResult, question: string): Explanation {

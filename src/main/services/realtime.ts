@@ -1,9 +1,28 @@
 import { createHash } from 'node:crypto'
 import type { RealtimeSessionCredential } from '../../shared/contracts'
 
-export const REALTIME_MODEL = process.env.LIFELENS_REALTIME_MODEL?.trim() || 'gpt-realtime-2.1'
+export const REALTIME_MODEL = process.env.LIFELENS_REALTIME_MODEL?.trim() || 'gpt-realtime-2.1-mini'
 const REQUEST_TIMEOUT_MS = 10_000
 const REALTIME_REASONING_EFFORTS = ['low', 'medium', 'high'] as const
+
+/**
+ * Model-specific client-secret capabilities. Unknown overrides stay usable,
+ * but deliberately receive no optional field until that capability is known.
+ */
+export const REALTIME_MODEL_CAPABILITIES = {
+  'gpt-realtime-2.1-mini': { supportsReasoning: true },
+  'gpt-realtime-2.1': { supportsReasoning: true },
+  'gpt-realtime-2': { supportsReasoning: true },
+  'gpt-realtime-mini': { supportsReasoning: false }
+} as const
+
+export function supportsRealtimeReasoning(model: string): boolean {
+  return REALTIME_MODEL_CAPABILITIES[model as keyof typeof REALTIME_MODEL_CAPABILITIES]?.supportsReasoning === true
+}
+
+function isKnownLegacyNonReasoningModel(model: string): boolean {
+  return REALTIME_MODEL_CAPABILITIES[model as keyof typeof REALTIME_MODEL_CAPABILITIES]?.supportsReasoning === false
+}
 
 export type RealtimeReasoningEffort = (typeof REALTIME_REASONING_EFFORTS)[number]
 
@@ -23,14 +42,27 @@ export function getRealtimeReasoningEffort(value = process.env.LIFELENS_REALTIME
 }
 
 export async function createRealtimeSessionCredential(safetySeed: string): Promise<RealtimeSessionCredential> {
-  const reasoningEffort = getRealtimeReasoningEffort()
   const apiKey = process.env.OPENAI_API_KEY?.trim()
   if (!apiKey) {
     return { mode: 'mock', model: REALTIME_MODEL }
   }
 
-  console.info(`Realtime reasoning effort: ${reasoningEffort}`)
+  const includesReasoning = supportsRealtimeReasoning(REALTIME_MODEL)
+  const reasoningEffort = includesReasoning ? getRealtimeReasoningEffort() : undefined
+  if (includesReasoning) {
+    console.info(`Realtime reasoning effort: ${reasoningEffort}`)
+  } else if (isKnownLegacyNonReasoningModel(REALTIME_MODEL)) {
+    console.warn(`Realtime model "${REALTIME_MODEL}" does not support reasoning.effort; omitting it.`)
+  }
   const safetyIdentifier = createHash('sha256').update(safetySeed).digest('hex')
+  const session: Record<string, unknown> = {
+    type: 'realtime',
+    model: REALTIME_MODEL,
+    audio: { output: { voice: 'marin' } }
+  }
+  if (includesReasoning) {
+    session.reasoning = { effort: reasoningEffort }
+  }
   let response: Response
   try {
     response = await fetchWithTimeout('https://api.openai.com/v1/realtime/client_secrets', {
@@ -41,12 +73,7 @@ export async function createRealtimeSessionCredential(safetySeed: string): Promi
         'OpenAI-Safety-Identifier': safetyIdentifier
       },
       body: JSON.stringify({
-        session: {
-          type: 'realtime',
-          model: REALTIME_MODEL,
-          reasoning: { effort: reasoningEffort },
-          audio: { output: { voice: 'marin' } }
-        }
+        session
       })
     })
   } catch (error) {

@@ -20,7 +20,14 @@ import type {
 import { fileKindLabel } from '../../shared/search-query'
 import { ExplanationCard, PhotoResultGrid, ToolConfirmationCard } from './components'
 import { FileSearchController, type SearchConfirmationRequest } from './file-search-controller'
-import { RealtimeClient } from './realtime'
+import { RealtimeClient, type RealtimeServerCall } from './realtime'
+
+const VOICE_PAUSED_NOTICE = 'Voice paused to save cost — ask a question to reconnect.'
+
+interface PendingProposal {
+  readonly proposal: ToolProposal
+  readonly serverCall?: RealtimeServerCall
+}
 
 const STATUS_LABELS: Record<CompanionState, string> = {
   idle: 'Ready',
@@ -33,6 +40,10 @@ const STATUS_LABELS: Record<CompanionState, string> = {
 
 export default function LifeLensApp() {
   const clientRef = useRef<RealtimeClient | undefined>(undefined)
+  const connectPromiseRef = useRef<Promise<void> | undefined>(undefined)
+  const hasConnectedOnceRef = useRef(false)
+  const expandedRef = useRef(false)
+  const collapsedAtRef = useRef<number | undefined>(Date.now())
   const controllerRef = useRef<FileSearchController>(undefined)
   const [expanded, setExpanded] = useState(false)
   const [companionState, setCompanionState] = useState<CompanionState>('idle')
@@ -45,7 +56,7 @@ export default function LifeLensApp() {
   const [explanation, setExplanation] = useState<Explanation>()
   const [pendingAction, setPendingAction] = useState<PendingActionPreview>()
   const [searchConfirmation, setSearchConfirmation] = useState<SearchConfirmationRequest | undefined>()
-  const pendingProposalsRef = useRef(new Map<string, ToolProposal>())
+  const pendingProposalsRef = useRef(new Map<string, PendingProposal>())
   const [toolResult, setToolResult] = useState<ToolExecutionResult>()
   const [transcript, setTranscript] = useState<string[]>([])
   const [documentRoots, setDocumentRoots] = useState<ApprovedDocumentRoot[]>([])
@@ -55,11 +66,13 @@ export default function LifeLensApp() {
   const [thumbnails, setThumbnails] = useState<Map<string, ResultThumbnail>>(new Map())
   const [isSearching, setIsSearching] = useState(false)
   const [error, setError] = useState<string>()
+  const [pausedNotice, setPausedNotice] = useState<string>()
   const [isConnecting, setIsConnecting] = useState(false)
   const [isCapturing, setIsCapturing] = useState(false)
   const [isConfirming, setIsConfirming] = useState(false)
   const [isChoosingFolder, setIsChoosingFolder] = useState(false)
-  const [pendingScreenCaptureCallId, setPendingScreenCaptureCallId] = useState<string | null | undefined>()
+  const [pendingScreenCaptureCall, setPendingScreenCaptureCall] = useState<RealtimeServerCall | null | undefined>()
+  const telegramServerCallRef = useRef<RealtimeServerCall | undefined>(undefined)
   const [telegramStatus, setTelegramStatus] = useState<TelegramStatus>({ state: 'disconnected' })
   const [telegramQuery, setTelegramQuery] = useState('')
   const [telegramRecipients, setTelegramRecipients] = useState<TelegramRecipient[]>([])
@@ -75,9 +88,18 @@ export default function LifeLensApp() {
   }, [])
 
   useEffect(() => {
+    expandedRef.current = expanded
     window.lifeLens.setPanelOpen(expanded)
     // Collapsing the companion must not leave an open microphone behind the orb.
-    clientRef.current?.setListening(expanded)
+    const client = clientRef.current
+    client?.setListening(expanded)
+    if (!expanded) {
+      collapsedAtRef.current = Date.now()
+      client?.startCollapseDisconnect(collapsedAtRef.current)
+    } else {
+      collapsedAtRef.current = undefined
+      client?.cancelCollapseDisconnect()
+    }
   }, [expanded])
 
   useEffect(() => {
@@ -129,87 +151,176 @@ export default function LifeLensApp() {
     }
   }
 
-  const connectVoice = async (): Promise<void> => {
-    setError(undefined)
-    setIsConnecting(true)
-    setCompanionState('thinking')
-    clientRef.current?.disconnect()
-    void window.lifeLens.cancelPhotoAnalysis()
-    try {
-      const credential = await window.lifeLens.createRealtimeSession()
-      const client = new RealtimeClient({
-        onState: setCompanionState,
-        onTranscript: appendTranscript,
-        onExplanation: setExplanation,
-        onCaptureContextRequest: requestScreenContext,
-        onFileSearchRequest: (request, callId) => { void controllerRef.current?.run(request, callId) },
-        onUserTranscript: (text) => window.lifeLens.noteUserRequest(text).then(() => undefined, () => undefined),
-        onTelegramRecipientSearch: requestTelegramRecipientSearch,
-        onToolProposal: (proposal) => { void preparePendingAction(proposal) },
-        onError: setError,
-        evaluateToolPolicy: (toolName) => window.lifeLens.evaluateToolRequest(toolName)
-      })
-      client.setApprovedRoots(documentRoots)
-      clientRef.current = client
-      setMode(credential.mode)
-      await client.connect(credential)
-    } catch (connectionError) {
-      clientRef.current?.disconnect()
-      clientRef.current = undefined
-      setCompanionState('error')
-      setError(messageFrom(connectionError))
-    } finally {
-      setIsConnecting(false)
+  function expireServerGeneration(generation: number): void {
+    if (controllerRef.current?.expireGeneration(generation)) {
+      void window.lifeLens.cancelFileSearch()
     }
+    setSearchConfirmation((current) => current?.serverCall?.generation === generation ? undefined : current)
+    setPendingScreenCaptureCall((current) => {
+      if (current && current.generation === generation) {
+        setCapturePickerOpen(false)
+        return undefined
+      }
+      return current
+    })
+    if (telegramServerCallRef.current?.generation === generation) {
+      telegramServerCallRef.current = undefined
+      setTelegramRecipients([])
+      setSelectedTelegramRecipientId(undefined)
+      setIsTelegramWorking(false)
+    }
+    for (const [approvalId, pending] of pendingProposalsRef.current) {
+      if (pending.serverCall?.generation !== generation) {
+        continue
+      }
+      pendingProposalsRef.current.delete(approvalId)
+      void window.lifeLens.cancelPendingAction(approvalId)
+      setPendingAction((current) => current?.approvalId === approvalId ? undefined : current)
+    }
+  }
+
+  function isPendingProposalCurrent(pending: PendingProposal | undefined): boolean {
+    return pending?.serverCall === undefined || clientRef.current?.isServerCallActive(pending.serverCall) === true
+  }
+
+  const connectVoice = (): Promise<void> => {
+    if (connectPromiseRef.current) {
+      return connectPromiseRef.current
+    }
+
+    const connection = (async (): Promise<void> => {
+      setError(undefined)
+      setPausedNotice(undefined)
+      setIsConnecting(true)
+      setCompanionState('thinking')
+      const previousGeneration = clientRef.current?.disconnect()
+      if (previousGeneration !== undefined) {
+        expireServerGeneration(previousGeneration)
+      }
+      void window.lifeLens.cancelPhotoAnalysis()
+      try {
+        const credential = await window.lifeLens.createRealtimeSession()
+        const client = new RealtimeClient({
+          onState: setCompanionState,
+          onTranscript: appendTranscript,
+          onExplanation: setExplanation,
+          onCaptureContextRequest: requestScreenContext,
+          onFileSearchRequest: (request, serverCall) => { void controllerRef.current?.run(request, serverCall) },
+          onUserTranscript: (text) => window.lifeLens.noteUserRequest(text).then(() => undefined, () => undefined),
+          onTelegramRecipientSearch: requestTelegramRecipientSearch,
+          onToolProposal: (proposal, serverCall) => { void preparePendingAction(proposal, serverCall) },
+          onError: setError,
+          onSessionEnded: (reason, generation) => {
+            expireServerGeneration(generation)
+            if (reason === 'error') {
+              setCompanionState('error')
+              return
+            }
+            setCompanionState('idle')
+            setPausedNotice(VOICE_PAUSED_NOTICE)
+          },
+          evaluateToolPolicy: (toolName) => window.lifeLens.evaluateToolRequest(toolName)
+        })
+        client.setApprovedRoots(documentRoots)
+        clientRef.current = client
+        setMode(credential.mode)
+        const pendingConnection = client.connect(credential, {
+          greet: credential.mode === 'live' ? !hasConnectedOnceRef.current : true
+        })
+        // If the user collapsed while the credential was being minted, carry
+        // that privacy choice into the session before its initial update.
+        client.setListening(expandedRef.current)
+        await pendingConnection
+        if (!expandedRef.current && collapsedAtRef.current !== undefined) {
+          client.startCollapseDisconnect(collapsedAtRef.current)
+        }
+        if (credential.mode === 'live') {
+          hasConnectedOnceRef.current = true
+        }
+      } catch (connectionError) {
+        clientRef.current?.disconnect()
+        clientRef.current = undefined
+        setCompanionState('error')
+        setError(messageFrom(connectionError))
+        throw connectionError
+      } finally {
+        setIsConnecting(false)
+      }
+    })()
+    connectPromiseRef.current = connection
+    const clearConnection = (): void => {
+      if (connectPromiseRef.current === connection) {
+        connectPromiseRef.current = undefined
+      }
+    }
+    void connection.then(clearConnection, clearConnection)
+    return connection
+  }
+
+  const ensureConnected = async (): Promise<void> => {
+    if (clientRef.current?.isConnected()) {
+      return
+    }
+    await connectVoice()
   }
 
   const openCompanion = (): void => {
     setExpanded(true)
     if (!clientRef.current?.isConnected()) {
-      void connectVoice()
+      void connectVoice().catch(() => undefined)
     }
   }
 
-  const loadCaptureSources = async (callId?: string): Promise<void> => {
+  const loadCaptureSources = async (serverCall?: RealtimeServerCall): Promise<void> => {
     setError(undefined)
-    if (callId !== undefined) {
-      setPendingScreenCaptureCallId(callId)
+    if (serverCall !== undefined) {
+      setPendingScreenCaptureCall(serverCall)
     }
     try {
       const sources = await window.lifeLens.listCaptureSources()
+      if (serverCall && !clientRef.current?.isServerCallActive(serverCall)) {
+        return
+      }
       setCaptureSources(sources)
       setCapturePickerOpen(true)
     } catch (sourceError) {
+      if (serverCall && !clientRef.current?.isServerCallActive(serverCall)) {
+        return
+      }
       setError(messageFrom(sourceError))
     }
   }
 
-  const captureScreen = async (callId?: string, sourceId = selectedCaptureSourceId): Promise<void> => {
-    const client = clientRef.current
-    if (!client) {
-      setCompanionState('error')
-      setError('Connect voice first, then capture the visible screen.')
-      return
-    }
-
+  const captureScreen = async (serverCall?: RealtimeServerCall, sourceId = selectedCaptureSourceId): Promise<void> => {
     setError(undefined)
     setIsCapturing(true)
     setCompanionState('thinking')
     try {
+      await ensureConnected()
+      const client = clientRef.current
+      if (!client) {
+        throw new Error('Connect voice first, then capture the visible screen.')
+      }
       const nextCapture = await window.lifeLens.captureScreen(sourceId)
+      if (serverCall && !client.isServerCallActive(serverCall)) {
+        return
+      }
       setCapture(nextCapture)
       setExplanation(undefined)
       setPendingAction(undefined)
       setToolResult(undefined)
       setSearchResults([])
-      await client.provideScreenContext(nextCapture, callId)
+      await client.provideScreenContext(nextCapture, serverCall)
     } catch (captureError) {
+      if (serverCall && !clientRef.current?.isServerCallActive(serverCall)) {
+        return
+      }
       if (sourceId && isSelectedSourceUnavailable(captureError)) {
         setSelectedCaptureSourceId(undefined)
-        client.invalidateScreenContext()
+        clientRef.current?.invalidateScreenContext()
         setCapture(undefined)
         setExplanation(undefined)
-        setPendingScreenCaptureCallId(callId ?? null)
+        setPendingScreenCaptureCall(serverCall ?? null)
         void loadCaptureSources()
       } else {
         setCompanionState('error')
@@ -220,7 +331,7 @@ export default function LifeLensApp() {
     }
   }
 
-  const requestScreenContext = (callId?: string): void => {
+  const requestScreenContext = (serverCall?: RealtimeServerCall): void => {
     const client = clientRef.current
     if (!client) {
       setError('Connect voice first, then ask Lumi about the visible screen.')
@@ -228,23 +339,22 @@ export default function LifeLensApp() {
     }
 
     if (!selectedCaptureSourceId) {
-      setPendingScreenCaptureCallId(callId ?? null)
+      setPendingScreenCaptureCall(serverCall ?? null)
       void loadCaptureSources()
       return
     }
 
-    void captureScreen(callId)
+    void captureScreen(serverCall)
   }
 
   const askQuestion = async (): Promise<void> => {
-    const client = clientRef.current
-    if (!client) {
-      setError('Connect voice first, then ask Lumi a question.')
-      return
-    }
-
     try {
       setError(undefined)
+      await ensureConnected()
+      const client = clientRef.current
+      if (!client) {
+        throw new Error('Connect voice first, then ask Lumi a question.')
+      }
       try {
         await window.lifeLens.noteUserRequest(question)
       } catch {
@@ -316,7 +426,7 @@ export default function LifeLensApp() {
     controllerRef.current = new FileSearchController({
       begin: (request) => window.lifeLens.beginFileSearch(request),
       chooseFolder: () => chooseDocumentRoot(),
-      completeCall: (callId, result) => clientRef.current?.completeFileSearch(callId, result),
+      completeCall: (serverCall, result) => clientRef.current?.completeFileSearch(serverCall, result),
       applyResults: (results) => applySearchResults(results),
       presentConfirmation: (request) => setSearchConfirmation(request),
       setSearching: (searching) => setIsSearching(searching),
@@ -442,19 +552,31 @@ export default function LifeLensApp() {
     }
   }
 
-  const requestTelegramRecipientSearch = (query: string, callId: string): void => {
+  const requestTelegramRecipientSearch = (query: string, serverCall: RealtimeServerCall): void => {
+    telegramServerCallRef.current = serverCall
     setTelegramQuery(query)
     setError(undefined)
     setIsTelegramWorking(true)
     void window.lifeLens.searchTelegramRecipients(query).then((recipients) => {
+      if (!clientRef.current?.isServerCallActive(serverCall)) {
+        return
+      }
       setTelegramRecipients(recipients)
       setSelectedTelegramRecipientId(undefined)
-      clientRef.current?.completeTelegramRecipientSearch(callId, recipients.length)
+      clientRef.current.completeTelegramRecipientSearch(serverCall, recipients.length)
     }).catch((telegramError) => {
+      if (!clientRef.current?.isServerCallActive(serverCall)) {
+        return
+      }
       const message = messageFrom(telegramError)
       setError(message)
-      clientRef.current?.completeTelegramRecipientSearch(callId, 0)
-    }).finally(() => setIsTelegramWorking(false))
+      clientRef.current.completeTelegramRecipientSearch(serverCall, 0)
+    }).finally(() => {
+      if (telegramServerCallRef.current === serverCall) {
+        telegramServerCallRef.current = undefined
+        setIsTelegramWorking(false)
+      }
+    })
   }
 
   const proposeTelegramMessage = (): void => {
@@ -476,29 +598,42 @@ export default function LifeLensApp() {
     })
   }
 
-  const preparePendingAction = async (proposal: ToolProposal): Promise<void> => {
+  const preparePendingAction = async (proposal: ToolProposal, serverCall?: RealtimeServerCall): Promise<void> => {
     setError(undefined)
     setToolResult(undefined)
     try {
       const action = await window.lifeLens.createPendingAction(proposal)
-      pendingProposalsRef.current.set(action.approvalId, proposal)
+      if (serverCall && !clientRef.current?.isServerCallActive(serverCall)) {
+        await window.lifeLens.cancelPendingAction(action.approvalId)
+        return
+      }
+      pendingProposalsRef.current.set(action.approvalId, { proposal, serverCall })
       setPendingAction(action)
     } catch (pendingError) {
+      if (serverCall && !clientRef.current?.isServerCallActive(serverCall)) {
+        return
+      }
       const message = messageFrom(pendingError)
-      clientRef.current?.sendToolResult(proposal, { ok: false, message })
+      clientRef.current?.sendToolResult(proposal, { ok: false, message }, serverCall)
       setCompanionState('error')
       setError(message)
     }
   }
 
   const confirmPendingAction = async (approvalId: string): Promise<void> => {
-    const proposal = pendingProposalsRef.current.get(approvalId)
+    const pending = pendingProposalsRef.current.get(approvalId)
+    const proposal = pending?.proposal
     setError(undefined)
     setIsConfirming(true)
     try {
       const result = await window.lifeLens.approvePendingAction(approvalId)
+      if (!isPendingProposalCurrent(pending)) {
+        pendingProposalsRef.current.delete(approvalId)
+        setPendingAction((current) => current?.approvalId === approvalId ? undefined : current)
+        return
+      }
       setToolResult(result)
-      if (proposal) clientRef.current?.sendToolResult(proposal, result)
+      if (proposal) clientRef.current?.sendToolResult(proposal, result, pending?.serverCall)
       pendingProposalsRef.current.delete(approvalId)
       setPendingAction((current) => current?.approvalId === approvalId ? undefined : current)
       if (result.searchResults) {
@@ -513,7 +648,12 @@ export default function LifeLensApp() {
       // Main approved exactly one image for this turn; send it through the
       // existing Realtime image path with the user's own question.
       if (result.analysisImage && proposal?.toolName === 'analyze_photo') {
-        await clientRef.current?.analyzeSelectedPhoto(result.analysisImage, proposal.arguments.question ?? '')
+        await ensureConnected()
+        const client = clientRef.current
+        if (!client) {
+          throw new Error('Connect voice before asking Lumi about a photo.')
+        }
+        await client.analyzeSelectedPhoto(result.analysisImage, proposal.arguments.question ?? '')
       }
 
       if (result.ok) {
@@ -524,8 +664,11 @@ export default function LifeLensApp() {
         setCompanionState('error')
       }
     } catch (toolError) {
+      if (!isPendingProposalCurrent(pending)) {
+        return
+      }
       const message = messageFrom(toolError)
-      if (proposal) clientRef.current?.sendToolResult(proposal, { ok: false, message })
+      if (proposal) clientRef.current?.sendToolResult(proposal, { ok: false, message }, pending?.serverCall)
       setCompanionState('error')
       setError(message)
     } finally {
@@ -534,10 +677,11 @@ export default function LifeLensApp() {
   }
 
   const dismissPendingAction = async (approvalId: string): Promise<void> => {
-    const proposal = pendingProposalsRef.current.get(approvalId)
+    const pending = pendingProposalsRef.current.get(approvalId)
+    const proposal = pending?.proposal
     try {
       await window.lifeLens.cancelPendingAction(approvalId)
-      if (proposal) clientRef.current?.declineToolProposal(proposal)
+      if (proposal) clientRef.current?.declineToolProposal(proposal, pending?.serverCall)
       pendingProposalsRef.current.delete(approvalId)
       setPendingAction((current) => current?.approvalId === approvalId ? undefined : current)
       setToolResult({ ok: false, message: 'Cancelled. Nothing was changed, opened, or sent.' })
@@ -553,10 +697,10 @@ export default function LifeLensApp() {
     clientRef.current?.invalidateScreenContext()
     setCapture(undefined)
     setExplanation(undefined)
-    const callId = pendingScreenCaptureCallId ?? undefined
-    setPendingScreenCaptureCallId(undefined)
-    if (pendingScreenCaptureCallId !== undefined) {
-      void captureScreen(callId, source.id)
+    const serverCall = pendingScreenCaptureCall ?? undefined
+    setPendingScreenCaptureCall(undefined)
+    if (pendingScreenCaptureCall !== undefined) {
+      void captureScreen(serverCall, source.id)
     }
   }
 
@@ -590,7 +734,7 @@ export default function LifeLensApp() {
 
           <div className="status-row" aria-live="polite">
             <span className={`status-dot state-${companionState}`} />
-            <span>{STATUS_LABELS[companionState]}</span>
+            <span>{isConnecting ? (hasConnectedOnceRef.current ? 'Reconnecting…' : 'Connecting…') : STATUS_LABELS[companionState]}</span>
             {mode && <span className="mode-badge">{mode === 'live' ? 'Realtime voice' : 'Mock voice'}</span>}
           </div>
 
@@ -605,8 +749,8 @@ export default function LifeLensApp() {
               <div className="section-heading-row">
                 <div><p className="eyebrow">CAPTURE SOURCE</p><h2>Choose once, then capture</h2></div>
                 <button className="text-button" type="button" onClick={() => {
-                  clientRef.current?.declineScreenContext(pendingScreenCaptureCallId ?? undefined)
-                  setPendingScreenCaptureCallId(undefined)
+                  clientRef.current?.declineScreenContext(pendingScreenCaptureCall ?? undefined)
+                  setPendingScreenCaptureCall(undefined)
                   setCapturePickerOpen(false)
                 }}>Close</button>
               </div>
@@ -631,6 +775,7 @@ export default function LifeLensApp() {
           )}
 
           {error && <p className="notice error-notice">{error}</p>}
+          {pausedNotice && <p className="notice">{pausedNotice}</p>}
           {isCapturing && <p className="notice privacy-notice"><strong>Looking at your screen</strong> once to answer this request. Lumi does not save or continuously monitor it.</p>}
           {mode === 'mock' && <p className="notice">Demo mode is active because no API key is configured. It exercises the same capture and confirmation path.</p>}
 
@@ -767,8 +912,8 @@ export default function LifeLensApp() {
           <details className="troubleshooting">
             <summary>More / Troubleshooting</summary>
             <div className="actions">
-              <button className="secondary-button" type="button" onClick={connectVoice} disabled={isConnecting}>
-                {isConnecting ? 'Connecting...' : 'Connect voice'}
+              <button className="secondary-button" type="button" onClick={() => { void connectVoice().catch(() => undefined) }} disabled={isConnecting}>
+                {isConnecting ? (hasConnectedOnceRef.current ? 'Reconnecting…' : 'Connecting…') : 'Connect voice'}
               </button>
               <button className="secondary-button" type="button" onClick={() => requestScreenContext()} disabled={!clientRef.current || isCapturing}>
                 {isCapturing ? 'Looking...' : capture ? 'Refresh screen' : 'Capture screen'}

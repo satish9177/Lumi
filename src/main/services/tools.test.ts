@@ -174,10 +174,10 @@ describe('executeConfirmedTool', () => {
       name: 'beach.jpg',
       mimeType: 'image/jpeg'
     })
-    // Downscaled and capped exactly like a screen capture.
+    // Photo analysis is downscaled before using the bounded JPEG ladder.
     const bytes = Buffer.from(result.analysisImage!.dataUrl.split(',')[1] ?? '', 'base64').byteLength
     expect(bytes).toBeLessThanOrEqual(MAX_CAPTURE_BYTES)
-    expect(result.analysisImage!.width).toBeLessThanOrEqual(1_600)
+    expect(result.analysisImage!.width).toBeLessThanOrEqual(1_024)
     expect(JSON.stringify({ ...result, analysisImage: { ...result.analysisImage, dataUrl: '' } })).not.toContain(workspace.root)
   })
 

@@ -14,7 +14,9 @@ import {
   type SearchConfirmationRequest,
   type TerminalCallResult
 } from './file-search-controller'
-import { RealtimeClient } from './realtime'
+import { RealtimeClient, type RealtimeServerCall } from './realtime'
+
+const SERVER_CALL: RealtimeServerCall = { callId: 'call-1', generation: 1 }
 
 function createResults(overrides: Partial<FileSearchResults> = {}): FileSearchResults {
   return {
@@ -42,6 +44,7 @@ interface ControllerHarness {
   confirmations: Array<SearchConfirmationRequest | undefined>
   applied: FileSearchResults[]
   errors: Array<string | undefined>
+  searchings: boolean[]
   chooseFolder: ReturnType<typeof vi.fn>
   listenings: number
 }
@@ -52,16 +55,17 @@ function createControllerHarness(begin: (request: FileSearchRequest) => Promise<
   const confirmations: Array<SearchConfirmationRequest | undefined> = []
   const applied: FileSearchResults[] = []
   const errors: Array<string | undefined> = []
+  const searchings: boolean[] = []
   const chooseFolder = vi.fn(async () => undefined)
   let listenings = 0
 
   const callbacks: FileSearchControllerCallbacks = {
     begin: (request) => { begins.push(request); return begin(request) },
     chooseFolder,
-    completeCall: (callId, result) => { completions.push({ callId, result }) },
+    completeCall: (serverCall, result) => { completions.push({ callId: serverCall?.callId, result }) },
     applyResults: (results) => { applied.push(results) },
     presentConfirmation: (request) => { confirmations.push(request) },
-    setSearching: () => undefined,
+    setSearching: (searching) => { searchings.push(searching) },
     setError: (message) => { errors.push(message) },
     setListening: () => { listenings += 1 }
   }
@@ -73,6 +77,7 @@ function createControllerHarness(begin: (request: FileSearchRequest) => Promise<
     confirmations,
     applied,
     errors,
+    searchings,
     chooseFolder,
     get listenings() { return listenings }
   }
@@ -82,7 +87,7 @@ describe('FileSearchController routing', () => {
   it('completes a ready search and answers the call once', async () => {
     const harness = createControllerHarness(async () => ({ status: 'completed', ...createResults() }))
 
-    await harness.controller.run({ queryTerms: 'resume' }, 'call-1', 'model')
+    await harness.controller.run({ queryTerms: 'resume' }, SERVER_CALL, 'model')
 
     expect(harness.applied).toHaveLength(1)
     expect(harness.completions).toEqual([
@@ -90,12 +95,13 @@ describe('FileSearchController routing', () => {
     ])
     expect(harness.chooseFolder).not.toHaveBeenCalled()
     expect(harness.confirmations).toEqual([])
+    expect(harness.searchings).toEqual([true, false])
   })
 
   it('opens the folder chooser without answering the held call when a folder is missing', async () => {
     const harness = createControllerHarness(async () => ({ status: 'awaiting_folder', pendingId: 'pending-1' }))
 
-    await harness.controller.run({ queryTerms: 'resume' }, 'call-1', 'model')
+    await harness.controller.run({ queryTerms: 'resume' }, SERVER_CALL, 'model')
 
     expect(harness.chooseFolder).toHaveBeenCalledTimes(1)
     // The original call stays open until the resume delivers its one result.
@@ -106,9 +112,9 @@ describe('FileSearchController routing', () => {
   it('routes a fail-closed search to its own confirmation, never a pending action', async () => {
     const harness = createControllerHarness(async () => ({ status: 'needs_confirmation', input: { queryTerms: 'resume' } }))
 
-    await harness.controller.run({ queryTerms: 'resume' }, 'call-1', 'model')
+    await harness.controller.run({ queryTerms: 'resume' }, SERVER_CALL, 'model')
 
-    expect(harness.confirmations).toEqual([{ input: { queryTerms: 'resume' }, callId: 'call-1' }])
+    expect(harness.confirmations).toEqual([{ input: { queryTerms: 'resume' }, serverCall: SERVER_CALL }])
     expect(harness.chooseFolder).not.toHaveBeenCalled()
     // The call is held for the confirmation; nothing is answered yet.
     expect(harness.completions).toEqual([])
@@ -121,11 +127,11 @@ describe('FileSearchController routing', () => {
         ? { status: 'completed', ...createResults() }
         : { status: 'needs_confirmation', input: { queryTerms: 'resume' } })
 
-    await harness.controller.confirm({ input: { queryTerms: 'resume' }, callId: 'call-1' })
+    await harness.controller.confirm({ input: { queryTerms: 'resume' }, serverCall: SERVER_CALL })
 
     // Clears the card, then re-enters begin as an explicit user request.
     expect(harness.confirmations).toEqual([undefined])
-    expect(harness.begins).toEqual([{ queryTerms: 'resume', callId: 'call-1', origin: 'user' }])
+    expect(harness.begins).toEqual([{ queryTerms: 'resume', callId: '1:call-1', origin: 'user' }])
     expect(harness.completions).toEqual([
       { callId: 'call-1', result: expect.objectContaining({ ok: true }) }
     ])
@@ -134,7 +140,7 @@ describe('FileSearchController routing', () => {
   it('declines by answering the held call exactly once', async () => {
     const harness = createControllerHarness(async () => ({ status: 'completed', ...createResults() }))
 
-    harness.controller.decline({ input: { queryTerms: 'resume' }, callId: 'call-1' })
+    harness.controller.decline({ input: { queryTerms: 'resume' }, serverCall: SERVER_CALL })
 
     expect(harness.confirmations).toEqual([undefined])
     expect(harness.begins).toEqual([])
@@ -146,7 +152,7 @@ describe('FileSearchController routing', () => {
   it('answers and surfaces the message for a failed search', async () => {
     const harness = createControllerHarness(async () => ({ status: 'failed', message: 'That search request is not valid.' }))
 
-    await harness.controller.run({ queryTerms: '   ' }, 'call-1', 'model')
+    await harness.controller.run({ queryTerms: '   ' }, SERVER_CALL, 'model')
 
     expect(harness.completions).toEqual([
       { callId: 'call-1', result: { ok: false, message: 'That search request is not valid.' } }
@@ -154,15 +160,70 @@ describe('FileSearchController routing', () => {
     expect(harness.errors).toContain('That search request is not valid.')
   })
 
-  it('answers the resumed call once the main process reports completion', () => {
+  it('answers the resumed call once the main process reports completion', async () => {
     const harness = createControllerHarness(async () => ({ status: 'awaiting_folder', pendingId: 'pending-1' }))
 
-    harness.controller.resolve({ status: 'completed', callId: 'call-1', ...createResults() })
+    await harness.controller.run({ queryTerms: 'resume' }, SERVER_CALL, 'model')
+    harness.controller.resolve({ status: 'completed', callId: '1:call-1', ...createResults() })
 
     expect(harness.applied).toHaveLength(1)
     expect(harness.completions).toEqual([
       { callId: 'call-1', result: expect.objectContaining({ ok: true, resultIds: ['result-1'] }) }
     ])
+  })
+
+  it('keeps same-ID search resumes isolated by session generation', async () => {
+    const harness = createControllerHarness(async () => ({ status: 'awaiting_folder', pendingId: 'pending-1' }))
+    const nextGenerationCall = { callId: 'call-1', generation: 2 }
+
+    await harness.controller.run({ queryTerms: 'old resume' }, SERVER_CALL, 'model')
+    await harness.controller.run({ queryTerms: 'new resume' }, nextGenerationCall, 'model')
+    harness.controller.expireGeneration(1)
+    harness.controller.resolve({ status: 'completed', callId: '1:call-1', ...createResults() })
+    harness.controller.resolve({ status: 'completed', callId: '2:call-1', ...createResults() })
+
+    expect(harness.completions).toEqual([
+      { callId: 'call-1', result: expect.objectContaining({ ok: true }) }
+    ])
+    expect(harness.begins.map((request) => request.callId)).toEqual(['1:call-1', '2:call-1'])
+  })
+
+  it('clears only the expired in-flight generation search loading state', async () => {
+    let resolveBegin: ((outcome: FileSearchOutcome) => void) | undefined
+    const harness = createControllerHarness(() => new Promise((resolve) => { resolveBegin = resolve }))
+
+    const run = harness.controller.run({ queryTerms: 'old resume' }, SERVER_CALL, 'model')
+    expect(harness.searchings).toEqual([true])
+
+    expect(harness.controller.expireGeneration(1)).toBe(true)
+    expect(harness.searchings).toEqual([true, false])
+
+    resolveBegin?.({ status: 'completed', ...createResults() })
+    await run
+
+    expect(harness.searchings).toEqual([true, false])
+    expect(harness.applied).toEqual([])
+    expect(harness.completions).toEqual([])
+  })
+
+  it('does not let an older stale request clear a newer local search', async () => {
+    const resolvers: Array<(outcome: FileSearchOutcome) => void> = []
+    const harness = createControllerHarness(() => new Promise((resolve) => { resolvers.push(resolve) }))
+
+    const oldRun = harness.controller.run({ queryTerms: 'old resume' }, SERVER_CALL, 'model')
+    harness.controller.expireGeneration(1)
+    const localRun = harness.controller.run({ queryTerms: 'local resume' }, undefined, 'user')
+    expect(harness.searchings).toEqual([true, false, true])
+
+    resolvers[0]?.({ status: 'completed', ...createResults() })
+    await oldRun
+    expect(harness.searchings).toEqual([true, false, true])
+    expect(harness.applied).toEqual([])
+
+    resolvers[1]?.({ status: 'completed', ...createResults() })
+    await localRun
+    expect(harness.searchings).toEqual([true, false, true, false])
+    expect(harness.applied).toHaveLength(1)
   })
 })
 
@@ -180,10 +241,12 @@ function injectDataChannel(client: RealtimeClient, events: Array<Record<string, 
     send: (value: string) => { events.push(JSON.parse(value) as Record<string, unknown>) }
   } as unknown as Pick<RTCDataChannel, 'readyState' | 'send'>
   ;(client as unknown as { mode: 'live' | 'mock' }).mode = 'live'
+  ;(client as unknown as { activeGeneration: number }).activeGeneration = 1
+  ;(client as unknown as { dataChannelGeneration: number }).dataChannelGeneration = 1
 }
 
 function callHandleServerEvent(client: RealtimeClient, event: unknown): void {
-  ;(client as unknown as { handleServerEvent: (serializedEvent: unknown) => void }).handleServerEvent.call(client, event)
+  ;(client as unknown as { handleServerEvent: (serializedEvent: unknown, generation: number) => void }).handleServerEvent.call(client, event, 1)
 }
 
 function functionCallOutputs(events: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
@@ -336,7 +399,10 @@ describe('folderless voice search regression', () => {
 
     // Fail-closed: a confirmation is presented, the call is still held, and no
     // folder chooser or pending action ran.
-    expect(harness.confirmation()).toEqual({ input: { queryTerms: 'resume', kind: 'any', recency: 'latest' }, callId: 'call-voice-1' })
+    expect(harness.confirmation()).toEqual({
+      input: { queryTerms: 'resume', kind: 'any', recency: 'latest' },
+      serverCall: { callId: 'call-voice-1', generation: 1 }
+    })
     expect(harness.chooseFolderCount()).toBe(0)
     expect(harness.createPendingAction).not.toHaveBeenCalled()
     expect(functionCallOutputs(harness.events)).toEqual([])

@@ -97,9 +97,9 @@ export async function executeConfirmedTool(store: LocalStore, rawProposal: unkno
 
       let encoded: { dataUrl: string; width: number; height: number }
       try {
-        // The same bounded ladder used for screen captures: the original
-        // full-resolution file is never uploaded.
-        encoded = encodeCaptureImage(image)
+        // Photo analysis tolerates a smaller input than on-screen text. The
+        // original full-resolution file is never uploaded.
+        encoded = encodeCaptureImage(image, { maxWidth: 1024 })
       } catch {
         return { ok: false, message: 'That photo is too large to share safely. Try a smaller image.' }
       }

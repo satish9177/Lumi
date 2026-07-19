@@ -1,12 +1,28 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { CaptureResult, Explanation, SearchDocumentsInput, ToolProposal } from '../../shared/contracts'
 import { IntentTracker } from '../../main/services/intent-policy'
 import { normalizeSearchQuery } from '../../shared/search-query'
-import { RealtimeClient } from './realtime'
+import {
+  COLLAPSE_DISCONNECT_MS,
+  IDLE_DISCONNECT_MS,
+  LAPTOP_MIC_CONSTRAINTS,
+  MAX_PENDING_WORK_EXTENSION_MS,
+  RealtimeClient,
+  type RealtimeServerCall
+} from './realtime'
 
 const originalWindow = globalThis.window
+const testClients: RealtimeClient[] = []
 
 afterEach(() => {
+  if (!globalThis.window) {
+    installTimerWindow()
+  }
+  for (const client of testClients.splice(0)) {
+    client.disconnect()
+  }
+  vi.useRealTimers()
+  vi.restoreAllMocks()
   globalThis.window = originalWindow
 })
 
@@ -18,7 +34,7 @@ type Callbacks = ConstructorParameters<typeof RealtimeClient>[0]
 
 /** Every callback a test does not care about is a no-op. */
 function createClient(overrides: Partial<Callbacks> = {}): RealtimeClient {
-  return new RealtimeClient({
+  const client = new RealtimeClient({
     onState: () => undefined,
     onTranscript: () => undefined,
     onExplanation: () => undefined,
@@ -28,6 +44,8 @@ function createClient(overrides: Partial<Callbacks> = {}): RealtimeClient {
     onError: () => undefined,
     ...overrides
   })
+  testClients.push(client)
+  return client
 }
 
 function injectDataChannel(client: RealtimeClient, events: Array<Record<string, unknown>>): void {
@@ -38,13 +56,53 @@ function injectDataChannel(client: RealtimeClient, events: Array<Record<string, 
   } as unknown as Pick<RTCDataChannel, 'readyState' | 'send'>
 }
 
+function installTimerWindow(): void {
+  globalThis.window = { setTimeout, clearTimeout, speechSynthesis: undefined } as unknown as Window & typeof globalThis
+}
+
 function setLiveMode(client: RealtimeClient): void {
-  ;(client as unknown as { mode: 'live' | 'mock' }).mode = 'live'
+  if (!globalThis.window || typeof globalThis.window.setTimeout !== 'function') {
+    installTimerWindow()
+  }
+  const internals = client as unknown as {
+    mode: 'live' | 'mock'
+    activeGeneration?: number
+    dataChannelGeneration?: number
+  }
+  internals.mode = 'live'
+  internals.activeGeneration ??= 1
+  internals.dataChannelGeneration ??= internals.activeGeneration
 }
 
 function callHandleServerEvent(client: RealtimeClient, event: unknown): void {
-  const handleServerEvent = (client as unknown as { handleServerEvent: (serializedEvent: unknown) => void }).handleServerEvent
-  handleServerEvent.call(client, event)
+  if (!(client as unknown as { dataChannel?: RTCDataChannel }).dataChannel) {
+    injectDataChannel(client, [])
+  }
+  setLiveMode(client)
+  const generation = (client as unknown as { activeGeneration: number }).activeGeneration
+  const handleServerEvent = (client as unknown as { handleServerEvent: (serializedEvent: unknown, generation: number) => void }).handleServerEvent
+  handleServerEvent.call(client, event, generation)
+}
+
+function registerServerCall(client: RealtimeClient, callId: string): RealtimeServerCall {
+  setLiveMode(client)
+  const generation = (client as unknown as { activeGeneration: number }).activeGeneration
+  const serverCall = { callId, generation }
+  ;(client as unknown as { pendingCallGenerations: Map<string, number> }).pendingCallGenerations.set(callId, generation)
+  return serverCall
+}
+
+function activateGeneration(client: RealtimeClient, generation: number): void {
+  const internals = client as unknown as {
+    mode: 'live' | 'mock'
+    connected: boolean
+    activeGeneration: number
+    dataChannelGeneration: number
+  }
+  internals.mode = 'live'
+  internals.connected = true
+  internals.activeGeneration = generation
+  internals.dataChannelGeneration = generation
 }
 
 function functionCallOutputs(events: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
@@ -80,7 +138,7 @@ describe('RealtimeClient server events', () => {
     const captureCalls: Array<string | undefined> = []
     const proposals: ToolProposal[] = []
     const client = createClient({
-      onCaptureContextRequest: (callId) => { captureCalls.push(callId) },
+      onCaptureContextRequest: (serverCall) => { captureCalls.push(serverCall?.callId) },
       onToolProposal: (proposal) => { proposals.push(proposal) }
     })
     const event = toolCallEvent('capture_screen_context', 'capture-call-1', '{}')
@@ -95,7 +153,7 @@ describe('RealtimeClient server events', () => {
   it('routes Telegram recipient lookup locally without exposing any recipient metadata', () => {
     const searches: Array<{ query: string; callId: string }> = []
     const client = createClient({
-      onTelegramRecipientSearch: (query, callId) => { searches.push({ query, callId }) }
+      onTelegramRecipientSearch: (query, serverCall) => { searches.push({ query, callId: serverCall.callId }) }
     })
 
     callHandleServerEvent(client, toolCallEvent('telegram_search_recipients', 'telegram-search-1', { query: 'Ravi' }))
@@ -114,17 +172,197 @@ describe('RealtimeClient server events', () => {
     expect(events).toHaveLength(1)
     expect(events[0]).toMatchObject({
       type: 'session.update',
-      session: { type: 'realtime', tool_choice: 'auto' }
+      session: { type: 'realtime', tool_choice: 'auto', max_output_tokens: 1024 }
     })
     const session = events[0]?.session as Record<string, unknown>
     expect(session.model).toBeUndefined()
     expect(session.reasoning).toBeUndefined()
     // Completed input transcription is what feeds the trusted intent tracker.
-    expect(session.audio).toMatchObject({ input: { transcription: { model: expect.any(String) } } })
+    expect(session.audio).toMatchObject({
+      input: {
+        noise_reduction: { type: 'far_field' },
+        transcription: { model: 'gpt-4o-mini-transcribe' },
+        turn_detection: {
+          type: 'server_vad',
+          threshold: 0.7,
+          prefix_padding_ms: 300,
+          silence_duration_ms: 650,
+          create_response: true,
+          interrupt_response: true
+        }
+      }
+    })
 
     callHandleServerEvent(client, JSON.stringify({ type: 'session.updated' }))
 
-    expect(events[1]).toMatchObject({ type: 'response.create', response: { output_modalities: ['audio'] } })
+    expect(events[1]).toMatchObject({
+      type: 'response.create',
+      response: { output_modalities: ['audio'], max_output_tokens: 192 }
+    })
+  })
+
+  it('does not repeat the greeting when a reconnect opts out', () => {
+    const events: Array<Record<string, unknown>> = []
+    const client = createClient()
+    injectDataChannel(client, events)
+    ;(client as unknown as { greetAfterInitialSessionUpdate: boolean }).greetAfterInitialSessionUpdate = false
+    const configureLiveSession = (client as unknown as { configureLiveSession: () => void }).configureLiveSession
+
+    configureLiveSession.call(client)
+    callHandleServerEvent(client, JSON.stringify({ type: 'session.updated' }))
+
+    expect(events.filter((event) => event.type === 'response.create')).toEqual([])
+  })
+
+  it('skips the initial greeting when an input turn has already started', () => {
+    const events: Array<Record<string, unknown>> = []
+    const client = createClient()
+    injectDataChannel(client, events)
+    const configureLiveSession = (client as unknown as { configureLiveSession: () => void }).configureLiveSession
+
+    configureLiveSession.call(client)
+    callHandleServerEvent(client, JSON.stringify({ type: 'input_audio_buffer.speech_started' }))
+    callHandleServerEvent(client, JSON.stringify({ type: 'session.updated' }))
+
+    expect(events.filter((event) => event.type === 'response.create')).toEqual([])
+  })
+
+  it('deduplicates unchanged instructions and sends only instructions after the initial update', () => {
+    const events: Array<Record<string, unknown>> = []
+    const client = createClient()
+    injectDataChannel(client, events)
+    setLiveMode(client)
+    const configureLiveSession = (client as unknown as { configureLiveSession: () => void }).configureLiveSession
+
+    configureLiveSession.call(client)
+    const roots = [{ id: 'root-1', label: 'Documents' }]
+    client.setApprovedRoots(roots)
+    client.setApprovedRoots(roots)
+
+    const updates = events.filter((event) => event.type === 'session.update')
+    expect(updates).toHaveLength(2)
+    const incremental = updates[1]?.session as Record<string, unknown>
+    expect(incremental.instructions).toEqual(expect.any(String))
+    expect(incremental.tools).toBeUndefined()
+    expect(incremental.audio).toBeUndefined()
+  })
+
+  it('uses a long-form ceiling for detailed typed requests', async () => {
+    const events: Array<Record<string, unknown>> = []
+    const client = createClient()
+    injectDataChannel(client, events)
+    setLiveMode(client)
+    ;(client as unknown as { connected: boolean }).connected = true
+
+    await client.sendUserRequest('Explain this page in detail')
+
+    expect(events.at(-1)).toMatchObject({
+      type: 'response.create',
+      response: { output_modalities: ['audio'], max_output_tokens: 2048 }
+    })
+  })
+
+  it('uses the normal ceiling for a simple typed request', async () => {
+    const events: Array<Record<string, unknown>> = []
+    const client = createClient()
+    injectDataChannel(client, events)
+    setLiveMode(client)
+    ;(client as unknown as { connected: boolean }).connected = true
+
+    await client.sendUserRequest('What time is it?')
+
+    expect(events.at(-1)).toMatchObject({
+      type: 'response.create',
+      response: { output_modalities: ['audio'], max_output_tokens: 512 }
+    })
+  })
+
+  it('marks screen captures as auto detail and uses the long-form ceiling', async () => {
+    const events: Array<Record<string, unknown>> = []
+    const client = createClient()
+    injectDataChannel(client, events)
+    setLiveMode(client)
+    ;(client as unknown as { connected: boolean }).connected = true
+    const capture: CaptureResult = {
+      id: 'capture-budget',
+      sourceId: 'screen:1:0',
+      sourceKind: 'screen',
+      label: 'Primary screen',
+      dataUrl: 'data:image/jpeg;base64,AA==',
+      mimeType: 'image/jpeg',
+      width: 1_600,
+      height: 900,
+      capturedAt: '2026-07-19T09:00:00.000Z'
+    }
+
+    await client.sendCapture(capture, 'Summarize this page')
+
+    expect(JSON.stringify(events)).toContain('"detail":"auto"')
+    expect(events.at(-1)).toMatchObject({
+      type: 'response.create',
+      response: { max_output_tokens: 2048 }
+    })
+  })
+
+  it('uses the search-results ceiling after a file-search function-call output', () => {
+    const events: Array<Record<string, unknown>> = []
+    const client = createClient()
+    injectDataChannel(client, events)
+    setLiveMode(client)
+
+    client.completeFileSearch(registerServerCall(client, 'search-budget'), {
+      ok: true,
+      message: 'Found one file.',
+      compactResults: [{ ordinal: 1, name: 'Resume.pdf', modifiedAgo: 'today' }],
+      resultCount: 1
+    })
+
+    expect(events.at(-1)).toMatchObject({
+      type: 'response.create',
+      response: { output_modalities: ['audio'], max_output_tokens: 512 }
+    })
+  })
+
+  it('bounds search narration to three safe filenames while preserving the full UI result count', () => {
+    const events: Array<Record<string, unknown>> = []
+    const client = createClient()
+    injectDataChannel(client, events)
+    setLiveMode(client)
+    const veryLongName = 'Quarterly_Implementation_Status_and_Architecture_Review_for_Realtime_Cost_Reduction_Phase_A_Final_Draft.pdf'
+
+    client.completeFileSearch(registerServerCall(client, 'search-narration'), {
+      ok: true,
+      message: 'Found 4 matching files.',
+      compactResults: [
+        { ordinal: 1, name: 'Resume.pdf', modifiedAgo: 'today' },
+        { ordinal: 2, name: veryLongName, modifiedAgo: 'yesterday' },
+        { ordinal: 3, name: 'Portfolio.pdf', modifiedAgo: '2 days ago' },
+        { ordinal: 4, name: 'Certificate.pdf', modifiedAgo: '3 days ago' }
+      ],
+      resultCount: 4
+    })
+
+    const output = functionCallOutputs(events)[0]!
+    const results = output.results as Array<{ ordinal: number; name: string }>
+    expect(results).toHaveLength(3)
+    expect(results.map((entry) => entry.ordinal)).toEqual([1, 2, 3])
+    expect(results[1]?.name).toMatch(/…$/)
+    expect(results[1]?.name).not.toContain('Final_Draft')
+    expect(output.message).toContain('4 total results')
+    expect(output.message).toContain('complete list is visible in the UI')
+    expect(output.message).toContain('Would you like to hear more results?')
+    expect(events.at(-1)).toMatchObject({
+      response: {
+        max_output_tokens: 512,
+        instructions: expect.stringContaining('Speak exactly this short search summary')
+      }
+    })
+  })
+
+  it('keeps laptop microphone echo cancellation, noise suppression, and gain control enabled', () => {
+    expect(LAPTOP_MIC_CONSTRAINTS).toEqual({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    })
   })
 
   it('keeps volatile capture timestamps out of the long-lived session instructions', () => {
@@ -186,7 +424,7 @@ describe('RealtimeClient server events', () => {
     const captureRequests: Array<string | undefined> = []
     const events: Array<Record<string, unknown>> = []
     const client = createClient({
-      onCaptureContextRequest: (callId) => { captureRequests.push(callId) },
+      onCaptureContextRequest: (serverCall) => { captureRequests.push(serverCall?.callId) },
       evaluateToolPolicy: async () => ({
         allowed: false,
         code: 'use_search_documents',
@@ -208,7 +446,7 @@ describe('RealtimeClient server events', () => {
   it('allows capture_screen_context when the trusted policy approves it', async () => {
     const captureRequests: Array<string | undefined> = []
     const client = createClient({
-      onCaptureContextRequest: (callId) => { captureRequests.push(callId) },
+      onCaptureContextRequest: (serverCall) => { captureRequests.push(serverCall?.callId) },
       evaluateToolPolicy: async () => ({ allowed: true })
     })
 
@@ -224,7 +462,7 @@ describe('RealtimeClient stored-file search', () => {
     const requests: Array<{ request: SearchDocumentsInput; callId?: string }> = []
     const proposals: ToolProposal[] = []
     const client = createClient({
-      onFileSearchRequest: (request, callId) => { requests.push({ request, callId }) },
+      onFileSearchRequest: (request, serverCall) => { requests.push({ request, callId: serverCall?.callId }) },
       onToolProposal: (proposal) => { proposals.push(proposal) }
     })
 
@@ -263,13 +501,14 @@ describe('RealtimeClient stored-file search', () => {
     injectDataChannel(client, events)
     setLiveMode(client)
 
-    client.completeFileSearch('search-1', {
+    const serverCall = registerServerCall(client, 'search-1')
+    client.completeFileSearch(serverCall, {
       ok: true,
       message: 'Found 1 matching file.',
       compactResults: [{ ordinal: 1, name: 'Resume_2026.pdf', modifiedAgo: '3 days ago' }],
       resultIds: ['result-1']
     })
-    client.completeFileSearch('search-1', { ok: false, message: 'A duplicate result.' })
+    client.completeFileSearch(serverCall, { ok: false, message: 'A duplicate result.' })
 
     expect(functionCallOutputs(events)).toEqual([
       expect.objectContaining({ ok: true, results: [{ ordinal: 1, name: 'Resume_2026.pdf', modifiedAgo: '3 days ago' }] })
@@ -282,7 +521,7 @@ describe('RealtimeClient stored-file search', () => {
     injectDataChannel(client, events)
     setLiveMode(client)
 
-    client.completeFileSearch('search-1', {
+    client.completeFileSearch(registerServerCall(client, 'search-1'), {
       ok: true,
       message: 'Found 1 matching file.',
       compactResults: [{ ordinal: 1, name: 'Resume_2026.pdf', modifiedAgo: '3 days ago' }],
@@ -328,7 +567,7 @@ describe('RealtimeClient stored-file search', () => {
     const captureRequests: Array<string | undefined> = []
     const requests: SearchDocumentsInput[] = []
     const client = createClient({
-      onCaptureContextRequest: (callId) => { captureRequests.push(callId) },
+      onCaptureContextRequest: (serverCall) => { captureRequests.push(serverCall?.callId) },
       onFileSearchRequest: (request) => { requests.push(request) }
     })
     client.setApprovedRoots([{ id: 'root-1', label: 'Documents' }])
@@ -345,7 +584,7 @@ describe('RealtimeClient stored-file search', () => {
     const captureRequests: Array<string | undefined> = []
     const requests: SearchDocumentsInput[] = []
     const client = createClient({
-      onCaptureContextRequest: (callId) => { captureRequests.push(callId) },
+      onCaptureContextRequest: (serverCall) => { captureRequests.push(serverCall?.callId) },
       onFileSearchRequest: (request) => { requests.push(request) }
     })
 
@@ -361,7 +600,7 @@ describe('RealtimeClient stored-file search', () => {
     const captureRequests: Array<string | undefined> = []
     const requests: SearchDocumentsInput[] = []
     const client = createClient({
-      onCaptureContextRequest: (callId) => { captureRequests.push(callId) },
+      onCaptureContextRequest: (serverCall) => { captureRequests.push(serverCall?.callId) },
       onFileSearchRequest: (request) => { requests.push(request) }
     })
 
@@ -375,7 +614,7 @@ describe('RealtimeClient stored-file search', () => {
   it('passes a photo search through with its kind and recency intact', async () => {
     const requests: Array<{ request: SearchDocumentsInput; callId?: string }> = []
     const client = createClient({
-      onFileSearchRequest: (request, callId) => { requests.push({ request, callId }) }
+      onFileSearchRequest: (request, serverCall) => { requests.push({ request, callId: serverCall?.callId }) }
     })
 
     callHandleServerEvent(client, toolCallEvent('search_documents', 'search-photo-1', {
@@ -396,7 +635,7 @@ describe('RealtimeClient stored-file search', () => {
     const transcripts: string[] = []
     const client = createClient({
       onTranscript: (text) => { transcripts.push(text) },
-      onCaptureContextRequest: (callId) => { captureRequests.push(callId) }
+      onCaptureContextRequest: (serverCall) => { captureRequests.push(serverCall?.callId) }
     })
 
     await client.connect({ mode: 'mock', model: 'gpt-realtime-2.1' })
@@ -409,7 +648,7 @@ describe('RealtimeClient stored-file search', () => {
   it('uses mock screen context for follow-up questions instead of requesting another capture', async () => {
     globalThis.window = { setTimeout } as unknown as Window & typeof globalThis
     const captureRequests: Array<string | undefined> = []
-    const client = createClient({ onCaptureContextRequest: (callId) => { captureRequests.push(callId) } })
+    const client = createClient({ onCaptureContextRequest: (serverCall) => { captureRequests.push(serverCall?.callId) } })
     const capture: CaptureResult = {
       id: 'capture-2',
       sourceId: 'screen:1:0',
@@ -463,10 +702,13 @@ describe('RealtimeClient selected-photo analysis', () => {
     await client.analyzeSelectedPhoto(approvedImage, 'Who is in this photo?')
 
     const images = imageContents(events)
-    expect(images).toEqual([{ type: 'input_image', image_url: approvedImage.dataUrl }])
+    expect(images).toEqual([{ type: 'input_image', image_url: approvedImage.dataUrl, detail: 'low' }])
     expect(JSON.stringify(events)).toContain('Who is in this photo?')
     expect(client.hasSelectedPhoto()).toBe(true)
-    expect(events.at(-1)).toMatchObject({ type: 'response.create' })
+    expect(events.at(-1)).toMatchObject({
+      type: 'response.create',
+      response: { max_output_tokens: 2048 }
+    })
   })
 
   it('answers follow-up questions without uploading the image again', async () => {
@@ -493,8 +735,6 @@ describe('RealtimeClient selected-photo analysis', () => {
   it('clears the selected photo explicitly and on disconnect', async () => {
     const events: Array<Record<string, unknown>> = []
     const client = connectedClient(events)
-    globalThis.window = { speechSynthesis: undefined } as unknown as Window & typeof globalThis
-
     await client.analyzeSelectedPhoto(approvedImage, 'What is this?')
     client.clearSelectedPhoto()
     expect(client.hasSelectedPhoto()).toBe(false)
@@ -534,7 +774,7 @@ describe('RealtimeClient selected-photo analysis', () => {
     const events: Array<Record<string, unknown>> = []
     const client = connectedClient(events)
 
-    client.completeFileSearch('search-photos-1', {
+    client.completeFileSearch(registerServerCall(client, 'search-photos-1'), {
       ok: true,
       message: 'Found 2 matching files.',
       compactResults: [
@@ -584,7 +824,7 @@ describe('RealtimeClient voice intent plumbing', () => {
     const events: Array<Record<string, unknown>> = []
     const client = createClient({
       onUserTranscript: async (text) => { tracker.noteUserRequest(text) },
-      onCaptureContextRequest: (callId) => { captureRequests.push(callId) },
+      onCaptureContextRequest: (serverCall) => { captureRequests.push(serverCall?.callId) },
       // The renderer delegates to the same trusted main-process policy.
       evaluateToolPolicy: async (toolName) => tracker.evaluateToolRequest(toolName, true)
     })
@@ -620,6 +860,350 @@ describe('RealtimeClient voice intent plumbing', () => {
   })
 })
 
+describe('RealtimeClient session generations', () => {
+  it('rejects an old tool result after manual reconnect and accepts the current call with the same ID', () => {
+    const firstEvents: Array<Record<string, unknown>> = []
+    const secondEvents: Array<Record<string, unknown>> = []
+    const proposals: Array<{ proposal: ToolProposal; serverCall: RealtimeServerCall }> = []
+    const client = createClient({
+      onToolProposal: (proposal, serverCall) => {
+        if (serverCall) proposals.push({ proposal, serverCall })
+      }
+    })
+    injectDataChannel(client, firstEvents)
+    activateGeneration(client, 1)
+    callHandleServerEvent(client, toolCallEvent('open_url', 'same-call', { url: 'https://old.example', reason: 'Open old.' }))
+    const old = proposals[0]!
+
+    client.disconnect()
+    injectDataChannel(client, secondEvents)
+    activateGeneration(client, 2)
+    callHandleServerEvent(client, toolCallEvent('open_url', 'same-call', { url: 'https://new.example', reason: 'Open new.' }))
+    const current = proposals[1]!
+
+    client.sendToolResult(old.proposal, { ok: true, message: 'Old result.' }, old.serverCall)
+    expect(secondEvents).toEqual([])
+    client.sendToolResult(current.proposal, { ok: true, message: 'Current result.' }, current.serverCall)
+    expect(functionCallOutputs(secondEvents)).toEqual([expect.objectContaining({ message: 'Current result.' })])
+  })
+
+  it('silently drops an async search completion from the previous generation', async () => {
+    const firstEvents: Array<Record<string, unknown>> = []
+    const secondEvents: Array<Record<string, unknown>> = []
+    let oldCall: RealtimeServerCall | undefined
+    const client = createClient({ onFileSearchRequest: (_request, serverCall) => { oldCall = serverCall } })
+    injectDataChannel(client, firstEvents)
+    activateGeneration(client, 1)
+    callHandleServerEvent(client, toolCallEvent('search_documents', 'old-search', {
+      query_terms: 'resume', reason: 'Find it.'
+    }))
+    await flushAsyncWork()
+    expect(oldCall).toBeDefined()
+
+    client.disconnect()
+    injectDataChannel(client, secondEvents)
+    activateGeneration(client, 2)
+    client.completeFileSearch(oldCall, { ok: true, message: 'Late old result.' })
+
+    expect(secondEvents).toEqual([])
+  })
+
+  it('silently drops a captured image selected for the previous generation', async () => {
+    const firstEvents: Array<Record<string, unknown>> = []
+    const secondEvents: Array<Record<string, unknown>> = []
+    const client = createClient()
+    injectDataChannel(client, firstEvents)
+    activateGeneration(client, 1)
+    const oldCall = registerServerCall(client, 'old-capture')
+    client.disconnect()
+    injectDataChannel(client, secondEvents)
+    activateGeneration(client, 2)
+
+    await client.provideScreenContext({
+      id: 'capture-old',
+      sourceId: 'screen:1:0',
+      sourceKind: 'screen',
+      label: 'Old screen',
+      dataUrl: 'data:image/jpeg;base64,AA==',
+      mimeType: 'image/jpeg',
+      width: 100,
+      height: 100,
+      capturedAt: new Date().toISOString()
+    }, oldCall)
+
+    expect(secondEvents).toEqual([])
+  })
+
+  it('invalidates pending calls on connection error before a reconnect', () => {
+    const ended: Array<{ reason: string; generation: number }> = []
+    const firstEvents: Array<Record<string, unknown>> = []
+    const secondEvents: Array<Record<string, unknown>> = []
+    const client = createClient({
+      onSessionEnded: (reason, generation) => { ended.push({ reason, generation }) }
+    })
+    injectDataChannel(client, firstEvents)
+    activateGeneration(client, 1)
+    const oldCall = registerServerCall(client, 'error-call')
+    const failLiveConnection = (client as unknown as { failLiveConnection: (generation: number) => void }).failLiveConnection
+
+    failLiveConnection.call(client, 1)
+    injectDataChannel(client, secondEvents)
+    activateGeneration(client, 2)
+    client.completeFileSearch(oldCall, { ok: true, message: 'Late after error.' })
+
+    expect(ended).toEqual([{ reason: 'error', generation: 1 }])
+    expect(secondEvents).toEqual([])
+  })
+})
+
+describe('RealtimeClient cost-saving lifecycle', () => {
+  function timedLiveClient(
+    overrides: Partial<Callbacks> = {}
+  ): { client: RealtimeClient; events: Array<Record<string, unknown>>; close: ReturnType<typeof vi.fn> } {
+    installTimerWindow()
+    const events: Array<Record<string, unknown>> = []
+    const close = vi.fn()
+    const client = createClient(overrides)
+    ;(client as unknown as { dataChannel: RTCDataChannel }).dataChannel = {
+      readyState: 'open',
+      send: (value: string) => { events.push(JSON.parse(value) as Record<string, unknown>) },
+      close
+    } as unknown as RTCDataChannel
+    setLiveMode(client)
+    ;(client as unknown as { connected: boolean }).connected = true
+    const touchActivity = (client as unknown as { touchActivity: () => void }).touchActivity
+    touchActivity.call(client)
+    return { client, events, close }
+  }
+
+  it('ends an inactive live session after four minutes', () => {
+    vi.useFakeTimers()
+    const ended: string[] = []
+    const { client, close } = timedLiveClient({ onSessionEnded: (reason) => { ended.push(reason) } })
+
+    vi.advanceTimersByTime(IDLE_DISCONNECT_MS)
+
+    expect(ended).toEqual(['idle'])
+    expect(close).toHaveBeenCalledOnce()
+    expect(client.isConnected()).toBe(false)
+  })
+
+  it('hard-stops an active response after the bounded idle extension', () => {
+    vi.useFakeTimers()
+    const ended: string[] = []
+    const { client } = timedLiveClient({ onSessionEnded: (reason) => { ended.push(reason) } })
+    ;(client as unknown as { responseActive: boolean }).responseActive = true
+
+    vi.advanceTimersByTime(IDLE_DISCONNECT_MS)
+    expect(ended).toEqual([])
+
+    vi.advanceTimersByTime(MAX_PENDING_WORK_EXTENSION_MS - 1)
+    expect(ended).toEqual([])
+    vi.advanceTimersByTime(1)
+    expect(ended).toEqual(['idle'])
+  })
+
+  it('gives short pending work grace, then ends as soon as its response finishes', () => {
+    vi.useFakeTimers()
+    const ended: string[] = []
+    const proposals: ToolProposal[] = []
+    let serverCall: RealtimeServerCall | undefined
+    const { client } = timedLiveClient({
+      onSessionEnded: (reason) => { ended.push(reason) },
+      onToolProposal: (proposal, call) => { proposals.push(proposal); serverCall = call }
+    })
+    callHandleServerEvent(client, toolCallEvent('open_url', 'pending-call', {
+      url: 'https://example.com',
+      reason: 'Open it.'
+    }))
+
+    vi.advanceTimersByTime(IDLE_DISCONNECT_MS)
+    expect(ended).toEqual([])
+
+    client.sendToolResult(proposals[0]!, { ok: true, message: 'Opened.' }, serverCall)
+    expect(ended).toEqual([])
+    callHandleServerEvent(client, JSON.stringify({ type: 'response.done', response: { output: [] } }))
+    expect(ended).toEqual(['idle'])
+  })
+
+  it('expires an abandoned confirmation at the idle hard deadline', () => {
+    vi.useFakeTimers()
+    const ended: string[] = []
+    const { client } = timedLiveClient({ onSessionEnded: (reason) => { ended.push(reason) } })
+    callHandleServerEvent(client, toolCallEvent('open_url', 'abandoned-call', {
+      url: 'https://example.com',
+      reason: 'Open it.'
+    }))
+
+    vi.advanceTimersByTime(IDLE_DISCONNECT_MS + MAX_PENDING_WORK_EXTENSION_MS - 1)
+    expect(ended).toEqual([])
+    vi.advanceTimersByTime(1)
+    expect(ended).toEqual(['idle'])
+  })
+
+  it('caps collapsed pending work at three minutes total', () => {
+    vi.useFakeTimers()
+    const ended: string[] = []
+    let pending: { proposal: ToolProposal; serverCall: RealtimeServerCall } | undefined
+    const { client, events } = timedLiveClient({
+      onSessionEnded: (reason) => { ended.push(reason) },
+      onToolProposal: (proposal, serverCall) => {
+        if (serverCall) pending = { proposal, serverCall }
+      }
+    })
+    callHandleServerEvent(client, toolCallEvent('open_url', 'collapse-pending', {
+      url: 'https://example.com', reason: 'Open it.'
+    }))
+
+    client.startCollapseDisconnect(Date.now())
+    vi.advanceTimersByTime(COLLAPSE_DISCONNECT_MS + MAX_PENDING_WORK_EXTENSION_MS - 1)
+    expect(ended).toEqual([])
+    vi.advanceTimersByTime(1)
+    expect(ended).toEqual(['collapsed'])
+    expect(vi.getTimerCount()).toBe(0)
+    client.sendToolResult(pending!.proposal, { ok: true, message: 'Late result.' }, pending!.serverCall)
+    expect(events).toEqual([])
+  })
+
+  it('re-arms exactly one idle timer after an immediate collapse and reopen', () => {
+    vi.useFakeTimers()
+    const ended: string[] = []
+    const { client } = timedLiveClient({ onSessionEnded: (reason) => { ended.push(reason) } })
+
+    client.startCollapseDisconnect(Date.now())
+    vi.advanceTimersByTime(COLLAPSE_DISCONNECT_MS / 2)
+    client.cancelCollapseDisconnect()
+    expect(vi.getTimerCount()).toBe(1)
+
+    vi.advanceTimersByTime(IDLE_DISCONNECT_MS - 1)
+    expect(ended).toEqual([])
+    vi.advanceTimersByTime(1)
+    expect(ended).toEqual(['idle'])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('re-arms bounded idle teardown when reopening after collapsed deferral consumed the old idle timer', () => {
+    vi.useFakeTimers()
+    const ended: string[] = []
+    const { client } = timedLiveClient({ onSessionEnded: (reason) => { ended.push(reason) } })
+    callHandleServerEvent(client, toolCallEvent('open_url', 'reopen-pending', {
+      url: 'https://example.com', reason: 'Open it.'
+    }))
+
+    // Collapse two minutes after the original activity. Its normal timer fires
+    // at t=3m and defers to t=5m; the original idle timer is consumed at t=4m.
+    vi.advanceTimersByTime(2 * 60_000)
+    client.startCollapseDisconnect(Date.now())
+    vi.advanceTimersByTime(COLLAPSE_DISCONNECT_MS)
+    vi.advanceTimersByTime(IDLE_DISCONNECT_MS - 2 * 60_000 - COLLAPSE_DISCONNECT_MS)
+    expect(ended).toEqual([])
+    expect(vi.getTimerCount()).toBe(1)
+
+    client.cancelCollapseDisconnect()
+    const timers = client as unknown as {
+      idleTimer?: number
+      collapseTimer?: number
+      deferredDisconnectTimer?: number
+    }
+    expect(timers.collapseTimer).toBeUndefined()
+    expect(timers.deferredDisconnectTimer).toBeUndefined()
+    expect(timers.idleTimer).toBeDefined()
+    expect(vi.getTimerCount()).toBe(1)
+
+    vi.advanceTimersByTime(IDLE_DISCONNECT_MS)
+    expect(ended).toEqual([])
+    vi.advanceTimersByTime(MAX_PENDING_WORK_EXTENSION_MS - 1)
+    expect(ended).toEqual([])
+    vi.advanceTimersByTime(1)
+    expect(ended).toEqual(['idle'])
+    expect(client.isConnected()).toBe(false)
+    expect(vi.getTimerCount()).toBe(0)
+
+    vi.advanceTimersByTime(IDLE_DISCONNECT_MS + MAX_PENDING_WORK_EXTENSION_MS)
+    expect(ended).toEqual(['idle'])
+  })
+
+  it('does not arm an idle timer when reopening after collapse already disconnected', () => {
+    vi.useFakeTimers()
+    const ended: string[] = []
+    const { client } = timedLiveClient({ onSessionEnded: (reason) => { ended.push(reason) } })
+
+    client.startCollapseDisconnect(Date.now())
+    vi.advanceTimersByTime(COLLAPSE_DISCONNECT_MS)
+    expect(ended).toEqual(['collapsed'])
+    expect(vi.getTimerCount()).toBe(0)
+
+    client.cancelCollapseDisconnect()
+    expect(vi.getTimerCount()).toBe(0)
+    vi.advanceTimersByTime(IDLE_DISCONNECT_MS + MAX_PENDING_WORK_EXTENSION_MS)
+    expect(ended).toEqual(['collapsed'])
+  })
+
+  it('defers idle teardown when a completed transcript touches activity', () => {
+    vi.useFakeTimers()
+    const ended: string[] = []
+    const { client } = timedLiveClient({ onSessionEnded: (reason) => { ended.push(reason) } })
+    vi.advanceTimersByTime(IDLE_DISCONNECT_MS - 1_000)
+
+    callHandleServerEvent(client, JSON.stringify({
+      type: 'conversation.item.input_audio_transcription.completed',
+      transcript: 'Tell me what this means'
+    }))
+    vi.advanceTimersByTime(IDLE_DISCONNECT_MS - 1)
+    expect(ended).toEqual([])
+
+    vi.advanceTimersByTime(1)
+    expect(ended).toEqual(['idle'])
+  })
+
+  it('never arms cost-saving teardown in mock mode', async () => {
+    vi.useFakeTimers()
+    globalThis.window = { setTimeout, clearTimeout } as unknown as Window & typeof globalThis
+    const ended: string[] = []
+    const client = createClient({ onSessionEnded: (reason) => { ended.push(reason) } })
+
+    await client.connect({ mode: 'mock', model: 'gpt-realtime-2.1-mini' })
+    client.startCollapseDisconnect(Date.now())
+    client.cancelCollapseDisconnect()
+    expect(vi.getTimerCount()).toBe(0)
+    vi.advanceTimersByTime(IDLE_DISCONNECT_MS * 2)
+
+    expect(ended).toEqual([])
+    expect(client.isConnected()).toBe(true)
+  })
+
+  it('silently ignores tool outputs that arrive after disconnect', () => {
+    vi.useFakeTimers()
+    const errors: string[] = []
+    const { client, events } = timedLiveClient({ onError: (message) => { errors.push(message) } })
+    const lateSearch = registerServerCall(client, 'late-search')
+    const lateTool = registerServerCall(client, 'late-call')
+    client.disconnect()
+
+    client.completeFileSearch(lateSearch, { ok: true, message: 'Found a late result.' })
+    client.sendToolResult({
+      id: 'late-proposal',
+      callId: 'late-call',
+      toolName: 'open_url',
+      reason: 'Open it.',
+      requiresConfirmation: true,
+      arguments: { url: 'https://example.com' }
+    }, { ok: true, message: 'Opened.' }, lateTool)
+
+    expect(events).toEqual([])
+    expect(errors).toEqual([])
+  })
+
+  it('ends a collapsed session at the normal deadline when no work is pending', () => {
+    vi.useFakeTimers()
+    const ended: string[] = []
+    const { client } = timedLiveClient({ onSessionEnded: (reason) => { ended.push(reason) } })
+    client.startCollapseDisconnect(Date.now())
+    vi.advanceTimersByTime(COLLAPSE_DISCONNECT_MS)
+    expect(ended).toEqual(['collapsed'])
+  })
+})
+
 describe('RealtimeClient microphone privacy', () => {
   it('mutes the microphone and disables turn detection when the panel closes', () => {
     const events: Array<Record<string, unknown>> = []
@@ -627,8 +1211,9 @@ describe('RealtimeClient microphone privacy', () => {
     const client = createClient()
     injectDataChannel(client, events)
     setLiveMode(client)
-    ;(client as unknown as { localAudio: { getAudioTracks: () => Array<{ enabled: boolean }> } }).localAudio = {
-      getAudioTracks: () => [track]
+    ;(client as unknown as { localAudio: { getAudioTracks: () => Array<{ enabled: boolean }>; getTracks: () => Array<{ stop: () => void }> } }).localAudio = {
+      getAudioTracks: () => [track],
+      getTracks: () => [track]
     }
 
     client.setListening(false)
@@ -645,12 +1230,13 @@ describe('RealtimeClient microphone privacy', () => {
 
   it('restores streaming when the panel is reopened', () => {
     const events: Array<Record<string, unknown>> = []
-    const track = { enabled: true }
+    const track = { enabled: true, stop: () => undefined }
     const client = createClient()
     injectDataChannel(client, events)
     setLiveMode(client)
-    ;(client as unknown as { localAudio: { getAudioTracks: () => Array<{ enabled: boolean }> } }).localAudio = {
-      getAudioTracks: () => [track]
+    ;(client as unknown as { localAudio: { getAudioTracks: () => Array<{ enabled: boolean }>; getTracks: () => Array<{ stop: () => void }> } }).localAudio = {
+      getAudioTracks: () => [track],
+      getTracks: () => [track]
     }
 
     client.setListening(false)
