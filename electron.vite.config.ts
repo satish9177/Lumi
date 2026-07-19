@@ -7,9 +7,14 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     build: {
       lib: {
-        entry: resolve('src/main/index.ts'),
+        // The vision worker is a second main-scope entry: it runs in an Electron
+        // utilityProcess, so it must be built as its own CommonJS bundle.
+        entry: {
+          index: resolve('src/main/index.ts'),
+          'vision-worker': resolve('src/main/vision-worker.ts')
+        },
         formats: ['cjs'],
-        fileName: 'index.cjs'
+        fileName: (_format, entryName) => `${entryName}.cjs`
       }
     }
   },

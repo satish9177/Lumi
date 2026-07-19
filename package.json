@@ -21,26 +21,33 @@
     },
     "files": [
       "out/**/*",
-      "package.json"
+      "package.json",
+      "!node_modules/onnxruntime-node/bin/napi-v6/darwin/**",
+      "!node_modules/onnxruntime-node/bin/napi-v6/linux/**",
+      "!node_modules/onnxruntime-node/bin/napi-v6/win32/arm64/**"
     ],
     "win": {
-  "icon": "build/icon.ico",
-  "target": [
-    {
-      "target": "nsis",
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
           "arch": [
             "x64"
           ]
-    }
-    ]
-   },
+        }
+      ]
+    },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
     },
+    "asarUnpack": [
+      "**/node_modules/onnxruntime-node/**"
+    ],
     "npmRebuild": false
   },
   "dependencies": {
+    "onnxruntime-node": "^1.27.0",
     "qrcode": "^1.5.4",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
