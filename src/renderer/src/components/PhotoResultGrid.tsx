@@ -9,14 +9,15 @@ export interface PhotoResultGridProps {
   fallback: boolean
   onOpen: (result: DocumentSearchResult) => void
   onAnalyze: (result: DocumentSearchResult) => void
+  onSend: (result: DocumentSearchResult) => void
 }
 
 /**
  * A local-only preview grid. Thumbnails are rendered from data URLs built in
- * the main process and are never sent anywhere; only a photo the user
- * explicitly selects for analysis ever leaves the machine.
+ * the main process and are never sent anywhere. Original bytes leave the
+ * machine only after the separate analysis or Telegram confirmation flow.
  */
-export function PhotoResultGrid({ results, thumbnails, fallback, onOpen, onAnalyze }: PhotoResultGridProps) {
+export function PhotoResultGrid({ results, thumbnails, fallback, onOpen, onAnalyze, onSend }: PhotoResultGridProps) {
   return (
     <ul className="lifelens-photo-grid">
       {results.map((result) => {
@@ -39,6 +40,7 @@ export function PhotoResultGrid({ results, thumbnails, fallback, onOpen, onAnaly
             <div className="lifelens-photo-actions">
               <button className="text-button" type="button" onClick={() => onOpen(result)}>Open</button>
               <button className="text-button" type="button" onClick={() => onAnalyze(result)}>Ask Lumi about this photo</button>
+              <button className="text-button" type="button" onClick={() => onSend(result)}>Send via Telegram</button>
             </div>
           </li>
         )

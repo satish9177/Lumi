@@ -7,6 +7,7 @@ import type {
   PendingSearchResolution,
   SearchDocumentsInput
 } from '../../shared/contracts'
+import { messageFrom } from './error-message'
 import type { RealtimeServerCall } from './realtime'
 
 /** The one terminal payload a held Realtime search call may ever receive. */
@@ -219,8 +220,4 @@ export class FileSearchController {
 
 function searchCorrelationId(serverCall: RealtimeServerCall): string {
   return `${serverCall.generation}:${serverCall.callId}`
-}
-
-function messageFrom(error: unknown): string {
-  return error instanceof Error ? error.message : 'LifeLens encountered an unexpected error.'
 }

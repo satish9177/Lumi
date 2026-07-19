@@ -199,6 +199,21 @@
   color: #ffd9a8;
 }
 
+.lifelens-document-icon {
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 72px;
+  margin-bottom: 10px;
+  border: 1px solid rgba(157, 245, 255, 0.3);
+  border-radius: 8px;
+  color: #9df5ff;
+  background: rgba(4, 10, 26, 0.55);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+}
+
 .lifelens-photo-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));

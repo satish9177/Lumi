@@ -1,15 +1,18 @@
 import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { Api, TelegramClient } from 'telegram'
+import { CustomFile } from 'telegram/client/uploads'
 import { Logger, LogLevel } from 'telegram/extensions/Logger'
 import { StringSession } from 'telegram/sessions'
 import { getDisplayName } from 'telegram/Utils'
-import type { TelegramAccount, TelegramRecipient, TelegramStatus } from '../../shared/contracts'
+import type { AttachmentMediaKind, TelegramAccount, TelegramRecipient, TelegramStatus } from '../../shared/contracts'
 
 const SESSION_FILE = 'telegram-session.bin'
 const MAX_MESSAGE_LENGTH = 4_096
 const MAX_RECIPIENTS = 10
 const DIALOG_SCAN_LIMIT = 100
+const MAX_CAPTION_LENGTH = 1_024
+const UNCERTAIN_ATTACHMENT_MESSAGE = 'I can’t confirm whether this reached Telegram. Check the chat before trying again.'
 
 export interface SafeStoragePort {
   isEncryptionAvailable: () => boolean
@@ -33,6 +36,7 @@ interface TelegramClientPort {
   ) => Promise<unknown>
   getDialogs: (params: { limit: number }) => Promise<Array<DialogLike>>
   sendMessage: (peer: any, params: any) => Promise<{ id?: number }>
+  sendFile: (peer: any, params: any) => Promise<{ id?: number }>
   invoke?: (request: any) => Promise<unknown>
 }
 
@@ -54,6 +58,28 @@ interface RecipientCandidate {
   recentRank: number
 }
 
+export interface TrustedTelegramRecipientSnapshot {
+  peer: unknown
+  displayName: string
+  username?: string
+  kind: TelegramRecipient['kind']
+}
+
+export interface ConfirmedTelegramAttachment {
+  canonicalPath: string
+  fileName: string
+  sizeBytes: number
+  mediaKind: AttachmentMediaKind
+  caption?: string
+}
+
+export class TelegramAttachmentDeliveryError extends Error {
+  constructor(message: string, readonly uncertain: boolean) {
+    super(message)
+    this.name = 'TelegramAttachmentDeliveryError'
+  }
+}
+
 interface PendingPassword {
   resolve: (password: string) => void
   reject: (error: Error) => void
@@ -69,13 +95,16 @@ export class TelegramService {
   private loginGeneration = 0
   private authTask: Promise<void> | undefined
   private status: TelegramStatus = { state: 'disconnected' }
+  private attachmentSendInFlight = false
+  private attachmentSendGeneration = 0
 
   constructor(
     private readonly userDataPath: string,
     private readonly secureStorage: SafeStoragePort,
     private readonly emitStatus: (status: TelegramStatus) => void,
     private readonly credentials = readCredentials(),
-    private readonly createClient: ClientFactory = createGramJsClient
+    private readonly createClient: ClientFactory = createGramJsClient,
+    private readonly attachmentTimeoutForBytes: (sizeBytes: number) => number = defaultAttachmentTimeout
   ) {}
 
   async initialize(): Promise<TelegramStatus> {
@@ -214,6 +243,8 @@ export class TelegramService {
     this.authTask = undefined
     this.recipients.clear()
     this.handledCallIds.clear()
+    this.attachmentSendInFlight = false
+    this.attachmentSendGeneration += 1
 
     const client = this.client
     this.client = undefined
@@ -236,6 +267,8 @@ export class TelegramService {
   async shutdown(): Promise<void> {
     this.recipients.clear()
     this.handledCallIds.clear()
+    this.attachmentSendInFlight = false
+    this.attachmentSendGeneration += 1
     await this.cancelLogin()
     await this.disconnectClient()
   }
@@ -279,6 +312,16 @@ export class TelegramService {
     }
   }
 
+  snapshotRecipient(resultId: string): Readonly<TrustedTelegramRecipientSnapshot> | undefined {
+    const candidate = this.recipients.get(resultId)
+    return candidate ? Object.freeze({
+      peer: candidate.peer,
+      displayName: candidate.displayName,
+      username: candidate.username,
+      kind: candidate.kind
+    }) : undefined
+  }
+
   async sendConfirmed(callId: string | undefined, resultId: string, message: string): Promise<void> {
     this.assertAuthorized()
     if (callId && this.handledCallIds.has(callId)) {
@@ -302,6 +345,70 @@ export class TelegramService {
       await this.client!.sendMessage(recipient.peer, { message, parseMode: undefined, linkPreview: false })
     } catch (error) {
       throw new Error(mapTelegramError(error))
+    }
+  }
+
+  async sendConfirmedAttachment(
+    callId: string | undefined,
+    recipient: Readonly<TrustedTelegramRecipientSnapshot>,
+    attachment: Readonly<ConfirmedTelegramAttachment>
+  ): Promise<void> {
+    this.assertAuthorized()
+    if (callId && this.handledCallIds.has(callId)) {
+      throw new Error('This Telegram attachment was already handled.')
+    }
+    if (recipient.kind === 'channel') {
+      throw new Error('LifeLens can send personal messages and groups, not channel posts.')
+    }
+    if (attachment.caption !== undefined && attachment.caption.length > MAX_CAPTION_LENGTH) {
+      throw new Error(`Telegram captions must be ${MAX_CAPTION_LENGTH} characters or shorter.`)
+    }
+    if (this.attachmentSendInFlight) {
+      throw new Error('Another Telegram attachment is already being sent. Wait for it to finish.')
+    }
+
+    if (callId) this.handledCallIds.add(callId)
+    this.attachmentSendInFlight = true
+    const sendGeneration = ++this.attachmentSendGeneration
+    let uploadStarted = false
+    let retainGuardUntilSettled = false
+    let operation: Promise<{ id?: number }> | undefined
+    const progressCallback = ((progress: number) => {
+      if (progress > 0) uploadStarted = true
+    }) as ((progress: number) => void) & { isCanceled?: boolean }
+
+    try {
+      operation = this.client!.sendFile(recipient.peer, {
+        file: new CustomFile(attachment.fileName, attachment.sizeBytes, attachment.canonicalPath),
+        caption: attachment.caption,
+        forceDocument: attachment.mediaKind === 'document',
+        fileSize: attachment.sizeBytes,
+        workers: 1,
+        progressCallback
+      })
+      await withAttachmentTimeout(operation, this.attachmentTimeoutForBytes(attachment.sizeBytes), progressCallback, () => uploadStarted)
+    } catch (error) {
+      if (error instanceof TelegramAttachmentDeliveryError) {
+        // A timed-out GramJS promise may still be winding down after its
+        // cooperative cancellation flag is set. Do not permit overlap.
+        retainGuardUntilSettled = true
+        throw error
+      }
+      const raw = error instanceof Error ? error.message : String(error)
+      const definitive = /FLOOD|PRIVACY|AUTH|SESSION_REVOKED|UNAUTHORIZED|PEER|PREMIUM|PAID/i.test(raw)
+      if (uploadStarted && !definitive) {
+        retainGuardUntilSettled = true
+        throw new TelegramAttachmentDeliveryError(UNCERTAIN_ATTACHMENT_MESSAGE, true)
+      }
+      throw new TelegramAttachmentDeliveryError(mapTelegramError(error), false)
+    } finally {
+      if (retainGuardUntilSettled && operation) {
+        void operation.finally(() => {
+          if (this.attachmentSendGeneration === sendGeneration) this.attachmentSendInFlight = false
+        }).catch(() => undefined)
+      } else {
+        if (this.attachmentSendGeneration === sendGeneration) this.attachmentSendInFlight = false
+      }
     }
   }
 
@@ -343,6 +450,8 @@ export class TelegramService {
   private async disconnectClient(): Promise<void> {
     const client = this.client
     this.client = undefined
+    this.attachmentSendInFlight = false
+    this.attachmentSendGeneration += 1
     if (client) {
       try {
         await client.disconnect()
@@ -484,4 +593,33 @@ export function mapTelegramError(error: unknown): string {
   if (/PREMIUM|PAID/i.test(message)) return 'Telegram requires a paid or Premium action for this message.'
   if (/network|connect|timeout|socket/i.test(message)) return 'Telegram network connection failed. Check your connection and try again.'
   return 'Telegram could not complete that request. Try again from the Telegram section.'
+}
+
+async function withAttachmentTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  progress: { isCanceled?: boolean },
+  uploadStarted: () => boolean
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      progress.isCanceled = true
+      reject(new TelegramAttachmentDeliveryError(
+        uploadStarted() ? UNCERTAIN_ATTACHMENT_MESSAGE : 'Telegram upload timed out before it started. Nothing was sent.',
+        uploadStarted()
+      ))
+    }, timeoutMs)
+  })
+  try {
+    return await Promise.race([operation, timeout])
+  } finally {
+    if (timer) clearTimeout(timer)
+    void operation.catch(() => undefined)
+  }
+}
+
+function defaultAttachmentTimeout(sizeBytes: number): number {
+  const megabytes = Math.max(1, sizeBytes / (1024 * 1024))
+  return Math.min(3 * 60_000, 60_000 + Math.ceil(megabytes) * 2_000)
 }

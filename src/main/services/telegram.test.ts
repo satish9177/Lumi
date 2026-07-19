@@ -35,6 +35,8 @@ class FakeClient {
   authorized = true
   sessionValue = 'telegram-session-secret'
   sent: Array<{ peer: unknown; message: string }> = []
+  sentFiles: Array<{ peer: unknown; params: any }> = []
+  sendFileHandler: ((peer: unknown, params: any) => Promise<{ id: number }>) | undefined
   dialogs: Array<any> = []
   dialogCalls = 0
   qrParams: any
@@ -53,6 +55,10 @@ class FakeClient {
   async sendMessage(peer: unknown, params: { message: string }): Promise<{ id: number }> {
     this.sent.push({ peer, message: params.message })
     return { id: this.sent.length }
+  }
+  async sendFile(peer: unknown, params: any): Promise<{ id: number }> {
+    this.sentFiles.push({ peer, params })
+    return this.sendFileHandler ? this.sendFileHandler(peer, params) : { id: this.sentFiles.length }
   }
   async invoke(): Promise<void> {}
 }
@@ -161,5 +167,128 @@ describe('TelegramService', () => {
     expect(mapTelegramError(new Error('FLOOD_WAIT_30'))).toMatch(/wait/i)
     expect(mapTelegramError(new Error('USER_PRIVACY_RESTRICTED'))).toMatch(/privacy/i)
     expect(mapTelegramError(new Error('socket timeout'))).toMatch(/network/i)
+  })
+
+  it('sends trusted photos and documents once with verbatim captions and the correct mode', async () => {
+    const client = new FakeClient()
+    client.dialogs = [dialog('Ravi', 0)]
+    const service = createService(await createFolder(), client)
+    await service.connect()
+    const [recipient] = await service.searchRecipients('ravi')
+    const snapshot = service.snapshotRecipient(recipient!.resultId)!
+
+    await service.sendConfirmedAttachment('photo-call', snapshot, {
+      canonicalPath: 'C:\\approved\\life.jpg', fileName: 'life.jpg', sizeBytes: 123,
+      mediaKind: 'photo', caption: '  best picture  '
+    })
+    await service.sendConfirmedAttachment('document-call', snapshot, {
+      canonicalPath: 'C:\\approved\\resume.pdf', fileName: 'resume.pdf', sizeBytes: 456,
+      mediaKind: 'document', caption: 'updated resume'
+    })
+    await service.sendConfirmedAttachment('caption-boundary', snapshot, {
+      canonicalPath: 'C:\\approved\\resume.pdf', fileName: 'resume.pdf', sizeBytes: 456,
+      mediaKind: 'document', caption: 'x'.repeat(1_024)
+    })
+    await expect(service.sendConfirmedAttachment('caption-too-long', snapshot, {
+      canonicalPath: 'C:\\approved\\resume.pdf', fileName: 'resume.pdf', sizeBytes: 456,
+      mediaKind: 'document', caption: 'x'.repeat(1_025)
+    })).rejects.toThrow(/1024/i)
+
+    expect(client.sentFiles).toHaveLength(3)
+    expect(client.sentFiles[0]!.peer).toEqual({ trustedPeer: 0 })
+    expect(client.sentFiles[0]!.params).toMatchObject({ caption: '  best picture  ', forceDocument: false, fileSize: 123, workers: 1 })
+    expect(client.sentFiles[0]!.params.file).toMatchObject({ name: 'life.jpg', size: 123, path: 'C:\\approved\\life.jpg' })
+    expect(client.sentFiles[1]!.params).toMatchObject({ caption: 'updated resume', forceDocument: true, fileSize: 456, workers: 1 })
+    expect(client.sentFiles[2]!.params.caption).toHaveLength(1_024)
+    await expect(service.sendConfirmedAttachment('photo-call', snapshot, {
+      canonicalPath: 'C:\\approved\\life.jpg', fileName: 'life.jpg', sizeBytes: 123, mediaKind: 'photo'
+    })).rejects.toThrow(/already handled/i)
+    expect(client.sentFiles).toHaveLength(3)
+  })
+
+  it('supports Saved Messages and rejects channels, disconnects, and concurrent sends', async () => {
+    const client = new FakeClient()
+    client.dialogs = [dialog('Saved Messages', 0), dialog('News', 1, { kind: 'channel' })]
+    const service = createService(await createFolder(), client)
+    await service.connect()
+    const [saved] = await service.searchRecipients('saved')
+    await service.sendConfirmedAttachment('saved-call', service.snapshotRecipient(saved!.resultId)!, {
+      canonicalPath: 'C:\\approved\\note.txt', fileName: 'note.txt', sizeBytes: 10, mediaKind: 'document'
+    })
+    const [channel] = await service.searchRecipients('news')
+    await expect(service.sendConfirmedAttachment('channel-call', service.snapshotRecipient(channel!.resultId)!, {
+      canonicalPath: 'C:\\approved\\note.txt', fileName: 'note.txt', sizeBytes: 10, mediaKind: 'document'
+    })).rejects.toThrow(/channel/i)
+
+    let release!: () => void
+    client.sendFileHandler = () => new Promise((resolve) => { release = () => resolve({ id: 2 }) })
+    const [savedAgain] = await service.searchRecipients('saved')
+    const first = service.sendConfirmedAttachment('in-flight-1', service.snapshotRecipient(savedAgain!.resultId)!, {
+      canonicalPath: 'C:\\approved\\note.txt', fileName: 'note.txt', sizeBytes: 10, mediaKind: 'document'
+    })
+    await expect(service.sendConfirmedAttachment('in-flight-2', service.snapshotRecipient(savedAgain!.resultId)!, {
+      canonicalPath: 'C:\\approved\\note.txt', fileName: 'note.txt', sizeBytes: 10, mediaKind: 'document'
+    })).rejects.toThrow(/already being sent/i)
+    release()
+    await first
+    await service.logout()
+    await expect(service.sendConfirmedAttachment('disconnected', service.snapshotRecipient(savedAgain!.resultId)!, {
+      canonicalPath: 'C:\\approved\\note.txt', fileName: 'note.txt', sizeBytes: 10, mediaKind: 'document'
+    })).rejects.toThrow(/not connected/i)
+  })
+
+  it('marks a timeout after upload begins uncertain and cooperatively cancels without retrying', async () => {
+    const client = new FakeClient()
+    client.dialogs = [dialog('Ravi', 0)]
+    client.sendFileHandler = async (_peer, params) => {
+      params.progressCallback(0.25)
+      return new Promise(() => undefined)
+    }
+    const service = new TelegramService(await createFolder(), createSafeStorage(), () => undefined, credentials, () => client as any, () => 5)
+    await service.connect()
+    const [recipient] = await service.searchRecipients('ravi')
+    const snapshot = service.snapshotRecipient(recipient!.resultId)!
+    const attachment = { canonicalPath: 'C:\\approved\\resume.pdf', fileName: 'resume.pdf', sizeBytes: 456, mediaKind: 'document' as const }
+    await expect(service.sendConfirmedAttachment('timeout-call', snapshot, attachment)).rejects.toMatchObject({ uncertain: true })
+    expect(client.sentFiles[0]!.params.progressCallback.isCanceled).toBe(true)
+    await expect(service.sendConfirmedAttachment('timeout-call', snapshot, attachment)).rejects.toThrow(/already handled/i)
+    expect(client.sentFiles).toHaveLength(1)
+  })
+
+  it('classifies FloodWait as definitive and does not retry the handled call', async () => {
+    const client = new FakeClient()
+    client.dialogs = [dialog('Ravi', 0)]
+    client.sendFileHandler = async () => { throw new Error('FLOOD_WAIT_30') }
+    const service = createService(await createFolder(), client)
+    await service.connect()
+    const [recipient] = await service.searchRecipients('ravi')
+    const snapshot = service.snapshotRecipient(recipient!.resultId)!
+    const attachment = { canonicalPath: 'C:\\approved\\resume.pdf', fileName: 'resume.pdf', sizeBytes: 456, mediaKind: 'document' as const }
+
+    await expect(service.sendConfirmedAttachment('flood-call', snapshot, attachment)).rejects.toMatchObject({
+      uncertain: false,
+      message: expect.stringMatching(/wait/i)
+    })
+    await expect(service.sendConfirmedAttachment('flood-call', snapshot, attachment)).rejects.toThrow(/already handled/i)
+    expect(client.sentFiles).toHaveLength(1)
+  })
+
+  it('classifies a timeout before upload progress as definitely not sent and does not retry', async () => {
+    const client = new FakeClient()
+    client.dialogs = [dialog('Ravi', 0)]
+    client.sendFileHandler = async () => new Promise(() => undefined)
+    const service = new TelegramService(await createFolder(), createSafeStorage(), () => undefined, credentials, () => client as any, () => 5)
+    await service.connect()
+    const [recipient] = await service.searchRecipients('ravi')
+    const snapshot = service.snapshotRecipient(recipient!.resultId)!
+    const attachment = { canonicalPath: 'C:\\approved\\resume.pdf', fileName: 'resume.pdf', sizeBytes: 456, mediaKind: 'document' as const }
+
+    await expect(service.sendConfirmedAttachment('pre-progress-timeout', snapshot, attachment)).rejects.toMatchObject({
+      uncertain: false,
+      message: expect.stringMatching(/before it started.*nothing was sent/i)
+    })
+    expect(client.sentFiles[0]!.params.progressCallback.isCanceled).toBe(true)
+    await expect(service.sendConfirmedAttachment('pre-progress-timeout', snapshot, attachment)).rejects.toThrow(/already handled/i)
+    expect(client.sentFiles).toHaveLength(1)
   })
 })

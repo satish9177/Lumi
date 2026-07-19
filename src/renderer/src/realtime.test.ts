@@ -161,6 +161,118 @@ describe('RealtimeClient server events', () => {
     expect(searches).toEqual([{ query: 'Ravi', callId: 'telegram-search-1' }])
   })
 
+  it('resolves selected and ordinal Telegram attachments locally with an exact caption', () => {
+    const requests: Array<{ fileResultId: string; recipientQuery: string; caption?: string }> = []
+    const events: Array<Record<string, unknown>> = []
+    const client = createClient({
+      onTelegramAttachmentRequest: (request) => { requests.push(request) }
+    })
+    injectDataChannel(client, events)
+    client.setSearchResults([
+      { id: 'private-result-a', kind: 'screenshot' },
+      { id: 'private-result-b', kind: 'screenshot' }
+    ])
+    callHandleServerEvent(client, toolCallEvent('telegram_send_attachment', 'attachment-ordinal', {
+      attachment: '2',
+      recipient_query: 'Kesava',
+      caption: '  exact caption  ',
+      reason: 'Send the second screenshot.'
+    }))
+
+    ;(client as unknown as { selectedPhoto: { resultId: string; name: string }; lastUserRequest: string }).selectedPhoto = {
+      resultId: 'private-selected-photo', name: 'life.jpg'
+    }
+    ;(client as unknown as { lastUserRequest: string }).lastUserRequest = 'Send this picture to Kesava.'
+    callHandleServerEvent(client, toolCallEvent('telegram_send_attachment', 'attachment-selected', {
+      attachment: 'selected', recipient_query: 'Kesava', reason: 'Send this picture.'
+    }))
+
+    expect(requests).toEqual([
+      { fileResultId: 'private-result-b', recipientQuery: 'Kesava', caption: '  exact caption  ', reason: 'Send the second screenshot.' },
+      { fileResultId: 'private-selected-photo', recipientQuery: 'Kesava', caption: undefined, reason: 'Send this picture.' }
+    ])
+    expect(JSON.stringify(events)).not.toContain('private-result')
+    expect(JSON.stringify(events)).not.toContain('private-selected-photo')
+  })
+
+  it('asks one clarification for an ambiguous selected attachment and never emits local IDs', () => {
+    const events: Array<Record<string, unknown>> = []
+    const requests: unknown[] = []
+    const client = createClient({ onTelegramAttachmentRequest: (request) => { requests.push(request) } })
+    injectDataChannel(client, events)
+    client.setSearchResults([{ id: 'secret-a', kind: 'document' }, { id: 'secret-b', kind: 'document' }])
+    ;(client as unknown as { lastUserRequest: string }).lastUserRequest = 'Send this document to Kesava.'
+
+    callHandleServerEvent(client, toolCallEvent('telegram_send_attachment', 'attachment-ambiguous', {
+      attachment: 'selected', recipient_query: 'Kesava', reason: 'Send it.'
+    }))
+
+    expect(requests).toEqual([])
+    expect(functionCallOutputs(events)).toEqual([expect.objectContaining({ ok: false, message: expect.stringMatching(/which one/i) })])
+    expect(JSON.stringify(events)).not.toContain('secret-a')
+    expect(JSON.stringify(events)).not.toContain('secret-b')
+  })
+
+  it('uses a flat bounded string schema for attachment references', () => {
+    const events: Array<Record<string, unknown>> = []
+    const client = createClient()
+    injectDataChannel(client, events)
+    const configureLiveSession = (client as unknown as { configureLiveSession: () => void }).configureLiveSession
+
+    configureLiveSession.call(client)
+
+    const session = events[0]!.session as { tools: Array<Record<string, unknown>> }
+    const tool = session.tools.find((candidate) => candidate.name === 'telegram_send_attachment')!
+    const parameters = tool.parameters as { properties: { attachment: Record<string, unknown> } }
+    expect(parameters.properties.attachment).toEqual({
+      type: 'string',
+      enum: ['selected', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10'],
+      description: expect.any(String)
+    })
+    expect(JSON.stringify(tool)).not.toContain('oneOf')
+  })
+
+  it('rejects invalid attachment strings without echoing paths or trusted-looking IDs', () => {
+    const events: Array<Record<string, unknown>> = []
+    const requests: unknown[] = []
+    const client = createClient({ onTelegramAttachmentRequest: (request) => { requests.push(request) } })
+    injectDataChannel(client, events)
+    client.setSearchResults([{ id: 'trusted-result-1', kind: 'document' }, { id: 'trusted-result-2', kind: 'document' }])
+    const invalid: unknown[] = ['0', '11', 2, 'C:\\Users\\person\\secret.pdf', 'trusted-result-2', 'resume.pdf', 'arbitrary']
+
+    invalid.forEach((attachment, index) => {
+      callHandleServerEvent(client, toolCallEvent('telegram_send_attachment', `invalid-attachment-${index}`, {
+        attachment, recipient_query: 'Kesava', reason: 'Send it.'
+      }))
+    })
+
+    expect(requests).toEqual([])
+    const outputs = functionCallOutputs(events)
+    expect(outputs).toHaveLength(invalid.length)
+    expect(outputs.every((output) => output.ok === false && /selected file or a result number/i.test(String(output.message)))).toBe(true)
+    const serialized = JSON.stringify(events)
+    expect(serialized).not.toContain('trusted-result-1')
+    expect(serialized).not.toContain('trusted-result-2')
+    expect(serialized).not.toContain('secret.pdf')
+  })
+
+  it('never auto-selects a fallback recent possibility', () => {
+    const events: Array<Record<string, unknown>> = []
+    const requests: unknown[] = []
+    const client = createClient({ onTelegramAttachmentRequest: (request) => { requests.push(request) } })
+    injectDataChannel(client, events)
+    client.setSearchResults([{ id: 'fallback-id', kind: 'document' }], true)
+    ;(client as unknown as { lastUserRequest: string }).lastUserRequest = 'Send my latest resume to Kesava.'
+
+    callHandleServerEvent(client, toolCallEvent('telegram_send_attachment', 'attachment-fallback', {
+      attachment: 'selected', recipient_query: 'Kesava', reason: 'Send resume.'
+    }))
+
+    expect(requests).toEqual([])
+    expect(functionCallOutputs(events)[0]).toMatchObject({ ok: false })
+    expect(JSON.stringify(events)).not.toContain('fallback-id')
+  })
+
   it('sends a complete session payload and waits for session.updated before greeting', () => {
     const events: Array<Record<string, unknown>> = []
     const client = createClient()

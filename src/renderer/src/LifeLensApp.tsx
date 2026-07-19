@@ -20,13 +20,24 @@ import type {
 import { fileKindLabel } from '../../shared/search-query'
 import { ExplanationCard, PhotoResultGrid, ToolConfirmationCard } from './components'
 import { FileSearchController, type SearchConfirmationRequest } from './file-search-controller'
-import { RealtimeClient, type RealtimeServerCall } from './realtime'
+import { messageFrom } from './error-message'
+import { approvePendingRendererAction, dismissPendingRendererAction } from './pending-action-coordinator'
+import {
+  RealtimeClient,
+  type RealtimeServerCall,
+  type TelegramAttachmentCoordinationRequest
+} from './realtime'
 
 const VOICE_PAUSED_NOTICE = 'Voice paused to save cost — ask a question to reconnect.'
 
 interface PendingProposal {
   readonly proposal: ToolProposal
   readonly serverCall?: RealtimeServerCall
+}
+
+interface PendingTelegramAttachment {
+  readonly request: TelegramAttachmentCoordinationRequest
+  readonly serverCall: RealtimeServerCall
 }
 
 const STATUS_LABELS: Record<CompanionState, string> = {
@@ -80,6 +91,7 @@ export default function LifeLensApp() {
   const [telegramMessage, setTelegramMessage] = useState('')
   const [telegramPassword, setTelegramPassword] = useState('')
   const [isTelegramWorking, setIsTelegramWorking] = useState(false)
+  const [pendingTelegramAttachment, setPendingTelegramAttachment] = useState<PendingTelegramAttachment>()
 
   const clearExpiredTelegramQr = useCallback((qrUrl: string): void => {
     setTelegramStatus((current) => current.qrUrl === qrUrl
@@ -163,11 +175,13 @@ export default function LifeLensApp() {
       }
       return current
     })
+    setPendingTelegramAttachment((current) => current?.serverCall.generation === generation ? undefined : current)
     if (telegramServerCallRef.current?.generation === generation) {
       telegramServerCallRef.current = undefined
       setTelegramRecipients([])
       setSelectedTelegramRecipientId(undefined)
       setIsTelegramWorking(false)
+      setPendingTelegramAttachment(undefined)
     }
     for (const [approvalId, pending] of pendingProposalsRef.current) {
       if (pending.serverCall?.generation !== generation) {
@@ -208,6 +222,7 @@ export default function LifeLensApp() {
           onFileSearchRequest: (request, serverCall) => { void controllerRef.current?.run(request, serverCall) },
           onUserTranscript: (text) => window.lifeLens.noteUserRequest(text).then(() => undefined, () => undefined),
           onTelegramRecipientSearch: requestTelegramRecipientSearch,
+          onTelegramAttachmentRequest: requestTelegramAttachment,
           onToolProposal: (proposal, serverCall) => { void preparePendingAction(proposal, serverCall) },
           onError: setError,
           onSessionEnded: (reason, generation) => {
@@ -387,7 +402,7 @@ export default function LifeLensApp() {
     setSearchResults(payload.results)
     setSearchFallback(payload.fallback)
     setThumbnails(new Map())
-    clientRef.current?.setSearchOrdinals(payload.results.map((result) => result.id))
+    clientRef.current?.setSearchResults(payload.results, payload.fallback)
     void loadThumbnails(payload.results)
   }
 
@@ -453,6 +468,33 @@ export default function LifeLensApp() {
       reason: `Open ${result.name}, which was returned by your approved-folder search.`,
       requiresConfirmation: true,
       arguments: { resultId: result.id }
+    })
+  }
+
+  const proposeTelegramAttachment = (result: DocumentSearchResult): void => {
+    if (!selectedTelegramRecipientId) {
+      setError('Choose one Telegram recipient before sending a file.')
+      return
+    }
+    const recipient = telegramRecipients.find((candidate) => candidate.resultId === selectedTelegramRecipientId)
+    if (!recipient) {
+      setError('That Telegram recipient is no longer available. Search again.')
+      return
+    }
+    if (telegramMessage.length > 1_024) {
+      setError(`That caption is ${telegramMessage.length} characters. Shorten it to 1024 characters or fewer.`)
+      return
+    }
+    void preparePendingAction({
+      id: crypto.randomUUID(),
+      toolName: 'send_telegram_attachment',
+      reason: 'Send this one trusted search result from your connected personal Telegram account.',
+      requiresConfirmation: true,
+      arguments: {
+        recipientResultId: recipient.resultId,
+        fileResultId: result.id,
+        caption: telegramMessage.length > 0 ? telegramMessage : undefined
+      }
     })
   }
 
@@ -579,6 +621,66 @@ export default function LifeLensApp() {
     })
   }
 
+  const requestTelegramAttachment = (request: TelegramAttachmentCoordinationRequest, serverCall: RealtimeServerCall): void => {
+    telegramServerCallRef.current = serverCall
+    setTelegramQuery(request.recipientQuery)
+    setTelegramMessage(request.caption ?? '')
+    setPendingTelegramAttachment(undefined)
+    setError(undefined)
+    setIsTelegramWorking(true)
+    void window.lifeLens.searchTelegramRecipients(request.recipientQuery).then((recipients) => {
+      if (!clientRef.current?.isServerCallActive(serverCall)) return
+      setTelegramRecipients(recipients)
+      setSelectedTelegramRecipientId(recipients.length === 1 ? recipients[0]!.resultId : undefined)
+      if (recipients.length === 0) {
+        clientRef.current.completeTelegramAttachmentRequest(serverCall, { ok: false, message: 'No local recipient matched. Ask the user for another name.' })
+        return
+      }
+      if (recipients.length === 1) {
+        proposeTrustedTelegramAttachment(request, recipients[0]!.resultId, serverCall)
+        return
+      }
+      setPendingTelegramAttachment({ request, serverCall })
+    }).catch((telegramError) => {
+      if (!clientRef.current?.isServerCallActive(serverCall)) return
+      const message = messageFrom(telegramError)
+      setError(message)
+      clientRef.current.completeTelegramAttachmentRequest(serverCall, { ok: false, message })
+    }).finally(() => {
+      if (telegramServerCallRef.current === serverCall) {
+        telegramServerCallRef.current = undefined
+        setIsTelegramWorking(false)
+      }
+    })
+  }
+
+  const proposeTrustedTelegramAttachment = (
+    request: TelegramAttachmentCoordinationRequest,
+    recipientResultId: string,
+    serverCall: RealtimeServerCall
+  ): void => {
+    setPendingTelegramAttachment(undefined)
+    void preparePendingAction({
+      id: crypto.randomUUID(),
+      callId: serverCall.callId,
+      toolName: 'send_telegram_attachment',
+      reason: request.reason,
+      requiresConfirmation: true,
+      arguments: {
+        recipientResultId,
+        fileResultId: request.fileResultId,
+        caption: request.caption
+      }
+    }, serverCall)
+  }
+
+  const selectTelegramRecipient = (resultId: string): void => {
+    setSelectedTelegramRecipientId(resultId)
+    if (pendingTelegramAttachment && clientRef.current?.isServerCallActive(pendingTelegramAttachment.serverCall)) {
+      proposeTrustedTelegramAttachment(pendingTelegramAttachment.request, resultId, pendingTelegramAttachment.serverCall)
+    }
+  }
+
   const proposeTelegramMessage = (): void => {
     if (!selectedTelegramRecipientId || !telegramMessage.trim()) {
       setError('Choose one Telegram recipient and enter the full message first.')
@@ -621,21 +723,35 @@ export default function LifeLensApp() {
   }
 
   const confirmPendingAction = async (approvalId: string): Promise<void> => {
-    const pending = pendingProposalsRef.current.get(approvalId)
-    const proposal = pending?.proposal
     setError(undefined)
-    setIsConfirming(true)
-    try {
-      const result = await window.lifeLens.approvePendingAction(approvalId)
-      if (!isPendingProposalCurrent(pending)) {
-        pendingProposalsRef.current.delete(approvalId)
-        setPendingAction((current) => current?.approvalId === approvalId ? undefined : current)
-        return
+    const outcome = await approvePendingRendererAction(
+      approvalId,
+      {
+        pendingByApprovalId: pendingProposalsRef.current,
+        clearCard: (settledApprovalId) => setPendingAction((current) => current?.approvalId === settledApprovalId ? undefined : current)
+      },
+      (settledApprovalId) => window.lifeLens.approvePendingAction(settledApprovalId),
+      setIsConfirming
+    )
+    if (outcome.status === 'missing') return
+
+    const pending = outcome.pending
+    const proposal = pending.proposal
+    if (outcome.status === 'failed') {
+      const message = messageFrom(outcome.error)
+      setToolResult({ ok: false, message })
+      if (isPendingProposalCurrent(pending)) {
+        clientRef.current?.sendToolResult(proposal, { ok: false, message }, pending.serverCall)
       }
+      setCompanionState('error')
+      return
+    }
+
+    const result = outcome.result
+    if (!isPendingProposalCurrent(pending)) return
+    try {
       setToolResult(result)
-      if (proposal) clientRef.current?.sendToolResult(proposal, result, pending?.serverCall)
-      pendingProposalsRef.current.delete(approvalId)
-      setPendingAction((current) => current?.approvalId === approvalId ? undefined : current)
+      clientRef.current?.sendToolResult(proposal, result, pending.serverCall)
       if (result.searchResults) {
         applySearchResults({
           results: result.searchResults,
@@ -644,15 +760,14 @@ export default function LifeLensApp() {
           message: result.message
         })
       }
+      if (result.openedResultId) clientRef.current?.recordOpenedResult(result.openedResultId)
 
       // Main approved exactly one image for this turn; send it through the
       // existing Realtime image path with the user's own question.
-      if (result.analysisImage && proposal?.toolName === 'analyze_photo') {
+      if (result.analysisImage && proposal.toolName === 'analyze_photo') {
         await ensureConnected()
         const client = clientRef.current
-        if (!client) {
-          throw new Error('Connect voice before asking Lumi about a photo.')
-        }
+        if (!client) throw new Error('Connect voice before asking Lumi about a photo.')
         await client.analyzeSelectedPhoto(result.analysisImage, proposal.arguments.question ?? '')
       }
 
@@ -664,31 +779,28 @@ export default function LifeLensApp() {
         setCompanionState('error')
       }
     } catch (toolError) {
-      if (!isPendingProposalCurrent(pending)) {
-        return
-      }
       const message = messageFrom(toolError)
-      if (proposal) clientRef.current?.sendToolResult(proposal, { ok: false, message }, pending?.serverCall)
       setCompanionState('error')
       setError(message)
-    } finally {
-      setIsConfirming(false)
     }
   }
 
   const dismissPendingAction = async (approvalId: string): Promise<void> => {
-    const pending = pendingProposalsRef.current.get(approvalId)
-    const proposal = pending?.proposal
-    try {
-      await window.lifeLens.cancelPendingAction(approvalId)
-      if (proposal) clientRef.current?.declineToolProposal(proposal, pending?.serverCall)
-      pendingProposalsRef.current.delete(approvalId)
-      setPendingAction((current) => current?.approvalId === approvalId ? undefined : current)
+    const outcome = await dismissPendingRendererAction(
+      approvalId,
+      {
+        pendingByApprovalId: pendingProposalsRef.current,
+        clearCard: (settledApprovalId) => setPendingAction((current) => current?.approvalId === settledApprovalId ? undefined : current)
+      },
+      (settledApprovalId) => window.lifeLens.cancelPendingAction(settledApprovalId)
+    )
+    if (outcome.status === 'dismissed') {
+      clientRef.current?.declineToolProposal(outcome.pending.proposal, outcome.pending.serverCall)
       setToolResult({ ok: false, message: 'Cancelled. Nothing was changed, opened, or sent.' })
       setCompanionState('listening')
-    } catch (cancelError) {
-      setError(messageFrom(cancelError))
+      return
     }
+    if (outcome.status === 'failed') setError(messageFrom(outcome.error))
   }
 
   const selectCaptureSource = (source: CaptureSource): void => {
@@ -831,6 +943,7 @@ export default function LifeLensApp() {
                     fallback={searchFallback}
                     onOpen={proposeOpenFile}
                     onAnalyze={proposeAnalyzePhoto}
+                    onSend={proposeTelegramAttachment}
                   />
                 ) : (
                   <ul className="search-results">
@@ -841,7 +954,10 @@ export default function LifeLensApp() {
                           <span>{result.relativePath}</span>
                           <span>{fileKindLabel(result.kind)} · {new Date(result.modifiedAt).toLocaleDateString()}</span>
                         </div>
-                        <button className="text-button" type="button" onClick={() => proposeOpenFile(result)}>Open file</button>
+                        <div className="actions">
+                          <button className="text-button" type="button" onClick={() => proposeOpenFile(result)}>Open file</button>
+                          <button className="text-button" type="button" onClick={() => proposeTelegramAttachment(result)}>Send via Telegram</button>
+                        </div>
                       </li>
                     ))}
                   </ul>
@@ -852,7 +968,17 @@ export default function LifeLensApp() {
 
           <section className="telegram-workspace" aria-label="Telegram integration">
             <div className="section-heading-row">
-              <div><p className="eyebrow">INTEGRATIONS</p><h2>Telegram <span className="unofficial-label">Unofficial</span></h2></div>
+              <div>
+                <p className="eyebrow">INTEGRATIONS</p>
+                <h2>Telegram</h2>
+                <div className="integration-subtitle">
+                  <span>Personal account connection</span>
+                  <details className="integration-disclosure">
+                    <summary aria-label="About Lumi's Telegram connection" title="About Lumi's Telegram connection">i</summary>
+                    <p>Lumi connects through a third-party Telegram client and is not affiliated with or endorsed by Telegram.</p>
+                  </details>
+                </div>
+              </div>
               {telegramStatus.state === 'connected' ? (
                 <button className="text-button" type="button" disabled={isTelegramWorking} onClick={() => void logoutTelegram()}>Log out</button>
               ) : (
@@ -861,7 +987,7 @@ export default function LifeLensApp() {
                 </button>
               )}
             </div>
-            {telegramStatus.state === 'disconnected' && <p className="workspace-note">Connect a personal account to search recipient metadata locally and send one confirmed plain-text message.</p>}
+            {telegramStatus.state === 'disconnected' && <p className="workspace-note">Connect a personal account to search recipient metadata locally and send one confirmed message, photo, or document.</p>}
             {(telegramStatus.state === 'connecting' || telegramStatus.state === 'awaiting_2fa') && (
               <div className="telegram-auth-card">
                 {telegramStatus.qrUrl ? (
@@ -892,17 +1018,18 @@ export default function LifeLensApp() {
                     {telegramRecipients.map((recipient) => (
                       <li key={recipient.resultId}>
                         <label>
-                          <input type="radio" name="telegram-recipient" checked={selectedTelegramRecipientId === recipient.resultId} onChange={() => setSelectedTelegramRecipientId(recipient.resultId)} />
+                          <input type="radio" name="telegram-recipient" checked={selectedTelegramRecipientId === recipient.resultId} onChange={() => selectTelegramRecipient(recipient.resultId)} />
                           <span><strong>{recipient.displayName}</strong>{recipient.username && <small>@{recipient.username}</small>}<small>{recipient.kind}</small></span>
                         </label>
                       </li>
                     ))}
                   </ul>
                 )}
+                {pendingTelegramAttachment && <p className="workspace-note">Choose one local recipient to continue to the single attachment confirmation.</p>}
                 {telegramQuery && telegramRecipients.length === 0 && <p className="workspace-note">Search returns up to ten local dialog/contact matches. Nothing is sent to OpenAI.</p>}
                 <label className="telegram-message-field">
-                  <span>Message to send</span>
-                  <textarea value={telegramMessage} maxLength={4096} onChange={(event) => setTelegramMessage(event.target.value)} placeholder="Write the complete message" />
+                  <span>Message or attachment caption</span>
+                  <textarea value={telegramMessage} maxLength={4096} onChange={(event) => setTelegramMessage(event.target.value)} placeholder="Write the complete message or caption" />
                 </label>
                 <button className="secondary-button" type="button" onClick={proposeTelegramMessage}>Send message</button>
               </>
@@ -960,10 +1087,6 @@ function currentSourceContext(capture: CaptureResult | undefined, explanation: E
     capturedAt: capture.capturedAt,
     signals: explanation.signals
   }
-}
-
-function messageFrom(error: unknown): string {
-  return error instanceof Error ? error.message : 'LifeLens encountered an unexpected error.'
 }
 
 /**

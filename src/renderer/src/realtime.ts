@@ -27,6 +27,13 @@ export interface RealtimeServerCall {
   readonly generation: number
 }
 
+export interface TelegramAttachmentCoordinationRequest {
+  fileResultId: string
+  recipientQuery: string
+  caption?: string
+  reason: string
+}
+
 interface RealtimeCallbacks {
   onState: (state: CompanionState) => void
   onTranscript: (text: string) => void
@@ -36,6 +43,7 @@ interface RealtimeCallbacks {
   /** Completed speech, forwarded so the trusted intent tracker sees it. */
   onUserTranscript?: (text: string) => Promise<void> | void
   onTelegramRecipientSearch?: (query: string, serverCall: RealtimeServerCall) => void
+  onTelegramAttachmentRequest?: (request: TelegramAttachmentCoordinationRequest, serverCall: RealtimeServerCall) => void
   onToolProposal: (proposal: ToolProposal, serverCall?: RealtimeServerCall) => void
   onError: (message: string) => void
   onSessionEnded?: (reason: 'idle' | 'collapsed' | 'error', generation: number) => void
@@ -44,6 +52,7 @@ interface RealtimeCallbacks {
 
 const CAPTURE_CONTEXT_TOOL = 'capture_screen_context'
 const TELEGRAM_RECIPIENT_SEARCH_TOOL = 'telegram_search_recipients'
+const TELEGRAM_ATTACHMENT_TOOL = 'telegram_send_attachment'
 const SCREEN_CONTEXT_TTL_MS = 10 * 60 * 1_000
 export const COLLAPSE_DISCONNECT_MS = 60_000
 export const IDLE_DISCONNECT_MS = 4 * 60_000
@@ -95,6 +104,8 @@ const SYSTEM_INSTRUCTIONS = [
   'capture_screen_context only inspects content already visible on the user\'s screen, such as "this email", "this image", "this page", "this error", or "what is on my screen". It is never a fallback for finding stored files.',
   'If a document request such as "check my resume" does not say whether the document is visible on screen or stored in a folder, ask exactly: Should I inspect the resume currently visible, or find it in your approved folder? Substitute the document the user named.',
   'Telegram contact and dialog metadata are local-only. You may request a local recipient search from the user\'s spoken recipient name, but never receive, repeat, or infer Telegram names, usernames, phone numbers, peer identifiers, or search results.',
+  'To send one already-found local photo or document, call telegram_send_attachment. Refer to the file only as selected or by its current result number. Never provide a filename, path, file identifier, recipient identifier, peer, MIME type, or bytes.',
+  'For a named file such as my latest resume, call search_documents first with query_terms resume, kind document, and recency latest. Never auto-select a fallback recent possibility; ask for its result number.',
   'Do not capture a screen when the panel opens or during a general greeting.',
   'When a user request needs visible-screen context and there is no current screen context, call capture_screen_context once. The user making that screen-relative request is consent for this one-time capture.',
   'When a current screen context is available, answer follow-up questions from it and do not call capture_screen_context again unless the user asks to refresh, says the screen changed, refers to a new visible item, or you cannot answer reliably.',
@@ -191,6 +202,22 @@ const TOOL_DEFINITIONS = [
   },
   {
     type: 'function',
+    name: TELEGRAM_ATTACHMENT_TOOL,
+    description: 'Coordinate sending exactly one already-found local photo or document through the connected personal Telegram account. This is only a request signal; LifeLens resolves both trusted identifiers locally and shows one final confirmation.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        attachment: { type: 'string', enum: ['selected', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10'], description: 'Use selected for the current trusted selection, or a numbered result string from 1 through 10.' },
+        recipient_query: { type: 'string', description: 'Only the spoken recipient name from the user request.' },
+        caption: { type: 'string', maxLength: 1024, description: 'Optional complete caption, unchanged.' },
+        reason: { type: 'string', description: 'Why this one attachment should be proposed.' }
+      },
+      required: ['attachment', 'recipient_query', 'reason']
+    }
+  },
+  {
+    type: 'function',
     name: TELEGRAM_RECIPIENT_SEARCH_TOOL,
     description: 'Request a local-only recipient lookup using the name in the user\'s own request. Recipient metadata and identifiers stay in LifeLens and are never returned to you. The user selects a recipient locally before any message can be proposed.',
     parameters: {
@@ -250,6 +277,9 @@ export class RealtimeClient {
   private selectedPhoto: { resultId: string; name: string } | undefined
   /** Ordinal-to-result mapping stays local; the model only ever sees numbers. */
   private resultOrdinals: string[] = []
+  private resultContext: Array<{ resultId: string; kind: 'document' | 'photo' | 'screenshot' | 'other' }> = []
+  private latestSearchFallback = false
+  private lastOpenedResult: { resultId: string; kind: 'document' | 'photo' | 'screenshot' | 'other' } | undefined
   /** Serializes transcript-driven intent updates ahead of guarded tool calls. */
   private intentUpdate: Promise<void> = Promise.resolve()
 
@@ -354,6 +384,18 @@ export class RealtimeClient {
   /** Maps the numbers shown to the model onto local result identifiers. */
   setSearchOrdinals(resultIds: readonly string[]): void {
     this.resultOrdinals = [...resultIds]
+  }
+
+  setSearchResults(results: ReadonlyArray<{ id: string; kind: 'document' | 'photo' | 'screenshot' | 'other' }>, fallback = false): void {
+    this.resultContext = results.map((result) => ({ resultId: result.id, kind: result.kind }))
+    this.resultOrdinals = this.resultContext.map((result) => result.resultId)
+    this.latestSearchFallback = fallback
+    this.lastOpenedResult = undefined
+  }
+
+  recordOpenedResult(resultId: string): void {
+    const result = this.resultContext.find((candidate) => candidate.resultId === resultId)
+    if (result) this.lastOpenedResult = result
   }
 
   /**
@@ -611,6 +653,9 @@ export class RealtimeClient {
     this.currentExplanation = undefined
     this.lastUserRequest = ''
     this.resultOrdinals = []
+    this.resultContext = []
+    this.latestSearchFallback = false
+    this.lastOpenedResult = undefined
     this.selectedPhoto = undefined
     this.listening = true
     this.dataChannel?.close()
@@ -623,6 +668,10 @@ export class RealtimeClient {
     this.localAudio = undefined
     this.remoteAudio = undefined
     return endedGeneration
+  }
+
+  completeTelegramAttachmentRequest(serverCall: RealtimeServerCall, result: ToolExecutionResult): void {
+    this.sendFunctionCallOutput(serverCall, result)
   }
 
   private async connectLive(token: string, generation: number): Promise<void> {
@@ -1037,6 +1086,24 @@ export class RealtimeClient {
       return
     }
 
+    if (rawName === TELEGRAM_ATTACHMENT_TOOL) {
+      try {
+        const parsed = JSON.parse(typeof event.arguments === 'string' ? event.arguments : '') as unknown
+        if (!isRecord(parsed)) throw new Error('Realtime supplied non-object attachment details.')
+        if (!this.callbacks.onTelegramAttachmentRequest) throw new Error('Telegram attachment sending is unavailable in this companion view.')
+        const fileResultId = this.resolveAttachmentReference(parsed.attachment)
+        const recipientQuery = requiredArgument(parsed, 'recipient_query')
+        const reason = requiredArgument(parsed, 'reason')
+        const caption = exactOptionalArgument(parsed, 'caption', 1_024)
+        this.callbacks.onTelegramAttachmentRequest({ fileResultId, recipientQuery, caption, reason }, serverCall)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'LifeLens received malformed Telegram attachment details.'
+        this.callbacks.onError(message)
+        this.sendFunctionCallOutput(serverCall, { ok: false, message })
+      }
+      return
+    }
+
     const name = isToolName(rawName) ? rawName : undefined
     if (!name) {
       this.pendingCallGenerations.delete(callId)
@@ -1156,6 +1223,8 @@ export class RealtimeClient {
             message: requiredArgument(argumentsValue, 'message')
           }
         })
+      case 'send_telegram_attachment':
+        throw new Error('Telegram attachment proposals are assembled only from trusted local selections.')
       case 'analyze_photo':
         // Unreachable through isToolName: sending a photo is a user action and
         // is never offered to the model as a tool.
@@ -1213,6 +1282,38 @@ export class RealtimeClient {
       response: { output_modalities: ['audio'], max_output_tokens: pickResponseBudget('long-form') }
     })
     this.responseActive = true
+  }
+
+  private resolveAttachmentReference(value: unknown): string {
+    if (typeof value === 'string' && /^(?:[1-9]|10)$/.test(value)) {
+      const ordinal = Number.parseInt(value, 10)
+      const resultId = this.resultOrdinals[ordinal - 1]
+      if (!resultId) throw new Error('That result number does not exist. Search again first.')
+      return resultId
+    }
+    if (value !== 'selected') {
+      throw new Error('Choose the selected file or a result number from 1 to 10.')
+    }
+
+    const asksForDocument = /\b(?:document|resume|cv|pdf|docx?|text file)\b/i.test(this.lastUserRequest)
+    const asksForPhoto = /\b(?:photo|picture|image|screenshot|screen shot)\b/i.test(this.lastUserRequest)
+    if (asksForPhoto && this.selectedPhoto) return this.selectedPhoto.resultId
+    if (!this.latestSearchFallback) {
+      const candidates = this.resultContext.filter((result) => asksForDocument
+        ? result.kind === 'document'
+        : asksForPhoto
+          ? result.kind === 'photo' || result.kind === 'screenshot'
+          : true)
+      if (candidates.length === 1) return candidates[0]!.resultId
+      if (candidates.length > 1) throw new Error('Which one — say the number from the list?')
+    }
+    if (this.lastOpenedResult && (asksForDocument
+      ? this.lastOpenedResult.kind === 'document'
+      : asksForPhoto
+        ? this.lastOpenedResult.kind === 'photo' || this.lastOpenedResult.kind === 'screenshot'
+        : true)) return this.lastOpenedResult.resultId
+    if (!asksForDocument && this.selectedPhoto) return this.selectedPhoto.resultId
+    throw new Error('Which file — say the number from the list?')
   }
 
   private touchActivity(): void {
@@ -1473,6 +1574,16 @@ function requiredArgument(argumentsValue: Record<string, unknown>, name: string,
 function optionalArgument(argumentsValue: Record<string, unknown>, name: string): string | undefined {
   const value = argumentsValue[name]
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function exactOptionalArgument(argumentsValue: Record<string, unknown>, name: string, maximum: number): string | undefined {
+  const value = argumentsValue[name]
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') {
+    throw new Error(`Realtime did not provide a valid ${name}.`)
+  }
+  if (value.length > maximum) throw new Error(`That ${name} is ${value.length} characters. Shorten it to ${maximum} characters or fewer.`)
+  return value
 }
 
 function normalizeDueAt(value: unknown): string {

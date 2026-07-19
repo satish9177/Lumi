@@ -18,7 +18,7 @@ export function ToolConfirmationCard({ action, isConfirming = false, onConfirm, 
   return (
     <article className="lifelens-tool-confirmation-card" aria-labelledby={headingId} aria-describedby={descriptionId}>
       <p className="lifelens-card-eyebrow">READY TO {label.toUpperCase()}</p>
-      <h2 id={headingId} className="lifelens-card-heading">{label}</h2>
+      <h2 id={headingId} className="lifelens-card-heading">{headingLabel(action)}</h2>
       <div id={descriptionId}><ActionDetails action={action} /></div>
       <p className="lifelens-confirmation-notice">LifeLens will act only if you choose {label}.</p>
       <div className="lifelens-confirmation-actions">
@@ -56,6 +56,22 @@ function ActionDetails({ action }: { action: PendingActionPreview }) {
         ['Recipient', accountLabel(action.recipient)],
         ['Message', action.message]
       ]} />
+    case 'send_telegram_attachment':
+      return (
+        <>
+          {action.mediaKind === 'photo' && action.previewDataUrl
+            ? <img className="lifelens-photo-preview" src={action.previewDataUrl} alt={`Preview of ${action.fileName}`} />
+            : action.mediaKind === 'document' && <div className="lifelens-document-icon" aria-hidden="true">DOC</div>}
+          <Details rows={[
+            ['From', accountLabel(action.account)],
+            ['To', accountLabel(action.recipient)],
+            ['File', action.fileName],
+            ['Type and size', `${action.fileTypeLabel} · ${formatFileSize(action.fileSizeBytes)}`],
+            ['Caption', action.caption ?? 'No caption']
+          ]} />
+          <p className="lifelens-upload-notice">Only this confirmed file will be sent to Telegram. It is not sent to OpenAI.</p>
+        </>
+      )
     case 'create_reminder':
       return <Details rows={[
         ['Reminder', action.title],
@@ -81,6 +97,7 @@ function actionLabel(action: PendingActionPreview): string {
   switch (action.actionType) {
     case 'analyze_photo': return 'Analyse photo'
     case 'send_telegram_message': return 'Send message'
+    case 'send_telegram_attachment': return action.mediaKind === 'photo' ? 'Send photo' : 'Send document'
     case 'create_reminder': return 'Create reminder'
     case 'search_documents': return 'Search folder'
     case 'open_file': return 'Open file'
@@ -91,6 +108,7 @@ function actionLabel(action: PendingActionPreview): string {
 
 function pendingLabel(action: PendingActionPreview): string {
   switch (action.actionType) {
+    case 'send_telegram_attachment': return action.mediaKind === 'photo' ? 'Sending photo…' : 'Sending document…'
     case 'analyze_photo': return 'Sending photo…'
     case 'send_telegram_message': return 'Sending…'
     case 'create_reminder': return 'Creating…'
@@ -101,6 +119,12 @@ function pendingLabel(action: PendingActionPreview): string {
   }
 }
 
+function headingLabel(action: PendingActionPreview): string {
+  return action.actionType === 'send_telegram_attachment'
+    ? `Send Telegram ${action.mediaKind}`
+    : actionLabel(action)
+}
+
 function accountLabel(value: { displayName: string; username?: string }): string {
   return value.username ? `${value.displayName} (@${value.username})` : value.displayName
 }
@@ -108,4 +132,10 @@ function accountLabel(value: { displayName: string; username?: string }): string
 function formatDateTime(value: string): string {
   const date = new Date(value)
   return Number.isNaN(date.valueOf()) ? value : date.toLocaleString()
+}
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }

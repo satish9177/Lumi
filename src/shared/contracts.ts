@@ -150,6 +150,14 @@ export interface SendTelegramMessageInput {
   message: string
 }
 
+export interface SendTelegramAttachmentInput {
+  recipientResultId: string
+  fileResultId: string
+  caption?: string
+}
+
+export type AttachmentMediaKind = 'photo' | 'document'
+
 export interface TelegramAccount {
   displayName: string
   username?: string
@@ -237,7 +245,7 @@ export interface SavedContextRecord {
   createdAt: string
 }
 
-export const TOOL_NAMES = ['create_reminder', 'search_documents', 'open_file', 'open_url', 'save_context', 'send_telegram_message', 'analyze_photo'] as const
+export const TOOL_NAMES = ['create_reminder', 'search_documents', 'open_file', 'open_url', 'save_context', 'send_telegram_message', 'send_telegram_attachment', 'analyze_photo'] as const
 export type ToolName = (typeof TOOL_NAMES)[number]
 
 export interface ToolArguments {
@@ -247,6 +255,7 @@ export interface ToolArguments {
   open_url: OpenUrlInput
   save_context: SaveContextInput
   send_telegram_message: SendTelegramMessageInput
+  send_telegram_attachment: SendTelegramAttachmentInput
   analyze_photo: AnalyzePhotoInput
 }
 
@@ -311,6 +320,18 @@ export type PendingActionPreview =
     account: TelegramAccount
     recipient: Pick<TelegramRecipient, 'displayName' | 'username'>
     message: string
+  })
+  | (PendingActionBase & {
+    actionType: 'send_telegram_attachment'
+    account: TelegramAccount
+    recipient: Pick<TelegramRecipient, 'displayName' | 'username' | 'kind'>
+    fileName: string
+    mediaKind: AttachmentMediaKind
+    fileSizeBytes: number
+    fileTypeLabel: string
+    caption?: string
+    /** A main-built local preview. It is never included in model events. */
+    previewDataUrl?: string
   })
 
 export interface LifeLensApi {
@@ -517,6 +538,33 @@ function parseSendTelegramMessageInput(value: unknown): SendTelegramMessageInput
   }
 }
 
+function parseSendTelegramAttachmentInput(value: unknown): SendTelegramAttachmentInput {
+  if (!isRecord(value)) {
+    throw new PayloadValidationError('Telegram attachment arguments must be an object.')
+  }
+  assertOnlyKeys(value, ['recipientResultId', 'fileResultId', 'caption'], 'Telegram attachment arguments')
+
+  return {
+    recipientResultId: requiredString(value.recipientResultId, 'recipientResultId', 250),
+    fileResultId: requiredString(value.fileResultId, 'fileResultId', 250),
+    caption: value.caption === undefined ? undefined : optionalBoundedString(value.caption, 'caption', 1_024)
+  }
+}
+
+function optionalBoundedString(value: unknown, field: string, maximum: number): string {
+  if (typeof value !== 'string' || value.length > maximum) {
+    throw new PayloadValidationError(`${field} must be a string no longer than ${maximum} characters.`)
+  }
+  return value
+}
+
+function assertOnlyKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
+  const allowedKeys = new Set(allowed)
+  if (Object.keys(value).some((key) => !allowedKeys.has(key))) {
+    throw new PayloadValidationError(`${label} contains unsupported properties.`)
+  }
+}
+
 export function parseToolProposal(value: unknown): ToolProposal {
   if (!isRecord(value)) {
     throw new PayloadValidationError('A tool proposal must be an object.')
@@ -546,6 +594,8 @@ export function parseToolProposal(value: unknown): ToolProposal {
       return { ...common, toolName, arguments: parseSaveContextInput(value.arguments) }
     case 'send_telegram_message':
       return { ...common, toolName, arguments: parseSendTelegramMessageInput(value.arguments) }
+    case 'send_telegram_attachment':
+      return { ...common, toolName, arguments: parseSendTelegramAttachmentInput(value.arguments) }
     case 'analyze_photo':
       return { ...common, toolName, arguments: parseAnalyzePhotoInput(value.arguments) }
     default:

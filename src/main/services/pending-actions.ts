@@ -5,18 +5,29 @@ import {
   type ToolProposal
 } from '../../shared/contracts'
 import { LocalStore } from './store'
-import { TelegramService } from './telegram'
+import {
+  TelegramAttachmentDeliveryError,
+  TelegramService,
+  type TrustedTelegramRecipientSnapshot
+} from './telegram'
 import { createResultThumbnails } from './thumbnails'
 import { executeConfirmedTool } from './tools'
+import {
+  revalidateTrustedAttachment,
+  validateTrustedAttachment,
+  type TrustedAttachmentSnapshot
+} from './attachment-validation'
 
 const DEFAULT_TTL_MS = 2 * 60 * 1_000
 
-type PendingState = 'ready' | 'executing' | 'executed' | 'cancelled' | 'expired' | 'failed'
+type PendingState = 'ready' | 'executing' | 'executed' | 'cancelled' | 'expired' | 'failed' | 'uncertain'
 
 interface PendingAction {
   proposal: ToolProposal
   preview: PendingActionPreview
   state: PendingState
+  attachment?: Readonly<TrustedAttachmentSnapshot>
+  recipientSnapshot?: Readonly<TrustedTelegramRecipientSnapshot>
 }
 
 export class PendingActionStore {
@@ -28,7 +39,9 @@ export class PendingActionStore {
     private readonly validateCapture: (proposal: ToolProposal) => void,
     private readonly now: () => number = () => Date.now(),
     private readonly ttlMs = DEFAULT_TTL_MS,
-    private readonly createThumbnails: typeof createResultThumbnails = createResultThumbnails
+    private readonly createThumbnails: typeof createResultThumbnails = createResultThumbnails,
+    private readonly validateAttachment: typeof validateTrustedAttachment = validateTrustedAttachment,
+    private readonly revalidateAttachment: typeof revalidateTrustedAttachment = revalidateTrustedAttachment
   ) {}
 
   async create(rawProposal: unknown): Promise<PendingActionPreview> {
@@ -38,8 +51,20 @@ export class PendingActionStore {
     const createdAt = new Date(this.now()).toISOString()
     const expiresAt = new Date(this.now() + this.ttlMs).toISOString()
     const approvalId = crypto.randomUUID()
-    const preview = await this.createTrustedPreview(proposal, approvalId, createdAt, expiresAt)
-    this.actions.set(approvalId, { proposal, preview, state: 'ready' })
+    const attachment = proposal.toolName === 'send_telegram_attachment'
+      ? await this.validateAttachment(this.store, proposal.arguments.fileResultId)
+      : undefined
+    const recipientSnapshot = proposal.toolName === 'send_telegram_attachment'
+      ? this.telegram.snapshotRecipient(proposal.arguments.recipientResultId)
+      : undefined
+    if (proposal.toolName === 'send_telegram_attachment' && !recipientSnapshot) {
+      throw new Error('That Telegram recipient is no longer available. Search again first.')
+    }
+    if (recipientSnapshot?.kind === 'channel') {
+      throw new Error('LifeLens can send personal messages and groups, not channel posts.')
+    }
+    const preview = await this.createTrustedPreview(proposal, approvalId, createdAt, expiresAt, attachment, recipientSnapshot)
+    this.actions.set(approvalId, { proposal, preview, state: 'ready', attachment, recipientSnapshot })
     return preview
   }
 
@@ -49,11 +74,13 @@ export class PendingActionStore {
     try {
       const result = action.proposal.toolName === 'send_telegram_message'
         ? await this.executeTelegram(action.proposal)
-        : await executeConfirmedTool(this.store, action.proposal)
+        : action.proposal.toolName === 'send_telegram_attachment'
+          ? await this.executeTelegramAttachment(action)
+          : await executeConfirmedTool(this.store, action.proposal)
       action.state = result.ok ? 'executed' : 'failed'
       return result
     } catch (error) {
-      action.state = 'failed'
+      action.state = error instanceof TelegramAttachmentDeliveryError && error.uncertain ? 'uncertain' : 'failed'
       throw error
     }
   }
@@ -69,6 +96,7 @@ export class PendingActionStore {
 
   clearTelegram(): void {
     this.clearByTool('send_telegram_message')
+    this.clearByTool('send_telegram_attachment')
   }
 
   /** Called when the Realtime session ends: no image may outlive the session. */
@@ -88,7 +116,9 @@ export class PendingActionStore {
     proposal: ToolProposal,
     approvalId: string,
     createdAt: string,
-    expiresAt: string
+    expiresAt: string,
+    attachment?: Readonly<TrustedAttachmentSnapshot>,
+    recipientSnapshot?: Readonly<TrustedTelegramRecipientSnapshot>
   ): Promise<PendingActionPreview> {
     const common = { approvalId, createdAt, expiresAt }
     switch (proposal.toolName) {
@@ -159,12 +189,56 @@ export class PendingActionStore {
           message: proposal.arguments.message
         }
       }
+      case 'send_telegram_attachment': {
+        const account = this.telegram.getStatus().account
+        if (!account || !attachment || !recipientSnapshot) {
+          throw new Error('Telegram is not connected or that trusted attachment is no longer available.')
+        }
+        const [preview] = attachment.mediaKind === 'photo'
+          ? await this.createThumbnails(this.store, [attachment.fileResultId])
+          : []
+        return {
+          ...common,
+          actionType: proposal.toolName,
+          account,
+          recipient: {
+            displayName: recipientSnapshot.displayName,
+            username: recipientSnapshot.username,
+            kind: recipientSnapshot.kind
+          },
+          fileName: attachment.fileName,
+          mediaKind: attachment.mediaKind,
+          fileSizeBytes: attachment.sizeBytes,
+          fileTypeLabel: attachment.fileTypeLabel,
+          caption: proposal.arguments.caption,
+          previewDataUrl: preview?.status === 'ok' ? preview.dataUrl : undefined
+        }
+      }
     }
   }
 
   private async executeTelegram(proposal: ToolProposal<'send_telegram_message'>): Promise<ToolExecutionResult> {
     await this.telegram.sendConfirmed(proposal.callId, proposal.arguments.recipientResultId, proposal.arguments.message)
     return { ok: true, message: 'Telegram message sent.', telegramSent: true }
+  }
+
+  private async executeTelegramAttachment(action: PendingAction): Promise<ToolExecutionResult> {
+    if (action.proposal.toolName !== 'send_telegram_attachment' || !action.attachment || !action.recipientSnapshot) {
+      throw new Error('That Telegram attachment approval is no longer available.')
+    }
+    const attachment = await this.revalidateAttachment(this.store, action.attachment)
+    await this.telegram.sendConfirmedAttachment(action.proposal.callId, action.recipientSnapshot, {
+      canonicalPath: attachment.canonicalPath,
+      fileName: attachment.fileName,
+      sizeBytes: attachment.sizeBytes,
+      mediaKind: attachment.mediaKind,
+      caption: action.proposal.arguments.caption
+    })
+    return {
+      ok: true,
+      message: `Telegram ${attachment.mediaKind === 'photo' ? 'photo' : 'document'} sent.`,
+      telegramSent: true
+    }
   }
 
   private getReadyAction(approvalId: unknown): PendingAction {

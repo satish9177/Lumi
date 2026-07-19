@@ -126,6 +126,7 @@ export async function executeConfirmedTool(store: LocalStore, rawProposal: unkno
       return { ok: true, message: `Saved context: ${savedContext.label}.`, savedContext }
     }
     case 'send_telegram_message':
+    case 'send_telegram_attachment':
       // Telegram sends are intercepted in the main IPC boundary, where the
       // trusted recipient map and a native confirmation are available.
       return { ok: false, message: 'Telegram messages must be confirmed through the Telegram connection.' }

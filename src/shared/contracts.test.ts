@@ -68,6 +68,30 @@ describe('parseToolProposal', () => {
       expect(proposal.arguments.dueAt).toBe('2026-07-20T03:30:00.000Z')
     }
   })
+
+  it('accepts only the closed Telegram attachment schema and preserves the caption exactly', () => {
+    const proposal = parseToolProposal({
+      id: 'attachment', toolName: 'send_telegram_attachment', reason: 'Send it.', requiresConfirmation: true,
+      arguments: { recipientResultId: 'recipient-id', fileResultId: 'file-id', caption: '  exact caption  ' }
+    })
+    expect(proposal.toolName).toBe('send_telegram_attachment')
+    if (proposal.toolName === 'send_telegram_attachment') expect(proposal.arguments.caption).toBe('  exact caption  ')
+
+    const boundary = parseToolProposal({
+      id: 'attachment-caption-boundary', toolName: 'send_telegram_attachment', reason: 'Send it.', requiresConfirmation: true,
+      arguments: { recipientResultId: 'recipient-id', fileResultId: 'file-id', caption: 'x'.repeat(1_024) }
+    })
+    expect(boundary.toolName === 'send_telegram_attachment' && boundary.arguments.caption?.length).toBe(1_024)
+
+    expect(() => parseToolProposal({
+      id: 'attachment-extra', toolName: 'send_telegram_attachment', reason: 'Send it.', requiresConfirmation: true,
+      arguments: { recipientResultId: 'recipient-id', fileResultId: 'file-id', path: 'C:\\secret.pdf' }
+    })).toThrow(/unsupported properties/i)
+    expect(() => parseToolProposal({
+      id: 'attachment-caption', toolName: 'send_telegram_attachment', reason: 'Send it.', requiresConfirmation: true,
+      arguments: { recipientResultId: 'recipient-id', fileResultId: 'file-id', caption: 'x'.repeat(1_025) }
+    })).toThrow(/1024/i)
+  })
 })
 
 describe('extractSignals', () => {
