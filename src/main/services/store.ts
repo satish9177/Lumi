@@ -96,6 +96,17 @@ export class LocalStore {
     return state.documentRoots.find((root) => root.id === rootId)
   }
 
+  async removeDocumentRoot(rootId: string): Promise<boolean> {
+    const state = await this.readState()
+    const next = state.documentRoots.filter((root) => root.id !== rootId)
+    if (next.length === state.documentRoots.length) return false
+    state.documentRoots = next
+    // Results from a revoked root cease to be trusted immediately.
+    state.searchResults = state.searchResults.filter((result) => result.rootId !== rootId)
+    await this.writeState(state)
+    return true
+  }
+
   /**
    * Replaces the previous result set. Ordinals shown to the user always refer
    * to the most recent search, so a stale result can never be reopened by
@@ -111,6 +122,7 @@ export class LocalStore {
       relativePath: result.relativePath,
       modifiedAt: result.modifiedAt,
       kind: result.kind,
+      reason: result.reason,
       absolutePath: result.absolutePath,
       createdAt
     }))
@@ -173,7 +185,8 @@ function toPublicSearchResult(result: StoredSearchResult): DocumentSearchResult 
     name: result.name,
     relativePath: result.relativePath,
     modifiedAt: result.modifiedAt,
-    kind: result.kind ?? 'other'
+    kind: result.kind ?? 'other',
+    ...(result.reason ? { reason: result.reason } : {})
   }
 }
 
@@ -223,7 +236,8 @@ function isStoredSearchResult(value: unknown): value is StoredSearchResult {
     typeof value.relativePath === 'string' &&
     typeof value.modifiedAt === 'string' &&
     typeof value.absolutePath === 'string' &&
-    typeof value.createdAt === 'string'
+    typeof value.createdAt === 'string' &&
+    (value.reason === undefined || typeof value.reason === 'string')
 }
 
 function isSavedContextRecord(value: unknown): value is SavedContextRecord {

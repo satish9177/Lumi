@@ -3,8 +3,9 @@
 Photos are embedded and searched **on this device**. No image, thumbnail,
 embedding, or query vector is sent to OpenAI or anywhere else.
 
-Status: the local-inference foundation is built and verified. The user-facing
-search is not wired up yet — see *Not yet built* at the bottom.
+Status: the Phase 1 local-inference and user-facing semantic-photo-search path
+are built. OCR, face identity, people counting, video, RAW/HEIC, and cloud
+folder analysis remain deliberately out of scope.
 
 ## Shape of the system
 
@@ -93,15 +94,33 @@ pack is installed. It checks the property that shape assertions cannot: that the
 locally reimplemented tokenizer and both towers land in the *same* CLIP space,
 by asserting relative similarity orderings rather than absolute values.
 
-## Not yet built
+## User-facing Phase 1 path
 
-The following are designed for but not implemented, so there is no user-facing
-semantic search yet:
+The renderer exposes narrow app-authored actions to enable the feature, consent
+to and control the frozen model download, pause/resume indexing, clear/rebuild,
+disable, and choose the plugged-in-only preference. It never supplies a URL,
+hash, filename, destination, model path, photo path, or vector.
 
-- safe image decoding (header checks, 50 MP gate, `createThumbnailFromPath`)
-- the indexing scheduler (pacing, pause/resume/cancel, power awareness)
-- `concepts` on the search contract, and query-side prompt ensembling
-- ranking fusion, honesty tiers, and reason labels
-- trusted-result revalidation into the existing search-result store
-- the settings card and reason badges
-- updated Realtime capability instructions
+The scanner accepts JPEG, PNG, and WebP only. It rejects links/reparse paths,
+oversized files, malformed headers, and images above 50 megapixels before
+decode. Electron creates a bounded aspect-preserving thumbnail; main performs a
+center crop and sends only the exact 224 × 224 BGRA bitmap to the worker.
+
+The coordinator reconciles `(root id, relative path, mtime, size)` snapshots
+with the journal, rechecks authorization and metadata at every dequeue, and
+checks again after inference before committing the row. Revoking a root cancels
+and discards active work for that generation, removes its queued entries, and
+purges its records. Transient locked/inference failures retry three times;
+permanent failures retry only after the file changes.
+
+Visual queries use the two app-authored prompts `a photo of {concept}` and
+`{concept}`. Their local text vectors are averaged and normalized in memory.
+Ranking uses semantic 0.80, filename/folder 0.15, and recency 0.05, with named
+cosine honesty gates at 0.27 (strong) and 0.20 (possible). Results below the
+possible gate are never claimed to depict the concept.
+
+The index only nominates results. Main reconstructs each path from the live root
+store and revalidates containment, regular-file status, mtime, size, and link
+status before registering a new opaque trusted result. Existing thumbnail,
+open, selected-photo analysis, and Telegram confirmation flows remain the only
+ways to act on those identifiers.

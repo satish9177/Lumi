@@ -151,4 +151,34 @@ describe('runDocumentSearch', () => {
 
     expect(search.results.map((result) => result.name)).toEqual(['Resume_2026.pdf'])
   })
+
+  it('registers locally ranked semantic photos through the trusted result store with compact reasons only', async () => {
+    const { store, root } = await createWorkspace()
+    await store.addDocumentRoot(root, 'Pictures')
+    const path = join(root, 'IMG_1234.jpg')
+    await writeAged(path, 60)
+    const [storedRoot] = await store.listStoredDocumentRoots()
+    const query = normalizeSearchQuery({ queryTerms: 'beach photos', kind: 'photo', concepts: ['beach'] })
+    const search = await runDocumentSearch(store, query, now, async () => ({
+      available: true,
+      incomplete: true,
+      indexed: 1,
+      total: 10,
+      candidates: [{
+        rootId: storedRoot!.id,
+        absolutePath: path,
+        relativePath: 'IMG_1234.jpg',
+        name: 'IMG_1234.jpg',
+        modifiedAtMs: NOW - 60 * 24 * 60 * 60 * 1_000,
+        sizeBytes: 7,
+        reason: 'Strong visual match: beach'
+      }]
+    }))
+
+    expect(search.results[0]).toMatchObject({ name: 'IMG_1234.jpg', reason: 'Strong visual match: beach' })
+    expect(search.compactResults[0]).toEqual(expect.objectContaining({ ordinal: 1, reason: 'Strong visual match: beach' }))
+    expect(search.message).toMatch(/1 of 10 photos have been indexed/i)
+    expect(JSON.stringify(search.compactResults)).not.toContain(root)
+    await expect(store.getSearchResult(search.results[0]!.id)).resolves.toMatchObject({ absolutePath: path })
+  })
 })

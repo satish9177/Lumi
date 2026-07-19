@@ -97,8 +97,10 @@ const SYSTEM_INSTRUCTIONS = [
   'Give search_documents one to three useful topic words from the user\'s own request, such as "resume" or "offer letter". Do not include words like my, latest, or file.',
   'Never ask the user for an exact filename or which folder to search before calling search_documents. Call it even when no folder is approved yet: LifeLens asks the user to approve a folder and then runs your search automatically.',
   'LifeLens shows the complete matching-file list in the UI. After a search result, state the total result count, mention at most the first three returned names, say the complete list is visible in the UI, and offer to hear more when there are additional results. Refer to results only by their number and name, and offer to open one with open_file.',
-  'search_documents matches only file names, folder names, and dates. You never see inside a photo or a document through it, and you cannot recognise people, faces, or objects across a folder. Never claim or imply that you can.',
-  'When the user asks for a photo by what is in it, say plainly that you can match names, folders, and dates but cannot recognise photo contents automatically, offer the closest local matches, and tell them to choose one photo for you to look at.',
+  'For photo requests, search_documents can use local visual concept search over photos already indexed on this device. Put up to three short concepts copied from the user request in concepts. Photo bytes and embeddings never reach you.',
+  'Local visual search does not support OCR, reading document text inside photos, counting people, or recognising a person\'s identity or face. Never claim those capabilities.',
+  'If indexing is incomplete or a result is described as a filename-only possibility, repeat that limitation plainly. Do not claim a weak result depicts the requested concept.',
+  'Selected-photo cloud analysis is separate from local indexing/search and happens only after the user explicitly confirms one photo. Never invoke or imply it happened automatically.',
   'When the user explicitly chooses one photo, LifeLens sends you that single image. Answer their question about it, and answer later follow-ups from that same image without asking for it again.',
   'If the result list is described as recent possibilities rather than matches, say so honestly and offer the numbered options instead of asking for a filename.',
   'capture_screen_context only inspects content already visible on the user\'s screen, such as "this email", "this image", "this page", "this error", or "what is on my screen". It is never a fallback for finding stored files.',
@@ -153,6 +155,7 @@ const TOOL_DEFINITIONS = [
         query_terms: { type: 'string', description: 'One to three topic words from the user\'s request, such as "resume" or "offer letter". No paths, no words like my or latest.' },
         kind: { type: 'string', enum: ['document', 'photo', 'screenshot', 'any'], description: 'The kind of file the user asked for, when they said.' },
         recency: { type: 'string', enum: ['latest', 'any'], description: 'Use latest when the user asked for the latest, newest, or most recent one.' },
+        concepts: { type: 'array', minItems: 1, maxItems: 3, items: { type: 'string', maxLength: 64 }, description: 'For visual photo search only: short concepts copied from the user request, such as beach or birthday.' },
         reason: { type: 'string', description: 'Why this approved-folder search helps.' }
       },
       required: ['query_terms', 'reason']
@@ -1553,10 +1556,20 @@ function parseSearchArguments(argumentsValue: Record<string, unknown>): SearchDo
 
   const kind = optionalArgument(argumentsValue, 'kind')
   const recency = optionalArgument(argumentsValue, 'recency')
+  const rawConcepts = argumentsValue.concepts
+  let concepts: string[] | undefined
+  if (rawConcepts !== undefined) {
+    if (!Array.isArray(rawConcepts)) throw new Error('Realtime supplied invalid visual concepts.')
+    concepts = rawConcepts.map((concept) => {
+      if (typeof concept !== 'string' || !concept.trim()) throw new Error('Realtime supplied invalid visual concepts.')
+      return concept.trim()
+    })
+  }
   return {
     queryTerms,
     kind: isSearchKind(kind) ? kind : undefined,
-    recency: isSearchRecency(recency) ? recency : undefined
+    recency: isSearchRecency(recency) ? recency : undefined,
+    concepts
   }
 }
 

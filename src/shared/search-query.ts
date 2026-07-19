@@ -12,6 +12,7 @@ export interface SearchQueryInput {
   queryTerms: string
   kind?: SearchKind
   recency?: SearchRecency
+  concepts?: string[]
 }
 
 export interface NormalizedSearchQuery {
@@ -25,10 +26,14 @@ export interface NormalizedSearchQuery {
   synonyms: string[]
   kind: SearchKind
   recency: SearchRecency
+  /** Short user-authored visual concepts. Empty means filename/date search. */
+  concepts: string[]
 }
 
 const MAX_QUERY_LENGTH = 250
 const MAX_TERMS = 8
+export const MAX_SEARCH_CONCEPTS = 3
+export const MAX_SEARCH_CONCEPT_LENGTH = 64
 
 const STOPWORDS = new Set([
   'a', 'an', 'and', 'any', 'are', 'at', 'can', 'do', 'find', 'fetch', 'for', 'from', 'get', 'give',
@@ -159,6 +164,8 @@ export function normalizeSearchQuery(input: SearchQueryInput): NormalizedSearchQ
     throw new SearchQueryValidationError('recency must be latest or any.')
   }
 
+  const concepts = normalizeConcepts(input.concepts)
+
   const rawTokens = tokenizeText(input.queryTerms)
   const detectedRecency = rawTokens.some((token) => RECENCY_WORDS.has(token)) ? 'latest' : 'any'
   const meaningful = rawTokens.filter((token) => !RECENCY_WORDS.has(token) && !STOPWORDS.has(token))
@@ -179,8 +186,29 @@ export function normalizeSearchQuery(input: SearchQueryInput): NormalizedSearchQ
     terms: Object.freeze([...terms]) as unknown as string[],
     synonyms: Object.freeze([...synonyms]) as unknown as string[],
     kind: input.kind && input.kind !== 'any' ? input.kind : detectKind(rawTokens),
-    recency: input.recency ?? detectedRecency
+    recency: input.recency ?? detectedRecency,
+    concepts: Object.freeze(concepts) as unknown as string[]
   })
+}
+
+export function normalizeConcepts(value: unknown): string[] {
+  if (value === undefined) return []
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_SEARCH_CONCEPTS) {
+    throw new SearchQueryValidationError(`concepts must contain one to ${MAX_SEARCH_CONCEPTS} short concepts.`)
+  }
+
+  const concepts = value.map((candidate) => {
+    if (typeof candidate !== 'string') throw new SearchQueryValidationError('Every concept must be text.')
+    const concept = candidate.replace(/\s+/g, ' ').trim()
+    if (concept.length === 0 || concept.length > MAX_SEARCH_CONCEPT_LENGTH) {
+      throw new SearchQueryValidationError(`Every concept must be at most ${MAX_SEARCH_CONCEPT_LENGTH} characters.`)
+    }
+    if (/[\\/]|^[a-f0-9]{20,}$/i.test(concept) || /[\[\]{}]/.test(concept)) {
+      throw new SearchQueryValidationError('A concept must be a short natural-language description.')
+    }
+    return concept.toLocaleLowerCase('en-US')
+  })
+  return [...new Set(concepts)]
 }
 
 function detectKind(tokens: readonly string[]): SearchKind {

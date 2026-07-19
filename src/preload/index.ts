@@ -20,10 +20,26 @@ const lifeLensApi: LifeLensApi = {
   cancelPendingAction: (approvalId: string) => ipcRenderer.invoke(IPC_CHANNELS.cancelPendingAction, approvalId),
   chooseDocumentRoot: () => ipcRenderer.invoke(IPC_CHANNELS.chooseDocumentRoot),
   listDocumentRoots: () => ipcRenderer.invoke(IPC_CHANNELS.listDocumentRoots),
+  removeDocumentRoot: (rootId: string) => ipcRenderer.invoke(IPC_CHANNELS.removeDocumentRoot, rootId),
   beginFileSearch: (request: FileSearchRequest) => ipcRenderer.invoke(IPC_CHANNELS.beginFileSearch, request),
   cancelFileSearch: () => ipcRenderer.invoke(IPC_CHANNELS.cancelFileSearch),
   getResultThumbnails: (resultIds: string[]) => ipcRenderer.invoke(IPC_CHANNELS.getResultThumbnails, resultIds),
   cancelPhotoAnalysis: () => ipcRenderer.invoke(IPC_CHANNELS.cancelPhotoAnalysis),
+  getPhotoSearchStatus: () => ipcRenderer.invoke(IPC_CHANNELS.getPhotoSearchStatus),
+  enablePhotoSearch: () => ipcRenderer.invoke(IPC_CHANNELS.enablePhotoSearch),
+  downloadPhotoSearchModel: () => ipcRenderer.invoke(IPC_CHANNELS.downloadPhotoSearchModel),
+  cancelPhotoSearchDownload: () => ipcRenderer.invoke(IPC_CHANNELS.cancelPhotoSearchDownload),
+  pausePhotoIndex: () => ipcRenderer.invoke(IPC_CHANNELS.pausePhotoIndex),
+  resumePhotoIndex: () => ipcRenderer.invoke(IPC_CHANNELS.resumePhotoIndex),
+  rebuildPhotoIndex: () => ipcRenderer.invoke(IPC_CHANNELS.rebuildPhotoIndex),
+  disablePhotoSearch: () => ipcRenderer.invoke(IPC_CHANNELS.disablePhotoSearch),
+  setPhotoIndexOnlyWhilePluggedIn: (enabled: boolean) => ipcRenderer.invoke(IPC_CHANNELS.setPhotoIndexOnlyWhilePluggedIn, enabled),
+  setRealtimeActive: (active: boolean) => ipcRenderer.invoke(IPC_CHANNELS.setRealtimeActive, active),
+  onPhotoSearchStatusChanged: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, status: Parameters<typeof listener>[0]) => listener(status)
+    ipcRenderer.on(IPC_CHANNELS.photoSearchStatusChanged, handler)
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.photoSearchStatusChanged, handler)
+  },
   onFileSearchResolved: (listener: (resolution: PendingSearchResolution) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, resolution: PendingSearchResolution) => listener(resolution)
     ipcRenderer.on(IPC_CHANNELS.fileSearchResolved, handler)

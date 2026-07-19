@@ -1,5 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain, safeStorage, screen } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, powerMonitor, safeStorage, screen, utilityProcess } from 'electron'
 import { existsSync } from 'node:fs'
+import { constants as osPriority, setPriority } from 'node:os'
 import { basename, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
@@ -22,6 +23,9 @@ import { createResultThumbnails, MAX_THUMBNAILS } from './services/thumbnails'
 import { restoreReminderTimers } from './services/tools'
 import { TelegramService } from './services/telegram'
 import { PendingActionStore } from './services/pending-actions'
+import { PhotoIndexCoordinator } from './vision/coordinator'
+import { VisionEngine, type VisionWorkerHandle } from './vision/engine'
+import { isModelPackInstalled, resolveAssetPath } from './vision/model-pack'
 
 let mainWindow: BrowserWindow | undefined
 let localStore: LocalStore
@@ -29,6 +33,7 @@ let telegramService: TelegramService
 let pendingActions: PendingActionStore
 let intentTracker: IntentTracker
 let searchOrchestrator: SearchOrchestrator
+let photoIndexCoordinator: PhotoIndexCoordinator
 const captures = new Map<string, Pick<CaptureResult, 'capturedAt'>>()
 
 const CLOSED_WINDOW_SIZE = { width: 88, height: 88 }
@@ -206,6 +211,7 @@ function registerIpcHandlers(): void {
 
     const path = selection.filePaths[0]
     const root = await localStore.addDocumentRoot(path, basename(path) || 'Approved folder')
+    void photoIndexCoordinator.reconcile()
     // Approving a folder is what the held search was waiting for; it resumes
     // here so the user never repeats the original request.
     await searchOrchestrator.notifyFolderApproved()
@@ -233,6 +239,49 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.cancelPhotoAnalysis, (event) => {
     requireMainWindow(event)
     pendingActions.clearPhotoAnalysis()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.getPhotoSearchStatus, (event) => {
+    requireMainWindow(event)
+    return photoIndexCoordinator.status()
+  })
+  ipcMain.handle(IPC_CHANNELS.enablePhotoSearch, async (event) => {
+    requireMainWindow(event)
+    return photoIndexCoordinator.enable()
+  })
+  ipcMain.handle(IPC_CHANNELS.downloadPhotoSearchModel, async (event) => {
+    requireMainWindow(event)
+    return photoIndexCoordinator.downloadModel()
+  })
+  ipcMain.handle(IPC_CHANNELS.cancelPhotoSearchDownload, async (event) => {
+    requireMainWindow(event)
+    return photoIndexCoordinator.cancelDownload()
+  })
+  ipcMain.handle(IPC_CHANNELS.pausePhotoIndex, async (event) => {
+    requireMainWindow(event)
+    return photoIndexCoordinator.pause()
+  })
+  ipcMain.handle(IPC_CHANNELS.resumePhotoIndex, async (event) => {
+    requireMainWindow(event)
+    return photoIndexCoordinator.resume()
+  })
+  ipcMain.handle(IPC_CHANNELS.rebuildPhotoIndex, async (event) => {
+    requireMainWindow(event)
+    return photoIndexCoordinator.rebuild()
+  })
+  ipcMain.handle(IPC_CHANNELS.disablePhotoSearch, async (event) => {
+    requireMainWindow(event)
+    return photoIndexCoordinator.disable()
+  })
+  ipcMain.handle(IPC_CHANNELS.setPhotoIndexOnlyWhilePluggedIn, async (event, enabled: unknown) => {
+    requireMainWindow(event)
+    if (typeof enabled !== 'boolean') throw new Error('The plugged-in indexing preference must be a boolean.')
+    return photoIndexCoordinator.setOnlyWhilePluggedIn(enabled)
+  })
+  ipcMain.handle(IPC_CHANNELS.setRealtimeActive, (event, active: unknown) => {
+    requireMainWindow(event)
+    if (typeof active !== 'boolean') throw new Error('Realtime activity must be a boolean.')
+    photoIndexCoordinator.setRealtimeActive(active)
   })
 
   ipcMain.handle(IPC_CHANNELS.listDocumentRoots, async (event) => {
@@ -346,12 +395,30 @@ function validateCaptureProvenance(proposal: ToolProposal): void {
 app.whenReady().then(async () => {
   app.setAppUserModelId('com.lifelens.app')
   localStore = new LocalStore(app.getPath('userData'))
+  photoIndexCoordinator = new PhotoIndexCoordinator({
+    userDataDir: app.getPath('userData'),
+    listRoots: () => localStore.listStoredDocumentRoots(),
+    createEngine: createVisionEngine,
+    decodeThumbnail: (path, size) => nativeImage.createThumbnailFromPath(path, size),
+    modelRuntime: { fetch },
+    isOnBattery: () => powerMonitor.isOnBatteryPower(),
+    emitStatus: emitPhotoSearchStatus
+  })
+
+  ipcMain.handle(IPC_CHANNELS.removeDocumentRoot, async (event, rootId: unknown) => {
+    requireMainWindow(event)
+    if (typeof rootId !== 'string' || rootId.length === 0 || rootId.length > 250) throw new Error('Folder approval identifier is invalid.')
+    const removed = await localStore.removeDocumentRoot(rootId)
+    if (removed) await photoIndexCoordinator.revokeRoot(rootId)
+    return removed
+  })
+  await photoIndexCoordinator.initialize()
   telegramService = new TelegramService(app.getPath('userData'), safeStorage, emitTelegramStatus)
   pendingActions = new PendingActionStore(localStore, telegramService, validateCaptureProvenance)
   intentTracker = new IntentTracker()
   searchOrchestrator = new SearchOrchestrator({
     listRoots: () => localStore.listDocumentRoots(),
-    runSearch: (query) => runDocumentSearch(localStore, query),
+    runSearch: (query) => runDocumentSearch(localStore, query, () => Date.now(), (semanticQuery) => photoIndexCoordinator.search(semanticQuery)),
     isTrustedIntent: (query) => intentTracker.supportsFileSearch(query),
     waitForTrust: waitForTrustedIntent,
     emit: emitFileSearchResolution
@@ -360,6 +427,9 @@ app.whenReady().then(async () => {
   mainWindow = createWindow()
   await restoreReminderTimers(localStore)
   await telegramService.initialize()
+
+  powerMonitor.on('on-battery', () => photoIndexCoordinator.powerChanged())
+  powerMonitor.on('on-ac', () => photoIndexCoordinator.powerChanged())
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -409,10 +479,38 @@ function emitTelegramStatus(status: TelegramStatus): void {
   }
 }
 
+function emitPhotoSearchStatus(status: ReturnType<PhotoIndexCoordinator['status']>): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.photoSearchStatusChanged, status)
+  }
+}
+
+function createVisionEngine(): VisionEngine {
+  const userDataDir = app.getPath('userData')
+  return new VisionEngine({
+    resolveModelPaths: async () => await isModelPackInstalled(userDataDir)
+      ? { image: resolveAssetPath(userDataDir, 'imageModel'), text: resolveAssetPath(userDataDir, 'textModel') }
+      : undefined,
+    spawn: (): VisionWorkerHandle => {
+      const child = utilityProcess.fork(join(__dirname, 'vision-worker.cjs'), [], { serviceName: 'LifeLens local photo search' })
+      if (child.pid) {
+        try { setPriority(child.pid, osPriority.priority.PRIORITY_BELOW_NORMAL) } catch { /* Best effort on supported platforms. */ }
+      }
+      return {
+        postMessage: (message) => child.postMessage(message),
+        onMessage: (listener) => child.on('message', listener),
+        onExit: (listener) => child.on('exit', listener),
+        kill: () => { child.kill() }
+      }
+    }
+  })
+}
+
 app.on('before-quit', () => {
   pendingActions?.clearAll()
   searchOrchestrator?.clear()
   void telegramService?.shutdown()
+  void photoIndexCoordinator?.shutdown()
 })
 
 app.on('window-all-closed', () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { extractSignals, parseToolProposal } from './contracts'
+import { extractSignals, parseFileSearchRequest, parseToolProposal } from './contracts'
 
 const sourceContext = {
   captureId: 'capture-1',
@@ -107,5 +107,14 @@ describe('extractSignals', () => {
         expect.objectContaining({ kind: 'next_action' })
       ])
     )
+  })
+})
+
+describe('semantic search contract', () => {
+  it('accepts up to three short concepts and rejects unknown or path-like fields', () => {
+    expect(parseFileSearchRequest({ queryTerms: 'beach', kind: 'photo', concepts: ['beach'], origin: 'user' }).concepts).toEqual(['beach'])
+    expect(() => parseFileSearchRequest({ queryTerms: 'beach', concepts: ['a', 'b', 'c', 'd'], origin: 'user' })).toThrow(/one to three/i)
+    expect(() => parseFileSearchRequest({ queryTerms: 'beach', concepts: ['C:\\Photos'], origin: 'user' })).toThrow(/natural-language/i)
+    expect(() => parseFileSearchRequest({ queryTerms: 'beach', concepts: ['beach'], embedding: [1], origin: 'user' })).toThrow(/unsupported/i)
   })
 })

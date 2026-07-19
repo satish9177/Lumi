@@ -9,6 +9,7 @@ import type {
   Explanation,
   FileSearchResults,
   PendingActionPreview,
+  PhotoSearchStatus,
   RealtimeMode,
   ResultThumbnail,
   SourceContext,
@@ -92,6 +93,11 @@ export default function LifeLensApp() {
   const [telegramPassword, setTelegramPassword] = useState('')
   const [isTelegramWorking, setIsTelegramWorking] = useState(false)
   const [pendingTelegramAttachment, setPendingTelegramAttachment] = useState<PendingTelegramAttachment>()
+  const [photoSearchStatus, setPhotoSearchStatus] = useState<PhotoSearchStatus>({
+    state: 'off', enabled: false, modelInstalled: false, modelDownloadBytes: 0, downloadedBytes: 0,
+    indexed: 0, total: 0, failed: 0, skipped: 0, onlyWhilePluggedIn: true, powerStateKnown: false, onBattery: false
+  })
+  const [isPhotoSearchWorking, setIsPhotoSearchWorking] = useState(false)
 
   const clearExpiredTelegramQr = useCallback((qrUrl: string): void => {
     setTelegramStatus((current) => current.qrUrl === qrUrl
@@ -117,6 +123,7 @@ export default function LifeLensApp() {
   useEffect(() => {
     void refreshDocumentRoots()
     void refreshTelegramStatus()
+    void window.lifeLens.getPhotoSearchStatus().then(setPhotoSearchStatus, () => undefined)
     const removeSearchListener = window.lifeLens.onFileSearchResolved((resolution) => controllerRef.current?.resolve(resolution))
     const removeTelegramListener = window.lifeLens.onTelegramAuthUpdate((status) => {
       setTelegramStatus(status)
@@ -128,13 +135,16 @@ export default function LifeLensApp() {
         setTelegramPassword('')
       }
     })
+    const removePhotoSearchListener = window.lifeLens.onPhotoSearchStatusChanged(setPhotoSearchStatus)
     return () => {
       removeSearchListener()
       removeTelegramListener()
+      removePhotoSearchListener()
       void window.lifeLens.cancelFileSearch()
       // No approved-but-unsent photo may outlive the session.
       void window.lifeLens.cancelPhotoAnalysis()
       clientRef.current?.disconnect()
+      void window.lifeLens.setRealtimeActive(false)
     }
   }, [])
 
@@ -226,6 +236,7 @@ export default function LifeLensApp() {
           onToolProposal: (proposal, serverCall) => { void preparePendingAction(proposal, serverCall) },
           onError: setError,
           onSessionEnded: (reason, generation) => {
+            void window.lifeLens.setRealtimeActive(false)
             expireServerGeneration(generation)
             if (reason === 'error') {
               setCompanionState('error')
@@ -246,6 +257,7 @@ export default function LifeLensApp() {
         // that privacy choice into the session before its initial update.
         client.setListening(expandedRef.current)
         await pendingConnection
+        void window.lifeLens.setRealtimeActive(true)
         if (!expandedRef.current && collapsedAtRef.current !== undefined) {
           client.startCollapseDisconnect(collapsedAtRef.current)
         }
@@ -253,6 +265,7 @@ export default function LifeLensApp() {
           hasConnectedOnceRef.current = true
         }
       } catch (connectionError) {
+        void window.lifeLens.setRealtimeActive(false)
         clientRef.current?.disconnect()
         clientRef.current = undefined
         setCompanionState('error')
@@ -458,7 +471,15 @@ export default function LifeLensApp() {
       return
     }
 
-    void controller.run({ queryTerms: query }, undefined, 'user')
+    const photoCue = /\b(?:photo|photos|picture|pictures|image|images)\b/i.test(query)
+    const concept = query
+      .replace(/\b(?:find|show|search|latest|recent|my|photo|photos|picture|pictures|image|images)\b/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 64)
+    void controller.run(photoCue && concept
+      ? { queryTerms: query, kind: 'photo', concepts: [concept] }
+      : { queryTerms: query }, undefined, 'user')
   }
 
   const proposeOpenFile = (result: DocumentSearchResult): void => {
@@ -469,6 +490,30 @@ export default function LifeLensApp() {
       requiresConfirmation: true,
       arguments: { resultId: result.id }
     })
+  }
+
+  const revokeDocumentRoot = async (root: ApprovedDocumentRoot): Promise<void> => {
+    if (!window.confirm(`Stop searching and indexing ${root.label}?`)) return
+    try {
+      await window.lifeLens.removeDocumentRoot(root.id)
+      updateDocumentRoots(await window.lifeLens.listDocumentRoots())
+      setSearchResults([])
+      setThumbnails(new Map())
+    } catch (rootError) {
+      setError(messageFrom(rootError))
+    }
+  }
+
+  const runPhotoSearchAction = async (action: () => Promise<PhotoSearchStatus>): Promise<void> => {
+    setIsPhotoSearchWorking(true)
+    setError(undefined)
+    try {
+      setPhotoSearchStatus(await action())
+    } catch (actionError) {
+      setError(messageFrom(actionError))
+    } finally {
+      setIsPhotoSearchWorking(false)
+    }
   }
 
   const proposeTelegramAttachment = (result: DocumentSearchResult): void => {
@@ -820,6 +865,7 @@ export default function LifeLensApp() {
   // document search keeps its list view.
   const showsImageResults = searchResults.length > 0 &&
     searchResults.every((result) => result.kind === 'photo' || result.kind === 'screenshot')
+  const showsSemanticResults = searchResults.some((result) => result.reason?.includes('visual match'))
   const applicationWindows = captureSources.filter((source) => source.kind === 'window')
   const entireDisplays = captureSources.filter((source) => source.kind === 'screen')
   const visibleLinks = explanation?.signals.filter((signal) => signal.kind === 'link') ?? []
@@ -920,7 +966,9 @@ export default function LifeLensApp() {
             </div>
             {documentRoots.length === 0
               ? <p className="workspace-note">LifeLens cannot search until you approve a folder. Ask for a file and it will offer the folder chooser once.</p>
-              : <p className="workspace-note">Searching {documentRoots.map((root) => root.label).join(', ')}.</p>}
+              : <ul className="approved-root-list">{documentRoots.map((root) => (
+                <li key={root.id}><span>{root.label}</span><button className="text-button" type="button" onClick={() => void revokeDocumentRoot(root)}>Revoke</button></li>
+              ))}</ul>}
             <div className="document-search-row">
               <input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="resume" aria-label="What to look for" />
               <button className="secondary-button" type="button" disabled={isSearching} onClick={proposeDocumentSearch}>
@@ -931,7 +979,9 @@ export default function LifeLensApp() {
               <>
                 <p className="workspace-note">
                   {showsImageResults
-                    ? 'I can search photo names, folders, and dates, but I cannot recognise the contents of every photo automatically. Here are the closest local matches. Choose one and I can look at that selected photo.'
+                    ? showsSemanticResults
+                      ? 'These matches came from the local on-device photo index. OCR and person identity recognition are not supported. Selected-photo analysis remains a separate confirmed action.'
+                      : 'These are filename, folder, and date possibilities. Choose one for the separate confirmed photo-analysis action.'
                     : searchFallback
                       ? 'No filename matched, so these are possible recent matches, newest first.'
                       : 'Best matches, newest first.'}
@@ -963,6 +1013,56 @@ export default function LifeLensApp() {
                   </ul>
                 )}
               </>
+            )}
+          </section>
+
+          <section className="photo-search-settings" aria-label="Intelligent photo search settings">
+            <div className="section-heading-row">
+              <div><p className="eyebrow">LOCAL PHOTO SEARCH</p><h2>Intelligent photo search</h2></div>
+              <span className={`photo-search-state state-${photoSearchStatus.state}`}>{photoSearchStateLabel(photoSearchStatus.state)}</span>
+            </div>
+            <p className="workspace-note"><strong>Photos are indexed on this device and are not uploaded.</strong> Visual search works only across indexed JPEG, PNG, and WebP photos.</p>
+            {!photoSearchStatus.enabled && (
+              <button className="secondary-button" type="button" disabled={isPhotoSearchWorking} onClick={() => void runPhotoSearchAction(() => window.lifeLens.enablePhotoSearch())}>Enable intelligent photo search</button>
+            )}
+            {photoSearchStatus.enabled && !photoSearchStatus.modelInstalled && photoSearchStatus.state !== 'downloading' && photoSearchStatus.state !== 'verifying' && (
+              <button className="secondary-button" type="button" disabled={isPhotoSearchWorking} onClick={() => void runPhotoSearchAction(() => window.lifeLens.downloadPhotoSearchModel())}>
+                Download local model ({formatMegabytes(photoSearchStatus.modelDownloadBytes)})
+              </button>
+            )}
+            {(photoSearchStatus.state === 'downloading' || photoSearchStatus.state === 'verifying') && (
+              <div className="photo-search-progress">
+                <progress max={Math.max(1, photoSearchStatus.modelDownloadBytes)} value={photoSearchStatus.downloadedBytes} />
+                <span>{formatMegabytes(photoSearchStatus.downloadedBytes)} of {formatMegabytes(photoSearchStatus.modelDownloadBytes)}</span>
+                <button className="text-button" type="button" onClick={() => void runPhotoSearchAction(() => window.lifeLens.cancelPhotoSearchDownload())}>Cancel</button>
+              </div>
+            )}
+            {photoSearchStatus.enabled && photoSearchStatus.modelInstalled && (
+              <>
+                <p className="workspace-note">{photoSearchStatus.indexed} of {photoSearchStatus.total} photos indexed · {photoSearchStatus.failed} failed · {photoSearchStatus.skipped} skipped.</p>
+                {photoSearchStatus.lastIndexedAt && <p className="workspace-note">Last indexed {new Date(photoSearchStatus.lastIndexedAt).toLocaleString()}.</p>}
+                <label className="photo-search-toggle">
+                  <input type="checkbox" checked={photoSearchStatus.onlyWhilePluggedIn} onChange={(event) => void runPhotoSearchAction(() => window.lifeLens.setPhotoIndexOnlyWhilePluggedIn(event.target.checked))} />
+                  <span>Index only while plugged in</span>
+                </label>
+                {!photoSearchStatus.powerStateKnown && <p className="workspace-note">Power state is unavailable, so indexing continues normally.</p>}
+                <div className="actions">
+                  {photoSearchStatus.state === 'paused'
+                    ? <button className="secondary-button" type="button" onClick={() => void runPhotoSearchAction(() => window.lifeLens.resumePhotoIndex())}>Resume</button>
+                    : <button className="secondary-button" type="button" onClick={() => void runPhotoSearchAction(() => window.lifeLens.pausePhotoIndex())}>Pause</button>}
+                </div>
+              </>
+            )}
+            {photoSearchStatus.message && <p className="workspace-note">{photoSearchStatus.message}</p>}
+            {photoSearchStatus.enabled && (
+              <div className="actions">
+                <button className="text-button" type="button" disabled={isPhotoSearchWorking} onClick={() => {
+                  if (window.confirm('Clear the local model and photo index? You will need to download and index again.')) void runPhotoSearchAction(() => window.lifeLens.rebuildPhotoIndex())
+                }}>Clear and rebuild</button>
+                <button className="text-button danger-button" type="button" disabled={isPhotoSearchWorking} onClick={() => {
+                  if (window.confirm('Disable intelligent photo search? Filename and date search will keep working.')) void runPhotoSearchAction(() => window.lifeLens.disablePhotoSearch())
+                }}>Disable</button>
+              </div>
             )}
           </section>
 
@@ -1075,6 +1175,17 @@ export default function LifeLensApp() {
       )}
     </main>
   )
+}
+
+function photoSearchStateLabel(state: PhotoSearchStatus['state']): string {
+  return ({
+    off: 'Off', consent_required: 'Consent required', downloading: 'Downloading', verifying: 'Verifying',
+    indexing: 'Indexing', paused: 'Paused', ready: 'Ready', error: 'Error', rebuild_required: 'Rebuild required'
+  })[state]
+}
+
+function formatMegabytes(bytes: number): string {
+  return `${Math.round(bytes / (1024 * 1024))} MB`
 }
 
 function currentSourceContext(capture: CaptureResult | undefined, explanation: Explanation | undefined): SourceContext | undefined {

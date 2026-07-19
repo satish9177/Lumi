@@ -18,11 +18,23 @@ export const IPC_CHANNELS = {
   cancelPendingAction: 'lifelens:cancel-pending-action',
   chooseDocumentRoot: 'lifelens:choose-document-root',
   listDocumentRoots: 'lifelens:list-document-roots',
+  removeDocumentRoot: 'lifelens:remove-document-root',
   beginFileSearch: 'lifelens:begin-file-search',
   cancelFileSearch: 'lifelens:cancel-file-search',
   fileSearchResolved: 'lifelens:file-search-resolved',
   getResultThumbnails: 'lifelens:get-result-thumbnails',
   cancelPhotoAnalysis: 'lifelens:cancel-photo-analysis',
+  getPhotoSearchStatus: 'lifelens:get-photo-search-status',
+  enablePhotoSearch: 'lifelens:enable-photo-search',
+  downloadPhotoSearchModel: 'lifelens:download-photo-search-model',
+  cancelPhotoSearchDownload: 'lifelens:cancel-photo-search-download',
+  pausePhotoIndex: 'lifelens:pause-photo-index',
+  resumePhotoIndex: 'lifelens:resume-photo-index',
+  rebuildPhotoIndex: 'lifelens:rebuild-photo-index',
+  disablePhotoSearch: 'lifelens:disable-photo-search',
+  setPhotoIndexOnlyWhilePluggedIn: 'lifelens:set-photo-index-only-while-plugged-in',
+  setRealtimeActive: 'lifelens:set-realtime-active',
+  photoSearchStatusChanged: 'lifelens:photo-search-status-changed',
   listReminders: 'lifelens:list-reminders',
   getTelegramStatus: 'lifelens:get-telegram-status',
   connectTelegram: 'lifelens:connect-telegram',
@@ -99,6 +111,8 @@ export interface SearchDocumentsInput {
   queryTerms: string
   kind?: SearchKind
   recency?: SearchRecency
+  /** Up to three short visual concepts copied from the user's request. */
+  concepts?: string[]
 }
 
 export interface OpenFileInput {
@@ -194,6 +208,8 @@ export interface DocumentSearchResult {
   relativePath: string
   modifiedAt: string
   kind: FileKind
+  /** Main-authored bounded explanation; never a raw score. */
+  reason?: string
 }
 
 /**
@@ -204,6 +220,26 @@ export interface CompactSearchResult {
   ordinal: number
   name: string
   modifiedAgo: string
+  reason?: string
+}
+
+export type PhotoSearchState = 'off' | 'consent_required' | 'downloading' | 'verifying' | 'indexing' | 'paused' | 'ready' | 'error' | 'rebuild_required'
+
+export interface PhotoSearchStatus {
+  state: PhotoSearchState
+  enabled: boolean
+  modelInstalled: boolean
+  modelDownloadBytes: number
+  downloadedBytes: number
+  indexed: number
+  total: number
+  failed: number
+  skipped: number
+  lastIndexedAt?: string
+  onlyWhilePluggedIn: boolean
+  powerStateKnown: boolean
+  onBattery: boolean
+  message?: string
 }
 
 export type FileSearchOrigin = 'model' | 'user'
@@ -212,6 +248,7 @@ export interface FileSearchRequest {
   queryTerms: string
   kind?: SearchKind
   recency?: SearchRecency
+  concepts?: string[]
   /** The Realtime function call awaiting a terminal result, when model-driven. */
   callId?: string
   origin: FileSearchOrigin
@@ -345,10 +382,22 @@ export interface LifeLensApi {
   cancelPendingAction: (approvalId: string) => Promise<void>
   chooseDocumentRoot: () => Promise<ApprovedDocumentRoot | undefined>
   listDocumentRoots: () => Promise<ApprovedDocumentRoot[]>
+  removeDocumentRoot: (rootId: string) => Promise<boolean>
   beginFileSearch: (request: FileSearchRequest) => Promise<FileSearchOutcome>
   cancelFileSearch: () => Promise<void>
   getResultThumbnails: (resultIds: string[]) => Promise<ResultThumbnail[]>
   cancelPhotoAnalysis: () => Promise<void>
+  getPhotoSearchStatus: () => Promise<PhotoSearchStatus>
+  enablePhotoSearch: () => Promise<PhotoSearchStatus>
+  downloadPhotoSearchModel: () => Promise<PhotoSearchStatus>
+  cancelPhotoSearchDownload: () => Promise<PhotoSearchStatus>
+  pausePhotoIndex: () => Promise<PhotoSearchStatus>
+  resumePhotoIndex: () => Promise<PhotoSearchStatus>
+  rebuildPhotoIndex: () => Promise<PhotoSearchStatus>
+  disablePhotoSearch: () => Promise<PhotoSearchStatus>
+  setPhotoIndexOnlyWhilePluggedIn: (enabled: boolean) => Promise<PhotoSearchStatus>
+  setRealtimeActive: (active: boolean) => Promise<void>
+  onPhotoSearchStatusChanged: (listener: (status: PhotoSearchStatus) => void) => () => void
   onFileSearchResolved: (listener: (resolution: PendingSearchResolution) => void) => () => void
   listReminders: () => Promise<ReminderRecord[]>
   getTelegramStatus: () => Promise<TelegramStatus>
@@ -433,10 +482,12 @@ function parseReminderInput(value: unknown): ReminderInput {
   }
 }
 
-function parseSearchDocumentsInput(value: unknown): SearchDocumentsInput {
+function parseSearchDocumentsInput(value: unknown, allowedExtra: readonly string[] = []): SearchDocumentsInput {
   if (!isRecord(value)) {
     throw new PayloadValidationError('Search arguments must be an object.')
   }
+
+  assertOnlyKeys(value, ['queryTerms', 'kind', 'recency', 'concepts', ...allowedExtra], 'Search arguments')
 
   const input: SearchDocumentsInput = { queryTerms: requiredString(value.queryTerms, 'queryTerms', 250) }
 
@@ -454,6 +505,19 @@ function parseSearchDocumentsInput(value: unknown): SearchDocumentsInput {
     input.recency = value.recency
   }
 
+  if (value.concepts !== undefined) {
+    if (!Array.isArray(value.concepts) || value.concepts.length === 0 || value.concepts.length > 3) {
+      throw new PayloadValidationError('concepts must contain one to three short concepts.')
+    }
+    input.concepts = value.concepts.map((concept) => {
+      const parsed = requiredString(concept, 'concepts', 64)
+      if (/[\\/]|^[a-f0-9]{20,}$/i.test(parsed) || /[\[\]{}]/.test(parsed)) {
+        throw new PayloadValidationError('concepts must contain natural-language descriptions only.')
+      }
+      return parsed
+    })
+  }
+
   return input
 }
 
@@ -467,7 +531,7 @@ export function parseFileSearchRequest(value: unknown): FileSearchRequest {
     throw new PayloadValidationError('A file search request must state a model or user origin.')
   }
 
-  const input = parseSearchDocumentsInput(value)
+  const input = parseSearchDocumentsInput(value, ['origin', 'callId'])
   return {
     ...input,
     origin: value.origin,

@@ -122,3 +122,12 @@ describe('formatModifiedAgo', () => {
     expect(formatModifiedAgo(now - 400 * 24 * 3_600_000, now)).toMatch(/year/)
   })
 })
+
+describe('visual concepts', () => {
+  it('normalizes, deduplicates, bounds, and freezes concepts', () => {
+    const query = normalizeSearchQuery({ queryTerms: 'beach photos', kind: 'photo', concepts: [' Beach ', 'beach'] })
+    expect(query.concepts).toEqual(['beach'])
+    expect(Object.isFrozen(query.concepts)).toBe(true)
+    expect(() => normalizeSearchQuery({ queryTerms: 'photo', concepts: ['x'.repeat(65)] })).toThrow(SearchQueryValidationError)
+  })
+})

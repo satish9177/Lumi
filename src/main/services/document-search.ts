@@ -6,6 +6,7 @@ import {
 import type { CompactSearchResult, DocumentSearchResult, FileSearchResults } from '../../shared/contracts'
 import { formatModifiedAgo, type NormalizedSearchQuery } from '../../shared/search-query'
 import type { LocalStore, SearchResultInput } from './store'
+import type { SemanticSearchResult } from '../vision/coordinator'
 
 /** The redacted view sent to the model is capped independently of the UI list. */
 const MAX_MODEL_RESULTS = 5
@@ -19,7 +20,8 @@ const MAX_UI_RESULTS = 10
 export async function runDocumentSearch(
   store: LocalStore,
   query: NormalizedSearchQuery,
-  now: () => number = () => Date.now()
+  now: () => number = () => Date.now(),
+  semanticSearch?: (query: NormalizedSearchQuery) => Promise<SemanticSearchResult>
 ): Promise<FileSearchResults> {
   const roots = await resolveSearchRoots(store)
   if (roots.length === 0) {
@@ -32,15 +34,57 @@ export async function runDocumentSearch(
   }
 
   const search = await searchApprovedDocuments(roots, query, { maxResults: MAX_UI_RESULTS, now })
-  const stored = await store.saveSearchResults(search.results.map(toSearchResultInput))
-  const compactResults = toCompactResults(stored, search.results.map((result) => result.modifiedAtMs), now())
+  const semantic = query.concepts.length > 0 && semanticSearch && (query.kind === 'photo' || query.kind === 'screenshot')
+    ? await semanticSearch(query)
+    : undefined
+  const selected = semantic ? mergeSemanticResults(semantic, search.results) : search.results.map((result) => ({
+    ...toSearchResultInput(result),
+    modifiedAtMs: result.modifiedAtMs
+  }))
+  const stored = await store.saveSearchResults(selected.map(({ modifiedAtMs: _modifiedAtMs, ...result }) => result))
+  const compactResults = toCompactResults(stored, selected.map((result) => result.modifiedAtMs), now())
+  const fallback = semantic ? semantic.candidates.length === 0 : search.fallback
 
   return {
     results: stored,
     compactResults,
-    fallback: search.fallback,
-    message: describeOutcome(stored.length, search.fallback, query)
+    fallback,
+    message: semantic
+      ? describeSemanticOutcome(stored.length, semantic, query)
+      : describeOutcome(stored.length, search.fallback, query)
   }
+}
+
+function mergeSemanticResults(
+  semantic: SemanticSearchResult,
+  filenameResults: ReadonlyArray<{
+    rootId: string
+    name: string
+    relativePath: string
+    modifiedAtMs: number
+    kind: DocumentSearchResult['kind']
+    path: string
+  }>
+): Array<SearchResultInput & { modifiedAtMs: number }> {
+  const merged: Array<SearchResultInput & { modifiedAtMs: number }> = semantic.candidates.map((result) => ({
+    rootId: result.rootId,
+    name: result.name,
+    relativePath: result.relativePath,
+    modifiedAt: new Date(result.modifiedAtMs).toISOString(),
+    modifiedAtMs: result.modifiedAtMs,
+    kind: 'photo',
+    absolutePath: result.absolutePath,
+    reason: result.reason
+  }))
+  const seen = new Set(merged.map((result) => `${result.rootId}:${result.relativePath.toLocaleLowerCase('en-US')}`))
+  for (const result of filenameResults) {
+    if (merged.length >= MAX_UI_RESULTS) break
+    const key = `${result.rootId}:${result.relativePath.toLocaleLowerCase('en-US')}`
+    if (seen.has(key)) continue
+    merged.push({ ...toSearchResultInput(result), modifiedAtMs: result.modifiedAtMs, reason: 'Recent filename match only' })
+    seen.add(key)
+  }
+  return merged.slice(0, MAX_UI_RESULTS)
 }
 
 /**
@@ -93,8 +137,21 @@ function toCompactResults(
   return stored.slice(0, MAX_MODEL_RESULTS).map((result, index) => ({
     ordinal: index + 1,
     name: result.name,
-    modifiedAgo: formatModifiedAgo(modifiedAtMs[index] ?? Date.parse(result.modifiedAt), nowMs)
+    modifiedAgo: formatModifiedAgo(modifiedAtMs[index] ?? Date.parse(result.modifiedAt), nowMs),
+    ...(result.reason ? { reason: result.reason } : {})
   }))
+}
+
+function describeSemanticOutcome(count: number, semantic: SemanticSearchResult, query: NormalizedSearchQuery): string {
+  const coverage = `${semantic.indexed} of ${semantic.total} photos have been indexed.`
+  const incomplete = semantic.incomplete ? ` Photo indexing is incomplete, so some matches may be missing. ${coverage}` : ''
+  if (!semantic.available) {
+    return `${semantic.message ?? 'Intelligent photo search is unavailable. I searched filenames and dates only.'}${incomplete}`
+  }
+  if (semantic.candidates.length === 0) {
+    return `Nothing reliably matched "${query.concepts.join(' / ')}". Here are filename and recent-photo possibilities.${incomplete}`
+  }
+  return `Found ${count} local photo ${count === 1 ? 'result' : 'results'} using on-device visual search. Offer to open one by its number.${incomplete}`
 }
 
 function describeOutcome(count: number, fallback: boolean, query: NormalizedSearchQuery): string {

@@ -36,7 +36,7 @@ export function PhotoResultGrid({ results, thumbnails, fallback, onOpen, onAnaly
             {folderLabel(result.relativePath) && (
               <p className="lifelens-photo-meta">in {folderLabel(result.relativePath)}</p>
             )}
-            <p className="lifelens-photo-match">{fallback ? 'Possible recent match' : 'Strong match'}</p>
+            <p className="lifelens-photo-match">{result.reason ?? (fallback ? 'Possible recent match' : 'Filename match')}</p>
             <div className="lifelens-photo-actions">
               <button className="text-button" type="button" onClick={() => onOpen(result)}>Open</button>
               <button className="text-button" type="button" onClick={() => onAnalyze(result)}>Ask Lumi about this photo</button>
