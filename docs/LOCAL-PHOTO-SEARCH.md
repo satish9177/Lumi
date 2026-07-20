@@ -223,3 +223,194 @@ Embeddings first (Phase-1 search must stay usable while Phase 2 catches up),
 then face scanning, then OCR at the lowest duty cycle. One expensive image task
 at a time. Pause, revocation, disable, and shutdown abort in-flight Phase-2 work
 immediately.
+
+# Phase 3 — user-labelled people (foundation, integration pending)
+
+Matching faces against people the **user has explicitly labelled**. This is not
+identity discovery: nothing is named automatically, no profile is created
+without an explicit confirmation, and there is no lookup of any kind against
+anything outside this device.
+
+## The people pack
+
+A third pack, independent of the CLIP pack and the Phase-2 extras pack, so
+installing it cannot invalidate a stored CLIP vector, an OCR result, or a
+visible-face count.
+
+| | |
+| --- | --- |
+| Pack id | `photo-search-people` |
+| Model | SFace (MobileFaceNet trained with the SFace loss) |
+| Source | `opencv/opencv_zoo`, `models/face_recognition_sface` |
+| Pinned revision | `f12e12798e8314f7c074a6656816c048dcc95b7a` |
+| File | `face_recognition_sface_2021dec.onnx` |
+| Size | 38,696,353 bytes |
+| SHA-256 | `0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79` |
+| Licence (code **and** weights) | Apache 2.0 |
+| Redistribution | Permitted; Lumi downloads rather than redistributes |
+| Input | `data`, `[1, 3, 112, 112]`, planar BGR, 0-255, no mean subtraction |
+| Output | `fc1`, `[1, 128]`, **not** L2-normalized (measured norm ≈ 4.83) |
+| Measured CPU latency | 31 ms median (min 20, max 38), Windows x64 |
+| Model load | 961 ms |
+
+The revision is the same commit already pinned for YuNet, so the detector
+producing the landmarks and the recognizer consuming them come from one
+immutable snapshot.
+
+### Why this model
+
+OpenCV Zoo licenses **per model** — its root README says "Please refer to
+licenses of different models" — and the SFace directory carries its own Apache
+2.0 `LICENSE` plus the statement "All files in this directory are licensed under
+Apache 2.0 License". That sentence is what grants the weights, not merely the
+surrounding Python.
+
+InsightFace ArcFace was rejected on its own words: its model zoo states "ALL
+models are available for non-commercial research purposes only" despite
+MIT-licensed code. FaceNet (davidsandberg) publishes no weight licence at all.
+
+### The provenance caveat
+
+The SFace weights descend from models trained on CASIA-WebFace, VGGFace2 and
+MS-Celeb-1M; the model card does not say which produced this export.
+MS-Celeb-1M was later withdrawn by Microsoft over the provenance of its images.
+Apache 2.0 grants use and redistribution of the artifact and says nothing about
+how those training faces were collected. This was raised explicitly and accepted
+as a recorded decision. See THIRD_PARTY_NOTICES.md.
+
+Two smaller residuals: the upstream `zhongyy/SFace` repository carries no
+licence file, so the grant rests on OpenCV's redistribution; and the ONNX
+conversion was performed by an OpenCV maintainer from that source.
+
+## Independent versioning
+
+`FACE_EMBED_MODEL_VERSION` and `PEOPLE_INDEX_VERSION` are separate numbers, and
+separate again from the CLIP, OCR and face-count versions. Bumping the embedding
+model marks profiles as needing re-enrolment without destroying them; bumping
+the index version invalidates stored match outcomes but not the enrolment.
+
+## What is stored, and what is not
+
+Stored, in `%APPDATA%/lifelens/people/profiles.json`, whole-file encrypted
+through Electron `safeStorage` (DPAPI on Windows):
+
+- an opaque profile id, the user's chosen label, and its case-folded form
+- 3-8 L2-normalized 128-float reference embeddings per profile
+- reference quality metadata, timestamps, model and index versions
+
+Never stored: reference image bytes, reference image paths, face crops, face
+landmarks, raw library-face embeddings, similarity scores, absolute paths.
+
+If `safeStorage` reports encryption unavailable, the store **refuses to write**
+rather than falling back to plaintext.
+
+`people/` is its own directory outside `photo-index/`, so "delete all people
+data" is a single recursive removal that provably cannot take a CLIP vector or
+an OCR result with it.
+
+## Alignment
+
+Five YuNet landmarks are fitted to the standard ArcFace 112x112 reference
+template with a least-squares **similarity** transform — rotation, uniform scale
+and translation only. A similarity cannot shear or stretch, so a bad landmark
+cannot distort a crop into resembling someone else. Sampling is bilinear with
+edge clamping, because a black wedge across a cheek is an artefact the model
+would otherwise encode as a feature of that person.
+
+Landmark decoding lives in `face-landmarks.ts`, deliberately separate from
+Phase 2's `face-detect.ts`. The counting path's guarantee that it never reads
+the `kps_*` tensors is enforced by a test, and Phase 3 keeps that true rather
+than widening a module whose narrowness was the point.
+
+## Matching tiers
+
+Thresholds are anchored on OpenCV's published same-identity cosine threshold for
+these exact weights, **0.363**, rather than on a number chosen by feel.
+
+| Tier | Condition | Copy |
+| --- | --- | --- |
+| `likely` | score ≥ 0.45 and no caution applies | "Likely match for Father" |
+| `possible` | score ≥ 0.363, or ≥ 0.45 with a caution | "Possible match for Father" |
+| `none` | score < 0.363 | "No reliable match found" |
+| unscanned | not yet processed | "Not checked for Father yet" |
+
+There is deliberately no tier meaning "definitely them". Cautions — low
+resolution, uncertain detection, a profile at the bare minimum reference count,
+or another enrolled person scoring within 0.05 — only ever **demote**. No
+combination can promote a weak score.
+
+A profile's score against a face is the **maximum** over its references, not the
+mean: references are varied by design, so a true match agreeing strongly with
+one and weakly with the rest is the expected shape.
+
+## Worker protocol
+
+Two Phase-3 commands, both closed and both validated on each side.
+
+`detect_faces_detailed` takes the same bounded 640×640 letterboxed bitmap as
+Phase 2's `detect_faces` and answers with boxes and landmarks. It exists as a
+*separate* command precisely so that `detect_faces` can keep answering with
+scores alone: visible-face counting must stay unable to locate a face inside a
+photograph, and it stays that way because its response type has nowhere to put a
+box. Geometry reaches main only — never the index, never the renderer as
+coordinates, never Realtime.
+
+`embed_faces` takes already-aligned 112×112 tensors and nothing else. There is
+no field for a path, a model identifier, a profile id or a label, so no caller —
+and nothing a caller was handed by the renderer — can steer which model runs or
+which file is read. Values outside 0-255, non-finite values, partial tensors and
+counts beyond the ceiling are all refused rather than clamped.
+
+Every embedding is L2-normalized inside the worker, and the receiving parser
+re-checks the norm before accepting the event. SFace does not return a unit
+vector, and an un-normalized vector would make every cosine comparison quietly
+wrong, so the check exists on both sides.
+
+## Enrolment
+
+A profile exists only because someone typed a name, chose specific photos,
+pointed at a specific face in each, and confirmed. No other path creates one —
+not dropping a file, not analysing an image, not a Telegram contact, not a
+search for a name that does not exist yet.
+
+The largest face is never assumed to be the intended one. When a reference holds
+more than one usable face, enrolment stops and asks; a parent standing behind a
+child is the ordinary case, and guessing enrols the wrong person under a name
+the user will then trust.
+
+Source files are revalidated **twice** — when a reference is added and again at
+final confirmation — because the bytes the user reviewed are the only bytes they
+consented to. A file that changed, disappeared, or whose folder was revoked in
+between is refused.
+
+Candidate previews and candidate ids are memory-only, bounded, and expire with
+the draft. Once the profile is created the draft is discarded, which is what
+makes "no reference paths are stored" true rather than aspirational.
+
+Quality gates: minimum face size, minimum detector confidence, successful
+alignment, and a cross-reference consistency check that refuses an enrolment
+whose references look like different people.
+
+## Query contract
+
+`people_labels`, at most three names, each bounded to 40 characters.
+
+Labels are text the user said — nothing more. The contract rejects profile ids
+(including UUID-shaped strings), long hex identifiers, paths, vectors,
+structured data and control characters, because each is something a caller might
+offer in place of a name, and a sanitized attack is still an attack that got
+partway.
+
+Resolution to a profile id happens **in main only**, exactly and
+case-insensitively. There is no fuzzy matching: "Mum" and "Mum's sister" are
+different people, and a near miss that silently returned the wrong one is the
+worst failure this feature has. An unrecognised label is reported as missing.
+
+Filename matches and biometric matches stay separate signals. A photo named
+`father-birthday.jpg` does not become a face match.
+
+## Status
+
+Slices A-D and the query contract are implemented and verified. The per-photo
+match records, coordinator scheduling and People UI are not yet built, and
+nothing is wired into the running application. See docs/STATUS.md.

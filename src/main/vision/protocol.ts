@@ -39,7 +39,7 @@ const MAX_REQUEST_ID_LENGTH = 64
  * to keep, and the face detector is small and loaded only while a face scan is
  * running.
  */
-export const VISION_MODEL_KINDS = ['image', 'text', 'face'] as const
+export const VISION_MODEL_KINDS = ['image', 'text', 'face', 'faceEmbed'] as const
 export type VisionModelKind = (typeof VISION_MODEL_KINDS)[number]
 
 /** The fixed input the pinned YuNet export accepts. */
@@ -52,6 +52,44 @@ export const FACE_BITMAP_BYTES = FACE_BITMAP_WIDTH * FACE_BITMAP_HEIGHT * 4
  * see `face-detect.ts` for why no box ever does.
  */
 export const MAX_FACE_SCORES = 64
+
+/**
+ * Phase 3 adds a *second*, separate detection command that also returns boxes
+ * and landmarks. The Phase-2 `detect_faces` command above is untouched and still
+ * answers with scores alone.
+ *
+ * Keeping them apart is the point. Visible-face counting must remain incapable
+ * of locating a face inside a photograph, and it stays that way because its
+ * response type has nowhere to put a box. Only the labelled-person path, which
+ * the user has explicitly enabled and enrolled into, receives geometry — and it
+ * needs it: landmarks are what make alignment possible, and boxes are what let
+ * a user point at the right face in a group photo.
+ *
+ * Geometry crosses to *main* only. It is never persisted, never given to the
+ * renderer except as a bounded preview image, and never sent to Realtime.
+ */
+export const MAX_DETAILED_FACES = 16
+
+/** x, y, width, height, score — in 640x640 detector input space. */
+export const FACE_BOX_STRIDE = 5
+/** Five landmarks, x and y each. */
+export const FACE_LANDMARK_STRIDE = 10
+
+/**
+ * The exact input the pinned SFace export accepts, and the width of what it
+ * returns. Measured against the pinned revision: `data` [1,3,112,112] and
+ * `fc1` [1,128].
+ */
+export const FACE_EMBED_SIZE = 112
+export const FACE_EMBED_TENSOR_FLOATS = 3 * FACE_EMBED_SIZE * FACE_EMBED_SIZE
+export const FACE_EMBED_LENGTH = 128
+
+/**
+ * A ceiling on faces embedded from one image. A crowd scene must not be able to
+ * turn one queued photo into a minute of inference, and the bound also caps the
+ * message size in both directions.
+ */
+export const MAX_EMBED_FACES = 16
 
 export function isVisionModelKind(value: unknown): value is VisionModelKind {
   return typeof value === 'string' && (VISION_MODEL_KINDS as readonly string[]).includes(value)
@@ -75,7 +113,9 @@ export const VISION_ERROR_CODES = [
   'non_finite_embedding',
   'image_unavailable',
   'invalid_detection_output',
-  'detection_failed'
+  'detection_failed',
+  'invalid_face_tensor',
+  'face_embed_failed'
 ] as const
 
 export type VisionErrorCode = (typeof VISION_ERROR_CODES)[number]
@@ -99,7 +139,9 @@ export const VISION_ERROR_MESSAGES: Record<VisionErrorCode, string> = {
   non_finite_embedding: 'The local model returned a non-finite embedding.',
   image_unavailable: 'That image could not be prepared.',
   invalid_detection_output: 'The local face detector returned an unreadable result.',
-  detection_failed: 'Counting visible faces failed for that image.'
+  detection_failed: 'Counting visible faces failed for that image.',
+  invalid_face_tensor: 'That face could not be prepared for the local model.',
+  face_embed_failed: 'Comparing that face against your saved people failed.'
 }
 
 export class VisionProtocolError extends Error {
@@ -161,12 +203,45 @@ export interface VisionShutdownCommand {
   type: 'shutdown'
 }
 
+/**
+ * Phase 3's detection request. Same bounded 640x640 bitmap as `detect_faces`,
+ * different answer: this one returns geometry, and only the labelled-person
+ * path issues it.
+ */
+export interface VisionDetectFacesDetailedCommand {
+  type: 'detect_faces_detailed'
+  requestId: string
+  width: number
+  height: number
+  format: typeof VISION_BITMAP_FORMAT
+  bitmap: ArrayBuffer
+}
+
+/**
+ * Already-aligned faces, ready for SFace.
+ *
+ * The command carries pixels and nothing else. There is deliberately no field
+ * for a file path, a model path, a model identifier, a profile id, or a label:
+ * the worker cannot be steered toward a different model or a different file by
+ * anything in this message, because none of those are expressible in it.
+ */
+export interface VisionEmbedFacesCommand {
+  type: 'embed_faces'
+  requestId: string
+  /** How many aligned faces the buffer holds. */
+  count: number
+  /** Float32Array of exactly `count * FACE_EMBED_TENSOR_FLOATS` values. */
+  tensors: ArrayBuffer
+}
+
 export type VisionCommand =
   | VisionLoadModelCommand
   | VisionUnloadModelCommand
   | VisionEmbedImageCommand
   | VisionEmbedTextCommand
   | VisionDetectFacesCommand
+  | VisionDetectFacesDetailedCommand
+  | VisionEmbedFacesCommand
   | VisionShutdownCommand
 
 export interface VisionReadyEvent {
@@ -218,12 +293,50 @@ export interface VisionFaceResultEvent {
   workerRssBytes: number
 }
 
+/**
+ * Boxes and landmarks for one image, in detector input space.
+ *
+ * Received by main, used to align and to let the user point at a face, then
+ * dropped. Nothing here is written to the index; see `index-store.ts`, which has
+ * no field capable of holding a box or a landmark.
+ */
+export interface VisionFaceDetailResultEvent {
+  type: 'face_detail_result'
+  requestId: string
+  count: number
+  /** Float32Array of `count * FACE_BOX_STRIDE` values. */
+  boxes: ArrayBuffer
+  /** Float32Array of `count * FACE_LANDMARK_STRIDE` values. */
+  landmarks: ArrayBuffer
+  elapsedMs: number
+  workerRssBytes: number
+}
+
+/**
+ * One L2-normalized 128-float embedding per submitted face.
+ *
+ * Normalization happens in the worker, before this event is constructed, so
+ * there is no path by which an un-normalized vector reaches comparison. SFace
+ * does not return a unit vector on its own.
+ */
+export interface VisionFaceEmbeddingsResultEvent {
+  type: 'face_embeddings_result'
+  requestId: string
+  count: number
+  /** Float32Array of exactly `count * FACE_EMBED_LENGTH` values. */
+  embeddings: ArrayBuffer
+  elapsedMs: number
+  workerRssBytes: number
+}
+
 export type VisionEvent =
   | VisionReadyEvent
   | VisionModelLoadedEvent
   | VisionModelUnloadedEvent
   | VisionEmbeddingResultEvent
   | VisionFaceResultEvent
+  | VisionFaceDetailResultEvent
+  | VisionFaceEmbeddingsResultEvent
   | VisionBoundedErrorEvent
 
 export function parseVisionCommand(raw: unknown): VisionCommand {
@@ -309,6 +422,54 @@ export function parseVisionCommand(raw: unknown): VisionCommand {
         bitmap
       }
     }
+    case 'detect_faces_detailed': {
+      assertOnlyKeys(record, ['type', 'requestId', 'width', 'height', 'format', 'bitmap'])
+      const requestId = asRequestId(record.requestId)
+      if (record.format !== VISION_BITMAP_FORMAT) {
+        throw new VisionProtocolError('invalid_bitmap')
+      }
+      if (record.width !== FACE_BITMAP_WIDTH || record.height !== FACE_BITMAP_HEIGHT) {
+        throw new VisionProtocolError('invalid_bitmap')
+      }
+      const bitmap = record.bitmap
+      if (!(bitmap instanceof ArrayBuffer) || bitmap.byteLength !== FACE_BITMAP_BYTES) {
+        throw new VisionProtocolError('invalid_bitmap')
+      }
+      return {
+        type: 'detect_faces_detailed',
+        requestId,
+        width: FACE_BITMAP_WIDTH,
+        height: FACE_BITMAP_HEIGHT,
+        format: VISION_BITMAP_FORMAT,
+        bitmap
+      }
+    }
+    case 'embed_faces': {
+      assertOnlyKeys(record, ['type', 'requestId', 'count', 'tensors'])
+      const requestId = asRequestId(record.requestId)
+      const count = record.count
+      if (typeof count !== 'number' || !Number.isInteger(count) || count < 1 || count > MAX_EMBED_FACES) {
+        throw new VisionProtocolError('invalid_face_tensor')
+      }
+      const tensors = record.tensors
+      // The buffer must be exactly the declared number of complete 112x112x3
+      // tensors — not more, not fewer, and not a partial one.
+      if (
+        !(tensors instanceof ArrayBuffer) ||
+        tensors.byteLength !== count * FACE_EMBED_TENSOR_FLOATS * 4
+      ) {
+        throw new VisionProtocolError('invalid_face_tensor')
+      }
+      for (const value of new Float32Array(tensors)) {
+        // Pixels, in the 0-255 range the aligner produces. A NaN or an
+        // out-of-range value means the buffer is not what this protocol
+        // describes, so it is refused rather than clamped into plausibility.
+        if (!Number.isFinite(value) || value < 0 || value > 255) {
+          throw new VisionProtocolError('invalid_face_tensor')
+        }
+      }
+      return { type: 'embed_faces', requestId, count, tensors }
+    }
     case 'shutdown':
       assertOnlyKeys(record, ['type'])
       return { type: 'shutdown' }
@@ -391,6 +552,86 @@ export function parseVisionEvent(raw: unknown): VisionEvent {
         type: 'face_result',
         requestId,
         scores,
+        elapsedMs: asDuration(record.elapsedMs),
+        workerRssBytes: asDuration(record.workerRssBytes)
+      }
+    }
+    case 'face_detail_result': {
+      assertOnlyKeys(record, ['type', 'requestId', 'count', 'boxes', 'landmarks', 'elapsedMs', 'workerRssBytes'])
+      const requestId = asRequestId(record.requestId)
+      const count = record.count
+      if (typeof count !== 'number' || !Number.isInteger(count) || count < 0 || count > MAX_DETAILED_FACES) {
+        throw new VisionProtocolError('invalid_detection_output')
+      }
+      const boxes = record.boxes
+      const landmarks = record.landmarks
+      if (
+        !(boxes instanceof ArrayBuffer) ||
+        !(landmarks instanceof ArrayBuffer) ||
+        boxes.byteLength !== count * FACE_BOX_STRIDE * 4 ||
+        landmarks.byteLength !== count * FACE_LANDMARK_STRIDE * 4
+      ) {
+        throw new VisionProtocolError('invalid_detection_output')
+      }
+      for (const value of new Float32Array(boxes)) {
+        if (!Number.isFinite(value)) {
+          throw new VisionProtocolError('invalid_detection_output')
+        }
+      }
+      for (const value of new Float32Array(landmarks)) {
+        if (!Number.isFinite(value)) {
+          throw new VisionProtocolError('invalid_detection_output')
+        }
+      }
+      return {
+        type: 'face_detail_result',
+        requestId,
+        count,
+        boxes,
+        landmarks,
+        elapsedMs: asDuration(record.elapsedMs),
+        workerRssBytes: asDuration(record.workerRssBytes)
+      }
+    }
+    case 'face_embeddings_result': {
+      assertOnlyKeys(record, ['type', 'requestId', 'count', 'embeddings', 'elapsedMs', 'workerRssBytes'])
+      const requestId = asRequestId(record.requestId)
+      const count = record.count
+      if (typeof count !== 'number' || !Number.isInteger(count) || count < 0 || count > MAX_EMBED_FACES) {
+        throw new VisionProtocolError('invalid_output')
+      }
+      const embeddings = record.embeddings
+      // Exactly 128 floats per face. A different width means a different model
+      // produced this, which must fail closed rather than reach comparison.
+      if (
+        !(embeddings instanceof ArrayBuffer) ||
+        embeddings.byteLength !== count * FACE_EMBED_LENGTH * 4
+      ) {
+        throw new VisionProtocolError('unexpected_embedding_length')
+      }
+      const values = new Float32Array(embeddings)
+      for (const value of values) {
+        if (!Number.isFinite(value)) {
+          throw new VisionProtocolError('non_finite_embedding')
+        }
+      }
+      // Re-checked on receipt, not merely on production: an embedding that is
+      // not a unit vector would make every cosine comparison silently wrong.
+      for (let face = 0; face < count; face += 1) {
+        let sumOfSquares = 0
+        for (let index = 0; index < FACE_EMBED_LENGTH; index += 1) {
+          const value = values[face * FACE_EMBED_LENGTH + index]!
+          sumOfSquares += value * value
+        }
+        if (Math.abs(Math.sqrt(sumOfSquares) - 1) > 1e-3) {
+          throw new VisionProtocolError('invalid_output')
+        }
+      }
+      return {
+        type: 'face_embeddings_result',
+        requestId,
+        count,
+        embeddings,
         elapsedMs: asDuration(record.elapsedMs),
         workerRssBytes: asDuration(record.workerRssBytes)
       }

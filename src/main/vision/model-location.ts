@@ -11,6 +11,7 @@
 import { join } from 'node:path'
 import { EXTRAS_PACK_ID } from './extras-manifest'
 import { MODEL_PACK_ID } from './manifest'
+import { PEOPLE_PACK_ID } from './people-manifest'
 
 export const VISION_MODEL_DIRECTORY = 'vision-models'
 export const PHOTO_INDEX_DIRECTORY = 'photo-index'
@@ -67,9 +68,35 @@ export function extrasAssetPath(userDataDir: string, fileName: string): string {
   return packAssetPath(userDataDir, EXTRAS_PACK_ID, fileName)
 }
 
+export function peoplePackDirectory(userDataDir: string): string {
+  return packDirectory(userDataDir, PEOPLE_PACK_ID)
+}
+
+export function peopleStagingDirectory(userDataDir: string): string {
+  return packStagingDirectory(userDataDir, PEOPLE_PACK_ID)
+}
+
+export function peopleAssetPath(userDataDir: string, fileName: string): string {
+  return packAssetPath(userDataDir, PEOPLE_PACK_ID, fileName)
+}
+
 export function photoIndexDirectory(userDataDir: string): string {
   return join(userDataDir, PHOTO_INDEX_DIRECTORY)
 }
+
+/**
+ * Where enrolled person profiles live. A directory of its own, entirely outside
+ * `photo-index`, so "delete all people data" is a single recursive removal that
+ * cannot take a CLIP vector or an OCR result with it — and so the biometric data
+ * is never interleaved into a file that other features rewrite.
+ */
+export const PEOPLE_DIRECTORY = 'people'
+
+export function peopleDirectory(userDataDir: string): string {
+  return join(userDataDir, PEOPLE_DIRECTORY)
+}
+
+export const PEOPLE_PROFILE_FILE = 'profiles.json'
 
 export const INDEX_JOURNAL_FILE = 'records.jsonl'
 export const INDEX_VECTOR_FILE = 'vectors.bin'

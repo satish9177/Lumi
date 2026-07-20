@@ -2,7 +2,10 @@ import type { ClassifiedIntent, GuardedTool, ToolPolicyCode, ToolPolicyDecision 
 import {
   isSearchKind,
   isSearchRecency,
+  normalizeContainsText,
+  normalizePeopleFilter,
   type FileKind,
+  type PeopleFilter,
   type SearchKind,
   type SearchRecency
 } from './search-query'
@@ -33,6 +36,10 @@ export const IPC_CHANNELS = {
   pausePhotoIndex: 'lifelens:pause-photo-index',
   resumePhotoIndex: 'lifelens:resume-photo-index',
   rebuildPhotoIndex: 'lifelens:rebuild-photo-index',
+  setPhotoTextSearchEnabled: 'lifelens:set-photo-text-search-enabled',
+  setPhotoFaceCountEnabled: 'lifelens:set-photo-face-count-enabled',
+  rebuildPhotoTextIndex: 'lifelens:rebuild-photo-text-index',
+  rebuildPhotoFaceIndex: 'lifelens:rebuild-photo-face-index',
   disablePhotoSearch: 'lifelens:disable-photo-search',
   setPhotoIndexOnlyWhilePluggedIn: 'lifelens:set-photo-index-only-while-plugged-in',
   setRealtimeActive: 'lifelens:set-realtime-active',
@@ -127,6 +134,10 @@ export interface SearchDocumentsInput {
   recency?: SearchRecency
   /** Up to three short visual concepts copied from the user's request. */
   concepts?: string[]
+  /** Words or a number expected to appear inside the image itself. */
+  containsText?: string
+  /** How many visible faces the photo should contain. Counting only, never identity. */
+  people?: PeopleFilter
 }
 
 export interface OpenFileInput {
@@ -254,6 +265,17 @@ export interface PhotoSearchStatus {
   powerStateKnown: boolean
   onBattery: boolean
   message?: string
+
+  // --- Phase 2 -------------------------------------------------------------
+  /** Reported separately from visual indexing, because they finish separately. */
+  textSearchEnabled: boolean
+  faceCountEnabled: boolean
+  extrasInstalled: boolean
+  extrasDownloadBytes: number
+  /** Images whose text has been read. Compare against `total`. */
+  textIndexed: number
+  /** Images whose visible faces have been counted. Compare against `total`. */
+  faceScanned: number
 }
 
 export type FileSearchOrigin = 'model' | 'user'
@@ -263,6 +285,8 @@ export interface FileSearchRequest {
   kind?: SearchKind
   recency?: SearchRecency
   concepts?: string[]
+  containsText?: string
+  people?: PeopleFilter
   /** The Realtime function call awaiting a terminal result, when model-driven. */
   callId?: string
   origin: FileSearchOrigin
@@ -412,6 +436,10 @@ export interface LifeLensApi {
   pausePhotoIndex: () => Promise<PhotoSearchStatus>
   resumePhotoIndex: () => Promise<PhotoSearchStatus>
   rebuildPhotoIndex: () => Promise<PhotoSearchStatus>
+  setPhotoTextSearchEnabled: (enabled: boolean) => Promise<PhotoSearchStatus>
+  setPhotoFaceCountEnabled: (enabled: boolean) => Promise<PhotoSearchStatus>
+  rebuildPhotoTextIndex: () => Promise<PhotoSearchStatus>
+  rebuildPhotoFaceIndex: () => Promise<PhotoSearchStatus>
   disablePhotoSearch: () => Promise<PhotoSearchStatus>
   setPhotoIndexOnlyWhilePluggedIn: (enabled: boolean) => Promise<PhotoSearchStatus>
   setRealtimeActive: (active: boolean) => Promise<void>
@@ -539,7 +567,11 @@ function parseSearchDocumentsInput(value: unknown, allowedExtra: readonly string
     throw new PayloadValidationError('Search arguments must be an object.')
   }
 
-  assertOnlyKeys(value, ['queryTerms', 'kind', 'recency', 'concepts', ...allowedExtra], 'Search arguments')
+  assertOnlyKeys(
+    value,
+    ['queryTerms', 'kind', 'recency', 'concepts', 'containsText', 'people', ...allowedExtra],
+    'Search arguments'
+  )
 
   const input: SearchDocumentsInput = { queryTerms: requiredString(value.queryTerms, 'queryTerms', 250) }
 
@@ -568,6 +600,32 @@ function parseSearchDocumentsInput(value: unknown, allowedExtra: readonly string
       }
       return parsed
     })
+  }
+
+  // Phase-2 fields reuse the query normalizer's own validators, so the rules
+  // live in exactly one place and the tool boundary cannot drift from them.
+  if (value.containsText !== undefined) {
+    try {
+      const containsText = normalizeContainsText(value.containsText)
+      if (containsText.length > 0) {
+        input.containsText = containsText
+      }
+    } catch (error) {
+      throw new PayloadValidationError(
+        error instanceof Error ? error.message : 'contains_text is not valid.'
+      )
+    }
+  }
+
+  if (value.people !== undefined) {
+    try {
+      const people = normalizePeopleFilter(value.people)
+      if (people) {
+        input.people = people
+      }
+    } catch (error) {
+      throw new PayloadValidationError(error instanceof Error ? error.message : 'people is not valid.')
+    }
   }
 
   return input

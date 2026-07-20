@@ -48,6 +48,34 @@ function stripComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')
 }
 
+/**
+ * Extracts one function's body by brace matching.
+ *
+ * Needed because the landmark guarantee is now per-function rather than
+ * per-file: the worker legitimately reads landmarks for the labelled-person
+ * path, and the counting functions must still be provably free of them. Exact
+ * name matching matters — `handleDetectFaces` and `handleDetectFacesDetailed`
+ * are different functions and a prefix match would conflate them.
+ */
+function functionBody(source: string, name: string): string {
+  const declaration = new RegExp(`function\\s+${name}\\s*\\(`).exec(source)
+  if (!declaration) {
+    throw new Error(`${name} not found — the test is out of date, not the code`)
+  }
+  const opening = source.indexOf('{', declaration.index + declaration[0].length)
+  let depth = 0
+  for (let index = opening; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1
+    else if (source[index] === '}') {
+      depth -= 1
+      if (depth === 0) {
+        return source.slice(opening, index + 1)
+      }
+    }
+  }
+  throw new Error(`${name} has no closing brace`)
+}
+
 const box = (overrides: Partial<FaceDetection> = {}): FaceDetection => ({
   x: 0,
   y: 0,
@@ -221,13 +249,36 @@ describe('the worker-side pipeline', () => {
 })
 
 describe('this is detection, not recognition', () => {
-  it('never reads the landmark tensors, in either the decoder or the worker', async () => {
-    // Comments are stripped first: both files *document* that landmarks are not
+  it('never reads the landmark tensors anywhere in the counting decoder', async () => {
+    // Comments are stripped first: the file *documents* that landmarks are not
     // used, and that prose is worth keeping. The assertion is about code.
-    for (const file of ['face-detect.ts', '../vision-worker.ts']) {
-      const code = stripComments(await readFile(join(__dirname, file), 'utf8'))
-      expect(code).not.toMatch(/\bkps\b|kps_|['"`]kps/)
+    const code = stripComments(await readFile(join(__dirname, 'face-detect.ts'), 'utf8'))
+    expect(code).not.toMatch(/\bkps\b|kps_|['"`]kps/)
+  })
+
+  it('never reads the landmark tensors on the worker’s counting path', async () => {
+    // This assertion used to cover the whole worker file. Phase 3 added a
+    // *separate* command that does read landmarks, because aligning a face for
+    // labelled-person matching is impossible without them.
+    //
+    // The guarantee being protected is unchanged: visible-face counting cannot
+    // locate a facial feature. So the assertion now names the counting
+    // functions rather than the file — and the test below pins the landmark
+    // collector to its single permitted caller, which the old file-wide check
+    // never did.
+    const code = stripComments(await readFile(join(__dirname, '../vision-worker.ts'), 'utf8'))
+    for (const name of ['collectYunetOutputs', 'handleDetectFaces']) {
+      expect(functionBody(code, name)).not.toMatch(/\bkps\b|kps_|['"`]kps/)
     }
+  })
+
+  it('lets only the labelled-person handler collect landmarks', async () => {
+    const code = stripComments(await readFile(join(__dirname, '../vision-worker.ts'), 'utf8'))
+    // Two occurrences only: the declaration, and the one call inside the
+    // detailed handler. A third would mean some other path gained access.
+    const uses = [...code.matchAll(/collectYunetLandmarkOutputs\b/g)]
+    expect(uses.length).toBe(2)
+    expect(functionBody(code, 'handleDetectFacesDetailed')).toContain('collectYunetLandmarkOutputs')
   })
 
   it('builds nothing resembling a face descriptor', async () => {

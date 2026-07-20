@@ -37,6 +37,13 @@ import {
   type ModelAssetRole
 } from './manifest'
 import { packAssetPath, packDirectory, packStagingDirectory } from './model-location'
+import {
+  isAllowlistedPeopleUrl,
+  PEOPLE_ASSETS,
+  PEOPLE_PACK_ID,
+  PEOPLE_PACK_VERSION,
+  type PeopleAssetRole
+} from './people-manifest'
 
 /**
  * One asset shape both manifests satisfy. The download, verification, and
@@ -45,7 +52,7 @@ import { packAssetPath, packDirectory, packStagingDirectory } from './model-loca
  * thing that can quietly stop checking a digest.
  */
 interface PackAsset {
-  role: ModelAssetRole | ExtrasAssetRole
+  role: ModelAssetRole | ExtrasAssetRole | PeopleAssetRole
   fileName: string
   url: string
   sizeBytes: number
@@ -72,6 +79,13 @@ const EXTRAS_PACK: PackSpec = Object.freeze({
   packVersion: EXTRAS_PACK_VERSION,
   assets: EXTRAS_ASSETS,
   isAllowlisted: isAllowlistedExtrasUrl
+})
+
+const PEOPLE_PACK: PackSpec = Object.freeze({
+  packId: PEOPLE_PACK_ID,
+  packVersion: PEOPLE_PACK_VERSION,
+  assets: PEOPLE_ASSETS,
+  isAllowlisted: isAllowlistedPeopleUrl
 })
 
 export const MODEL_PACK_ERROR_CODES = [
@@ -120,7 +134,7 @@ export interface ModelPackProgress {
   receivedBytes: number
   totalBytes: number
   /** Which manifest entry is in flight, for a coarse status line. */
-  role: ModelAssetRole | ExtrasAssetRole
+  role: ModelAssetRole | ExtrasAssetRole | PeopleAssetRole
 }
 
 export interface ModelPackRuntime {
@@ -193,6 +207,10 @@ export function isExtrasPackInstalled(userDataDir: string): Promise<boolean> {
   return isPackInstalled(EXTRAS_PACK, userDataDir)
 }
 
+export function isPeoplePackInstalled(userDataDir: string): Promise<boolean> {
+  return isPackInstalled(PEOPLE_PACK, userDataDir)
+}
+
 export async function installedPackVersion(userDataDir: string): Promise<number | undefined> {
   const marker = await readMarker(CLIP_PACK, userDataDir)
   return marker?.packVersion
@@ -230,6 +248,19 @@ export function extrasLanguageDirectory(userDataDir: string): string {
 
 export function extrasPackTotalBytes(): number {
   return packTotalBytes(EXTRAS_PACK)
+}
+
+export async function installedPeopleVersion(userDataDir: string): Promise<number | undefined> {
+  const marker = await readMarker(PEOPLE_PACK, userDataDir)
+  return marker?.packVersion
+}
+
+export function resolvePeopleAssetPath(userDataDir: string, role: PeopleAssetRole): string {
+  return resolveRolePath(PEOPLE_PACK, userDataDir, role)
+}
+
+export function peoplePackTotalBytes(): number {
+  return packTotalBytes(PEOPLE_PACK)
 }
 
 export interface DownloadOptions {
@@ -327,6 +358,14 @@ export function downloadExtrasPack(
   return downloadPack(EXTRAS_PACK, userDataDir, runtime, options)
 }
 
+export function downloadPeoplePack(
+  userDataDir: string,
+  runtime: ModelPackRuntime,
+  options: DownloadOptions
+): Promise<void> {
+  return downloadPack(PEOPLE_PACK, userDataDir, runtime, options)
+}
+
 /**
  * Removes the pack and any staged bytes. Used by "Clear and rebuild".
  *
@@ -348,6 +387,10 @@ export function clearModelPack(userDataDir: string): Promise<void> {
 
 export function clearExtrasPack(userDataDir: string): Promise<void> {
   return clearPack(EXTRAS_PACK, userDataDir)
+}
+
+export function clearPeoplePack(userDataDir: string): Promise<void> {
+  return clearPack(PEOPLE_PACK, userDataDir)
 }
 
 async function assetAlreadyInstalled(spec: PackSpec, userDataDir: string, asset: PackAsset): Promise<boolean> {

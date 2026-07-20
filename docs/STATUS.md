@@ -435,3 +435,156 @@ claimed here:
 - a keyboard-only walkthrough
 - an NVDA or Narrator walkthrough
 - Windows "Show animations" off, and High Contrast
+
+## Local photo search — Phase 2 (OCR and visible-face counting) — CODE COMPLETE
+
+| Command | Result |
+| --- | --- |
+| `npm.cmd run typecheck` | 1 error, outside this phase (see below) |
+| `npm.cmd test` | 1,005 passed, 2 skipped (57 files) |
+| `npm.cmd run build` | passed |
+| `npm.cmd run package` | passed — `release/0.1.0/Lumi Setup 0.1.0.exe` (129.8 MB) |
+
+Phase 2 added +280 tests (725 → 1,005). Every pre-existing test was retained;
+the only two touched were updated because the behaviour they pinned changed on
+purpose, and both were strengthened rather than weakened:
+
+- `model-pack.test.ts` — the allowlist assertion now reads
+  `spec.isAllowlisted(asset.url)` after the downloader was generalized, plus a
+  new test that each pack is bound to its *own* allowlist.
+- `copy.ts` — "reading text in photos is not supported" became "Lumi can count
+  visible faces but cannot recognise who someone is", because the first half
+  stopped being true.
+
+### Typecheck: one error, not from this phase
+
+`src/main/index.ts` fails to compile because concurrent screen-reasoning work in
+the tree widened `captures` to `Pick<CaptureResult, 'capturedAt' | 'dataUrl'>`
+without updating `rememberCapture`, which still stores only `capturedAt`.
+
+It was left alone deliberately. Retaining full capture data URLs in a
+main-process map is a memory and privacy decision belonging to that feature's
+author, not something to guess at from the type error. Every other file
+typechecks; `git diff` confirms the offending lines are not part of Phase 2.
+
+### Verified against the real models
+
+The extras pack was installed locally and both integration suites ran for real
+rather than staying skipped:
+
+- `real-ocr.test.ts` — Tesseract read `1234` from an image this application
+  encoded itself, in ~500 ms per image. One test replaces `globalThis.fetch`
+  with a throwing stub and asserts it is never called, so "no network" is
+  demonstrated rather than asserted.
+- `real-face-detect.test.ts` — YuNet's real anchor counts match the decoder's
+  grid assumption at every stride (6400/1600/400), a flat grey field yields zero
+  confident faces, and inference is ~30 ms.
+
+### Measured, not estimated
+
+| | |
+| --- | --- |
+| OCR worker start | ~200 ms |
+| OCR per image | ~500 ms (bounded at 25 s) |
+| YuNet per image | ~30 ms |
+| Extras pack | 4.3 MB |
+
+### Remaining manual acceptance
+
+None of the following can be certified from automated checks:
+
+- screenshot text search, photographed-document OCR, Aadhaar-style number query
+- one/two/group and no-visible-face searches on real photographs
+- semantic + OCR combined query
+- behaviour while indexing is incomplete; pause, resume, restart
+- folder revocation mid-OCR
+- open, analyse, and Telegram actions on a Phase-2 result
+- the Windows installed build
+- voice, Telegram, reminders, and capture regression
+- CPU, RAM, and full-library indexing time on a real photo library
+
+### Deferred to Phase 3
+
+Face identity, labelled people, automatic naming, any trait inference,
+handwriting, non-English OCR, video, HEIC/RAW, PDF content, and DirectML all
+remain deliberately out of scope and unimplemented.
+
+## Local photo search — Phase 3 (user-labelled people) — NOT CODE COMPLETE
+
+Slices A-D and the query contract are implemented and verified. The index
+records, coordinator scheduling and People UI are not. Nothing from Phase 3 is
+reachable from the running application yet: there is no IPC channel and no
+settings UI, so the feature cannot be exercised by a user. Phases 1 and 2 are
+untouched and behave exactly as before.
+
+### Done
+
+- **Slice A — model and licence spike.** SFace from the pinned OpenCV Zoo
+  revision. Apache 2.0 for code *and* weights, verified by fetching the model
+  directory's own LICENSE and README at that revision. InsightFace rejected on
+  its published "non-commercial research purposes only" terms. Weights hashed;
+  the digest independently matches the repository's git-LFS `oid`. Shape and
+  latency measured on this machine: `[1,3,112,112]` → `[1,128]`, 31 ms median
+  CPU, output **not** normalized.
+- **Slice B — encrypted profile store.** `person-profiles.ts`. Whole-file
+  `safeStorage` encryption; refuses to persist rather than falling back to
+  plaintext; atomic writes behind a serialized chain; corruption recovery that
+  reports itself instead of presenting "no people"; bounded profiles and
+  references; case-insensitive label uniqueness; rename; per-profile and total
+  deletion; model-version invalidation that marks rather than destroys.
+- **Slice C — worker and engine integration.** A closed `embed_faces` command
+  taking only already-aligned 112×112 tensors — no path, no model identifier, no
+  profile id is expressible in it. Every embedding is L2-normalized in the
+  worker *and* re-verified by the event parser. A separate
+  `detect_faces_detailed` command carries geometry for the labelled-person path
+  only; Phase 2's `detect_faces` still answers with scores alone.
+- **Slice D — enrolment service.** `person-enrollment.ts`. Explicit label,
+  explicit reference selection, explicit face choice when a photo holds more
+  than one usable face, explicit final confirmation. Source files revalidated
+  twice — when added and again at confirmation. Candidate previews and ids are
+  memory-only and expire. Quality gates on face size, detector confidence and
+  alignment; cross-reference consistency check before creation. No source path,
+  pixel, crop or landmark survives profile creation.
+- **Query contract.** `people_labels` on the closed search query: at most three
+  names, bounded length, exact case-insensitive resolution performed **in main
+  only**. Rejects profile ids, vectors, paths, structured data and control
+  characters. App-authored vocabulary that tops out at "Likely match" — there is
+  no phrase asserting identity.
+
+### Not done
+
+- Slice E — per-photo people-match records in the photo index
+- Slice F — coordinator scheduling, cancellation, invalidation and coverage
+- Slice H — People settings UI and the enrolment screens
+- IPC channels, preload bridge and renderer wiring for any of the above
+- The Realtime tool-schema entry for `people_labels`
+- Deletion of per-photo match records on profile delete (the profile store side
+  exists; there are no records to delete yet)
+- Real-model integration test for SFace on synthetic faces
+- Manual acceptance checklist
+
+### Verification
+
+`npm run typecheck`, `npm test`, `npm run build`, `npm run package` all pass, run
+after each completed slice rather than deferred. 1,225 tests pass, 2 skipped, 67
+files.
+
+### A Phase-2 security test was narrowed, deliberately
+
+`face-detect.test.ts` asserted that the *entire* `vision-worker.ts` file never
+reads YuNet's `kps_*` landmark tensors. Phase 3 legitimately reads them, because
+aligning a face is impossible without landmarks.
+
+The guarantee being protected — visible-face counting cannot locate a facial
+feature — is unchanged. The assertion now names the counting functions
+(`collectYunetOutputs`, `handleDetectFaces`) instead of the whole file, and a new
+test pins the landmark collector to its single permitted caller, which the old
+file-wide check never did. Net: two more tests, and a tighter statement of the
+same property.
+
+### Decision recorded
+
+The SFace training-data provenance (CASIA-WebFace / VGGFace2 / MS-Celeb-1M, the
+last withdrawn by Microsoft) was raised before implementation and accepted, and
+is documented in THIRD_PARTY_NOTICES.md and docs/LOCAL-PHOTO-SEARCH.md rather
+than left implicit.

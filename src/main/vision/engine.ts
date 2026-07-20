@@ -35,6 +35,23 @@ export interface VisionModelPaths {
   text: string
   /** Absent until the Phase-2 extras pack is installed. */
   face?: string
+  /** Absent until the Phase-3 people pack is installed. */
+  faceEmbed?: string
+}
+
+/**
+ * Face geometry for one image, in detector input space.
+ *
+ * Reaches main only, and only on the labelled-person path. It is used to align
+ * faces and to let the user point at one; it is never persisted and never sent
+ * to the renderer as coordinates or to Realtime at all.
+ */
+export interface DetectedFaceGeometry {
+  count: number
+  /** `count * 5` values: x, y, width, height, score. */
+  boxes: Float32Array
+  /** `count * 10` values: five landmark x/y pairs. */
+  landmarks: Float32Array
 }
 
 export interface EngineTimer {
@@ -70,8 +87,8 @@ export class VisionEngineError extends Error {
 
 interface PendingRequest {
   requestId: string
-  /** Embedding vector or face-score list, depending on the command. */
-  resolve: (values: Float32Array) => void
+  /** Embedding vector, face-score list, or face geometry, per the command. */
+  resolve: (values: Float32Array | DetectedFaceGeometry) => void
   reject: (error: VisionEngineError) => void
   timer: EngineTimer
 }
@@ -132,7 +149,7 @@ export class VisionEngine {
     return this.enqueue(async () => {
       await this.ensureModel('image')
       this.restartIdleTimer()
-      return this.request((requestId) => ({
+      return this.requestVector((requestId) => ({
         type: 'embed_image',
         requestId,
         width,
@@ -146,7 +163,7 @@ export class VisionEngine {
   async embedText(tokenIds: Int32Array, tokenCount: number): Promise<Float32Array> {
     return this.enqueue(async () => {
       await this.ensureModel('text')
-      return this.request((requestId) => ({
+      return this.requestVector((requestId) => ({
         type: 'embed_text',
         requestId,
         tokenIds: tokenIds.buffer.slice(
@@ -169,7 +186,7 @@ export class VisionEngine {
     return this.enqueue(async () => {
       await this.ensureModel('face')
       this.restartIdleTimer()
-      return this.request((requestId) => ({
+      return this.requestVector((requestId) => ({
         type: 'detect_faces',
         requestId,
         width: 640,
@@ -178,6 +195,69 @@ export class VisionEngine {
         bitmap
       }))
     })
+  }
+
+  /**
+   * Detects faces *with* geometry, for the labelled-person path only.
+   *
+   * Separate from `detectFaces` above, which answers with scores alone and is
+   * all visible-face counting can ever reach. Counting must stay incapable of
+   * locating a face inside a photograph, so the two commands stay distinct
+   * rather than one growing an option flag.
+   */
+  async detectFacesDetailed(bitmap: ArrayBuffer): Promise<DetectedFaceGeometry> {
+    return this.enqueue(async () => {
+      await this.ensureModel('face')
+      this.restartIdleTimer()
+      const result = await this.request((requestId) => ({
+        type: 'detect_faces_detailed',
+        requestId,
+        width: 640,
+        height: 640,
+        format: 'bgra',
+        bitmap
+      }))
+      if (result instanceof Float32Array) {
+        // The worker answered the wrong shape for this command.
+        throw new VisionEngineError('invalid_detection_output')
+      }
+      return result
+    })
+  }
+
+  /**
+   * Embeds already-aligned 112x112 faces with SFace.
+   *
+   * Takes pixels, and only pixels. There is no parameter here for a path, a
+   * model identifier, or a profile — the caller cannot influence which model
+   * runs, and neither can anything the caller was given by the renderer.
+   *
+   * Resolves to `count * 128` L2-normalized values. Normalization happens in
+   * the worker and is re-verified by the event parser, so an un-normalized
+   * vector cannot reach comparison from either direction.
+   */
+  async embedFaces(tensors: Float32Array, count: number): Promise<Float32Array> {
+    return this.enqueue(async () => {
+      await this.ensureModel('faceEmbed')
+      this.restartIdleTimer()
+      return this.requestVector((requestId) => ({
+        type: 'embed_faces',
+        requestId,
+        count,
+        tensors: tensors.buffer.slice(
+          tensors.byteOffset,
+          tensors.byteOffset + tensors.byteLength
+        ) as ArrayBuffer
+      }))
+    })
+  }
+
+  /** Releases SFace, which is only needed while enrolling or scanning. */
+  releaseFaceEmbedModel(): void {
+    if (this.worker && this.loaded.has('faceEmbed')) {
+      this.loaded.delete('faceEmbed')
+      this.post({ type: 'unload_model', kind: 'faceEmbed' })
+    }
   }
 
   /** Releases the face detector, which is only needed while a scan is running. */
@@ -364,7 +444,17 @@ export class VisionEngine {
     // The face detector ships in the separate Phase-2 pack, which the user may
     // never install. Its absence is an ordinary missing model, not an error in
     // the Phase-1 path, and semantic search carries on unaffected.
-    const modelPath = kind === 'image' ? paths.image : kind === 'text' ? paths.text : paths.face
+    // Each optional model ships in its own pack, which the user may never
+    // install. Absence is an ordinary missing model, not a failure of the
+    // Phase-1 path, and semantic search carries on unaffected either way.
+    const modelPath =
+      kind === 'image'
+        ? paths.image
+        : kind === 'text'
+          ? paths.text
+          : kind === 'faceEmbed'
+            ? paths.faceEmbed
+            : paths.face
     if (!modelPath) {
       throw new VisionEngineError('model_missing')
     }
@@ -390,8 +480,25 @@ export class VisionEngine {
     })
   }
 
-  private request(build: (requestId: string) => Record<string, unknown>): Promise<Float32Array> {
-    return new Promise<Float32Array>((resolve, reject) => {
+  /**
+   * The common case: a command whose answer is a flat vector.
+   *
+   * Narrows rather than casts, so a worker that answered with the wrong event
+   * shape for the command surfaces as a bounded error instead of a value that
+   * type-checks and then misbehaves downstream.
+   */
+  private async requestVector(build: (requestId: string) => Record<string, unknown>): Promise<Float32Array> {
+    const result = await this.request(build)
+    if (!(result instanceof Float32Array)) {
+      throw new VisionEngineError('invalid_output')
+    }
+    return result
+  }
+
+  private request(
+    build: (requestId: string) => Record<string, unknown>
+  ): Promise<Float32Array | DetectedFaceGeometry> {
+    return new Promise<Float32Array | DetectedFaceGeometry>((resolve, reject) => {
       const requestId = `r${this.nextRequestId++}`
       const timer = this.schedule(() => {
         if (this.pendingRequest?.requestId === requestId) {
@@ -484,6 +591,30 @@ export class VisionEngine {
         this.pendingRequest = undefined
         request.timer.cancel()
         request.resolve(new Float32Array(event.scores))
+        return
+      }
+      case 'face_detail_result': {
+        const request = this.pendingRequest
+        if (request?.requestId !== event.requestId) {
+          return
+        }
+        this.pendingRequest = undefined
+        request.timer.cancel()
+        request.resolve({
+          count: event.count,
+          boxes: new Float32Array(event.boxes),
+          landmarks: new Float32Array(event.landmarks)
+        })
+        return
+      }
+      case 'face_embeddings_result': {
+        const request = this.pendingRequest
+        if (request?.requestId !== event.requestId) {
+          return
+        }
+        this.pendingRequest = undefined
+        request.timer.cancel()
+        request.resolve(new Float32Array(event.embeddings))
         return
       }
       case 'bounded_error':

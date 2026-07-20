@@ -356,6 +356,24 @@ function registerIpcHandlers(): void {
     requireMainWindow(event)
     return photoIndexCoordinator.rebuild()
   })
+  ipcMain.handle(IPC_CHANNELS.setPhotoTextSearchEnabled, async (event, enabled: unknown) => {
+    requireMainWindow(event)
+    if (typeof enabled !== 'boolean') throw new Error('The text search preference must be a boolean.')
+    return photoIndexCoordinator.setTextSearchEnabled(enabled)
+  })
+  ipcMain.handle(IPC_CHANNELS.setPhotoFaceCountEnabled, async (event, enabled: unknown) => {
+    requireMainWindow(event)
+    if (typeof enabled !== 'boolean') throw new Error('The visible-face counting preference must be a boolean.')
+    return photoIndexCoordinator.setFaceCountEnabled(enabled)
+  })
+  ipcMain.handle(IPC_CHANNELS.rebuildPhotoTextIndex, async (event) => {
+    requireMainWindow(event)
+    return photoIndexCoordinator.rebuildTextIndex()
+  })
+  ipcMain.handle(IPC_CHANNELS.rebuildPhotoFaceIndex, async (event) => {
+    requireMainWindow(event)
+    return photoIndexCoordinator.rebuildFaceIndex()
+  })
   ipcMain.handle(IPC_CHANNELS.disablePhotoSearch, async (event) => {
     requireMainWindow(event)
     return photoIndexCoordinator.disable()

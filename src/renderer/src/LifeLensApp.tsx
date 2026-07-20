@@ -121,7 +121,9 @@ export default function LifeLensApp() {
   const [pendingTelegramAttachment, setPendingTelegramAttachment] = useState<PendingTelegramAttachment>()
   const [photoSearchStatus, setPhotoSearchStatus] = useState<PhotoSearchStatus>({
     state: 'off', enabled: false, modelInstalled: false, modelDownloadBytes: 0, downloadedBytes: 0,
-    indexed: 0, total: 0, failed: 0, skipped: 0, onlyWhilePluggedIn: true, powerStateKnown: false, onBattery: false
+    indexed: 0, total: 0, failed: 0, skipped: 0, onlyWhilePluggedIn: true, powerStateKnown: false, onBattery: false,
+    textSearchEnabled: false, faceCountEnabled: false, extrasInstalled: false, extrasDownloadBytes: 0,
+    textIndexed: 0, faceScanned: 0
   })
   const [isPhotoSearchWorking, setIsPhotoSearchWorking] = useState(false)
 
@@ -1480,6 +1482,66 @@ export default function LifeLensApp() {
                     {photoSearchStatus.state === 'paused'
                       ? <button className="secondary-button" type="button" onClick={() => void runPhotoSearchAction(() => window.lifeLens.resumePhotoIndex())}>Resume</button>
                       : <button className="secondary-button" type="button" onClick={() => void runPhotoSearchAction(() => window.lifeLens.pausePhotoIndex())}>Pause</button>}
+                  </div>
+
+                  {/* Phase 2. Each capability is opt-in and reports its own
+                      progress, because they complete at very different rates. */}
+                  <div className="photo-search-phase2">
+                    <p className="workspace-note">{COPY.photos.phase2LocalOnly}</p>
+                    {!photoSearchStatus.extrasInstalled && (
+                      <p className="workspace-note">{COPY.photos.extrasDownload}</p>
+                    )}
+
+                    <label className="photo-search-toggle">
+                      <input
+                        type="checkbox"
+                        checked={photoSearchStatus.textSearchEnabled}
+                        disabled={isPhotoSearchWorking}
+                        onChange={(event) => void runPhotoSearchAction(() => window.lifeLens.setPhotoTextSearchEnabled(event.target.checked))}
+                      />
+                      <span>{COPY.photos.enableTextSearch}</span>
+                    </label>
+                    <p className="workspace-note">{COPY.photos.enableTextSearchNote}</p>
+                    {photoSearchStatus.textSearchEnabled && (
+                      <p className="workspace-note">
+                        {photoSearchStatus.textIndexed >= photoSearchStatus.total
+                          ? COPY.photos.textReady
+                          : COPY.photos.textProgress(photoSearchStatus.textIndexed, photoSearchStatus.total)}
+                      </p>
+                    )}
+
+                    <label className="photo-search-toggle">
+                      <input
+                        type="checkbox"
+                        checked={photoSearchStatus.faceCountEnabled}
+                        disabled={isPhotoSearchWorking}
+                        onChange={(event) => void runPhotoSearchAction(() => window.lifeLens.setPhotoFaceCountEnabled(event.target.checked))}
+                      />
+                      <span>{COPY.photos.enableFaceCount}</span>
+                    </label>
+                    <p className="workspace-note">{COPY.photos.enableFaceCountNote}</p>
+                    {photoSearchStatus.faceCountEnabled && (
+                      <p className="workspace-note">
+                        {photoSearchStatus.faceScanned >= photoSearchStatus.total
+                          ? COPY.photos.faceReady
+                          : COPY.photos.faceProgress(photoSearchStatus.faceScanned, photoSearchStatus.total)}
+                      </p>
+                    )}
+
+                    {(photoSearchStatus.textSearchEnabled || photoSearchStatus.faceCountEnabled) && (
+                      <div className="actions">
+                        {photoSearchStatus.textSearchEnabled && (
+                          <button className="text-button" type="button" disabled={isPhotoSearchWorking} onClick={() => {
+                            if (window.confirm(COPY.photos.confirmRebuildText)) void runPhotoSearchAction(() => window.lifeLens.rebuildPhotoTextIndex())
+                          }}>{COPY.photos.rebuildTextIndex}</button>
+                        )}
+                        {photoSearchStatus.faceCountEnabled && (
+                          <button className="text-button" type="button" disabled={isPhotoSearchWorking} onClick={() => {
+                            if (window.confirm(COPY.photos.confirmRebuildFaces)) void runPhotoSearchAction(() => window.lifeLens.rebuildPhotoFaceIndex())
+                          }}>{COPY.photos.rebuildFaceIndex}</button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </>
               )}

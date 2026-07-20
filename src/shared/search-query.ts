@@ -32,6 +32,16 @@ export const MAX_CONTAINS_TEXT_LENGTH = 80
 /** Beyond this a count is not something a person asks for by number. */
 export const MAX_PEOPLE_COUNT = 10
 
+/**
+ * How many labelled people one request may name. Three covers "Mother, Father
+ * and me"; beyond that the question is really "who is in this photo", which is
+ * not a question Lumi answers.
+ */
+export const MAX_PEOPLE_LABELS = 3
+
+/** A label is a name someone typed, matching the enrolment bound. */
+export const MAX_PEOPLE_LABEL_LENGTH = 40
+
 export interface SearchQueryInput {
   queryTerms: string
   kind?: SearchKind
@@ -39,6 +49,8 @@ export interface SearchQueryInput {
   concepts?: string[]
   containsText?: string
   people?: PeopleFilter
+  /** Labels of enrolled people, as the user said them. Never profile ids. */
+  peopleLabels?: string[]
 }
 
 export interface NormalizedSearchQuery {
@@ -58,6 +70,13 @@ export interface NormalizedSearchQuery {
   containsText: string
   /** The same text as comparable tokens, so ranking never re-normalizes. */
   containsTextTokens: string[]
+  /**
+   * Labels of enrolled people the request named, in the user's own casing.
+   *
+   * Still just text at this point. Main resolves these to profile ids; nothing
+   * upstream of main ever sees or supplies an id.
+   */
+  peopleLabels: string[]
   /** Absent means the request said nothing about how many people. */
   people?: PeopleFilter
 }
@@ -199,6 +218,7 @@ export function normalizeSearchQuery(input: SearchQueryInput): NormalizedSearchQ
   const concepts = normalizeConcepts(input.concepts)
   const containsText = normalizeContainsText(input.containsText)
   const people = normalizePeopleFilter(input.people)
+  const peopleLabels = normalizePeopleLabels(input.peopleLabels)
 
   const rawTokens = tokenizeText(input.queryTerms)
   const detectedRecency = rawTokens.some((token) => RECENCY_WORDS.has(token)) ? 'latest' : 'any'
@@ -224,6 +244,7 @@ export function normalizeSearchQuery(input: SearchQueryInput): NormalizedSearchQ
     concepts: Object.freeze(concepts) as unknown as string[],
     containsText,
     containsTextTokens: Object.freeze(ocrTokensOf(containsText)) as unknown as string[],
+    peopleLabels: Object.freeze(peopleLabels) as unknown as string[],
     ...(people ? { people: Object.freeze(people) } : {})
   })
 }
@@ -272,6 +293,77 @@ export function normalizeContainsText(value: unknown): string {
     throw new SearchQueryValidationError('contains_text must contain searchable characters.')
   }
   return normalized
+}
+
+/**
+ * Validates the labels of enrolled people named in a request.
+ *
+ * What this function returns is *text the user said*, nothing more. It performs
+ * no lookup and resolves nothing: turning a label into a profile is main's job
+ * alone, and deliberately happens nowhere near the model or the renderer.
+ *
+ * The rejections are the point. A label is a short human name, so anything
+ * shaped like an identifier, a path, a vector, or structured data is refused
+ * rather than cleaned up — because each of those is something a caller might
+ * try to smuggle in place of a name, and a sanitized version of an attack is
+ * still an attack that got partway.
+ */
+export function normalizePeopleLabels(value: unknown): string[] {
+  if (value === undefined || value === null) {
+    return []
+  }
+  if (!Array.isArray(value)) {
+    throw new SearchQueryValidationError('people_labels must be a list of names.')
+  }
+  if (value.length > MAX_PEOPLE_LABELS) {
+    throw new SearchQueryValidationError(`people_labels must name at most ${MAX_PEOPLE_LABELS} people.`)
+  }
+
+  const labels: string[] = []
+  const seen = new Set<string>()
+
+  for (const entry of value) {
+    if (typeof entry !== 'string') {
+      // Catches a number, a vector, an object, or a nested array outright.
+      throw new SearchQueryValidationError('people_labels must contain only names.')
+    }
+    const candidate = entry.normalize('NFKC').replace(/\s+/g, ' ').trim()
+    if (candidate.length === 0) {
+      continue
+    }
+    if (candidate.length > MAX_PEOPLE_LABEL_LENGTH) {
+      throw new SearchQueryValidationError(
+        `A name must be at most ${MAX_PEOPLE_LABEL_LENGTH} characters.`
+      )
+    }
+    if (/[\\/]/.test(candidate)) {
+      throw new SearchQueryValidationError('A name must not look like a file path.')
+    }
+    if (/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(candidate)) {
+      // A profile id shaped value. Ids are never accepted from outside main.
+      throw new SearchQueryValidationError('A name must not look like an identifier.')
+    }
+    if (/^[a-f0-9]{20,}$/i.test(candidate)) {
+      throw new SearchQueryValidationError('A name must not look like an identifier.')
+    }
+    if (/[[\]{}]/.test(candidate)) {
+      throw new SearchQueryValidationError('A name must be a person’s name, not structured data.')
+    }
+    if (/[\u0000-\u001f\u007f]/.test(candidate)) {
+      throw new SearchQueryValidationError('A name must not contain control characters.')
+    }
+
+    // Case-folded for duplicate detection only; the user's own casing is kept,
+    // because it is what gets read back to them.
+    const key = candidate.toLocaleLowerCase('en-US')
+    if (seen.has(key)) {
+      continue
+    }
+    seen.add(key)
+    labels.push(candidate)
+  }
+
+  return labels
 }
 
 /**
