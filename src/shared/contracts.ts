@@ -9,6 +9,7 @@ import {
 
 export const IPC_CHANNELS = {
   captureScreen: 'lifelens:capture-screen',
+  analyzeCapture: 'lifelens:analyze-capture',
   listCaptureSources: 'lifelens:list-capture-sources',
   createRealtimeSession: 'lifelens:create-realtime-session',
   noteUserRequest: 'lifelens:note-user-request',
@@ -94,6 +95,15 @@ export interface Explanation {
   summary: string
   sourceCaptureId: string
   signals: ExtractedSignal[]
+}
+
+export interface ScreenReasoningSummary {
+  sourceCaptureId: string
+  summary: string
+  dates: string[]
+  links: string[]
+  risks: string[]
+  nextActions: string[]
 }
 
 export interface SourceContext {
@@ -379,6 +389,7 @@ export type PendingActionPreview =
 export interface LifeLensApi {
   listCaptureSources: () => Promise<CaptureSource[]>
   captureScreen: (sourceId?: string) => Promise<CaptureResult>
+  analyzeCapture: (captureId: string) => Promise<ScreenReasoningSummary>
   createRealtimeSession: () => Promise<RealtimeSessionCredential>
   noteUserRequest: (request: string) => Promise<ClassifiedIntent>
   evaluateToolRequest: (toolName: GuardedTool) => Promise<ToolPolicyDecision>

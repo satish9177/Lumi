@@ -17,6 +17,7 @@ import { captureScreen, listCaptureSources } from './services/capture'
 import { runDocumentSearch } from './services/document-search'
 import { IntentTracker } from './services/intent-policy'
 import { createRealtimeSessionCredential } from './services/realtime'
+import { createScreenReasoningSummary } from './services/screen-reasoning'
 import { SearchOrchestrator } from './services/search-orchestrator'
 import { LocalStore } from './services/store'
 import { createResultThumbnails, MAX_THUMBNAILS } from './services/thumbnails'
@@ -46,7 +47,7 @@ let photoIndexCoordinator: PhotoIndexCoordinator
 let windowState: WindowStateStore
 let droppedFiles: DroppedFileStore
 let panelOpen = false
-const captures = new Map<string, Pick<CaptureResult, 'capturedAt'>>()
+const captures = new Map<string, Pick<CaptureResult, 'capturedAt' | 'dataUrl'>>()
 
 const CLOSED_WINDOW_SIZE = { width: 88, height: 88 }
 const OPEN_WINDOW_SIZE = { width: 390, height: 640 }
@@ -215,6 +216,18 @@ function registerIpcHandlers(): void {
         mainWindow.showInactive()
       }
     }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.analyzeCapture, async (event, captureId: unknown) => {
+    requireMainWindow(event)
+    if (!isCaptureId(captureId)) {
+      throw new Error('Screen reasoning requires a valid capture from this session.')
+    }
+    const capture = captures.get(captureId)
+    if (!capture) {
+      throw new Error('That screen capture is no longer available. Capture it again before asking Lumi to review it.')
+    }
+    return createScreenReasoningSummary({ id: captureId, dataUrl: capture.dataUrl }, app.getPath('userData'))
   })
 
   ipcMain.handle(IPC_CHANNELS.createRealtimeSession, async (event) => {
@@ -471,9 +484,9 @@ function waitForDesktopRepaint(): Promise<void> {
 }
 
 function rememberCapture(capture: CaptureResult): void {
-  // The renderer keeps only the active, in-session image context. Main retains
-  // just enough provenance to validate a confirmed reminder or saved context.
-  captures.set(capture.id, { capturedAt: capture.capturedAt })
+  // Main holds a bounded in-memory copy so a separately confirmed GPT-5.6
+  // review can send only this user-selected capture. It is never persisted.
+  captures.set(capture.id, { capturedAt: capture.capturedAt, dataUrl: capture.dataUrl })
   while (captures.size > 12) {
     const oldestId = captures.keys().next().value
     if (!oldestId) {
@@ -481,6 +494,10 @@ function rememberCapture(capture: CaptureResult): void {
     }
     captures.delete(oldestId)
   }
+}
+
+function isCaptureId(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 }
 
 function validateCaptureProvenance(proposal: ToolProposal): void {

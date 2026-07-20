@@ -13,6 +13,7 @@ import type {
   PhotoSearchStatus,
   RealtimeMode,
   ResultThumbnail,
+  ScreenReasoningSummary,
   SourceContext,
   TelegramRecipient,
   TelegramStatus,
@@ -78,6 +79,9 @@ export default function LifeLensApp() {
   const [capturePickerOpen, setCapturePickerOpen] = useState(false)
   const [selectedCaptureSourceId, setSelectedCaptureSourceId] = useState<string>()
   const [explanation, setExplanation] = useState<Explanation>()
+  const [screenReasoning, setScreenReasoning] = useState<ScreenReasoningSummary>()
+  const [screenReasoningConfirmationOpen, setScreenReasoningConfirmationOpen] = useState(false)
+  const [isScreenReasoning, setIsScreenReasoning] = useState(false)
   const [pendingAction, setPendingAction] = useState<PendingActionPreview>()
   const [searchConfirmation, setSearchConfirmation] = useState<SearchConfirmationRequest | undefined>()
   const pendingProposalsRef = useRef(new Map<string, PendingProposal>())
@@ -448,6 +452,8 @@ export default function LifeLensApp() {
       }
       setCapture(nextCapture)
       setExplanation(undefined)
+      setScreenReasoning(undefined)
+      setScreenReasoningConfirmationOpen(true)
       setPendingAction(undefined)
       setToolResult(undefined)
       setSearchResults([])
@@ -469,6 +475,30 @@ export default function LifeLensApp() {
       }
     } finally {
       setIsCapturing(false)
+    }
+  }
+
+  const reviewCaptureWithGpt56 = async (): Promise<void> => {
+    if (!capture) {
+      return
+    }
+    setError(undefined)
+    setIsScreenReasoning(true)
+    setCompanionState('thinking')
+    try {
+      const result = await window.lifeLens.analyzeCapture(capture.id)
+      if (result.sourceCaptureId !== capture.id) {
+        throw new Error('Lumi received a screen brief for a different capture.')
+      }
+      setScreenReasoning(result)
+      setScreenReasoningConfirmationOpen(false)
+      setExplanation(explanationFromScreenReasoning(result))
+      setCompanionState('success')
+    } catch (reasoningError) {
+      setCompanionState('error')
+      setError(messageFrom(reasoningError))
+    } finally {
+      setIsScreenReasoning(false)
     }
   }
 
@@ -1047,6 +1077,8 @@ export default function LifeLensApp() {
     clientRef.current?.invalidateScreenContext()
     setCapture(undefined)
     setExplanation(undefined)
+    setScreenReasoning(undefined)
+    setScreenReasoningConfirmationOpen(false)
     const serverCall = pendingScreenCaptureCall ?? undefined
     setPendingScreenCaptureCall(undefined)
     if (pendingScreenCaptureCall !== undefined) {
@@ -1200,6 +1232,28 @@ export default function LifeLensApp() {
               <img src={capture.dataUrl} alt={`Preview of ${capture.label}`} />
               <figcaption>Captured {new Date(capture.capturedAt).toLocaleTimeString()} from {capture.sourceKind === 'screen' ? 'screen' : 'window'}</figcaption>
             </figure>
+          )}
+
+          {capture && mode === 'live' && screenReasoningConfirmationOpen && !screenReasoning && (
+            <section className="screen-reasoning-confirmation" aria-label="GPT-5.6 screen review confirmation">
+              <p className="eyebrow">GPT-5.6 REVIEW</p>
+              <p>Send only this capture to OpenAI for a read-only brief of visible dates, links, risks, and next actions?</p>
+              <div className="actions">
+                <button className="secondary-button" type="button" onClick={() => void reviewCaptureWithGpt56()} disabled={isScreenReasoning}>
+                  {isScreenReasoning ? 'Reviewing capture…' : 'Review this capture with GPT-5.6'}
+                </button>
+                <button className="text-button" type="button" onClick={() => setScreenReasoningConfirmationOpen(false)} disabled={isScreenReasoning}>Not now</button>
+              </div>
+            </section>
+          )}
+
+          {screenReasoning && (
+            <section className="screen-reasoning-card" aria-label="GPT-5.6 screen review">
+              <p className="eyebrow">GPT-5.6 REVIEW</p>
+              <p>{screenReasoning.summary}</p>
+              {screenReasoning.risks.length > 0 && <><h2>Risks to notice</h2><ul>{screenReasoning.risks.map((risk) => <li key={risk}>{risk}</li>)}</ul></>}
+              {screenReasoning.nextActions.length > 0 && <><h2>Suggested next actions</h2><ul>{screenReasoning.nextActions.map((action) => <li key={action}>{action}</li>)}</ul></>}
+            </section>
           )}
 
           {explanation && <ExplanationCard explanation={explanation} />}
@@ -1557,6 +1611,18 @@ function currentSourceContext(capture: CaptureResult | undefined, explanation: E
     summary: explanation.summary,
     capturedAt: capture.capturedAt,
     signals: explanation.signals
+  }
+}
+
+function explanationFromScreenReasoning(reasoning: ScreenReasoningSummary): Explanation {
+  return {
+    summary: reasoning.summary,
+    sourceCaptureId: reasoning.sourceCaptureId,
+    signals: [
+      ...reasoning.dates.map((value) => ({ kind: 'date' as const, label: 'Important date', value })),
+      ...reasoning.links.map((value) => ({ kind: 'link' as const, label: 'Visible link', value })),
+      ...reasoning.nextActions.map((value) => ({ kind: 'next_action' as const, label: 'Suggested next action', value }))
+    ]
   }
 }
 
