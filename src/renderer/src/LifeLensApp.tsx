@@ -19,7 +19,8 @@ import type {
   ToolProposal
 } from '../../shared/contracts'
 import { fileKindLabel } from '../../shared/search-query'
-import { ExplanationCard, PhotoResultGrid, ToolConfirmationCard } from './components'
+import { BrandMark, DragGrip, ExplanationCard, PhotoResultGrid, StatusPill, ToolConfirmationCard } from './components'
+import { deriveStatus } from './status'
 import { FileSearchController, type SearchConfirmationRequest } from './file-search-controller'
 import { messageFrom } from './error-message'
 import { approvePendingRendererAction, dismissPendingRendererAction } from './pending-action-coordinator'
@@ -41,14 +42,8 @@ interface PendingTelegramAttachment {
   readonly serverCall: RealtimeServerCall
 }
 
-const STATUS_LABELS: Record<CompanionState, string> = {
-  idle: 'Ready',
-  listening: 'Listening',
-  thinking: 'Thinking',
-  speaking: 'Speaking',
-  success: 'Done',
-  error: 'Needs attention'
-}
+/** Empty-state chips. These only prefill the composer; they never run on their own. */
+const SUGGESTIONS = ['What is this email about?', 'Find my resume', 'Show me photos of the whiteboard']
 
 export default function LifeLensApp() {
   const clientRef = useRef<RealtimeClient | undefined>(undefined)
@@ -70,6 +65,10 @@ export default function LifeLensApp() {
   const [searchConfirmation, setSearchConfirmation] = useState<SearchConfirmationRequest | undefined>()
   const pendingProposalsRef = useRef(new Map<string, PendingProposal>())
   const [toolResult, setToolResult] = useState<ToolExecutionResult>()
+  const [windowNotice, setWindowNotice] = useState<string>()
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [online, setOnline] = useState(() => navigator.onLine)
+  const conversationRef = useRef<HTMLDivElement>(null)
   const [transcript, setTranscript] = useState<string[]>([])
   const [documentRoots, setDocumentRoots] = useState<ApprovedDocumentRoot[]>([])
   const [searchQuery, setSearchQuery] = useState('resume')
@@ -118,7 +117,52 @@ export default function LifeLensApp() {
       collapsedAtRef.current = undefined
       client?.cancelCollapseDisconnect()
     }
+    // Settings must never stay open behind the orb.
+    if (!expanded) {
+      setSettingsOpen(false)
+    }
   }, [expanded])
+
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine)
+    window.addEventListener('online', update)
+    window.addEventListener('offline', update)
+    return () => {
+      window.removeEventListener('online', update)
+      window.removeEventListener('offline', update)
+    }
+  }, [])
+
+  // Keep the newest message in view as the conversation grows.
+  useEffect(() => {
+    const region = conversationRef.current
+    if (!region) {
+      return
+    }
+    region.scrollTop = region.scrollHeight
+  }, [transcript, searchResults, explanation, toolResult, pendingAction, searchConfirmation])
+
+  // Escape closes the topmost layer, one at a time, before collapsing.
+  useEffect(() => {
+    if (!expanded) {
+      return
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') {
+        return
+      }
+      event.preventDefault()
+      if (settingsOpen) {
+        setSettingsOpen(false)
+      } else if (capturePickerOpen) {
+        setCapturePickerOpen(false)
+      } else {
+        setExpanded(false)
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [expanded, settingsOpen, capturePickerOpen])
 
   useEffect(() => {
     void refreshDocumentRoots()
@@ -869,11 +913,22 @@ export default function LifeLensApp() {
   const applicationWindows = captureSources.filter((source) => source.kind === 'window')
   const entireDisplays = captureSources.filter((source) => source.kind === 'screen')
   const visibleLinks = explanation?.signals.filter((signal) => signal.kind === 'link') ?? []
+  const hasConversation = transcript.length > 0 || Boolean(explanation) || searchResults.length > 0 || Boolean(capture)
+  const status = deriveStatus({
+    companionState,
+    isConnecting,
+    hasConnectedBefore: hasConnectedOnceRef.current,
+    online,
+    isSending: isTelegramWorking,
+    isSearching,
+    photoSearchStatus,
+    mode
+  })
 
   return (
     <main className={`app-shell ${expanded ? 'is-open' : 'is-closed'}`}>
-      <div className="companion-shell" title="Drag the outer ring to move LifeLens">
-        <button className={`companion-core state-${companionState}`} type="button" aria-label="Open LifeLens" onClick={openCompanion}>
+      <div className="companion-shell drag-region" title="Drag the outer ring to move Lumi">
+        <button className={`companion-core state-${companionState}`} type="button" aria-label="Open Lumi" onClick={openCompanion}>
           <span className="companion-eye left" />
           <span className="companion-eye right" />
           <span className="companion-glow" />
@@ -881,26 +936,49 @@ export default function LifeLensApp() {
       </div>
 
       {expanded && (
-        <section className="panel" aria-label="LifeLens interaction panel">
-          <header className="panel-header drag-handle">
-            <div>
-              <p className="eyebrow">LIFELENS</p>
-              <h1>See it. Understand it.</h1>
+        <section className="panel" aria-label="Lumi">
+          <header className="panel-header drag-region">
+            <div className="brand-lockup">
+              <DragGrip />
+              <BrandMark size={20} />
+              <h1>Lumi</h1>
             </div>
-            <button className="icon-button" type="button" aria-label="Close LifeLens panel" onClick={() => setExpanded(false)}>&times;</button>
+            <div className="header-controls">
+              <StatusPill status={status} />
+              <button
+                className="icon-button"
+                type="button"
+                aria-label="Settings"
+                aria-expanded={settingsOpen}
+                onClick={() => setSettingsOpen((open) => !open)}
+              >
+                ⚙
+              </button>
+              <button className="icon-button" type="button" aria-label="Collapse to orb" onClick={() => setExpanded(false)}>&times;</button>
+            </div>
           </header>
 
-          <div className="status-row" aria-live="polite">
-            <span className={`status-dot state-${companionState}`} />
-            <span>{isConnecting ? (hasConnectedOnceRef.current ? 'Reconnecting…' : 'Connecting…') : STATUS_LABELS[companionState]}</span>
-            {mode && <span className="mode-badge">{mode === 'live' ? 'Realtime voice' : 'Mock voice'}</span>}
-          </div>
+          <div className="conversation" role="log" aria-live="polite" aria-label="Conversation with Lumi" ref={conversationRef}>
+          {!hasConversation && (
+            <div className="conversation-empty">
+              <BrandMark size={48} glow />
+              <p>Ask about what is on your screen, or find a file.</p>
+              <div className="suggestion-chips">
+                {SUGGESTIONS.map((suggestion) => (
+                  <button
+                    className="chip"
+                    type="button"
+                    key={suggestion}
+                    onClick={() => setQuestion(suggestion)}
+                  >
+                    {suggestion}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
-          <form className="question-field" onSubmit={(event) => { event.preventDefault(); void askQuestion() }}>
-            <span>Ask Lumi</span>
-            <input value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="What is this email about?" />
-            <button className="primary-button" type="submit" disabled={!clientRef.current || !question.trim()}>Ask Lumi</button>
-          </form>
+          {transcript.map((line, index) => <p className="message" key={`${line}-${index}`}>{line}</p>)}
 
           {capturePickerOpen && (
             <section className="source-picker" aria-label="Choose a screen or window to capture">
@@ -957,24 +1035,7 @@ export default function LifeLensApp() {
             </section>
           )}
 
-          <section className="document-workspace" aria-label="Approved document search">
-            <div className="section-heading-row">
-              <div><p className="eyebrow">APPROVED DOCUMENTS</p><h2>Find the latest resume</h2></div>
-              <button className="text-button" type="button" disabled={isChoosingFolder} onClick={() => void chooseDocumentRoot()}>
-                {isChoosingFolder ? 'Choosing...' : 'Approve folder'}
-              </button>
-            </div>
-            {documentRoots.length === 0
-              ? <p className="workspace-note">LifeLens cannot search until you approve a folder. Ask for a file and it will offer the folder chooser once.</p>
-              : <ul className="approved-root-list">{documentRoots.map((root) => (
-                <li key={root.id}><span>{root.label}</span><button className="text-button" type="button" onClick={() => void revokeDocumentRoot(root)}>Revoke</button></li>
-              ))}</ul>}
-            <div className="document-search-row">
-              <input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="resume" aria-label="What to look for" />
-              <button className="secondary-button" type="button" disabled={isSearching} onClick={proposeDocumentSearch}>
-                {isSearching ? 'Searching...' : 'Search files'}
-              </button>
-            </div>
+          <section className="result-block" aria-label="Search results">
             {searchResults.length > 0 && (
               <>
                 <p className="workspace-note">
@@ -1016,139 +1077,6 @@ export default function LifeLensApp() {
             )}
           </section>
 
-          <section className="photo-search-settings" aria-label="Intelligent photo search settings">
-            <div className="section-heading-row">
-              <div><p className="eyebrow">LOCAL PHOTO SEARCH</p><h2>Intelligent photo search</h2></div>
-              <span className={`photo-search-state state-${photoSearchStatus.state}`}>{photoSearchStateLabel(photoSearchStatus.state)}</span>
-            </div>
-            <p className="workspace-note"><strong>Photos are indexed on this device and are not uploaded.</strong> Visual search works only across indexed JPEG, PNG, and WebP photos.</p>
-            {!photoSearchStatus.enabled && (
-              <button className="secondary-button" type="button" disabled={isPhotoSearchWorking} onClick={() => void runPhotoSearchAction(() => window.lifeLens.enablePhotoSearch())}>Enable intelligent photo search</button>
-            )}
-            {photoSearchStatus.enabled && !photoSearchStatus.modelInstalled && photoSearchStatus.state !== 'downloading' && photoSearchStatus.state !== 'verifying' && (
-              <button className="secondary-button" type="button" disabled={isPhotoSearchWorking} onClick={() => void runPhotoSearchAction(() => window.lifeLens.downloadPhotoSearchModel())}>
-                Download local model ({formatMegabytes(photoSearchStatus.modelDownloadBytes)})
-              </button>
-            )}
-            {(photoSearchStatus.state === 'downloading' || photoSearchStatus.state === 'verifying') && (
-              <div className="photo-search-progress">
-                <progress max={Math.max(1, photoSearchStatus.modelDownloadBytes)} value={photoSearchStatus.downloadedBytes} />
-                <span>{formatMegabytes(photoSearchStatus.downloadedBytes)} of {formatMegabytes(photoSearchStatus.modelDownloadBytes)}</span>
-                <button className="text-button" type="button" onClick={() => void runPhotoSearchAction(() => window.lifeLens.cancelPhotoSearchDownload())}>Cancel</button>
-              </div>
-            )}
-            {photoSearchStatus.enabled && photoSearchStatus.modelInstalled && (
-              <>
-                <p className="workspace-note">{photoSearchStatus.indexed} of {photoSearchStatus.total} photos indexed · {photoSearchStatus.failed} failed · {photoSearchStatus.skipped} skipped.</p>
-                {photoSearchStatus.lastIndexedAt && <p className="workspace-note">Last indexed {new Date(photoSearchStatus.lastIndexedAt).toLocaleString()}.</p>}
-                <label className="photo-search-toggle">
-                  <input type="checkbox" checked={photoSearchStatus.onlyWhilePluggedIn} onChange={(event) => void runPhotoSearchAction(() => window.lifeLens.setPhotoIndexOnlyWhilePluggedIn(event.target.checked))} />
-                  <span>Index only while plugged in</span>
-                </label>
-                {!photoSearchStatus.powerStateKnown && <p className="workspace-note">Power state is unavailable, so indexing continues normally.</p>}
-                <div className="actions">
-                  {photoSearchStatus.state === 'paused'
-                    ? <button className="secondary-button" type="button" onClick={() => void runPhotoSearchAction(() => window.lifeLens.resumePhotoIndex())}>Resume</button>
-                    : <button className="secondary-button" type="button" onClick={() => void runPhotoSearchAction(() => window.lifeLens.pausePhotoIndex())}>Pause</button>}
-                </div>
-              </>
-            )}
-            {photoSearchStatus.message && <p className="workspace-note">{photoSearchStatus.message}</p>}
-            {photoSearchStatus.enabled && (
-              <div className="actions">
-                <button className="text-button" type="button" disabled={isPhotoSearchWorking} onClick={() => {
-                  if (window.confirm('Clear the local model and photo index? You will need to download and index again.')) void runPhotoSearchAction(() => window.lifeLens.rebuildPhotoIndex())
-                }}>Clear and rebuild</button>
-                <button className="text-button danger-button" type="button" disabled={isPhotoSearchWorking} onClick={() => {
-                  if (window.confirm('Disable intelligent photo search? Filename and date search will keep working.')) void runPhotoSearchAction(() => window.lifeLens.disablePhotoSearch())
-                }}>Disable</button>
-              </div>
-            )}
-          </section>
-
-          <section className="telegram-workspace" aria-label="Telegram integration">
-            <div className="section-heading-row">
-              <div>
-                <p className="eyebrow">INTEGRATIONS</p>
-                <h2>Telegram</h2>
-                <div className="integration-subtitle">
-                  <span>Personal account connection</span>
-                  <details className="integration-disclosure">
-                    <summary aria-label="About Lumi's Telegram connection" title="About Lumi's Telegram connection">i</summary>
-                    <p>Lumi connects through a third-party Telegram client and is not affiliated with or endorsed by Telegram.</p>
-                  </details>
-                </div>
-              </div>
-              {telegramStatus.state === 'connected' ? (
-                <button className="text-button" type="button" disabled={isTelegramWorking} onClick={() => void logoutTelegram()}>Log out</button>
-              ) : (
-                <button className="text-button" type="button" disabled={isTelegramWorking || telegramStatus.state === 'connecting'} onClick={() => void connectTelegram()}>
-                  {isTelegramWorking || telegramStatus.state === 'connecting' ? 'Connecting...' : 'Connect Telegram'}
-                </button>
-              )}
-            </div>
-            {telegramStatus.state === 'disconnected' && <p className="workspace-note">Connect a personal account to search recipient metadata locally and send one confirmed message, photo, or document.</p>}
-            {(telegramStatus.state === 'connecting' || telegramStatus.state === 'awaiting_2fa') && (
-              <div className="telegram-auth-card">
-                {telegramStatus.qrUrl ? (
-                  <>
-                    <p>Open Telegram on your phone: <strong>Settings → Devices → Link Desktop Device</strong>, then scan the current login QR token.</p>
-                    <TelegramLoginQr qrUrl={telegramStatus.qrUrl} expiresAt={telegramStatus.expiresAt} onExpire={clearExpiredTelegramQr} />
-                  </>
-                ) : <p>{telegramStatus.message ?? 'Preparing a Telegram QR token…'}</p>}
-                {telegramStatus.state === 'awaiting_2fa' && (
-                  <form className="telegram-password-row" onSubmit={(event) => { event.preventDefault(); void submitTelegramPassword() }}>
-                    <input type="password" autoComplete="current-password" value={telegramPassword} onChange={(event) => setTelegramPassword(event.target.value)} placeholder="Telegram two-step password" aria-label="Telegram two-step verification password" />
-                    <button className="secondary-button" type="submit" disabled={!telegramPassword || isTelegramWorking}>Continue</button>
-                  </form>
-                )}
-                <button className="text-button" type="button" disabled={isTelegramWorking} onClick={() => void cancelTelegramConnect()}>Cancel</button>
-              </div>
-            )}
-            {telegramStatus.state === 'error' && <p className="notice error-notice">{telegramStatus.message}</p>}
-            {telegramStatus.state === 'connected' && (
-              <>
-                <p className="workspace-note">Connected as <strong>{formatTelegramAccount(telegramStatus)}</strong>. Recipient names and chat metadata stay local to Lumi.</p>
-                <div className="document-search-row">
-                  <input value={telegramQuery} onChange={(event) => setTelegramQuery(event.target.value)} placeholder="Recipient name" aria-label="Telegram recipient name" />
-                  <button className="secondary-button" type="button" disabled={isTelegramWorking} onClick={() => void searchTelegramRecipients()}>Find</button>
-                </div>
-                {telegramRecipients.length > 0 && (
-                  <ul className="telegram-recipients">
-                    {telegramRecipients.map((recipient) => (
-                      <li key={recipient.resultId}>
-                        <label>
-                          <input type="radio" name="telegram-recipient" checked={selectedTelegramRecipientId === recipient.resultId} onChange={() => selectTelegramRecipient(recipient.resultId)} />
-                          <span><strong>{recipient.displayName}</strong>{recipient.username && <small>@{recipient.username}</small>}<small>{recipient.kind}</small></span>
-                        </label>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {pendingTelegramAttachment && <p className="workspace-note">Choose one local recipient to continue to the single attachment confirmation.</p>}
-                {telegramQuery && telegramRecipients.length === 0 && <p className="workspace-note">Search returns up to ten local dialog/contact matches. Nothing is sent to OpenAI.</p>}
-                <label className="telegram-message-field">
-                  <span>Message or attachment caption</span>
-                  <textarea value={telegramMessage} maxLength={4096} onChange={(event) => setTelegramMessage(event.target.value)} placeholder="Write the complete message or caption" />
-                </label>
-                <button className="secondary-button" type="button" onClick={proposeTelegramMessage}>Send message</button>
-              </>
-            )}
-          </section>
-
-          <details className="troubleshooting">
-            <summary>More / Troubleshooting</summary>
-            <div className="actions">
-              <button className="secondary-button" type="button" onClick={() => { void connectVoice().catch(() => undefined) }} disabled={isConnecting}>
-                {isConnecting ? (hasConnectedOnceRef.current ? 'Reconnecting…' : 'Connecting…') : 'Connect voice'}
-              </button>
-              <button className="secondary-button" type="button" onClick={() => requestScreenContext()} disabled={!clientRef.current || isCapturing}>
-                {isCapturing ? 'Looking...' : capture ? 'Refresh screen' : 'Capture screen'}
-              </button>
-              <button className="text-button" type="button" onClick={() => void loadCaptureSources()}>Change screen</button>
-            </div>
-          </details>
-
           {searchConfirmation && (
             <SearchConfirmationCard
               request={searchConfirmation}
@@ -1165,11 +1093,224 @@ export default function LifeLensApp() {
             />
           )}
           {toolResult && <p className={`notice ${toolResult.ok ? 'success-notice' : 'error-notice'}`}>{toolResult.message}</p>}
-          {transcript.length > 0 && (
-            <details className="transcript">
-              <summary>Conversation</summary>
-              {transcript.map((line, index) => <p key={`${line}-${index}`}>{line}</p>)}
-            </details>
+          </div>
+
+          <form className="composer" onSubmit={(event) => { event.preventDefault(); void askQuestion() }}>
+            <input
+              className="composer-input"
+              value={question}
+              onChange={(event) => setQuestion(event.target.value)}
+              placeholder="Ask Lumi…"
+              aria-label="Ask Lumi"
+            />
+            <button
+              className="icon-button"
+              type="button"
+              aria-label={capture ? 'Look at my screen again' : 'Look at my screen'}
+              title={capture ? 'Look at my screen again' : 'Look at my screen'}
+              onClick={() => requestScreenContext()}
+              disabled={!clientRef.current || isCapturing}
+            >
+              ◉
+            </button>
+            <button
+              className="primary-button send-button"
+              type="submit"
+              disabled={!clientRef.current || !question.trim()}
+              title={!clientRef.current ? 'Lumi is still connecting.' : !question.trim() ? 'Type a question first.' : 'Send'}
+            >
+              Send
+            </button>
+          </form>
+
+          {settingsOpen && (
+            <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Settings">
+              <header className="settings-header">
+                <h2>Settings</h2>
+                <button className="icon-button" type="button" aria-label="Close settings" onClick={() => setSettingsOpen(false)}>&times;</button>
+              </header>
+              <div className="settings-scroll">
+                <section className="settings-group" aria-label="Voice">
+                  <h3>Voice</h3>
+                  {mode === 'mock'
+                    ? <p className="workspace-note">Demo mode — voice and answers are simulated, so Lumi can be tried without an OpenAI key. Capture, search, confirmation, and Telegram all behave exactly as they will live.</p>
+                    : <p className="workspace-note">Voice is live. Lumi listens only while the panel is open.</p>}
+                  <div className="actions">
+                    <button className="secondary-button" type="button" onClick={() => { void connectVoice().catch(() => undefined) }} disabled={isConnecting}>
+                      {isConnecting ? (hasConnectedOnceRef.current ? 'Reconnecting…' : 'Connecting…') : 'Connect voice'}
+                    </button>
+                  </div>
+                </section>
+
+                <section className="settings-group" aria-label="Files and approved folders">
+                  <h3>Files and approved folders</h3>
+                  {documentRoots.length === 0
+                    ? <p className="workspace-note">Lumi can only search folders you approve. Ask for a file and Lumi will offer the folder chooser once.</p>
+                    : <ul className="approved-root-list">{documentRoots.map((root) => (
+                      <li key={root.id}><span>{root.label}</span><button className="text-button" type="button" onClick={() => void revokeDocumentRoot(root)}>Revoke</button></li>
+                    ))}</ul>}
+                  <div className="actions">
+                    <button className="secondary-button" type="button" disabled={isChoosingFolder} onClick={() => void chooseDocumentRoot()}>
+                      {isChoosingFolder ? 'Choosing…' : 'Approve a folder'}
+                    </button>
+                  </div>
+                  <div className="document-search-row">
+                    <input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="resume" aria-label="What to look for" />
+                    <button className="secondary-button" type="button" disabled={isSearching} onClick={proposeDocumentSearch}>
+                      {isSearching ? 'Searching…' : 'Search files'}
+                    </button>
+                  </div>
+                </section>
+
+            <section className="photo-search-settings" aria-label="Intelligent photo search settings">
+              <div className="section-heading-row">
+                <div><p className="eyebrow">LOCAL PHOTO SEARCH</p><h2>Intelligent photo search</h2></div>
+                <span className={`photo-search-state state-${photoSearchStatus.state}`}>{photoSearchStateLabel(photoSearchStatus.state)}</span>
+              </div>
+              <p className="workspace-note"><strong>Photos are indexed on this device and are not uploaded.</strong> Visual search works only across indexed JPEG, PNG, and WebP photos.</p>
+              {!photoSearchStatus.enabled && (
+                <button className="secondary-button" type="button" disabled={isPhotoSearchWorking} onClick={() => void runPhotoSearchAction(() => window.lifeLens.enablePhotoSearch())}>Enable intelligent photo search</button>
+              )}
+              {photoSearchStatus.enabled && !photoSearchStatus.modelInstalled && photoSearchStatus.state !== 'downloading' && photoSearchStatus.state !== 'verifying' && (
+                <button className="secondary-button" type="button" disabled={isPhotoSearchWorking} onClick={() => void runPhotoSearchAction(() => window.lifeLens.downloadPhotoSearchModel())}>
+                  Download local model ({formatMegabytes(photoSearchStatus.modelDownloadBytes)})
+                </button>
+              )}
+              {(photoSearchStatus.state === 'downloading' || photoSearchStatus.state === 'verifying') && (
+                <div className="photo-search-progress">
+                  <progress max={Math.max(1, photoSearchStatus.modelDownloadBytes)} value={photoSearchStatus.downloadedBytes} />
+                  <span>{formatMegabytes(photoSearchStatus.downloadedBytes)} of {formatMegabytes(photoSearchStatus.modelDownloadBytes)}</span>
+                  <button className="text-button" type="button" onClick={() => void runPhotoSearchAction(() => window.lifeLens.cancelPhotoSearchDownload())}>Cancel</button>
+                </div>
+              )}
+              {photoSearchStatus.enabled && photoSearchStatus.modelInstalled && (
+                <>
+                  <p className="workspace-note">{photoSearchStatus.indexed} of {photoSearchStatus.total} photos indexed · {photoSearchStatus.failed} failed · {photoSearchStatus.skipped} skipped.</p>
+                  {photoSearchStatus.lastIndexedAt && <p className="workspace-note">Last indexed {new Date(photoSearchStatus.lastIndexedAt).toLocaleString()}.</p>}
+                  <label className="photo-search-toggle">
+                    <input type="checkbox" checked={photoSearchStatus.onlyWhilePluggedIn} onChange={(event) => void runPhotoSearchAction(() => window.lifeLens.setPhotoIndexOnlyWhilePluggedIn(event.target.checked))} />
+                    <span>Index only while plugged in</span>
+                  </label>
+                  {!photoSearchStatus.powerStateKnown && <p className="workspace-note">Power state is unavailable, so indexing continues normally.</p>}
+                  <div className="actions">
+                    {photoSearchStatus.state === 'paused'
+                      ? <button className="secondary-button" type="button" onClick={() => void runPhotoSearchAction(() => window.lifeLens.resumePhotoIndex())}>Resume</button>
+                      : <button className="secondary-button" type="button" onClick={() => void runPhotoSearchAction(() => window.lifeLens.pausePhotoIndex())}>Pause</button>}
+                  </div>
+                </>
+              )}
+              {photoSearchStatus.message && <p className="workspace-note">{photoSearchStatus.message}</p>}
+              {photoSearchStatus.enabled && (
+                <div className="actions">
+                  <button className="text-button" type="button" disabled={isPhotoSearchWorking} onClick={() => {
+                    if (window.confirm('Clear the local model and photo index? You will need to download and index again.')) void runPhotoSearchAction(() => window.lifeLens.rebuildPhotoIndex())
+                  }}>Clear and rebuild</button>
+                  <button className="text-button danger-button" type="button" disabled={isPhotoSearchWorking} onClick={() => {
+                    if (window.confirm('Disable intelligent photo search? Filename and date search will keep working.')) void runPhotoSearchAction(() => window.lifeLens.disablePhotoSearch())
+                  }}>Disable</button>
+                </div>
+              )}
+            </section>
+
+            <section className="telegram-workspace" aria-label="Telegram integration">
+              <div className="section-heading-row">
+                <div>
+                  <p className="eyebrow">INTEGRATIONS</p>
+                  <h2>Telegram</h2>
+                  <div className="integration-subtitle">
+                    <span>Personal account connection</span>
+                    <details className="integration-disclosure">
+                      <summary aria-label="About Lumi's Telegram connection" title="About Lumi's Telegram connection">i</summary>
+                      <p>Lumi connects through a third-party Telegram client and is not affiliated with or endorsed by Telegram.</p>
+                    </details>
+                  </div>
+                </div>
+                {telegramStatus.state === 'connected' ? (
+                  <button className="text-button" type="button" disabled={isTelegramWorking} onClick={() => void logoutTelegram()}>Log out</button>
+                ) : (
+                  <button className="text-button" type="button" disabled={isTelegramWorking || telegramStatus.state === 'connecting'} onClick={() => void connectTelegram()}>
+                    {isTelegramWorking || telegramStatus.state === 'connecting' ? 'Connecting...' : 'Connect Telegram'}
+                  </button>
+                )}
+              </div>
+              {telegramStatus.state === 'disconnected' && <p className="workspace-note">Connect a personal account to search recipient metadata locally and send one confirmed message, photo, or document.</p>}
+              {(telegramStatus.state === 'connecting' || telegramStatus.state === 'awaiting_2fa') && (
+                <div className="telegram-auth-card">
+                  {telegramStatus.qrUrl ? (
+                    <>
+                      <p>Open Telegram on your phone: <strong>Settings → Devices → Link Desktop Device</strong>, then scan the current login QR token.</p>
+                      <TelegramLoginQr qrUrl={telegramStatus.qrUrl} expiresAt={telegramStatus.expiresAt} onExpire={clearExpiredTelegramQr} />
+                    </>
+                  ) : <p>{telegramStatus.message ?? 'Preparing a Telegram QR token…'}</p>}
+                  {telegramStatus.state === 'awaiting_2fa' && (
+                    <form className="telegram-password-row" onSubmit={(event) => { event.preventDefault(); void submitTelegramPassword() }}>
+                      <input type="password" autoComplete="current-password" value={telegramPassword} onChange={(event) => setTelegramPassword(event.target.value)} placeholder="Telegram two-step password" aria-label="Telegram two-step verification password" />
+                      <button className="secondary-button" type="submit" disabled={!telegramPassword || isTelegramWorking}>Continue</button>
+                    </form>
+                  )}
+                  <button className="text-button" type="button" disabled={isTelegramWorking} onClick={() => void cancelTelegramConnect()}>Cancel</button>
+                </div>
+              )}
+              {telegramStatus.state === 'error' && <p className="notice error-notice">{telegramStatus.message}</p>}
+              {telegramStatus.state === 'connected' && (
+                <>
+                  <p className="workspace-note">Connected as <strong>{formatTelegramAccount(telegramStatus)}</strong>. Recipient names and chat metadata stay local to Lumi.</p>
+                  <div className="document-search-row">
+                    <input value={telegramQuery} onChange={(event) => setTelegramQuery(event.target.value)} placeholder="Recipient name" aria-label="Telegram recipient name" />
+                    <button className="secondary-button" type="button" disabled={isTelegramWorking} onClick={() => void searchTelegramRecipients()}>Find</button>
+                  </div>
+                  {telegramRecipients.length > 0 && (
+                    <ul className="telegram-recipients">
+                      {telegramRecipients.map((recipient) => (
+                        <li key={recipient.resultId}>
+                          <label>
+                            <input type="radio" name="telegram-recipient" checked={selectedTelegramRecipientId === recipient.resultId} onChange={() => selectTelegramRecipient(recipient.resultId)} />
+                            <span><strong>{recipient.displayName}</strong>{recipient.username && <small>@{recipient.username}</small>}<small>{recipient.kind}</small></span>
+                          </label>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {pendingTelegramAttachment && <p className="workspace-note">Choose one local recipient to continue to the single attachment confirmation.</p>}
+                  {telegramQuery && telegramRecipients.length === 0 && <p className="workspace-note">Search returns up to ten local dialog/contact matches. Nothing is sent to OpenAI.</p>}
+                  <label className="telegram-message-field">
+                    <span>Message or attachment caption</span>
+                    <textarea value={telegramMessage} maxLength={4096} onChange={(event) => setTelegramMessage(event.target.value)} placeholder="Write the complete message or caption" />
+                  </label>
+                  <button className="secondary-button" type="button" onClick={proposeTelegramMessage}>Send message</button>
+                </>
+              )}
+            </section>
+
+                <section className="settings-group" aria-label="Appearance">
+                  <h3>Appearance</h3>
+                  <p className="workspace-note">Drag Lumi by its header to move it. Lumi remembers where you put it.</p>
+                  <div className="actions">
+                    <button
+                      className="secondary-button"
+                      type="button"
+                      onClick={() => {
+                        void window.lifeLens.resetWindowPosition().then(
+                          () => setWindowNotice('Lumi is back at the bottom-right of your main screen.'),
+                          () => setWindowNotice('Lumi could not move the window just now. Try again.')
+                        )
+                      }}
+                    >
+                      Reset window position
+                    </button>
+                  </div>
+                  {windowNotice && <p className="notice">{windowNotice}</p>}
+                </section>
+
+                <section className="settings-group" aria-label="Privacy">
+                  <h3>Privacy</h3>
+                  <p className="workspace-note">
+                    Photos are indexed on this device and are not uploaded. Lumi searches only the folders you approve, looks at your screen
+                    only when you ask, and never acts without your confirmation.
+                  </p>
+                </section>
+              </div>
+            </div>
           )}
         </section>
       )}

@@ -8,6 +8,7 @@
   "type": "module",
   "scripts": {
     "dev": "electron-vite dev",
+    "icons": "node scripts/generate-icons.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "build": "electron-vite build",
@@ -15,7 +16,7 @@
   },
   "build": {
     "appId": "com.lifelens.app",
-    "productName": "LifeLens",
+    "productName": "Lumi",
     "directories": {
       "output": "release/${version}"
     },

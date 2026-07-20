@@ -146,6 +146,11 @@ export function isTelegramSafeDimensions(width: number, height: number): boolean
   return width <= MAX_PHOTO_DIMENSION && height <= MAX_PHOTO_DIMENSION && ratio <= MAX_PHOTO_ASPECT_RATIO
 }
 
+/** Exported so dropped-file validation reuses the same labels. */
+export function attachmentTypeLabel(type: AttachmentType): string {
+  return typeLabel(type)
+}
+
 function typeLabel(type: AttachmentType): string {
   switch (type) {
     case 'jpeg': return 'JPEG image'
@@ -156,6 +161,11 @@ function typeLabel(type: AttachmentType): string {
     case 'docx': return 'Word document'
     case 'txt': return 'Text document'
   }
+}
+
+/** Exported so dropped-file validation sniffs with the identical prefix read. */
+export function readAttachmentPrefix(path: string): Promise<Buffer> {
+  return readPrefix(path)
 }
 
 async function readPrefix(path: string): Promise<Buffer> {

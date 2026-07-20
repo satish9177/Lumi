@@ -23,9 +23,18 @@ import { createResultThumbnails, MAX_THUMBNAILS } from './services/thumbnails'
 import { restoreReminderTimers } from './services/tools'
 import { TelegramService } from './services/telegram'
 import { PendingActionStore } from './services/pending-actions'
+import { DroppedFileStore } from './services/dropped-files'
 import { PhotoIndexCoordinator } from './vision/coordinator'
 import { VisionEngine, type VisionWorkerHandle } from './vision/engine'
 import { isModelPackInstalled, resolveAssetPath } from './vision/model-pack'
+import {
+  anchorOf,
+  boundsForAnchor,
+  clampToDisplays,
+  defaultBounds,
+  WindowStateStore,
+  type Size
+} from './services/window-state'
 
 let mainWindow: BrowserWindow | undefined
 let localStore: LocalStore
@@ -34,15 +43,24 @@ let pendingActions: PendingActionStore
 let intentTracker: IntentTracker
 let searchOrchestrator: SearchOrchestrator
 let photoIndexCoordinator: PhotoIndexCoordinator
+let windowState: WindowStateStore
+let droppedFiles: DroppedFileStore
+let panelOpen = false
 const captures = new Map<string, Pick<CaptureResult, 'capturedAt'>>()
 
 const CLOSED_WINDOW_SIZE = { width: 88, height: 88 }
 const OPEN_WINDOW_SIZE = { width: 390, height: 640 }
-const WINDOW_MARGIN = 20
+
+function currentWindowSize(): Size {
+  return panelOpen ? OPEN_WINDOW_SIZE : CLOSED_WINDOW_SIZE
+}
 
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
-    title: 'LifeLens',
+    title: 'Lumi',
+    // Packaged builds inherit the icon electron-builder embeds in the
+    // executable; this only dresses the dev run, where there is no exe icon.
+    ...(app.isPackaged ? {} : { icon: join(__dirname, '../../build/icon.ico') }),
     width: CLOSED_WINDOW_SIZE.width,
     height: CLOSED_WINDOW_SIZE.height,
     show: false,
@@ -65,6 +83,8 @@ function createWindow(): BrowserWindow {
   window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
   positionWindow(window, CLOSED_WINDOW_SIZE)
   window.once('ready-to-show', () => window.showInactive())
+  // Debounced inside the store, so a drag never writes on every frame.
+  window.on('move', rememberWindowPosition)
 
   if (process.env.ELECTRON_RENDERER_URL) {
     void window.loadURL(process.env.ELECTRON_RENDERER_URL)
@@ -83,41 +103,84 @@ function createWindow(): BrowserWindow {
   return window
 }
 
-function positionWindow(window: BrowserWindow, size: { width: number; height: number }): void {
-  const display = screen.getDisplayMatching(window.getBounds())
-  const { x, y, width, height } = display.workArea
-  window.setBounds({
-    x: x + width - size.width - WINDOW_MARGIN,
-    y: y + height - size.height - WINDOW_MARGIN,
-    width: size.width,
-    height: size.height
-  })
+/**
+ * Places the window at its remembered bottom-right anchor, or at the default
+ * corner of the primary display when there is nothing usable to restore.
+ *
+ * Electron reports window bounds and `display.workArea` in the same DIP space,
+ * so no scale-factor arithmetic belongs here.
+ */
+function positionWindow(window: BrowserWindow, size: Size): void {
+  const stored = windowState?.current()
+  const primary = screen.getPrimaryDisplay()
+  if (!stored) {
+    window.setBounds(defaultBounds(primary, size))
+    return
+  }
+
+  window.setBounds(clampToDisplays({ x: stored.anchorX, y: stored.anchorY }, size, screen.getAllDisplays(), primary))
 }
 
 function setPanelOpen(open: boolean): void {
+  panelOpen = open
   if (!mainWindow || mainWindow.isDestroyed()) {
     return
   }
 
   resizeWindowAtCurrentPosition(mainWindow, open ? OPEN_WINDOW_SIZE : CLOSED_WINDOW_SIZE)
+  rememberWindowPosition()
 }
 
-function resizeWindowAtCurrentPosition(window: BrowserWindow, requestedSize: { width: number; height: number }): void {
-  const currentBounds = window.getBounds()
-  const display = screen.getDisplayMatching(currentBounds)
-  const workArea = display.workArea
-  const width = Math.min(requestedSize.width, workArea.width)
-  const height = Math.min(requestedSize.height, workArea.height)
-  window.setBounds({
-    x: clamp(currentBounds.x, workArea.x, workArea.x + workArea.width - width),
-    y: clamp(currentBounds.y, workArea.y, workArea.y + workArea.height - height),
-    width,
-    height
+/**
+ * Resizes around the window's bottom-right corner, so the orb appears to stay
+ * where the user left it while the panel grows up and to the left from it.
+ */
+function resizeWindowAtCurrentPosition(window: BrowserWindow, requestedSize: Size): void {
+  const anchor = anchorOf(window.getBounds())
+  window.setBounds(clampToDisplays(anchor, requestedSize, screen.getAllDisplays(), screen.getPrimaryDisplay()))
+}
+
+/** Records the window's current corner so the next launch can restore it. */
+function rememberWindowPosition(): void {
+  if (!mainWindow || mainWindow.isDestroyed() || !windowState) {
+    return
+  }
+
+  const anchor = anchorOf(mainWindow.getBounds())
+  windowState.save({
+    version: 1,
+    anchorX: anchor.x,
+    anchorY: anchor.y,
+    open: panelOpen,
+    alwaysOnTop: mainWindow.isAlwaysOnTop()
   })
 }
 
-function clamp(value: number, minimum: number, maximum: number): number {
-  return Math.min(Math.max(value, minimum), maximum)
+/**
+ * Re-clamps the live window after the display layout changes, so unplugging a
+ * monitor or changing scale mid-session can never strand Lumi off-screen.
+ */
+function reclampWindow(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return
+  }
+
+  const anchor = anchorOf(mainWindow.getBounds())
+  const bounds = clampToDisplays(anchor, currentWindowSize(), screen.getAllDisplays(), screen.getPrimaryDisplay())
+  mainWindow.setBounds(bounds)
+  rememberWindowPosition()
+}
+
+/** Recovery for a window the user can no longer reach. */
+function resetWindowPosition(): void {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return
+  }
+
+  windowState?.clear()
+  mainWindow.setBounds(defaultBounds(screen.getPrimaryDisplay(), currentWindowSize()))
+  mainWindow.showInactive()
+  rememberWindowPosition()
 }
 
 function requireMainWindow(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): void {
@@ -340,6 +403,32 @@ function registerIpcHandlers(): void {
 
     setPanelOpen(open)
   })
+
+  ipcMain.handle(IPC_CHANNELS.resetWindowPosition, (event) => {
+    requireMainWindow(event)
+    resetWindowPosition()
+  })
+
+  /**
+   * Registering a dropped file validates it and retains it — and does nothing
+   * else. No upload, no analysis, no send, no open, and no change to the
+   * approved-folder list. Every later action confirms separately.
+   */
+  ipcMain.handle(IPC_CHANNELS.registerDroppedFile, async (event, path: unknown) => {
+    requireMainWindow(event)
+    if (typeof path !== 'string' || path.length > 32_000) {
+      throw new Error('A dropped file must arrive as a single path.')
+    }
+    return droppedFiles.register(path)
+  })
+
+  ipcMain.handle(IPC_CHANNELS.removeDroppedFile, (event, droppedId: unknown) => {
+    requireMainWindow(event)
+    if (typeof droppedId !== 'string' || droppedId.length === 0 || droppedId.length > 250) {
+      throw new Error('A dropped file identifier is invalid.')
+    }
+    droppedFiles.remove(droppedId)
+  })
 }
 
 /**
@@ -393,8 +482,19 @@ function validateCaptureProvenance(proposal: ToolProposal): void {
 }
 
 app.whenReady().then(async () => {
+  // Must equal the electron-builder appId. Kept as the original identifier so
+  // the rename to Lumi stays a visible-branding change and never relocates the
+  // user's profile directory — see docs/UI-UX-POLISH.md §6.
   app.setAppUserModelId('com.lifelens.app')
   localStore = new LocalStore(app.getPath('userData'))
+  windowState = new WindowStateStore(app.getPath('userData'))
+  await windowState.load()
+  // In memory only: a dropped file is never written to disk and never joins
+  // the approved-folder search scope.
+  droppedFiles = new DroppedFileStore((path) => {
+    const image = nativeImage.createFromPath(path)
+    return image.isEmpty() ? undefined : image.getSize()
+  })
   photoIndexCoordinator = new PhotoIndexCoordinator({
     userDataDir: app.getPath('userData'),
     listRoots: () => localStore.listStoredDocumentRoots(),
@@ -430,6 +530,12 @@ app.whenReady().then(async () => {
 
   powerMonitor.on('on-battery', () => photoIndexCoordinator.powerChanged())
   powerMonitor.on('on-ac', () => photoIndexCoordinator.powerChanged())
+
+  // A monitor can disappear or be rescaled while Lumi is running; the header
+  // must stay reachable when it does.
+  screen.on('display-removed', reclampWindow)
+  screen.on('display-added', reclampWindow)
+  screen.on('display-metrics-changed', reclampWindow)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -507,6 +613,9 @@ function createVisionEngine(): VisionEngine {
 }
 
 app.on('before-quit', () => {
+  // Persist any anchor still sitting in the debounce window.
+  void windowState?.flush()
+  droppedFiles?.clear()
   pendingActions?.clearAll()
   searchOrchestrator?.clear()
   void telegramService?.shutdown()

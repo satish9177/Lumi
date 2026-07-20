@@ -166,3 +166,148 @@ The app reported: `Reminder saved for 19/7/2026, 9:00:00 am.`
 - Five consecutive complete hero runs with a visible interview email, live voice, capture, explanation, reminder, approved-folder search, file opening, and URL opening.
 
 The MVP is not complete yet. No full-hero or five-run completion claim has been made.
+
+## UI/UX polish — Slice 1 (branding and window behaviour)
+
+Delivered against [docs/UI-UX-POLISH.md](UI-UX-POLISH.md) §5–§11.
+
+| Command | Result |
+| --- | --- |
+| `npm.cmd run typecheck` | passed |
+| `npm.cmd test` | 521 passed, 2 skipped (33 files) |
+| `npm.cmd run build` | passed |
+| `npm.cmd run package` | passed — `release/0.1.0/Lumi Setup 0.1.0.exe`, `win-unpacked/Lumi.exe` |
+
+### Branding migration decision — visible rename only, no profile move
+
+Inspection corrected the premise recorded in §6 of the polish document. That
+section assumed two profile directories (`%APPDATA%\LifeLens` packaged,
+`%APPDATA%\lifelens` dev) needing reconciliation. In fact only one exists.
+
+`app.getName()` resolves from the *top-level* `productName` or `name` of the
+packaged `package.json`. This project has no top-level `productName`, and
+electron-builder does not inject `build.productName` into the packaged manifest —
+verified by extracting `package.json` from the built `app.asar`. Both dev and
+packaged builds therefore resolve `userData` to `%APPDATA%\lifelens`, which is
+the only directory present on disk.
+
+Consequently `build.productName` was changed to `Lumi` on its own. That renames
+the installer, the executable, the Start-menu shortcut, and the Add/Remove
+Programs entry, while `app.getName()` — and so `userData` — is untouched.
+`appId` and `setAppUserModelId` both stay `com.lifelens.app` so they continue to
+agree and NSIS still treats the build as an upgrade rather than a second
+application.
+
+**No migration code was written, because no state moves.** Reminders, the
+Telegram session, approved folders, photo-search preferences, the model pack,
+the photo index, and window state all stay where they are. Verified after
+packaging: running `Lumi.exe` created no `%APPDATA%\Lumi` directory.
+
+Renaming `appId`, the top-level `name`, or the `userData` location remains
+deferred; it would require the migration and rollback path §6 describes.
+
+### Also delivered
+
+- `scripts/generate-icons.mjs` (`npm.cmd run icons`) renders the orb mark to
+  PNGs and a 7-layer `build/icon.ico` in pure Node — no image toolchain, no
+  network. `build/icon-master.svg` is the editable reference.
+- `win.icon` previously pointed at a non-existent `build/icon.ico`, so packaged
+  builds shipped the default Electron icon. All 7 layers are now verified
+  present inside the packaged `Lumi.exe`.
+- `src/main/services/window-state.ts` — bottom-right anchor persistence with a
+  400 ms debounce, plus a pure `clampToDisplays` that honours a stored position
+  only while 40 px of the window's header strip remains reachable. 26 tests.
+- Expand/collapse now anchors the bottom-right corner, so the orb stays put
+  while the panel grows up and to the left.
+- `display-added`/`display-removed`/`display-metrics-changed` re-clamp the live
+  window, so unplugging a monitor cannot strand it off-screen.
+- `lifelens:reset-window-position`, surfaced under More / Troubleshooting.
+
+### Known pre-existing flake (not introduced here)
+
+`src/main/services/realtime.test.ts` intermittently fails the full-suite run
+with `Body is unusable: Body has already been read`. Its `fetch` mocks use
+`mockResolvedValue(new Response(...))`, which hands the *same* `Response`
+instance to every call; a second read of one body throws. It passes in
+isolation and on most full runs. Not touched here because it sits in Realtime
+test code that this pass is scoped out of.
+
+## UI/UX polish — Slice 2 (conversation-first panel)
+
+| Command | Result |
+| --- | --- |
+| `npm.cmd run typecheck` | passed |
+| `npm.cmd test` | 540 passed, 2 skipped (35 files) |
+| `npm.cmd run build` | passed |
+| `npm.cmd run package` | passed |
+
+The panel is now three fixed zones — a draggable header, a conversation that
+takes the remaining height and scrolls, and a pinned composer — replacing the
+single scrolling form column. The transcript is promoted from a collapsed
+`<details>` to the primary surface, with an empty state whose suggestion chips
+only prefill the composer and never execute.
+
+Settings moved into a slide-over overlay grouped by capability: Voice, Files and
+approved folders, Intelligent photo search, Telegram, Appearance, Privacy. The
+photo-search and Telegram sections were moved intact rather than rewritten.
+
+`src/renderer/src/status.ts` collapses the five competing signals into one
+header pill, with the §15 precedence covered by 15 tests. Background photo
+indexing is reported only when Lumi is otherwise idle.
+
+Preserved and unchanged: the Realtime session lifecycle, microphone mute on
+collapse and the collapse-disconnect timer, photo and file results, reason
+badges, semantic-search status, Telegram login and confirmation, reminders,
+screen capture, approved-folder controls, and selected-photo analysis.
+`realtime.ts`, `file-search-controller.ts`, and `pending-action-coordinator.ts`
+were not touched.
+
+## UI/UX polish — Slice 3 (drag-and-drop) — PARTIAL, feature inert
+
+| Command | Result |
+| --- | --- |
+| `npm.cmd run typecheck` | passed |
+| `npm.cmd test` | 581 passed, 2 skipped (37 files) |
+| `npm.cmd run build` | passed |
+| `npm.cmd run package` | passed — `release/0.1.0/Lumi Setup 0.1.0.exe` |
+
+**Landed.** `src/main/services/dropped-files.ts`: validation and a
+capacity-one, memory-only store with a 30-minute idle TTL refreshed on use.
+Validation order is shortcut-extension → `lstat` (rejecting links, junctions and
+directories without following them) → `realpath` → second `lstat` on the
+canonical path, then the *existing* `sniffAttachmentType`, `MAX_ATTACHMENT_BYTES`,
+`MAX_PHOTO_BYTES`, `MAX_TEXT_BYTES` and `isTelegramSafeDimensions` — reused, not
+reimplemented. 36 tests, including a fixture per supported type and fail-closed
+revalidation after a size or mtime change.
+
+Because creating a symbolic link needs elevation on Windows and the integration
+test would otherwise skip silently, the reject-links rule is also covered
+unconditionally through an exported `assertRegularFile` predicate.
+
+`registerDroppedFile`/`removeDroppedFile` are wired through contracts, the
+preload bridge, and validated main handlers. Preload is the only layer that
+touches the path: it calls `webUtils.getPathForFile` and forwards the result,
+never returning it to the renderer. `resolveTrustedPath` is defined and tested
+as the seam where dropped-file trust and approved-root trust meet.
+
+**Not yet landed.** The seam is not threaded into `createResultThumbnails`,
+`validateTrustedAttachment`, `open_file`/`analyze_photo`, or
+`PendingActionStore.createTrustedPreview`; there is no drop overlay, no
+dropped-file card, and no renderer drop handler.
+
+**The feature is therefore inert and fail-closed.** Nothing in the renderer
+calls `registerDroppedFile`, and no action path accepts a dropped identifier, so
+a dropped file cannot be opened, analysed, or sent. Threading the seam is the
+next step and must keep the "no automatic action" invariant.
+
+`open_file` and `analyze_photo` currently look a result up in the approved-root
+store *before* resolving its path, so threading the seam is not a resolver swap
+— those two paths need a dropped-file branch that supplies the display name
+from the frozen snapshot and labels the confirmation preview "Dropped file".
+
+## UI/UX polish — Slice 4 (copy and accessibility) — NOT STARTED
+
+`docs/COPY.md` has not been applied. `src/renderer/src/copy.ts`, the banned-term
+lint test, and the accessibility sweep remain outstanding. Some Slice 2 strings
+were written in the COPY.md voice as they moved, but no systematic sweep ran and
+older strings still carry the retired wording.

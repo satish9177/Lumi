@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Lumi orb — the reference drawing of the mark.
+
+  The raster assets (build/icon.ico, build/icon-*.png, build/tray/*.png) are
+  produced by scripts/generate-icons.mjs, which draws this same mark
+  analytically so the build needs no image toolchain. Edit both together.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="orb" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#79efff" />
+      <stop offset="0.5" stop-color="#8f9bff" />
+      <stop offset="1" stop-color="#dd75ff" />
+    </linearGradient>
+    <radialGradient id="innerGlow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.18" />
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0" />
+    </radialGradient>
+    <radialGradient id="spark" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.85" />
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0" />
+    </radialGradient>
+  </defs>
+
+  <!-- Disc at 86% of the canvas on a fully transparent background. -->
+  <circle cx="512" cy="512" r="440" fill="url(#orb)" />
+  <circle cx="512" cy="512" r="440" fill="url(#innerGlow)" />
+
+  <!-- Specular spark at roughly 30% / 25%. -->
+  <circle cx="336" cy="292" r="132" fill="url(#spark)" />
+
+  <!-- Rim so the disc holds its edge against light chrome. -->
+  <circle cx="512" cy="512" r="437" fill="none" stroke="#2a2f6e" stroke-opacity="0.4" stroke-width="6" />
+</svg>

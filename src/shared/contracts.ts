@@ -43,7 +43,10 @@ export const IPC_CHANNELS = {
   logoutTelegram: 'lifelens:logout-telegram',
   searchTelegramRecipients: 'lifelens:search-telegram-recipients',
   telegramAuthUpdate: 'lifelens:telegram-auth-update',
-  setPanelOpen: 'lifelens:set-panel-open'
+  setPanelOpen: 'lifelens:set-panel-open',
+  resetWindowPosition: 'lifelens:reset-window-position',
+  registerDroppedFile: 'lifelens:register-dropped-file',
+  removeDroppedFile: 'lifelens:remove-dropped-file'
 } as const
 
 export const COMPANION_STATES = ['idle', 'listening', 'thinking', 'speaking', 'success', 'error'] as const
@@ -408,6 +411,25 @@ export interface LifeLensApi {
   searchTelegramRecipients: (query: string) => Promise<TelegramRecipient[]>
   onTelegramAuthUpdate: (listener: (status: TelegramStatus) => void) => () => void
   setPanelOpen: (open: boolean) => void
+  resetWindowPosition: () => Promise<void>
+  /**
+   * Resolves a dropped `File` to a path inside preload and hands it to main.
+   * The path is never returned to renderer application code.
+   */
+  registerDroppedFile: (file: File) => Promise<DroppedFileDescriptor>
+  removeDroppedFile: (droppedId: string) => Promise<void>
+}
+
+/**
+ * Everything the renderer may know about a dropped file. Deliberately carries
+ * no path — not even a relative one.
+ */
+export interface DroppedFileDescriptor {
+  readonly droppedId: string
+  readonly fileName: string
+  readonly fileTypeLabel: string
+  readonly sizeBytes: number
+  readonly mediaKind: AttachmentMediaKind
 }
 
 export class PayloadValidationError extends Error {

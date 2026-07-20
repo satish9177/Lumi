@@ -103,6 +103,26 @@ async function createOneThumbnail(
  * approved root. Returns undefined for an unknown result, a revoked folder, a
  * deleted file, or any path that escapes.
  */
+/**
+ * Resolves any identifier the renderer may legitimately name to a path main
+ * trusts.
+ *
+ * Two kinds of trust meet here, and only here: a dropped file, which the user
+ * handed Lumi directly and which is revalidated on every use, and an
+ * approved-folder search result, which must still prove membership in an
+ * approved root. Both are UUIDs, so no action contract changes shape.
+ *
+ * A dropped identifier never gains approved-root trust, and an unknown
+ * identifier resolves to nothing in both branches.
+ */
+export async function resolveTrustedPath(
+  store: LocalStore,
+  droppedFiles: { resolve(id: string): Promise<string | undefined> } | undefined,
+  id: string
+): Promise<string | undefined> {
+  return (await droppedFiles?.resolve(id)) ?? (await resolveTrustedResultPath(store, id))
+}
+
 export async function resolveTrustedResultPath(store: LocalStore, resultId: string): Promise<string | undefined> {
   const storedResult = await store.getSearchResult(resultId)
   if (!storedResult) {

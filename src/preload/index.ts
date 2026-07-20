@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import {
   IPC_CHANNELS,
   type FileSearchRequest,
@@ -57,7 +57,19 @@ const lifeLensApi: LifeLensApi = {
     ipcRenderer.on(IPC_CHANNELS.telegramAuthUpdate, handler)
     return () => ipcRenderer.removeListener(IPC_CHANNELS.telegramAuthUpdate, handler)
   },
-  setPanelOpen: (open: boolean) => ipcRenderer.send(IPC_CHANNELS.setPanelOpen, open)
+  setPanelOpen: (open: boolean) => ipcRenderer.send(IPC_CHANNELS.setPanelOpen, open),
+  resetWindowPosition: () => ipcRenderer.invoke(IPC_CHANNELS.resetWindowPosition),
+  /**
+   * The one place a dropped file's path exists outside main.
+   *
+   * `webUtils.getPathForFile` is called here and the result is forwarded
+   * straight to main. It is never returned to the renderer, never stored, and
+   * never logged. A drag with no local backing file — an Outlook attachment, a
+   * browser image — yields an empty string, which main rejects.
+   */
+  registerDroppedFile: (file: File) =>
+    ipcRenderer.invoke(IPC_CHANNELS.registerDroppedFile, webUtils.getPathForFile(file)),
+  removeDroppedFile: (droppedId: string) => ipcRenderer.invoke(IPC_CHANNELS.removeDroppedFile, droppedId)
 }
 
 contextBridge.exposeInMainWorld('lifeLens', lifeLensApi)
