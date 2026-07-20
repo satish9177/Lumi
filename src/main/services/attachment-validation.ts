@@ -2,6 +2,7 @@ import { nativeImage } from 'electron'
 import { open, stat } from 'node:fs/promises'
 import { basename, extname } from 'node:path'
 import type { AttachmentMediaKind } from '../../shared/contracts'
+import type { DroppedFileLookup } from './dropped-files'
 import type { LocalStore } from './store'
 import { resolveTrustedResultPath } from './thumbnails'
 
@@ -30,8 +31,18 @@ export type ImageDimensionsProbe = (path: string) => { width: number; height: nu
 export async function validateTrustedAttachment(
   store: LocalStore,
   fileResultId: string,
-  probeImage: ImageDimensionsProbe = probeNativeImage
+  probeImage: ImageDimensionsProbe = probeNativeImage,
+  droppedFiles?: DroppedFileLookup
 ): Promise<TrustedAttachmentSnapshot> {
+  // A dropped file carries its own trust and is revalidated by `resolve`. It is
+  // deliberately not looked up in the approved-root store, which it is not in.
+  if (droppedFiles?.wasInvalidated(fileResultId)) {
+    throw new Error('That dropped file is no longer available. Drop it again to use it.')
+  }
+  if (droppedFiles?.snapshot(fileResultId)) {
+    return validateDroppedAttachment(droppedFiles, fileResultId, probeImage)
+  }
+
   const stored = await store.getSearchResult(fileResultId)
   if (!stored) {
     throw new Error('That file is not a result from an approved search. Search again first.')
@@ -98,14 +109,58 @@ export async function validateTrustedAttachment(
   })
 }
 
+/**
+ * Builds an attachment snapshot for a dropped file.
+ *
+ * The dropped store owns the check: `resolve` re-`lstat`s the canonical path
+ * and compares size, mtime, sniffed type and media kind against the frozen
+ * registration snapshot, clearing the entry on any mismatch. Anything it
+ * declines is treated exactly like a missing approved-folder result.
+ */
+async function validateDroppedAttachment(
+  droppedFiles: DroppedFileLookup,
+  droppedId: string,
+  probeImage: ImageDimensionsProbe
+): Promise<TrustedAttachmentSnapshot> {
+  const canonicalPath = await droppedFiles.resolve(droppedId)
+  const snapshot = canonicalPath ? droppedFiles.snapshot(droppedId) : undefined
+  if (!canonicalPath || !snapshot) {
+    throw new Error('That dropped file is no longer available. Drop it again to use it.')
+  }
+
+  if (snapshot.mediaKind === 'photo') {
+    let dimensions: { width: number; height: number } | undefined
+    try {
+      dimensions = probeImage(canonicalPath)
+    } catch {
+      dimensions = undefined
+    }
+    if (!dimensions || !isTelegramSafeDimensions(dimensions.width, dimensions.height)) {
+      throw new Error('That image cannot be sent safely as a Telegram photo. Nothing was sent.')
+    }
+  }
+
+  return Object.freeze({
+    fileResultId: droppedId,
+    canonicalPath,
+    fileName: snapshot.fileName,
+    mediaKind: snapshot.mediaKind,
+    sizeBytes: snapshot.sizeBytes,
+    mtimeMs: snapshot.mtimeMs,
+    sniffedType: snapshot.sniffedType,
+    fileTypeLabel: snapshot.fileTypeLabel
+  })
+}
+
 export async function revalidateTrustedAttachment(
   store: LocalStore,
   reviewed: TrustedAttachmentSnapshot,
-  probeImage: ImageDimensionsProbe = probeNativeImage
+  probeImage: ImageDimensionsProbe = probeNativeImage,
+  droppedFiles?: DroppedFileLookup
 ): Promise<TrustedAttachmentSnapshot> {
   let current: TrustedAttachmentSnapshot
   try {
-    current = await validateTrustedAttachment(store, reviewed.fileResultId, probeImage)
+    current = await validateTrustedAttachment(store, reviewed.fileResultId, probeImage, droppedFiles)
   } catch {
     throw changedFileError()
   }

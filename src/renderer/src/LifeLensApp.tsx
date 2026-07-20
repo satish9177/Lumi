@@ -6,6 +6,7 @@ import type {
   CaptureSource,
   CompanionState,
   DocumentSearchResult,
+  DroppedFileDescriptor,
   Explanation,
   FileSearchResults,
   PendingActionPreview,
@@ -19,8 +20,22 @@ import type {
   ToolProposal
 } from '../../shared/contracts'
 import { fileKindLabel } from '../../shared/search-query'
-import { BrandMark, DragGrip, ExplanationCard, PhotoResultGrid, StatusPill, ToolConfirmationCard } from './components'
+import {
+  BrandMark,
+  DragGrip,
+  DropOverlay,
+  DroppedFileCard,
+  ExplanationCard,
+  PhotoResultGrid,
+  StatusPill,
+  ToolConfirmationCard
+} from './components'
+import { countDraggedFiles, decideDrop, preventFileNavigation, TOO_MANY_FILES_MESSAGE } from './drop-intake'
 import { deriveStatus } from './status'
+
+/** Honest copy: Lumi can move a document, but it cannot read one. */
+const DOCUMENT_ANALYSIS_NOTICE =
+  "Lumi can open this file or send it on Telegram. Reading its contents isn't supported yet."
 import { FileSearchController, type SearchConfirmationRequest } from './file-search-controller'
 import { messageFrom } from './error-message'
 import { approvePendingRendererAction, dismissPendingRendererAction } from './pending-action-coordinator'
@@ -67,6 +82,9 @@ export default function LifeLensApp() {
   const [toolResult, setToolResult] = useState<ToolExecutionResult>()
   const [windowNotice, setWindowNotice] = useState<string>()
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [droppedFile, setDroppedFile] = useState<DroppedFileDescriptor>()
+  const [dragFileCount, setDragFileCount] = useState(0)
+  const [isDroppedFileBusy, setIsDroppedFileBusy] = useState(false)
   const [online, setOnline] = useState(() => navigator.onLine)
   const conversationRef = useRef<HTMLDivElement>(null)
   const [transcript, setTranscript] = useState<string[]>([])
@@ -123,6 +141,9 @@ export default function LifeLensApp() {
     }
   }, [expanded])
 
+  // A stray drop must never navigate the window to a file:// page.
+  useEffect(() => preventFileNavigation(document), [])
+
   useEffect(() => {
     const update = () => setOnline(navigator.onLine)
     window.addEventListener('online', update)
@@ -152,7 +173,11 @@ export default function LifeLensApp() {
         return
       }
       event.preventDefault()
-      if (settingsOpen) {
+      // Layers close outermost first: drop overlay, settings, capture picker,
+      // then the panel itself.
+      if (dragFileCount > 0) {
+        setDragFileCount(0)
+      } else if (settingsOpen) {
         setSettingsOpen(false)
       } else if (capturePickerOpen) {
         setCapturePickerOpen(false)
@@ -162,7 +187,7 @@ export default function LifeLensApp() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [expanded, settingsOpen, capturePickerOpen])
+  }, [expanded, settingsOpen, capturePickerOpen, dragFileCount])
 
   useEffect(() => {
     void refreshDocumentRoots()
@@ -526,6 +551,80 @@ export default function LifeLensApp() {
       : { queryTerms: query }, undefined, 'user')
   }
 
+  /**
+   * Registers exactly one dropped file and does nothing else with it.
+   *
+   * The `File` goes to preload, which resolves it to a path and hands that to
+   * main. No path comes back — only an opaque id and safe metadata.
+   */
+  const handleDrop = async (transfer: DataTransfer | null): Promise<void> => {
+    setDragFileCount(0)
+    const decision = decideDrop(transfer)
+    if (decision.kind === 'none') {
+      return
+    }
+    if (decision.kind === 'too-many') {
+      setError(TOO_MANY_FILES_MESSAGE)
+      return
+    }
+
+    setError(undefined)
+    try {
+      // A second drop replaces the first; the previous id stops resolving.
+      const descriptor = await window.lifeLens.registerDroppedFile(decision.file)
+      setDroppedFile(descriptor)
+    } catch (dropError) {
+      setDroppedFile(undefined)
+      setError(messageFrom(dropError))
+    }
+  }
+
+  const removeDroppedFile = async (): Promise<void> => {
+    const current = droppedFile
+    setDroppedFile(undefined)
+    if (!current) {
+      return
+    }
+    try {
+      // Clearing main's record is what actually revokes the grant; the source
+      // file on disk is untouched.
+      await window.lifeLens.removeDroppedFile(current.droppedId)
+    } catch {
+      // The record is gone from the user's point of view either way.
+    }
+  }
+
+  const proposeDroppedOpen = (): void => {
+    if (!droppedFile) return
+    void preparePendingAction({
+      id: crypto.randomUUID(),
+      toolName: 'open_file',
+      reason: `Open ${droppedFile.fileName}, the file you dropped on Lumi.`,
+      requiresConfirmation: true,
+      arguments: { resultId: droppedFile.droppedId }
+    })
+  }
+
+  const proposeDroppedAnalyse = (): void => {
+    if (!droppedFile) return
+    if (droppedFile.mediaKind !== 'photo') {
+      setError(DOCUMENT_ANALYSIS_NOTICE)
+      return
+    }
+    void preparePendingAction({
+      id: crypto.randomUUID(),
+      toolName: 'analyze_photo',
+      reason: `Send only ${droppedFile.fileName} to OpenAI so Lumi can answer your question about it.`,
+      requiresConfirmation: true,
+      arguments: { resultId: droppedFile.droppedId, question: question.trim() || 'What is in this photo?' }
+    })
+  }
+
+  const proposeDroppedSend = (): void => {
+    if (!droppedFile) return
+    proposeTelegramAttachment({ id: droppedFile.droppedId, name: droppedFile.fileName })
+  }
+
   const proposeOpenFile = (result: DocumentSearchResult): void => {
     void preparePendingAction({
       id: crypto.randomUUID(),
@@ -560,7 +659,9 @@ export default function LifeLensApp() {
     }
   }
 
-  const proposeTelegramAttachment = (result: DocumentSearchResult): void => {
+  // Takes only the id and name, so an approved-folder result and a dropped file
+  // travel the identical proposal path. Main decides which trust applies.
+  const proposeTelegramAttachment = (result: { id: string; name: string }): void => {
     if (!selectedTelegramRecipientId) {
       setError('Choose one Telegram recipient before sending a file.')
       return
@@ -857,7 +958,11 @@ export default function LifeLensApp() {
         await ensureConnected()
         const client = clientRef.current
         if (!client) throw new Error('Connect voice before asking Lumi about a photo.')
-        await client.analyzeSelectedPhoto(result.analysisImage, proposal.arguments.question ?? '')
+        // A dropped file's identifier is a temporary main-side handle. The
+        // confirmed image still goes to OpenAI, but the id is withheld so the
+        // model can never later address it as "the selected file".
+        const isDropped = result.analysisImage.resultId === droppedFile?.droppedId
+        await client.analyzeSelectedPhoto(result.analysisImage, proposal.arguments.question ?? '', !isDropped)
       }
 
       if (result.ok) {
@@ -936,7 +1041,25 @@ export default function LifeLensApp() {
       </div>
 
       {expanded && (
-        <section className="panel" aria-label="Lumi">
+        <section
+          className="panel"
+          aria-label="Lumi"
+          onDragOver={(event) => {
+            event.preventDefault()
+            setDragFileCount(countDraggedFiles(event.dataTransfer))
+          }}
+          onDragLeave={(event) => {
+            // Ignore the transient leave fired when crossing a child element.
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+              setDragFileCount(0)
+            }
+          }}
+          onDrop={(event) => {
+            event.preventDefault()
+            void handleDrop(event.dataTransfer)
+          }}
+        >
+          {dragFileCount > 0 && <DropOverlay fileCount={dragFileCount} />}
           <header className="panel-header drag-region">
             <div className="brand-lockup">
               <DragGrip />
@@ -1094,6 +1217,20 @@ export default function LifeLensApp() {
           )}
           {toolResult && <p className={`notice ${toolResult.ok ? 'success-notice' : 'error-notice'}`}>{toolResult.message}</p>}
           </div>
+
+          {droppedFile && (
+            <DroppedFileCard
+              file={droppedFile}
+              busy={isDroppedFileBusy}
+              onOpen={proposeDroppedOpen}
+              onAnalyse={proposeDroppedAnalyse}
+              onSend={proposeDroppedSend}
+              onRemove={() => {
+                setIsDroppedFileBusy(true)
+                void removeDroppedFile().finally(() => setIsDroppedFileBusy(false))
+              }}
+            />
+          )}
 
           <form className="composer" onSubmit={(event) => { event.preventDefault(); void askQuestion() }}>
             <input

@@ -406,14 +406,26 @@ export class RealtimeClient {
    * path. Choosing another photo replaces this context; follow-up questions
    * reuse the image already in the conversation rather than uploading again.
    */
-  async analyzeSelectedPhoto(image: ApprovedImagePayload, question: string): Promise<void> {
+  async analyzeSelectedPhoto(
+    image: ApprovedImagePayload,
+    question: string,
+    /**
+     * Whether the model may later refer to this photo as "the selected file".
+     *
+     * False for a dropped file: its identifier is a temporary main-side handle,
+     * and letting it resolve a model-issued "selected" reference would make it
+     * model-addressable. The confirmed image still reaches OpenAI either way —
+     * only the reusable handle is withheld.
+     */
+    retainSelection = true
+  ): Promise<void> {
     if (!this.connected) {
       throw new Error('Connect voice before asking Lumi about a photo.')
     }
 
     const request = question.trim() || 'What is in this photo?'
     this.touchActivity()
-    this.selectedPhoto = { resultId: image.resultId, name: image.name }
+    this.selectedPhoto = retainSelection ? { resultId: image.resultId, name: image.name } : undefined
     this.lastUserRequest = request
     this.callbacks.onState('thinking')
 

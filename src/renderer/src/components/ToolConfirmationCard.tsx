@@ -1,5 +1,5 @@
 import { useId } from 'react'
-import type { PendingActionPreview } from '../../../shared/contracts'
+import type { PendingActionPreview, TrustedSourceKind } from '../../../shared/contracts'
 import './components.css'
 
 export interface ToolConfirmationCardProps {
@@ -41,8 +41,7 @@ function ActionDetails({ action }: { action: PendingActionPreview }) {
           )}
           <Details rows={[
             ['Photo', action.fileName],
-            ['Location', action.relativePath],
-            ['Approved folder', action.folderLabel],
+            ...sourceRows(action.source, action.relativePath, action.folderLabel),
             ['Question', action.question]
           ]} />
           <p className="lifelens-upload-notice">
@@ -67,6 +66,7 @@ function ActionDetails({ action }: { action: PendingActionPreview }) {
             ['To', accountLabel(action.recipient)],
             ['File', action.fileName],
             ['Type and size', `${action.fileTypeLabel} · ${formatFileSize(action.fileSizeBytes)}`],
+            ...(action.source === 'dropped-file' ? [['Source', 'Dropped file'] as [string, string]] : []),
             ['Caption', action.caption ?? 'No caption']
           ]} />
           <p className="lifelens-upload-notice">Only this confirmed file will be sent to Telegram. It is not sent to OpenAI.</p>
@@ -81,12 +81,26 @@ function ActionDetails({ action }: { action: PendingActionPreview }) {
     case 'search_documents':
       return <Details rows={[['Approved folder', action.folderLabel], ['Search for', action.query]]} />
     case 'open_file':
-      return <Details rows={[['File', action.fileName], ['Location', action.relativePath], ['Approved folder', action.folderLabel]]} />
+      return <Details rows={[['File', action.fileName], ...sourceRows(action.source, action.relativePath, action.folderLabel)]} />
     case 'open_url':
       return <Details rows={[['Destination', action.domain], ['URL', action.url]]} />
     case 'save_context':
       return <Details rows={[['Label', action.label], ['Summary', action.summary]]} />
   }
+}
+
+/**
+ * Describes where a file came from without ever implying folder trust it does
+ * not have. A dropped file has no approved folder, so it is not given one.
+ */
+function sourceRows(
+  source: TrustedSourceKind | undefined,
+  relativePath: string,
+  folderLabel: string
+): Array<[string, string]> {
+  return source === 'dropped-file'
+    ? [['Source', 'Dropped file — temporary, not an approved folder']]
+    : [['Location', relativePath], ['Approved folder', folderLabel]]
 }
 
 function Details({ rows }: { rows: Array<[string, string]> }) {

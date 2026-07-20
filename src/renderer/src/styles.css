@@ -242,6 +242,100 @@ input:focus-visible {
   color: #a8bde3;
 }
 
+.drop-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: grid;
+  place-items: center;
+  border-radius: 24px;
+  border: 2px dashed rgba(121, 239, 255, 0.7);
+  background: rgba(9, 14, 36, 0.86);
+  /* The overlay is advisory: the panel underneath still receives the drop. */
+  pointer-events: none;
+  padding: 16px;
+  text-align: center;
+}
+
+.drop-overlay.is-rejected {
+  border-color: rgba(255, 114, 133, 0.7);
+}
+
+.drop-overlay-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 650;
+  color: #eaf3ff;
+}
+
+.drop-overlay-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: #b9cdf0;
+}
+
+.dropped-file-card {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid rgba(195, 223, 255, 0.24);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.dropped-file-preview {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 8px;
+  background: rgba(9, 14, 36, 0.75);
+}
+
+.dropped-file-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.dropped-file-glyph {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: #9ec5ff;
+}
+
+.dropped-file-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.dropped-file-name {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dropped-file-meta,
+.dropped-file-note {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: #b9cdf0;
+}
+
+.dropped-file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
 .composer {
   display: flex;
   align-items: center;

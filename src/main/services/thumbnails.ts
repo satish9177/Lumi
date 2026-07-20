@@ -7,6 +7,7 @@ import {
 import type { ResultThumbnail } from '../../shared/contracts'
 import { isImageExtension } from '../../shared/search-query'
 import type { CaptureImage } from './capture'
+import type { DroppedFileLookup } from './dropped-files'
 import type { LocalStore } from './store'
 
 /** Bounds chosen so a full grid stays small enough for the renderer. */
@@ -33,7 +34,8 @@ export type ImageLoader = (path: string) => CaptureImage | undefined
 export async function createResultThumbnails(
   store: LocalStore,
   resultIds: readonly string[],
-  loadImage: ImageLoader = loadNativeImage
+  loadImage: ImageLoader = loadNativeImage,
+  droppedFiles?: DroppedFileLookup
 ): Promise<ResultThumbnail[]> {
   if (!Array.isArray(resultIds)) {
     return []
@@ -48,7 +50,7 @@ export async function createResultThumbnails(
       continue
     }
 
-    const thumbnail = await createOneThumbnail(store, resultId, loadImage, MAX_THUMBNAIL_SET_BYTES - setBytes)
+    const thumbnail = await createOneThumbnail(store, resultId, loadImage, MAX_THUMBNAIL_SET_BYTES - setBytes, droppedFiles)
     setBytes += byteLengthOf(thumbnail.dataUrl)
     thumbnails.push(thumbnail)
   }
@@ -60,9 +62,11 @@ async function createOneThumbnail(
   store: LocalStore,
   resultId: string,
   loadImage: ImageLoader,
-  remainingBytes: number
+  remainingBytes: number,
+  droppedFiles?: DroppedFileLookup
 ): Promise<ResultThumbnail> {
-  const safePath = await resolveTrustedResultPath(store, resultId)
+  // Resolving revalidates a dropped record before any byte is read.
+  const safePath = await resolveTrustedPath(store, droppedFiles, resultId)
   if (!safePath) {
     return { resultId, status: 'unavailable' }
   }

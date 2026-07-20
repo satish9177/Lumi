@@ -262,48 +262,71 @@ screen capture, approved-folder controls, and selected-photo analysis.
 `realtime.ts`, `file-search-controller.ts`, and `pending-action-coordinator.ts`
 were not touched.
 
-## UI/UX polish — Slice 3 (drag-and-drop) — PARTIAL, feature inert
+## UI/UX polish — Slice 3 (secure single-file drag-and-drop) — COMPLETE
 
 | Command | Result |
 | --- | --- |
 | `npm.cmd run typecheck` | passed |
-| `npm.cmd test` | 581 passed, 2 skipped (37 files) |
+| `npm.cmd test` | 624 passed, 2 skipped (41 files) |
 | `npm.cmd run build` | passed |
 | `npm.cmd run package` | passed — `release/0.1.0/Lumi Setup 0.1.0.exe` |
 
-**Landed.** `src/main/services/dropped-files.ts`: validation and a
-capacity-one, memory-only store with a 30-minute idle TTL refreshed on use.
-Validation order is shortcut-extension → `lstat` (rejecting links, junctions and
-directories without following them) → `realpath` → second `lstat` on the
-canonical path, then the *existing* `sniffAttachmentType`, `MAX_ATTACHMENT_BYTES`,
-`MAX_PHOTO_BYTES`, `MAX_TEXT_BYTES` and `isTelegramSafeDimensions` — reused, not
-reimplemented. 36 tests, including a fixture per supported type and fail-closed
-revalidation after a size or mtime change.
+### Resolver design
 
-Because creating a symbolic link needs elevation on Windows and the integration
-test would otherwise skip silently, the reject-links rule is also covered
-unconditionally through an exported `assertRegularFile` predicate.
+Two trust sources meet only in main, and the renderer cannot choose between
+them. `resolveTrustedPath(store, droppedFiles, id)` tries the dropped record
+first — which revalidates — and otherwise falls through to the unchanged
+approved-root resolution. Both identifier kinds are UUIDs, so no action contract
+changed shape: a dropped id travels as the existing `resultId`/`fileResultId`.
 
-`registerDroppedFile`/`removeDroppedFile` are wired through contracts, the
-preload bridge, and validated main handlers. Preload is the only layer that
-touches the path: it calls `webUtils.getPathForFile` and forwards the result,
-never returning it to the renderer. `resolveTrustedPath` is defined and tested
-as the seam where dropped-file trust and approved-root trust meet.
+An optional `DroppedFileLookup` is threaded through `createResultThumbnails`,
+`validateTrustedAttachment`, `revalidateTrustedAttachment`,
+`executeConfirmedTool` and `PendingActionStore`. It is optional so every
+existing approved-root caller and test is unaffected.
 
-**Not yet landed.** The seam is not threaded into `createResultThumbnails`,
-`validateTrustedAttachment`, `open_file`/`analyze_photo`, or
-`PendingActionStore.createTrustedPreview`; there is no drop overlay, no
-dropped-file card, and no renderer drop handler.
+A dropped file never enters `LocalStore`, never appears in search results, and
+never approves its parent folder.
 
-**The feature is therefore inert and fail-closed.** Nothing in the renderer
-calls `registerDroppedFile`, and no action path accepts a dropped identifier, so
-a dropped file cannot be opened, analysed, or sent. Threading the seam is the
-next step and must keep the "no automatic action" invariant.
+### TTL behaviour — fixed, never extended
 
-`open_file` and `analyze_photo` currently look a result up in the approved-root
-store *before* resolving its path, so threading the seam is not a resolver swap
-— those two paths need a dropped-file branch that supplies the display name
-from the frozen snapshot and labels the confirmation preview "Dropped file".
+The expiry is fixed at registration and is **not** refreshed by use. `resolve`
+runs at proposal time as well as at approval, so an idle timer would have let
+merely rendering a confirmation card prolong the grant. When a record lapses
+while a confirmation card is open, approval fails, nothing happens, and the user
+is told the temporary file is gone.
+
+The store keeps a bounded list of identifiers it has let go of — ids only, no
+paths — so an action on an expired, removed, or replaced id fails with "That
+dropped file is no longer available. Drop it again to use it." rather than the
+misleading "not a result from an approved search".
+
+### Revalidation
+
+Every open, analyse, and send revalidates at proposal *and* at approval:
+existence, TTL, canonical path, still-a-regular-file, not a link or junction,
+mtime, size, sniffed type, and media kind — plus that the action suits the media
+kind. Approved-root revalidation is untouched.
+
+### Realtime boundary
+
+`analyzeSelectedPhoto` gained a `retainSelection` flag, defaulting to true.
+For a dropped image it is false: the confirmed image still reaches OpenAI, but
+the dropped identifier is not retained as `selectedPhoto`, so the model can
+never later resolve "the selected file" to it. This was the one Realtime
+production change in this slice and it is a security control, not a redesign.
+
+### Verified at runtime
+
+`webUtils.getPathForFile` was probed in a real sandboxed preload using Lumi's
+exact `webPreferences` (`sandbox: true`, `contextIsolation: true`,
+`nodeIntegration: false`) and is available. The packaged app launches without
+error and writes no dropped-file state to disk.
+
+### Known limitation
+
+Dropping onto the **collapsed orb** does nothing; the drop target is the open
+panel. Document-level handlers still prevent navigation in that case, so it
+fails safe, but it is a discoverability gap worth closing later.
 
 ## UI/UX polish — Slice 4 (copy and accessibility) — NOT STARTED
 

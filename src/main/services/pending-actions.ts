@@ -10,8 +10,12 @@ import {
   TelegramService,
   type TrustedTelegramRecipientSnapshot
 } from './telegram'
+import type { DroppedFileLookup } from './dropped-files'
 import { createResultThumbnails } from './thumbnails'
-import { executeConfirmedTool } from './tools'
+import { DOCUMENT_ANALYSIS_MESSAGE, executeConfirmedTool } from './tools'
+
+/** Shown when a temporary dropped record lapsed or changed before an action ran. */
+const DROPPED_GONE = 'That dropped file is no longer available. Drop it again to use it.'
 import {
   revalidateTrustedAttachment,
   validateTrustedAttachment,
@@ -41,7 +45,9 @@ export class PendingActionStore {
     private readonly ttlMs = DEFAULT_TTL_MS,
     private readonly createThumbnails: typeof createResultThumbnails = createResultThumbnails,
     private readonly validateAttachment: typeof validateTrustedAttachment = validateTrustedAttachment,
-    private readonly revalidateAttachment: typeof revalidateTrustedAttachment = revalidateTrustedAttachment
+    private readonly revalidateAttachment: typeof revalidateTrustedAttachment = revalidateTrustedAttachment,
+    /** Absent in tests that only exercise approved-folder results. */
+    private readonly droppedFiles?: DroppedFileLookup
   ) {}
 
   async create(rawProposal: unknown): Promise<PendingActionPreview> {
@@ -52,7 +58,7 @@ export class PendingActionStore {
     const expiresAt = new Date(this.now() + this.ttlMs).toISOString()
     const approvalId = crypto.randomUUID()
     const attachment = proposal.toolName === 'send_telegram_attachment'
-      ? await this.validateAttachment(this.store, proposal.arguments.fileResultId)
+      ? await this.validateAttachment(this.store, proposal.arguments.fileResultId, undefined, this.droppedFiles)
       : undefined
     const recipientSnapshot = proposal.toolName === 'send_telegram_attachment'
       ? this.telegram.snapshotRecipient(proposal.arguments.recipientResultId)
@@ -76,7 +82,7 @@ export class PendingActionStore {
         ? await this.executeTelegram(action.proposal)
         : action.proposal.toolName === 'send_telegram_attachment'
           ? await this.executeTelegramAttachment(action)
-          : await executeConfirmedTool(this.store, action.proposal)
+          : await executeConfirmedTool(this.store, action.proposal, this.droppedFiles)
       action.state = result.ok ? 'executed' : 'failed'
       return result
     } catch (error) {
@@ -141,6 +147,22 @@ export class PendingActionStore {
         }
       }
       case 'open_file': {
+        if (this.droppedFiles?.wasInvalidated(proposal.arguments.resultId)) throw new Error(DROPPED_GONE)
+        // The card must never imply folder trust a dropped file does not have.
+        const dropped = this.droppedFiles?.snapshot(proposal.arguments.resultId)
+        if (dropped) {
+          if (!(await this.droppedFiles?.resolve(proposal.arguments.resultId))) {
+            throw new Error(DROPPED_GONE)
+          }
+          return {
+            ...common,
+            actionType: proposal.toolName,
+            fileName: dropped.fileName,
+            relativePath: dropped.fileName,
+            folderLabel: 'Dropped file',
+            source: 'dropped-file'
+          }
+        }
         const result = await this.store.getSearchResult(proposal.arguments.resultId)
         if (!result) throw new Error('That file is not a result from an approved search. Search again first.')
         const root = await this.store.getDocumentRoot(result.rootId)
@@ -150,7 +172,8 @@ export class PendingActionStore {
           actionType: proposal.toolName,
           fileName: result.name,
           relativePath: result.relativePath,
-          folderLabel: root.label
+          folderLabel: root.label,
+          source: 'approved-folder'
         }
       }
       case 'open_url': {
@@ -160,6 +183,28 @@ export class PendingActionStore {
       case 'save_context':
         return { ...common, actionType: proposal.toolName, label: proposal.arguments.label, summary: proposal.arguments.sourceContext.summary }
       case 'analyze_photo': {
+        if (this.droppedFiles?.wasInvalidated(proposal.arguments.resultId)) throw new Error(DROPPED_GONE)
+        const droppedPhoto = this.droppedFiles?.snapshot(proposal.arguments.resultId)
+        if (droppedPhoto) {
+          if (droppedPhoto.mediaKind !== 'photo') throw new Error(DOCUMENT_ANALYSIS_MESSAGE)
+          if (!(await this.droppedFiles?.resolve(proposal.arguments.resultId))) throw new Error(DROPPED_GONE)
+          const [droppedPreview] = await this.createThumbnails(
+            this.store,
+            [proposal.arguments.resultId],
+            undefined,
+            this.droppedFiles
+          )
+          return {
+            ...common,
+            actionType: proposal.toolName,
+            fileName: droppedPhoto.fileName,
+            relativePath: droppedPhoto.fileName,
+            folderLabel: 'Dropped file',
+            source: 'dropped-file',
+            question: proposal.arguments.question ?? 'What is in this photo?',
+            previewDataUrl: droppedPreview?.status === 'ok' ? droppedPreview.dataUrl : undefined
+          }
+        }
         const result = await this.store.getSearchResult(proposal.arguments.resultId)
         if (!result) throw new Error('That photo is not a result from an approved search. Search again first.')
         const root = await this.store.getDocumentRoot(result.rootId)
@@ -195,11 +240,12 @@ export class PendingActionStore {
           throw new Error('Telegram is not connected or that trusted attachment is no longer available.')
         }
         const [preview] = attachment.mediaKind === 'photo'
-          ? await this.createThumbnails(this.store, [attachment.fileResultId])
+          ? await this.createThumbnails(this.store, [attachment.fileResultId], undefined, this.droppedFiles)
           : []
         return {
           ...common,
           actionType: proposal.toolName,
+          source: this.droppedFiles?.snapshot(attachment.fileResultId) ? 'dropped-file' : 'approved-folder',
           account,
           recipient: {
             displayName: recipientSnapshot.displayName,
@@ -226,7 +272,9 @@ export class PendingActionStore {
     if (action.proposal.toolName !== 'send_telegram_attachment' || !action.attachment || !action.recipientSnapshot) {
       throw new Error('That Telegram attachment approval is no longer available.')
     }
-    const attachment = await this.revalidateAttachment(this.store, action.attachment)
+    // Second check, at approval: a dropped record that expired or changed since
+    // the card was rendered fails here and nothing is sent.
+    const attachment = await this.revalidateAttachment(this.store, action.attachment, undefined, this.droppedFiles)
     await this.telegram.sendConfirmedAttachment(action.proposal.callId, action.recipientSnapshot, {
       canonicalPath: attachment.canonicalPath,
       fileName: attachment.fileName,

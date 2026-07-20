@@ -166,7 +166,15 @@ describe('DroppedFileStore lifetime', () => {
 
     const descriptor = await store.register(await write('paper.pdf', FIXTURES['paper.pdf']))
 
-    expect(Object.keys(descriptor).sort()).toEqual(['droppedId', 'fileName', 'fileTypeLabel', 'mediaKind', 'sizeBytes'])
+    // An exact allowlist, so a new field cannot quietly become a path leak.
+    expect(Object.keys(descriptor).sort()).toEqual([
+      'droppedId',
+      'expiresAt',
+      'fileName',
+      'fileTypeLabel',
+      'mediaKind',
+      'sizeBytes'
+    ])
     expect(JSON.stringify(descriptor)).not.toContain(dir)
   })
 
@@ -230,16 +238,26 @@ describe('DroppedFileStore lifetime', () => {
     expect(await store.resolve(descriptor.droppedId)).toBeUndefined()
   })
 
-  it('refreshes the TTL when a confirmed action uses the entry', async () => {
+  it('keeps a fixed expiry that using the entry does not extend', async () => {
     let now = 1_000
     const store = new DroppedFileStore(SAFE_IMAGE, () => now)
     const descriptor = await store.register(await write('paper.pdf', FIXTURES['paper.pdf']))
 
+    // Using the entry just before expiry must not buy it another window.
     now += DROPPED_FILE_TTL_MS - 1
     expect(await store.resolve(descriptor.droppedId)).toBeDefined()
 
-    now += DROPPED_FILE_TTL_MS - 1
-    expect(await store.resolve(descriptor.droppedId)).toBeDefined()
+    now += 2
+    expect(await store.resolve(descriptor.droppedId)).toBeUndefined()
+  })
+
+  it('reports the fixed expiry to the renderer', async () => {
+    let now = 1_000
+    const store = new DroppedFileStore(SAFE_IMAGE, () => now)
+
+    const descriptor = await store.register(await write('paper.pdf', FIXTURES['paper.pdf']))
+
+    expect(Date.parse(descriptor.expiresAt)).toBe(now + DROPPED_FILE_TTL_MS)
   })
 
   it('clears on explicit removal', async () => {

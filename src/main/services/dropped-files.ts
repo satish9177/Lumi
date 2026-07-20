@@ -27,7 +27,12 @@ import {
  * the search-result store would let the next search silently evict it.
  */
 
-/** One file at a time. A second drop replaces the first. */
+/**
+ * How long a dropped record lives, measured from registration and never
+ * extended. A fixed expiry is chosen over an idle one so that rendering a
+ * confirmation card — which revalidates, and so would touch an idle timer —
+ * cannot silently prolong the user's temporary grant.
+ */
 export const DROPPED_FILE_TTL_MS = 30 * 60 * 1000
 
 /** Shortcuts are rejected by extension before anything dereferences them. */
@@ -186,6 +191,14 @@ function formatMegabytes(bytes: number): string {
 export class DroppedFileStore {
   private entry: DroppedFileSnapshot | undefined
   private expiresAt = 0
+  /**
+   * Identifiers this store has let go of, so an action on one can say plainly
+   * that the temporary file is gone instead of falling through to "not a result
+   * from an approved search", which would be untrue and confusing.
+   *
+   * Identifiers only — no path, no metadata. Bounded to the recent few.
+   */
+  private readonly invalidated: string[] = []
 
   constructor(
     private readonly probeImage?: ImageDimensionsProbe,
@@ -199,16 +212,18 @@ export class DroppedFileStore {
   async register(path: string): Promise<DroppedFileDescriptor> {
     const validated = await validateDroppedFile(path, this.probeImage)
     const snapshot: DroppedFileSnapshot = Object.freeze({ droppedId: randomUUID(), ...validated })
-    // Capacity one: the previous entry is dropped, not queued.
+    // Capacity one: the previous entry is let go of, not queued, and its
+    // identifier is remembered as invalidated so actions on it fail honestly.
+    this.clear()
     this.entry = snapshot
     this.expiresAt = this.now() + DROPPED_FILE_TTL_MS
-    return describe(snapshot)
+    return describe(snapshot, this.expiresAt)
   }
 
   /** The renderer-safe view, or nothing when there is no live entry. */
   current(): DroppedFileDescriptor | undefined {
     const snapshot = this.peek()
-    return snapshot ? describe(snapshot) : undefined
+    return snapshot ? describe(snapshot, this.expiresAt) : undefined
   }
 
   /**
@@ -244,8 +259,10 @@ export class DroppedFileStore {
       return undefined
     }
 
-    // A confirmed use keeps the entry alive.
-    this.expiresAt = this.now() + DROPPED_FILE_TTL_MS
+    // Deliberately no TTL refresh. `resolve` runs at proposal time as well as
+    // at approval, so refreshing here would let merely rendering a confirmation
+    // card extend the temporary record's life. The expiry is fixed at
+    // registration; to keep working past it the user drops the file again.
     return snapshot.canonicalPath
   }
 
@@ -268,8 +285,22 @@ export class DroppedFileStore {
   }
 
   clear(): void {
+    if (this.entry) {
+      this.invalidated.push(this.entry.droppedId)
+      while (this.invalidated.length > 8) {
+        this.invalidated.shift()
+      }
+    }
     this.entry = undefined
     this.expiresAt = 0
+  }
+
+  /** True for an identifier this store held and has since let go of. */
+  wasInvalidated(droppedId: string): boolean {
+    // Expiry is lazy, so apply it before answering — otherwise an entry that
+    // has just lapsed would not yet be recorded as invalidated.
+    this.peek()
+    return this.invalidated.includes(droppedId)
   }
 
   private peek(): DroppedFileSnapshot | undefined {
@@ -281,12 +312,25 @@ export class DroppedFileStore {
 }
 
 /** Everything the renderer may know. Notably: no path of any kind. */
-function describe(snapshot: DroppedFileSnapshot): DroppedFileDescriptor {
+function describe(snapshot: DroppedFileSnapshot, expiresAt: number): DroppedFileDescriptor {
   return {
     droppedId: snapshot.droppedId,
     fileName: snapshot.fileName,
     fileTypeLabel: snapshot.fileTypeLabel,
     sizeBytes: snapshot.sizeBytes,
-    mediaKind: snapshot.mediaKind
+    mediaKind: snapshot.mediaKind,
+    expiresAt: new Date(expiresAt).toISOString()
   }
+}
+
+/**
+ * The narrow view main's trusted-file consumers need.
+ *
+ * Kept minimal so a consumer can be handed the ability to resolve and describe
+ * a dropped file without also being able to register or clear one.
+ */
+export interface DroppedFileLookup {
+  resolve(droppedId: string): Promise<string | undefined>
+  snapshot(droppedId: string): DroppedFileSnapshot | undefined
+  wasInvalidated(droppedId: string): boolean
 }

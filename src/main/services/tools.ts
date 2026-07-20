@@ -6,6 +6,7 @@ import {
 } from '../../features/document-tools/search'
 import { isImageExtension } from '../../shared/search-query'
 import { encodeCaptureImage, type CaptureImage } from './capture'
+import type { DroppedFileLookup } from './dropped-files'
 import { resolveTrustedResultPath } from './thumbnails'
 import {
   parseToolProposal,
@@ -19,7 +20,54 @@ import { LocalStore } from './store'
 const MAX_TIMER_DELAY = 2_147_000_000
 const reminderTimers = new Map<string, NodeJS.Timeout>()
 
-export async function executeConfirmedTool(store: LocalStore, rawProposal: unknown): Promise<ToolExecutionResult> {
+/** Honest copy: Lumi can move a document, but it cannot read one. */
+export const DOCUMENT_ANALYSIS_MESSAGE =
+  "Lumi can open this file or send it on Telegram. Reading its contents isn't supported yet."
+
+function droppedGoneMessage(): string {
+  return 'That dropped file is no longer available. Drop it again to use it.'
+}
+
+/**
+ * Loads and re-encodes one confirmed image for a single analysis turn.
+ *
+ * Shared by approved-folder results and dropped files so both are subject to
+ * the identical bounded downscale. The original full-resolution file is never
+ * uploaded.
+ */
+function prepareAnalysisImage(safePath: string, resultId: string, name: string): ToolExecutionResult {
+  const image = loadImageForAnalysis(safePath)
+  if (!image) {
+    return { ok: false, message: 'Lumi could not read that image. It may be corrupt or an unsupported format.' }
+  }
+
+  let encoded: { dataUrl: string; width: number; height: number }
+  try {
+    // Photo analysis tolerates a smaller input than on-screen text.
+    encoded = encodeCaptureImage(image, { maxWidth: 1024 })
+  } catch {
+    return { ok: false, message: 'That photo is too large to share safely. Try a smaller image.' }
+  }
+
+  return {
+    ok: true,
+    message: `Prepared ${name} for one analysis.`,
+    analysisImage: {
+      resultId,
+      name,
+      dataUrl: encoded.dataUrl,
+      mimeType: 'image/jpeg',
+      width: encoded.width,
+      height: encoded.height
+    }
+  }
+}
+
+export async function executeConfirmedTool(
+  store: LocalStore,
+  rawProposal: unknown,
+  droppedFiles?: DroppedFileLookup
+): Promise<ToolExecutionResult> {
   const proposal = parseToolProposal(rawProposal)
 
   switch (proposal.toolName) {
@@ -50,6 +98,24 @@ export async function executeConfirmedTool(store: LocalStore, rawProposal: unkno
       }
     }
     case 'open_file': {
+      // A dropped file is opened from its own revalidated record. It never
+      // acquires approved-folder trust, and the renderer never supplied a path.
+      if (droppedFiles?.wasInvalidated(proposal.arguments.resultId)) {
+        return { ok: false, message: droppedGoneMessage() }
+      }
+      const dropped = droppedFiles?.snapshot(proposal.arguments.resultId)
+      if (dropped) {
+        const droppedPath = await droppedFiles?.resolve(proposal.arguments.resultId)
+        if (!droppedPath) {
+          return { ok: false, message: droppedGoneMessage() }
+        }
+        const droppedFailure = await shell.openPath(droppedPath)
+        if (droppedFailure) {
+          return { ok: false, message: 'Windows could not open that file.' }
+        }
+        return { ok: true, message: `Opened ${dropped.fileName}.` }
+      }
+
       const storedResult = await store.getSearchResult(proposal.arguments.resultId)
       if (!storedResult) {
         return { ok: false, message: 'That file is not a result from an approved search. Search again first.' }
@@ -74,6 +140,22 @@ export async function executeConfirmedTool(store: LocalStore, rawProposal: unkno
       return { ok: true, message: `Opened ${storedResult.name}.`, openedResultId: storedResult.id }
     }
     case 'analyze_photo': {
+      if (droppedFiles?.wasInvalidated(proposal.arguments.resultId)) {
+        return { ok: false, message: droppedGoneMessage() }
+      }
+      const droppedPhoto = droppedFiles?.snapshot(proposal.arguments.resultId)
+      if (droppedPhoto) {
+        if (droppedPhoto.mediaKind !== 'photo') {
+          return { ok: false, message: DOCUMENT_ANALYSIS_MESSAGE }
+        }
+        // Revalidated immediately before any image byte is read.
+        const droppedPath = await droppedFiles?.resolve(proposal.arguments.resultId)
+        if (!droppedPath) {
+          return { ok: false, message: droppedGoneMessage() }
+        }
+        return prepareAnalysisImage(droppedPath, proposal.arguments.resultId, droppedPhoto.fileName)
+      }
+
       const storedResult = await store.getSearchResult(proposal.arguments.resultId)
       if (!storedResult) {
         return { ok: false, message: 'That photo is not a result from an approved search. Search again first.' }
@@ -90,32 +172,7 @@ export async function executeConfirmedTool(store: LocalStore, rawProposal: unkno
         return { ok: false, message: 'That result is not an image Lumi can analyse.' }
       }
 
-      const image = loadImageForAnalysis(safePath)
-      if (!image) {
-        return { ok: false, message: 'Lumi could not read that image. It may be corrupt or an unsupported format.' }
-      }
-
-      let encoded: { dataUrl: string; width: number; height: number }
-      try {
-        // Photo analysis tolerates a smaller input than on-screen text. The
-        // original full-resolution file is never uploaded.
-        encoded = encodeCaptureImage(image, { maxWidth: 1024 })
-      } catch {
-        return { ok: false, message: 'That photo is too large to share safely. Try a smaller image.' }
-      }
-
-      return {
-        ok: true,
-        message: `Prepared ${storedResult.name} for one analysis.`,
-        analysisImage: {
-          resultId: storedResult.id,
-          name: storedResult.name,
-          dataUrl: encoded.dataUrl,
-          mimeType: 'image/jpeg',
-          width: encoded.width,
-          height: encoded.height
-        }
-      }
+      return prepareAnalysisImage(safePath, storedResult.id, storedResult.name)
     }
     case 'open_url': {
       await shell.openExternal(proposal.arguments.url)

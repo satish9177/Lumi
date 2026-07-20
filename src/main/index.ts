@@ -296,7 +296,7 @@ function registerIpcHandlers(): void {
     if (!Array.isArray(resultIds) || resultIds.length > MAX_THUMBNAILS) {
       throw new Error('Thumbnails are only available for a short list of search results.')
     }
-    return createResultThumbnails(localStore, resultIds as string[])
+    return createResultThumbnails(localStore, resultIds as string[], undefined, droppedFiles)
   })
 
   ipcMain.handle(IPC_CHANNELS.cancelPhotoAnalysis, (event) => {
@@ -419,7 +419,20 @@ function registerIpcHandlers(): void {
     if (typeof path !== 'string' || path.length > 32_000) {
       throw new Error('A dropped file must arrive as a single path.')
     }
-    return droppedFiles.register(path)
+    const descriptor = await droppedFiles.register(path)
+    if (descriptor.mediaKind !== 'photo') {
+      // Documents get an app-authored glyph in the renderer. Their contents are
+      // never read.
+      return descriptor
+    }
+
+    // A preview failure must not invalidate an otherwise valid dropped file.
+    try {
+      const [thumbnail] = await createResultThumbnails(localStore, [descriptor.droppedId], undefined, droppedFiles)
+      return thumbnail?.status === 'ok' ? { ...descriptor, thumbnailDataUrl: thumbnail.dataUrl } : descriptor
+    } catch {
+      return descriptor
+    }
   })
 
   ipcMain.handle(IPC_CHANNELS.removeDroppedFile, (event, droppedId: unknown) => {
@@ -514,7 +527,17 @@ app.whenReady().then(async () => {
   })
   await photoIndexCoordinator.initialize()
   telegramService = new TelegramService(app.getPath('userData'), safeStorage, emitTelegramStatus)
-  pendingActions = new PendingActionStore(localStore, telegramService, validateCaptureProvenance)
+  pendingActions = new PendingActionStore(
+    localStore,
+    telegramService,
+    validateCaptureProvenance,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    droppedFiles
+  )
   intentTracker = new IntentTracker()
   searchOrchestrator = new SearchOrchestrator({
     listRoots: () => localStore.listDocumentRoots(),

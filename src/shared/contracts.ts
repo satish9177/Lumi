@@ -343,7 +343,7 @@ interface PendingActionBase {
 export type PendingActionPreview =
   | (PendingActionBase & { actionType: 'create_reminder'; title: string; dueAt: string; sourceContextSummary: string })
   | (PendingActionBase & { actionType: 'search_documents'; folderLabel: string; query: string })
-  | (PendingActionBase & { actionType: 'open_file'; fileName: string; relativePath: string; folderLabel: string })
+  | (PendingActionBase & { actionType: 'open_file'; fileName: string; relativePath: string; folderLabel: string; source?: TrustedSourceKind })
   | (PendingActionBase & { actionType: 'open_url'; url: string; domain: string })
   | (PendingActionBase & { actionType: 'save_context'; label: string; summary: string })
   | (PendingActionBase & {
@@ -352,6 +352,7 @@ export type PendingActionPreview =
     relativePath: string
     folderLabel: string
     question: string
+    source?: TrustedSourceKind
     /** A trusted local preview built in main, not supplied by the renderer. */
     previewDataUrl?: string
   })
@@ -370,6 +371,7 @@ export type PendingActionPreview =
     fileSizeBytes: number
     fileTypeLabel: string
     caption?: string
+    source?: TrustedSourceKind
     /** A main-built local preview. It is never included in model events. */
     previewDataUrl?: string
   })
@@ -430,7 +432,22 @@ export interface DroppedFileDescriptor {
   readonly fileTypeLabel: string
   readonly sizeBytes: number
   readonly mediaKind: AttachmentMediaKind
+  /** When the temporary record lapses, so the card can say so plainly. */
+  readonly expiresAt: string
+  /**
+   * A bounded, main-rendered preview for images only. Documents get an
+   * app-authored glyph in the renderer; their contents are never read.
+   */
+  readonly thumbnailDataUrl?: string
 }
+
+/**
+ * Which kind of trust produced a file in a confirmation card.
+ *
+ * Absent means an approved-folder search result, which is every existing
+ * caller. Only main ever sets this — the renderer cannot choose its own trust.
+ */
+export type TrustedSourceKind = 'approved-folder' | 'dropped-file'
 
 export class PayloadValidationError extends Error {
   constructor(message: string) {
