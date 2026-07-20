@@ -77,7 +77,19 @@ export class SearchOrchestrator {
     this.resolvePending('superseded', 'A newer search replaced this one.')
 
     if (!(await this.isTrusted(request, query))) {
-      return { status: 'needs_confirmation', input: { queryTerms: query.phrase, kind: query.kind, recency: query.recency } }
+      // The Phase-2 constraints travel with the confirmation, so approving the
+      // card runs the search the user actually asked for rather than a broader
+      // one that quietly dropped the text or people filter.
+      return {
+        status: 'needs_confirmation',
+        input: {
+          queryTerms: query.phrase,
+          kind: query.kind,
+          recency: query.recency,
+          ...(query.containsText ? { containsText: query.containsText } : {}),
+          ...(query.people ? { people: query.people } : {})
+        }
+      }
     }
 
     const roots = await this.dependencies.listRoots()

@@ -15,11 +15,15 @@
  */
 
 import { existsSync } from 'node:fs'
+import { detectionScores, FACE_INPUT_SIZE, FACE_STRIDES, type YunetOutputs } from './vision/face-detect'
 import { bgraToClipTensor, CLIP_TENSOR_DIMS, normalizedEmbedding } from './vision/preprocess'
 import {
   CLIP_CONTEXT_LENGTH,
+  FACE_BITMAP_HEIGHT,
+  FACE_BITMAP_WIDTH,
   parseVisionCommand,
   VisionProtocolError,
+  type VisionDetectFacesCommand,
   type VisionEmbedImageCommand,
   type VisionEmbedTextCommand,
   type VisionErrorCode,
@@ -31,7 +35,10 @@ import {
 /** Preferred CLIP outputs, most specific first. */
 const PREFERRED_OUTPUTS: Record<VisionModelKind, readonly string[]> = {
   image: ['image_embeds', 'pooler_output'],
-  text: ['text_embeds', 'pooler_output']
+  text: ['text_embeds', 'pooler_output'],
+  // The face detector's outputs are read by name per stride, not through this
+  // table; the entry exists so the record stays total over the model kinds.
+  face: []
 }
 const PREFERRED_IMAGE_INPUT = 'pixel_values'
 const TEXT_INPUT_IDS = 'input_ids'
@@ -125,6 +132,9 @@ export function createVisionWorker(deps: VisionWorkerDeps): VisionWorker {
         return
       case 'embed_text':
         await handleEmbedText(command)
+        return
+      case 'detect_faces':
+        await handleDetectFaces(command)
         return
       case 'shutdown':
         models.clear()
@@ -226,6 +236,59 @@ export function createVisionWorker(deps: VisionWorkerDeps): VisionWorker {
     await runAndEmit('text', loaded, feeds, command.requestId)
   }
 
+  /**
+   * Counts visible faces.
+   *
+   * The decoded boxes exist only inside this function. They are needed to
+   * suppress the same face detected at several strides, and are dropped the
+   * moment that is done: what leaves here is a bounded list of scores. Nothing
+   * that could locate a face within the photograph crosses the boundary.
+   */
+  async function handleDetectFaces(command: VisionDetectFacesCommand): Promise<void> {
+    const runtime = ort
+    const loaded = models.get('face')
+    if (!loaded || !runtime) {
+      emitError('not_initialised', command.requestId)
+      return
+    }
+
+    let tensor: unknown
+    try {
+      tensor = new runtime.Tensor('float32', bgraToFaceTensor(new Uint8Array(command.bitmap)), [
+        1,
+        3,
+        FACE_BITMAP_HEIGHT,
+        FACE_BITMAP_WIDTH
+      ])
+    } catch (error) {
+      emitError(codeFrom(error, 'invalid_bitmap'), command.requestId)
+      return
+    }
+
+    const startedAt = now()
+    let outputs: Record<string, OrtTensorData>
+    try {
+      outputs = await loaded.session.run({ [loaded.inputName]: tensor })
+    } catch {
+      emitError('detection_failed', command.requestId)
+      return
+    }
+    const elapsedMs = now() - startedAt
+
+    try {
+      const scores = detectionScores(collectYunetOutputs(outputs), FACE_INPUT_SIZE)
+      emit({
+        type: 'face_result',
+        requestId: command.requestId,
+        scores: scores.buffer as ArrayBuffer,
+        elapsedMs,
+        workerRssBytes: rssBytes()
+      })
+    } catch (error) {
+      emitError(codeFrom(error, 'invalid_detection_output'), command.requestId)
+    }
+  }
+
   async function runAndEmit(
     kind: VisionModelKind,
     loaded: LoadedModel,
@@ -260,6 +323,56 @@ export function createVisionWorker(deps: VisionWorkerDeps): VisionWorker {
   }
 
   return { handleMessage }
+}
+
+/**
+ * BGRA bytes to YuNet's expected planar BGR float tensor.
+ *
+ * No mean subtraction or scaling: this export consumes raw 0-255 values in BGR
+ * order, which is also the order Chromium's `toBitmap()` already produces, so
+ * the channels are copied straight across rather than swapped.
+ */
+export function bgraToFaceTensor(bitmap: Uint8Array): Float32Array {
+  const pixels = FACE_BITMAP_WIDTH * FACE_BITMAP_HEIGHT
+  if (bitmap.length !== pixels * 4) {
+    throw new VisionProtocolError('invalid_bitmap')
+  }
+
+  const tensor = new Float32Array(pixels * 3)
+  for (let pixel = 0; pixel < pixels; pixel += 1) {
+    const source = pixel * 4
+    tensor[pixel] = bitmap[source]! // B plane
+    tensor[pixels + pixel] = bitmap[source + 1]! // G plane
+    tensor[pixels * 2 + pixel] = bitmap[source + 2]! // R plane
+  }
+  return tensor
+}
+
+/**
+ * Gathers the twelve YuNet outputs into the three this application reads.
+ *
+ * `kps_*` is deliberately absent: the landmark tensors are the one output that
+ * could seed identity work, so they are never collected, never decoded, and
+ * never leave the session.
+ */
+function collectYunetOutputs(outputs: Record<string, OrtTensorData>): YunetOutputs {
+  const collected: YunetOutputs = { cls: {}, obj: {}, bbox: {} }
+  let found = 0
+
+  for (const stride of FACE_STRIDES) {
+    for (const family of ['cls', 'obj', 'bbox'] as const) {
+      const data = outputs[`${family}_${stride}`]?.data
+      if (data instanceof Float32Array) {
+        collected[family][stride] = data
+        found += 1
+      }
+    }
+  }
+
+  if (found === 0) {
+    throw new VisionProtocolError('invalid_detection_output')
+  }
+  return collected
 }
 
 function selectInputName(kind: VisionModelKind, session: InferenceSession): string {

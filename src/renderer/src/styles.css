@@ -635,6 +635,8 @@ button:disabled {
 .explanation-card,
 .proposal-card,
 .capture-card,
+.screen-reasoning-confirmation,
+.screen-reasoning-card,
 .transcript {
   margin: 12px 0 0;
   border-radius: 14px;
@@ -685,6 +687,41 @@ button:disabled {
   padding: 7px 9px;
   color: #9cb1d2;
   font-size: 11px;
+}
+
+.screen-reasoning-confirmation,
+.screen-reasoning-card {
+  padding: 10px;
+  border: 1px solid rgba(115, 244, 255, 0.24);
+  background: rgba(57, 184, 212, 0.1);
+}
+
+.screen-reasoning-confirmation > p:not(.eyebrow),
+.screen-reasoning-card > p:not(.eyebrow) {
+  margin: 4px 0 0;
+  color: #d7e6fb;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.screen-reasoning-confirmation .actions {
+  margin-top: 10px;
+}
+
+.screen-reasoning-card h2 {
+  margin: 10px 0 4px;
+  color: #c9f8ff;
+  font-size: 12px;
+}
+
+.screen-reasoning-card ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+  color: #d7e6fb;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .explanation-card,

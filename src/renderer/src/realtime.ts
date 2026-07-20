@@ -14,7 +14,7 @@ import {
   type ToolName,
   type ToolProposal
 } from '../../shared/contracts'
-import { isSearchKind, isSearchRecency } from '../../shared/search-query'
+import { isSearchKind, isSearchRecency, type PeopleFilter } from '../../shared/search-query'
 import {
   classifyUserIntent,
   evaluateGuardedToolRequest,
@@ -156,6 +156,17 @@ const TOOL_DEFINITIONS = [
         kind: { type: 'string', enum: ['document', 'photo', 'screenshot', 'any'], description: 'The kind of file the user asked for, when they said.' },
         recency: { type: 'string', enum: ['latest', 'any'], description: 'Use latest when the user asked for the latest, newest, or most recent one.' },
         concepts: { type: 'array', minItems: 1, maxItems: 3, items: { type: 'string', maxLength: 64 }, description: 'For visual photo search only: short concepts copied from the user request, such as beach or birthday.' },
+        contains_text: { type: 'string', maxLength: 80, description: 'Words or a number the user expects to be written inside the image itself, such as "degree certificate" or "1234". Copy them from the user request. No paths.' },
+        people: {
+          type: 'object',
+          additionalProperties: false,
+          description: 'How many visible faces the photo should contain. Lumi counts visible faces; it cannot recognise who anyone is, so never use this for a named person.',
+          properties: {
+            op: { type: 'string', enum: ['eq', 'gte', 'none'], description: 'Use eq for an exact number, gte for "group photo" (with n 3), and none for photos with nobody visible.' },
+            n: { type: 'number', minimum: 0, maximum: 10, description: 'The number of people, for eq and gte only.' }
+          },
+          required: ['op']
+        },
         reason: { type: 'string', description: 'Why this approved-folder search helps.' }
       },
       required: ['query_terms', 'reason']
@@ -1577,11 +1588,30 @@ function parseSearchArguments(argumentsValue: Record<string, unknown>): SearchDo
       return concept.trim()
     })
   }
+  // Phase-2 fields are read here but validated in main, like every other
+  // argument: the renderer only shapes them, it never decides they are safe.
+  const containsText = optionalArgument(argumentsValue, 'contains_text') ?? optionalArgument(argumentsValue, 'containsText')
+
+  const rawPeople = argumentsValue.people
+  let people: PeopleFilter | undefined
+  if (rawPeople !== undefined) {
+    if (typeof rawPeople !== 'object' || rawPeople === null || Array.isArray(rawPeople)) {
+      throw new Error('Realtime supplied an invalid people filter.')
+    }
+    const { op, n } = rawPeople as Record<string, unknown>
+    if (typeof op !== 'string') {
+      throw new Error('Realtime supplied an invalid people filter.')
+    }
+    people = { op: op as PeopleFilter['op'], ...(typeof n === 'number' ? { n } : {}) }
+  }
+
   return {
     queryTerms,
     kind: isSearchKind(kind) ? kind : undefined,
     recency: isSearchRecency(recency) ? recency : undefined,
-    concepts
+    concepts,
+    containsText,
+    people
   }
 }
 

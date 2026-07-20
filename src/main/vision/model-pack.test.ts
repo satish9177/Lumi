@@ -401,6 +401,17 @@ describe('bounded errors', () => {
     const raw = await readFile(join(__dirname, 'model-pack.ts'), 'utf8')
     // The downloader must never assemble a URL; it only forwards asset.url.
     expect(raw).not.toMatch(/https?:\/\//)
-    expect(raw).toContain('isAllowlistedAssetUrl(asset.url)')
+    // Re-checked immediately before the fetch, against the allowlist belonging
+    // to the pack being downloaded, so a mutated manifest entry cannot widen
+    // what this function is willing to contact.
+    expect(raw).toContain('spec.isAllowlisted(asset.url)')
+  })
+
+  it('binds each pack to its own compiled-in allowlist', async () => {
+    const raw = await readFile(join(__dirname, 'model-pack.ts'), 'utf8')
+    // Neither pack may borrow the other's allowlist: the CLIP pack must not
+    // become downloadable from the extras hosts, or the reverse.
+    expect(raw).toMatch(/packId: MODEL_PACK_ID[\s\S]{0,200}isAllowlisted: isAllowlistedAssetUrl/)
+    expect(raw).toMatch(/packId: EXTRAS_PACK_ID[\s\S]{0,200}isAllowlisted: isAllowlistedExtrasUrl/)
   })
 })

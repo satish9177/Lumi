@@ -33,6 +33,8 @@ export interface VisionWorkerHandle {
 export interface VisionModelPaths {
   image: string
   text: string
+  /** Absent until the Phase-2 extras pack is installed. */
+  face?: string
 }
 
 export interface EngineTimer {
@@ -68,7 +70,8 @@ export class VisionEngineError extends Error {
 
 interface PendingRequest {
   requestId: string
-  resolve: (vector: Float32Array) => void
+  /** Embedding vector or face-score list, depending on the command. */
+  resolve: (values: Float32Array) => void
   reject: (error: VisionEngineError) => void
   timer: EngineTimer
 }
@@ -153,6 +156,36 @@ export class VisionEngine {
         tokenCount
       }))
     })
+  }
+
+  /**
+   * Counts visible faces in a 640x640 letterboxed BGRA bitmap.
+   *
+   * Resolves to the confidence scores of the surviving detections — never a
+   * box. Reuses the same single-inference queue as embedding, so a face scan
+   * and an interactive search embedding cannot run at once.
+   */
+  async detectFaces(bitmap: ArrayBuffer): Promise<Float32Array> {
+    return this.enqueue(async () => {
+      await this.ensureModel('face')
+      this.restartIdleTimer()
+      return this.request((requestId) => ({
+        type: 'detect_faces',
+        requestId,
+        width: 640,
+        height: 640,
+        format: 'bgra',
+        bitmap
+      }))
+    })
+  }
+
+  /** Releases the face detector, which is only needed while a scan is running. */
+  releaseFaceModel(): void {
+    if (this.worker && this.loaded.has('face')) {
+      this.loaded.delete('face')
+      this.post({ type: 'unload_model', kind: 'face' })
+    }
   }
 
   /** Releases the image tower now rather than waiting for the idle timer. */
@@ -328,6 +361,14 @@ export class VisionEngine {
       throw new VisionEngineError('model_missing')
     }
 
+    // The face detector ships in the separate Phase-2 pack, which the user may
+    // never install. Its absence is an ordinary missing model, not an error in
+    // the Phase-1 path, and semantic search carries on unaffected.
+    const modelPath = kind === 'image' ? paths.image : kind === 'text' ? paths.text : paths.face
+    if (!modelPath) {
+      throw new VisionEngineError('model_missing')
+    }
+
     this.ensureWorker()
 
     await new Promise<void>((resolve, reject) => {
@@ -340,7 +381,7 @@ export class VisionEngine {
 
       this.pendingLoad = { kind, resolve, reject, timer }
       try {
-        this.post({ type: 'load_model', kind, modelPath: kind === 'image' ? paths.image : paths.text })
+        this.post({ type: 'load_model', kind, modelPath })
       } catch (error) {
         timer.cancel()
         this.pendingLoad = undefined
@@ -432,6 +473,17 @@ export class VisionEngine {
         this.pendingRequest = undefined
         request.timer.cancel()
         request.resolve(new Float32Array(event.vector))
+        return
+      }
+      case 'face_result': {
+        const request = this.pendingRequest
+        if (request?.requestId !== event.requestId) {
+          // A late answer to a timed-out request. Dropping it is correct.
+          return
+        }
+        this.pendingRequest = undefined
+        request.timer.cancel()
+        request.resolve(new Float32Array(event.scores))
         return
       }
       case 'bounded_error':

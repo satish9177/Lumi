@@ -23,14 +23,56 @@ import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import type { ReadableStream as WebReadableStream } from 'node:stream/web'
 import {
+  EXTRAS_ASSETS,
+  EXTRAS_PACK_ID,
+  EXTRAS_PACK_VERSION,
+  isAllowlistedExtrasUrl,
+  type ExtrasAssetRole
+} from './extras-manifest'
+import {
   isAllowlistedAssetUrl,
   MODEL_ASSETS,
   MODEL_PACK_ID,
   MODEL_PACK_VERSION,
-  type ModelAsset,
   type ModelAssetRole
 } from './manifest'
-import { downloadStagingDirectory, modelAssetPath, modelPackDirectory } from './model-location'
+import { packAssetPath, packDirectory, packStagingDirectory } from './model-location'
+
+/**
+ * One asset shape both manifests satisfy. The download, verification, and
+ * installation rules are identical for every pack, so they live in exactly one
+ * audited place rather than being copied per pack — a second copy is a second
+ * thing that can quietly stop checking a digest.
+ */
+interface PackAsset {
+  role: ModelAssetRole | ExtrasAssetRole
+  fileName: string
+  url: string
+  sizeBytes: number
+  sha256: string
+}
+
+interface PackSpec {
+  packId: string
+  packVersion: number
+  assets: readonly PackAsset[]
+  /** The pack's own compiled-in allowlist. Re-checked immediately before fetch. */
+  isAllowlisted: (url: string) => boolean
+}
+
+const CLIP_PACK: PackSpec = Object.freeze({
+  packId: MODEL_PACK_ID,
+  packVersion: MODEL_PACK_VERSION,
+  assets: MODEL_ASSETS,
+  isAllowlisted: isAllowlistedAssetUrl
+})
+
+const EXTRAS_PACK: PackSpec = Object.freeze({
+  packId: EXTRAS_PACK_ID,
+  packVersion: EXTRAS_PACK_VERSION,
+  assets: EXTRAS_ASSETS,
+  isAllowlisted: isAllowlistedExtrasUrl
+})
 
 export const MODEL_PACK_ERROR_CODES = [
   'not_consented',
@@ -78,7 +120,7 @@ export interface ModelPackProgress {
   receivedBytes: number
   totalBytes: number
   /** Which manifest entry is in flight, for a coarse status line. */
-  role: ModelAssetRole
+  role: ModelAssetRole | ExtrasAssetRole
 }
 
 export interface ModelPackRuntime {
@@ -108,7 +150,11 @@ const activeDownloads = new Set<string>()
  * disclosure, the disk-space gate, and progress reporting can never drift apart.
  */
 export function modelPackTotalBytes(): number {
-  return MODEL_ASSETS.reduce((total, asset) => total + asset.sizeBytes, 0)
+  return packTotalBytes(CLIP_PACK)
+}
+
+function packTotalBytes(spec: PackSpec): number {
+  return spec.assets.reduce((total, asset) => total + asset.sizeBytes, 0)
 }
 
 /**
@@ -116,18 +162,18 @@ export function modelPackTotalBytes(): number {
  * the marker records the current pack version. Size is a cheap gate; the digest
  * was already checked at install time and is recorded in the marker.
  */
-export async function isModelPackInstalled(userDataDir: string): Promise<boolean> {
-  const marker = await readMarker(userDataDir)
-  if (!marker || marker.packId !== MODEL_PACK_ID || marker.packVersion !== MODEL_PACK_VERSION) {
+async function isPackInstalled(spec: PackSpec, userDataDir: string): Promise<boolean> {
+  const marker = await readMarker(spec, userDataDir)
+  if (!marker || marker.packId !== spec.packId || marker.packVersion !== spec.packVersion) {
     return false
   }
 
-  for (const asset of MODEL_ASSETS) {
+  for (const asset of spec.assets) {
     if (marker.digests[asset.fileName] !== asset.sha256) {
       return false
     }
     try {
-      const details = await stat(modelAssetPath(userDataDir, asset.fileName))
+      const details = await stat(packAssetPath(userDataDir, spec.packId, asset.fileName))
       if (!details.isFile() || details.size !== asset.sizeBytes) {
         return false
       }
@@ -139,18 +185,51 @@ export async function isModelPackInstalled(userDataDir: string): Promise<boolean
   return true
 }
 
+export function isModelPackInstalled(userDataDir: string): Promise<boolean> {
+  return isPackInstalled(CLIP_PACK, userDataDir)
+}
+
+export function isExtrasPackInstalled(userDataDir: string): Promise<boolean> {
+  return isPackInstalled(EXTRAS_PACK, userDataDir)
+}
+
 export async function installedPackVersion(userDataDir: string): Promise<number | undefined> {
-  const marker = await readMarker(userDataDir)
+  const marker = await readMarker(CLIP_PACK, userDataDir)
   return marker?.packVersion
+}
+
+export async function installedExtrasVersion(userDataDir: string): Promise<number | undefined> {
+  const marker = await readMarker(EXTRAS_PACK, userDataDir)
+  return marker?.packVersion
+}
+
+function resolveRolePath(spec: PackSpec, userDataDir: string, role: string): string {
+  const asset = spec.assets.find((candidate) => candidate.role === role)
+  if (!asset) {
+    throw new ModelPackError('install_failed')
+  }
+  return packAssetPath(userDataDir, spec.packId, asset.fileName)
 }
 
 /** Resolves an asset path only for a role this application defined. */
 export function resolveAssetPath(userDataDir: string, role: ModelAssetRole): string {
-  const asset = MODEL_ASSETS.find((candidate) => candidate.role === role)
-  if (!asset) {
-    throw new ModelPackError('install_failed')
-  }
-  return modelAssetPath(userDataDir, asset.fileName)
+  return resolveRolePath(CLIP_PACK, userDataDir, role)
+}
+
+export function resolveExtrasAssetPath(userDataDir: string, role: ExtrasAssetRole): string {
+  return resolveRolePath(EXTRAS_PACK, userDataDir, role)
+}
+
+/**
+ * The directory holding `eng.traineddata`. Tesseract is handed a directory
+ * rather than a file path because it resolves a language to a filename itself.
+ */
+export function extrasLanguageDirectory(userDataDir: string): string {
+  return packDirectory(userDataDir, EXTRAS_PACK_ID)
+}
+
+export function extrasPackTotalBytes(): number {
+  return packTotalBytes(EXTRAS_PACK)
 }
 
 export interface DownloadOptions {
@@ -166,7 +245,8 @@ export interface DownloadOptions {
  * skipped and a partial file resumes with a Range request where the server
  * allows it.
  */
-export async function downloadModelPack(
+async function downloadPack(
+  spec: PackSpec,
   userDataDir: string,
   runtime: ModelPackRuntime,
   options: DownloadOptions
@@ -178,15 +258,17 @@ export async function downloadModelPack(
   // A second concurrent request for the same pack is refused rather than run, so
   // the two never write the same staging file and cancellation stays owned by
   // the first caller. Retrying after this one settles is fine: the guard clears
-  // in the finally below.
-  if (activeDownloads.has(userDataDir)) {
+  // in the finally below. The key includes the pack id, so the CLIP pack and the
+  // extras pack are independent writers rather than blocking each other.
+  const guard = `${spec.packId} ${userDataDir}`
+  if (activeDownloads.has(guard)) {
     throw new ModelPackError('download_in_progress')
   }
-  activeDownloads.add(userDataDir)
+  activeDownloads.add(guard)
 
   try {
-    const packDir = modelPackDirectory(userDataDir)
-    const stagingDir = downloadStagingDirectory(userDataDir)
+    const packDir = packDirectory(userDataDir, spec.packId)
+    const stagingDir = packStagingDirectory(userDataDir, spec.packId)
 
     try {
       await mkdir(packDir, { recursive: true })
@@ -195,21 +277,21 @@ export async function downloadModelPack(
       throw new ModelPackError('install_failed')
     }
 
-    const totalBytes = modelPackTotalBytes()
+    const totalBytes = packTotalBytes(spec)
     await assertDiskSpace(totalBytes, stagingDir, runtime)
 
     let completedBytes = 0
-    for (const asset of MODEL_ASSETS) {
+    for (const asset of spec.assets) {
       throwIfAborted(options.signal)
 
-      if (await assetAlreadyInstalled(userDataDir, asset)) {
+      if (await assetAlreadyInstalled(spec, userDataDir, asset)) {
         completedBytes += asset.sizeBytes
         options.onProgress?.({ receivedBytes: completedBytes, totalBytes, role: asset.role })
         continue
       }
 
       const baseline = completedBytes
-      await fetchAndInstallAsset(userDataDir, stagingDir, asset, runtime, options, (assetBytes) => {
+      await fetchAndInstallAsset(spec, userDataDir, stagingDir, asset, runtime, options, (assetBytes) => {
         options.onProgress?.({
           receivedBytes: baseline + assetBytes,
           totalBytes,
@@ -219,14 +301,30 @@ export async function downloadModelPack(
       completedBytes += asset.sizeBytes
     }
 
-    await writeMarker(userDataDir, runtime)
+    await writeMarker(spec, userDataDir, runtime)
 
     // The staging directory has served its purpose; leaving it would double the
     // pack's footprint on disk.
     await rm(stagingDir, { recursive: true, force: true }).catch(() => undefined)
   } finally {
-    activeDownloads.delete(userDataDir)
+    activeDownloads.delete(guard)
   }
+}
+
+export function downloadModelPack(
+  userDataDir: string,
+  runtime: ModelPackRuntime,
+  options: DownloadOptions
+): Promise<void> {
+  return downloadPack(CLIP_PACK, userDataDir, runtime, options)
+}
+
+export function downloadExtrasPack(
+  userDataDir: string,
+  runtime: ModelPackRuntime,
+  options: DownloadOptions
+): Promise<void> {
+  return downloadPack(EXTRAS_PACK, userDataDir, runtime, options)
 }
 
 /**
@@ -236,17 +334,25 @@ export async function downloadModelPack(
  * directory out from under an active writer has no safe outcome, so the defined
  * one is to make the caller cancel the download first.
  */
-export async function clearModelPack(userDataDir: string): Promise<void> {
-  if (activeDownloads.has(userDataDir)) {
+async function clearPack(spec: PackSpec, userDataDir: string): Promise<void> {
+  if (activeDownloads.has(`${spec.packId} ${userDataDir}`)) {
     throw new ModelPackError('download_in_progress')
   }
-  await rm(modelPackDirectory(userDataDir), { recursive: true, force: true }).catch(() => undefined)
-  await rm(downloadStagingDirectory(userDataDir), { recursive: true, force: true }).catch(() => undefined)
+  await rm(packDirectory(userDataDir, spec.packId), { recursive: true, force: true }).catch(() => undefined)
+  await rm(packStagingDirectory(userDataDir, spec.packId), { recursive: true, force: true }).catch(() => undefined)
 }
 
-async function assetAlreadyInstalled(userDataDir: string, asset: ModelAsset): Promise<boolean> {
+export function clearModelPack(userDataDir: string): Promise<void> {
+  return clearPack(CLIP_PACK, userDataDir)
+}
+
+export function clearExtrasPack(userDataDir: string): Promise<void> {
+  return clearPack(EXTRAS_PACK, userDataDir)
+}
+
+async function assetAlreadyInstalled(spec: PackSpec, userDataDir: string, asset: PackAsset): Promise<boolean> {
   try {
-    const details = await stat(modelAssetPath(userDataDir, asset.fileName))
+    const details = await stat(packAssetPath(userDataDir, spec.packId, asset.fileName))
     return details.isFile() && details.size === asset.sizeBytes
   } catch {
     return false
@@ -254,16 +360,17 @@ async function assetAlreadyInstalled(userDataDir: string, asset: ModelAsset): Pr
 }
 
 async function fetchAndInstallAsset(
+  spec: PackSpec,
   userDataDir: string,
   stagingDir: string,
-  asset: ModelAsset,
+  asset: PackAsset,
   runtime: ModelPackRuntime,
   options: DownloadOptions,
   onAssetProgress: (assetBytes: number) => void
 ): Promise<void> {
   // Re-checked here, not only at manifest authoring time, so a mutated entry
   // cannot widen what this function is willing to contact.
-  if (!isAllowlistedAssetUrl(asset.url)) {
+  if (!spec.isAllowlisted(asset.url)) {
     throw new ModelPackError('install_failed')
   }
 
@@ -299,7 +406,7 @@ async function fetchAndInstallAsset(
     try {
       // Same volume, so this is an atomic replace: the pack directory only ever
       // contains verified bytes.
-      await rename(stagingPath, modelAssetPath(userDataDir, asset.fileName))
+      await rename(stagingPath, packAssetPath(userDataDir, spec.packId, asset.fileName))
     } catch {
       throw new ModelPackError('install_failed')
     }
@@ -311,7 +418,7 @@ async function fetchAndInstallAsset(
 
 async function streamAsset(
   stagingPath: string,
-  asset: ModelAsset,
+  asset: PackAsset,
   runtime: ModelPackRuntime,
   options: DownloadOptions,
   onAssetProgress: (assetBytes: number) => void
@@ -438,9 +545,9 @@ async function defaultFreeDiskBytes(directory: string): Promise<number | undefin
   }
 }
 
-async function readMarker(userDataDir: string): Promise<PackMarker | undefined> {
+async function readMarker(spec: PackSpec, userDataDir: string): Promise<PackMarker | undefined> {
   try {
-    const raw = await readFile(join(modelPackDirectory(userDataDir), PACK_MARKER_FILE), 'utf8')
+    const raw = await readFile(join(packDirectory(userDataDir, spec.packId), PACK_MARKER_FILE), 'utf8')
     const parsed: unknown = JSON.parse(raw)
     if (
       typeof parsed !== 'object' ||
@@ -457,16 +564,16 @@ async function readMarker(userDataDir: string): Promise<PackMarker | undefined> 
   }
 }
 
-async function writeMarker(userDataDir: string, runtime: ModelPackRuntime): Promise<void> {
+async function writeMarker(spec: PackSpec, userDataDir: string, runtime: ModelPackRuntime): Promise<void> {
   const marker: PackMarker = {
-    packId: MODEL_PACK_ID,
-    packVersion: MODEL_PACK_VERSION,
+    packId: spec.packId,
+    packVersion: spec.packVersion,
     installedAt: new Date(runtime.now?.() ?? Date.now()).toISOString(),
-    digests: Object.fromEntries(MODEL_ASSETS.map((asset) => [asset.fileName, asset.sha256]))
+    digests: Object.fromEntries(spec.assets.map((asset) => [asset.fileName, asset.sha256]))
   }
 
   try {
-    const markerPath = join(modelPackDirectory(userDataDir), PACK_MARKER_FILE)
+    const markerPath = join(packDirectory(userDataDir, spec.packId), PACK_MARKER_FILE)
     const temporaryPath = `${markerPath}.tmp`
     await writeFile(temporaryPath, JSON.stringify(marker), 'utf8')
     await flushToDisk(temporaryPath)

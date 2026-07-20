@@ -1,3 +1,5 @@
+import { normalizeOcrText, ocrTokensOf } from './ocr-text'
+
 // One deterministic normalization path for stored-file search. Live Realtime,
 // mock voice, typed panel search, and transcribed speech all pass through here,
 // so ranking sees the same tokens regardless of how the request arrived.
@@ -8,11 +10,35 @@ export type SearchKind = (typeof SEARCH_KINDS)[number]
 export const SEARCH_RECENCIES = ['latest', 'any'] as const
 export type SearchRecency = (typeof SEARCH_RECENCIES)[number]
 
+/**
+ * How a request constrains the number of visible faces.
+ *
+ * `none` is not `eq: 0`. "No people" has to mean "nothing was detected, and
+ * nothing was even marginally detected", because a hedged detection is still
+ * evidence of a person. Keeping it a distinct operator stops that distinction
+ * from being lost at a call site.
+ */
+export const PEOPLE_OPS = ['eq', 'gte', 'none'] as const
+export type PeopleOp = (typeof PEOPLE_OPS)[number]
+
+export interface PeopleFilter {
+  op: PeopleOp
+  n?: number
+}
+
+/** Long enough for a phrase off a document, short enough to stay a query. */
+export const MAX_CONTAINS_TEXT_LENGTH = 80
+
+/** Beyond this a count is not something a person asks for by number. */
+export const MAX_PEOPLE_COUNT = 10
+
 export interface SearchQueryInput {
   queryTerms: string
   kind?: SearchKind
   recency?: SearchRecency
   concepts?: string[]
+  containsText?: string
+  people?: PeopleFilter
 }
 
 export interface NormalizedSearchQuery {
@@ -28,6 +54,12 @@ export interface NormalizedSearchQuery {
   recency: SearchRecency
   /** Short user-authored visual concepts. Empty means filename/date search. */
   concepts: string[]
+  /** Normalized text to look for inside images. Empty means no text signal. */
+  containsText: string
+  /** The same text as comparable tokens, so ranking never re-normalizes. */
+  containsTextTokens: string[]
+  /** Absent means the request said nothing about how many people. */
+  people?: PeopleFilter
 }
 
 const MAX_QUERY_LENGTH = 250
@@ -165,6 +197,8 @@ export function normalizeSearchQuery(input: SearchQueryInput): NormalizedSearchQ
   }
 
   const concepts = normalizeConcepts(input.concepts)
+  const containsText = normalizeContainsText(input.containsText)
+  const people = normalizePeopleFilter(input.people)
 
   const rawTokens = tokenizeText(input.queryTerms)
   const detectedRecency = rawTokens.some((token) => RECENCY_WORDS.has(token)) ? 'latest' : 'any'
@@ -187,8 +221,101 @@ export function normalizeSearchQuery(input: SearchQueryInput): NormalizedSearchQ
     synonyms: Object.freeze([...synonyms]) as unknown as string[],
     kind: input.kind && input.kind !== 'any' ? input.kind : detectKind(rawTokens),
     recency: input.recency ?? detectedRecency,
-    concepts: Object.freeze(concepts) as unknown as string[]
+    concepts: Object.freeze(concepts) as unknown as string[],
+    containsText,
+    containsTextTokens: Object.freeze(ocrTokensOf(containsText)) as unknown as string[],
+    ...(people ? { people: Object.freeze(people) } : {})
   })
+}
+
+/**
+ * Validates and normalizes the text to look for inside images.
+ *
+ * Normalized through the *same* function the indexer uses, so a query and a
+ * stored page are reduced identically. Doing it in two places is how the two
+ * silently stop matching.
+ *
+ * The rejections mirror `normalizeConcepts`: this field is a short phrase a
+ * person would say aloud, so anything shaped like a path, an identifier, a
+ * serialized structure, or a vector is not that and is refused rather than
+ * sanitized.
+ */
+export function normalizeContainsText(value: unknown): string {
+  if (value === undefined || value === null) {
+    return ''
+  }
+  if (typeof value !== 'string') {
+    throw new SearchQueryValidationError('contains_text must be text.')
+  }
+
+  const candidate = value.replace(/\s+/g, ' ').trim()
+  if (candidate.length === 0) {
+    return ''
+  }
+  if (candidate.length > MAX_CONTAINS_TEXT_LENGTH) {
+    throw new SearchQueryValidationError(
+      `contains_text must be at most ${MAX_CONTAINS_TEXT_LENGTH} characters.`
+    )
+  }
+  if (/[\\/]/.test(candidate)) {
+    throw new SearchQueryValidationError('contains_text must not look like a file path.')
+  }
+  if (/^[a-f0-9]{20,}$/i.test(candidate)) {
+    throw new SearchQueryValidationError('contains_text must not look like an identifier.')
+  }
+  if (/[[\]{}]/.test(candidate)) {
+    throw new SearchQueryValidationError('contains_text must be a short phrase, not structured data.')
+  }
+
+  const normalized = normalizeOcrText(candidate)
+  if (normalized.length === 0) {
+    throw new SearchQueryValidationError('contains_text must contain searchable characters.')
+  }
+  return normalized
+}
+
+/**
+ * Validates the visible-face-count constraint.
+ *
+ * A closed schema: unknown keys are refused rather than ignored, so a caller
+ * cannot smuggle an unvalidated field past this and have some later change
+ * start honouring it.
+ */
+export function normalizePeopleFilter(value: unknown): PeopleFilter | undefined {
+  if (value === undefined || value === null) {
+    return undefined
+  }
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new SearchQueryValidationError('people must be an object with an op.')
+  }
+
+  const record = value as Record<string, unknown>
+  for (const key of Object.keys(record)) {
+    if (key !== 'op' && key !== 'n') {
+      throw new SearchQueryValidationError('people accepts only op and n.')
+    }
+  }
+
+  const op = record.op
+  if (typeof op !== 'string' || !(PEOPLE_OPS as readonly string[]).includes(op)) {
+    throw new SearchQueryValidationError('people.op must be eq, gte, or none.')
+  }
+
+  if (op === 'none') {
+    // `n` is meaningless here, and accepting it would invite "none, 3".
+    if (record.n !== undefined) {
+      throw new SearchQueryValidationError('people.op none does not take a count.')
+    }
+    return { op: 'none' }
+  }
+
+  const n = record.n
+  if (typeof n !== 'number' || !Number.isInteger(n) || n < 0 || n > MAX_PEOPLE_COUNT) {
+    throw new SearchQueryValidationError(
+      `people.n must be a whole number between 0 and ${MAX_PEOPLE_COUNT}.`
+    )
+  }
+  return { op: op as 'eq' | 'gte', n }
 }
 
 export function normalizeConcepts(value: unknown): string[] {

@@ -124,3 +124,102 @@ store and revalidates containment, regular-file status, mtime, size, and link
 status before registering a new opaque trusted result. Existing thumbnail,
 open, selected-photo analysis, and Telegram confirmation flows remain the only
 ways to act on those identifiers.
+
+---
+
+# Phase 2 — text and visible-face counting
+
+Both run **on this device**. No image, page of text, face box, or count is sent
+to OpenAI or anywhere else.
+
+## The extras pack
+
+A second pack, `photo-search-extras`, kept deliberately separate from the CLIP
+pack so that installing it cannot change `MODEL_PACK_ID` and invalidate a single
+stored vector.
+
+| file | bytes | licence | role |
+| --- | --- | --- | --- |
+| `eng.traineddata` | 4,113,088 | Apache-2.0 | Tesseract English |
+| `face_detection_yunet_2023mar.onnx` | 232,589 | MIT (Shiqi Yu) | YuNet detection |
+
+**4.3 MB total.** Both pinned to immutable commits and SHA-256 verified before
+install, by the same audited downloader the CLIP pack uses — `model-pack.ts` was
+generalized over a pack descriptor rather than copied, so there is one place
+where a digest is checked, not two.
+
+YuNet finds *where* faces are so Lumi can count them. It cannot recognise who
+anyone is, and this phase builds nothing that could.
+
+## Index schema
+
+Phase-2 fields are additive and independently versioned:
+
+```
+ocrStatus  ocrText  ocrTokens  ocrVersion  ocrFailureCode  ocrAttempts
+faceStatus  visibleFaceCount  uncertainFaceCount  faceVersion  faceFailureCode
+```
+
+`INDEX_FORMAT_VERSION` stays at 2, so a Phase-1 journal loads unchanged with
+every vector intact. `OCR_MODEL_VERSION` and `FACE_MODEL_VERSION` are compared
+*per record* and are deliberately absent from `index-meta.json`: a new text
+model drops stale text and keeps the vector, rather than re-embedding the
+library to gain a better reader.
+
+`undefined` is a real fourth state — "never checked". It is never reported as
+zero faces or as no text.
+
+Still not stored: image bytes, face crops, face embeddings, landmarks, identity,
+absolute paths, or anything from OpenAI.
+
+## OCR
+
+Tesseract.js in its own worker, terminated when idle so its WASM heap never sits
+resident beside the CLIP image tower. Images are decoded to a bounded greyscale
+PNG (longest edge 1600, never upscaled). One job at a time, 25 s ceiling,
+cancellable, and it fails closed if the verified training data is missing rather
+than fetching one.
+
+**Extracted text is untrusted.** It is matched against and nothing else: never
+logged, never placed in an error, never sent to Realtime, never treated as an
+instruction. Only app-authored reasons such as "Contains the text you searched
+for" ever leave the device.
+
+Match ladder, strongest first: exact phrase, all tokens, bounded fuzzy, none.
+Digits must match exactly — returning someone else's reference number as though
+it were the one asked for is not a tolerable failure. A partial match is not a
+match.
+
+## Visible-face counting
+
+YuNet through the existing ONNX worker as a third model kind, letterboxed to
+640x640 (padded, never cropped — a crop cuts people out of the edges of a group
+photo). Decode and NMS happen worker-side and the geometry is discarded there:
+**only a bounded list of confidence scores crosses the process boundary.** The
+`kps_*` landmark tensors are never read.
+
+Thresholds: >= 0.90 confident, >= 0.60 uncertain, below that rejected. The two
+counts are kept separate so an unsure detection can never be presented as a
+person.
+
+Query semantics: `eq n`, `gte n` (group), `none`. "None" requires both counts to
+be zero. An unscanned image is never treated as zero and is reported as coverage.
+
+Wording stays literally true — "2 visible faces detected", never "2 people".
+Someone turned away or behind another guest is present but undetected.
+
+## Ranking
+
+Weights when every signal exists: semantic 0.55, OCR 0.30, filename 0.10,
+recency 0.05, renormalized over whatever is actually present. People count is a
+hard filter, not a weight: a photo of one person is not a slightly worse answer
+to "two people", it is the wrong answer.
+
+Tie-breaking is unchanged: fused score, then modified time, then normalized path.
+
+## Scheduler
+
+Embeddings first (Phase-1 search must stay usable while Phase 2 catches up),
+then face scanning, then OCR at the lowest duty cycle. One expensive image task
+at a time. Pause, revocation, disable, and shutdown abort in-flight Phase-2 work
+immediately.

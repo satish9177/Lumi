@@ -34,9 +34,24 @@ export const CLIP_TOKEN_BYTES = CLIP_CONTEXT_LENGTH * 4
 const MAX_MODEL_PATH_LENGTH = 1_024
 const MAX_REQUEST_ID_LENGTH = 64
 
-/** Two independent sessions: the image tower is disposable, the text tower is cheap to keep. */
-export const VISION_MODEL_KINDS = ['image', 'text'] as const
+/**
+ * Independent sessions: the image tower is disposable, the text tower is cheap
+ * to keep, and the face detector is small and loaded only while a face scan is
+ * running.
+ */
+export const VISION_MODEL_KINDS = ['image', 'text', 'face'] as const
 export type VisionModelKind = (typeof VISION_MODEL_KINDS)[number]
+
+/** The fixed input the pinned YuNet export accepts. */
+export const FACE_BITMAP_WIDTH = 640
+export const FACE_BITMAP_HEIGHT = 640
+export const FACE_BITMAP_BYTES = FACE_BITMAP_WIDTH * FACE_BITMAP_HEIGHT * 4
+
+/**
+ * The most detections whose scores may cross the boundary. Only scores cross:
+ * see `face-detect.ts` for why no box ever does.
+ */
+export const MAX_FACE_SCORES = 64
 
 export function isVisionModelKind(value: unknown): value is VisionModelKind {
   return typeof value === 'string' && (VISION_MODEL_KINDS as readonly string[]).includes(value)
@@ -58,7 +73,9 @@ export const VISION_ERROR_CODES = [
   'invalid_output',
   'unexpected_embedding_length',
   'non_finite_embedding',
-  'image_unavailable'
+  'image_unavailable',
+  'invalid_detection_output',
+  'detection_failed'
 ] as const
 
 export type VisionErrorCode = (typeof VISION_ERROR_CODES)[number]
@@ -80,7 +97,9 @@ export const VISION_ERROR_MESSAGES: Record<VisionErrorCode, string> = {
   invalid_output: 'The local model returned an unreadable result.',
   unexpected_embedding_length: 'The local model returned an unexpected embedding size.',
   non_finite_embedding: 'The local model returned a non-finite embedding.',
-  image_unavailable: 'That image could not be prepared.'
+  image_unavailable: 'That image could not be prepared.',
+  invalid_detection_output: 'The local face detector returned an unreadable result.',
+  detection_failed: 'Counting visible faces failed for that image.'
 }
 
 export class VisionProtocolError extends Error {
@@ -128,6 +147,16 @@ export interface VisionEmbedTextCommand {
   tokenCount: number
 }
 
+export interface VisionDetectFacesCommand {
+  type: 'detect_faces'
+  requestId: string
+  width: number
+  height: number
+  format: typeof VISION_BITMAP_FORMAT
+  /** A 640x640 letterboxed BGRA bitmap, prepared in main. */
+  bitmap: ArrayBuffer
+}
+
 export interface VisionShutdownCommand {
   type: 'shutdown'
 }
@@ -137,6 +166,7 @@ export type VisionCommand =
   | VisionUnloadModelCommand
   | VisionEmbedImageCommand
   | VisionEmbedTextCommand
+  | VisionDetectFacesCommand
   | VisionShutdownCommand
 
 export interface VisionReadyEvent {
@@ -171,11 +201,29 @@ export interface VisionBoundedErrorEvent {
   requestId?: string
 }
 
+/**
+ * The result of a face scan: confidence scores only.
+ *
+ * There is deliberately no field for boxes, landmarks, crops, or any descriptor.
+ * The worker decodes and suppresses geometry internally and discards it, so the
+ * only thing that can be learned on this side of the boundary is how many
+ * face-shaped regions were found and how sure the detector was.
+ */
+export interface VisionFaceResultEvent {
+  type: 'face_result'
+  requestId: string
+  /** Float32Array of at most MAX_FACE_SCORES values, each in [0, 1]. */
+  scores: ArrayBuffer
+  elapsedMs: number
+  workerRssBytes: number
+}
+
 export type VisionEvent =
   | VisionReadyEvent
   | VisionModelLoadedEvent
   | VisionModelUnloadedEvent
   | VisionEmbeddingResultEvent
+  | VisionFaceResultEvent
   | VisionBoundedErrorEvent
 
 export function parseVisionCommand(raw: unknown): VisionCommand {
@@ -239,6 +287,28 @@ export function parseVisionCommand(raw: unknown): VisionCommand {
       }
       return { type: 'embed_text', requestId, tokenIds, tokenCount }
     }
+    case 'detect_faces': {
+      assertOnlyKeys(record, ['type', 'requestId', 'width', 'height', 'format', 'bitmap'])
+      const requestId = asRequestId(record.requestId)
+      if (record.format !== VISION_BITMAP_FORMAT) {
+        throw new VisionProtocolError('invalid_bitmap')
+      }
+      if (record.width !== FACE_BITMAP_WIDTH || record.height !== FACE_BITMAP_HEIGHT) {
+        throw new VisionProtocolError('invalid_bitmap')
+      }
+      const bitmap = record.bitmap
+      if (!(bitmap instanceof ArrayBuffer) || bitmap.byteLength !== FACE_BITMAP_BYTES) {
+        throw new VisionProtocolError('invalid_bitmap')
+      }
+      return {
+        type: 'detect_faces',
+        requestId,
+        width: FACE_BITMAP_WIDTH,
+        height: FACE_BITMAP_HEIGHT,
+        format: VISION_BITMAP_FORMAT,
+        bitmap
+      }
+    }
     case 'shutdown':
       assertOnlyKeys(record, ['type'])
       return { type: 'shutdown' }
@@ -296,6 +366,31 @@ export function parseVisionEvent(raw: unknown): VisionEvent {
         requestId,
         kind: record.kind,
         vector,
+        elapsedMs: asDuration(record.elapsedMs),
+        workerRssBytes: asDuration(record.workerRssBytes)
+      }
+    }
+    case 'face_result': {
+      assertOnlyKeys(record, ['type', 'requestId', 'scores', 'elapsedMs', 'workerRssBytes'])
+      const requestId = asRequestId(record.requestId)
+      const scores = record.scores
+      if (!(scores instanceof ArrayBuffer) || scores.byteLength % 4 !== 0) {
+        throw new VisionProtocolError('invalid_detection_output')
+      }
+      if (scores.byteLength / 4 > MAX_FACE_SCORES) {
+        throw new VisionProtocolError('invalid_detection_output')
+      }
+      // A score outside [0, 1] is not a probability, so the message is not the
+      // one this protocol describes and is rejected rather than clamped.
+      for (const value of new Float32Array(scores)) {
+        if (!Number.isFinite(value) || value < 0 || value > 1) {
+          throw new VisionProtocolError('invalid_detection_output')
+        }
+      }
+      return {
+        type: 'face_result',
+        requestId,
+        scores,
         elapsedMs: asDuration(record.elapsedMs),
         workerRssBytes: asDuration(record.workerRssBytes)
       }

@@ -43,7 +43,9 @@
       "allowToChangeInstallationDirectory": true
     },
     "asarUnpack": [
-      "**/node_modules/onnxruntime-node/**"
+      "**/node_modules/onnxruntime-node/**",
+      "**/node_modules/tesseract.js/**",
+      "**/node_modules/tesseract.js-core/**"
     ],
     "npmRebuild": false
   },
@@ -52,7 +54,8 @@
     "qrcode": "^1.5.4",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
-    "telegram": "^2.26.22"
+    "telegram": "^2.26.22",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "@types/node": "^24.3.0",

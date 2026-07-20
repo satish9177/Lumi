@@ -88,10 +88,37 @@ export const COPY = {
     verificationFailed: 'The download didn’t arrive intact, so Lumi discarded it. Nothing was installed. Try again.',
     unsupportedImage: 'Lumi can’t read that image. It may be damaged or in a format Lumi doesn’t handle.',
     semanticResults:
-      'These matches came from photo content indexed on this device. Reading text in photos and recognising people are not supported. Analysing one photo is a separate confirmed action.',
+      'These matches came from photo content indexed on this device. Lumi can count visible faces but cannot recognise who someone is. Analysing one photo is a separate confirmed action.',
     nameResults: 'These are name, folder, and date matches. Choose one for the separate confirmed photo analysis.',
     confirmRebuild: 'Clear what Lumi has learned about your photos and start again? You will need to download and index again.',
-    confirmDisable: 'Turn off photo search by content? Searching by name and date keeps working.'
+    confirmDisable: 'Turn off photo search by content? Searching by name and date keeps working.',
+
+    /* ------------------------------------------- Phase 2: text and faces */
+    phase2LocalOnly: 'Photo text and visible faces are checked on this device.',
+    extrasDownload:
+      'Reading text and counting visible faces needs a further 4 MB download, kept on this device.',
+    enableTextSearch: 'Find text inside photos',
+    enableTextSearchNote: 'Reads words and numbers in screenshots and photographed documents.',
+    enableFaceCount: 'Count visible faces',
+    // States the limit in the control itself, so the capability is never
+    // oversold before someone turns it on.
+    enableFaceCountNote: 'Counts how many faces are visible. It cannot tell who anyone is.',
+    textProgress: (done: number, total: number) =>
+      `Text search: ${done.toLocaleString()} of ${total.toLocaleString()}`,
+    faceProgress: (done: number, total: number) =>
+      `Face count: ${done.toLocaleString()} of ${total.toLocaleString()}`,
+    textReady: 'Text search ready',
+    faceReady: 'Face count ready',
+    visualReady: 'Visual search ready',
+    rebuildTextIndex: 'Rebuild text index',
+    rebuildFaceIndex: 'Rebuild face-count index',
+    confirmRebuildText: 'Read the text in your photos again? Visual search is not affected.',
+    confirmRebuildFaces: 'Count visible faces again? Visual search is not affected.',
+    // The answer when someone asks Lumi to find a specific person. It says what
+    // Lumi can do instead of only refusing, and the word "yet" is deliberate.
+    namedPersonUnsupported: 'Lumi can count visible faces, but it can’t recognise who someone is yet.',
+    notCheckedForText: 'Not checked for text yet',
+    notCheckedForFaces: 'Not checked for visible faces yet'
   },
 
   /* --------------------------------------------------------- drag and drop */

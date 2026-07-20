@@ -36,6 +36,8 @@
 import { createHash } from 'node:crypto'
 import { appendFile, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { MAX_OCR_TEXT_CHARS, MAX_OCR_TOKENS, MAX_OCR_TOKEN_LENGTH } from '../../shared/ocr-text'
+import { FACE_MODEL_VERSION, OCR_MODEL_VERSION } from './extras-manifest'
 import { CLIP_EMBEDDING_LENGTH } from './protocol'
 import {
   INDEX_JOURNAL_FILE,
@@ -65,6 +67,38 @@ export const INDEX_FAILURE_CODES = [
 ] as const
 export type IndexFailureCode = (typeof INDEX_FAILURE_CODES)[number]
 
+/**
+ * Phase-2 signals are tracked per image and per signal, because a photo can
+ * legitimately be embedded but not yet read for text, or counted for faces but
+ * not yet embedded. `undefined` is a distinct and important fourth state:
+ * "never looked at". It must never be reported as zero faces or as no text.
+ */
+export const PHASE2_STATUSES = ['pending', 'done', 'failed', 'skipped'] as const
+export type Phase2Status = (typeof PHASE2_STATUSES)[number]
+
+export const OCR_FAILURE_CODES = [
+  'decode_failed',
+  'unsupported_format',
+  'too_many_pixels',
+  'file_locked',
+  'ocr_failed',
+  'ocr_timeout',
+  'ocr_unavailable'
+] as const
+export type OcrFailureCode = (typeof OCR_FAILURE_CODES)[number]
+
+export const FACE_FAILURE_CODES = [
+  'decode_failed',
+  'unsupported_format',
+  'too_many_pixels',
+  'file_locked',
+  'detection_failed',
+  'face_model_unavailable'
+] as const
+export type FaceFailureCode = (typeof FACE_FAILURE_CODES)[number]
+
+export const MAX_STORED_FACE_COUNT = 50
+
 export interface PhotoIndexRecord {
   imageId: string
   rootId: string
@@ -82,6 +116,45 @@ export interface PhotoIndexRecord {
   failureCode?: IndexFailureCode
   attempts: number
   updatedAtMs: number
+
+  // --- Phase 2: local text ------------------------------------------------
+  /** Absent means this image has never been read for text. */
+  ocrStatus?: Phase2Status
+  /** Deterministically normalized, bounded. Untrusted local data — never sent anywhere. */
+  ocrText?: string
+  /** Compact searchable form of the same text. */
+  ocrTokens?: string[]
+  ocrVersion?: number
+  ocrFailureCode?: OcrFailureCode
+  ocrAttempts?: number
+
+  // --- Phase 2: visible-face counting -------------------------------------
+  /** Absent means this image has never been scanned for faces. */
+  faceStatus?: Phase2Status
+  /** Faces above the confident threshold. Detection only — never identity. */
+  visibleFaceCount?: number
+  /** Faces between the uncertain and confident thresholds. */
+  uncertainFaceCount?: number
+  faceVersion?: number
+  faceFailureCode?: FaceFailureCode
+  faceAttempts?: number
+}
+
+/** Coverage of each Phase-2 signal, for the separate settings progress lines. */
+export interface Phase2Counts {
+  /** Live records eligible for Phase-2 work. */
+  total: number
+  ocrDone: number
+  ocrFailed: number
+  ocrSkipped: number
+  faceDone: number
+  faceFailed: number
+  faceSkipped: number
+}
+
+export interface Phase2Versions {
+  ocr: number
+  face: number
 }
 
 interface IndexMeta {
@@ -127,6 +200,14 @@ export class PhotoIndexStore {
   private records = new Map<string, PhotoIndexRecord>()
   private rowCount = 0
   private modelVersion = 0
+  /**
+   * Deliberately *not* part of `index-meta.json`, and deliberately not part of
+   * the whole-index validity check. A new OCR or face model must invalidate
+   * only its own per-record fields; making it a generation-level version would
+   * throw away every CLIP vector to gain a better text reader, which is exactly
+   * the re-index this phase must avoid.
+   */
+  private phase2Versions: Phase2Versions = { ocr: OCR_MODEL_VERSION, face: FACE_MODEL_VERSION }
   private loaded = false
   /** Journal lines written since load, used to decide when to compact. */
   private appendedLines = 0
@@ -144,7 +225,11 @@ export class PhotoIndexStore {
    * on disk all discard the index and start a fresh generation — a stale vector
    * is worse than no vector, because it produces confidently wrong matches.
    */
-  async load(modelVersion: number): Promise<{ rebuilt: boolean; droppedLines: number }> {
+  async load(
+    modelVersion: number,
+    phase2: Phase2Versions = { ocr: OCR_MODEL_VERSION, face: FACE_MODEL_VERSION }
+  ): Promise<{ rebuilt: boolean; droppedLines: number }> {
+    this.phase2Versions = phase2
     return this.runExclusive(() => this.loadInner(modelVersion))
   }
 
@@ -193,7 +278,7 @@ export class PhotoIndexStore {
       if (line.trim().length === 0) {
         continue
       }
-      const record = parseRecordLine(line, modelVersion)
+      const record = parseRecordLine(line, modelVersion, this.phase2Versions)
       if (!record) {
         // A torn final line from an interrupted write, or a corrupt entry.
         droppedLines += 1
@@ -256,6 +341,137 @@ export class PhotoIndexStore {
       else if (record.status === 'skipped') counts.skipped += 1
     }
     return counts
+  }
+
+  /**
+   * Phase-2 coverage, reported separately from `counts()` so the existing
+   * Phase-1 status contract keeps its exact shape.
+   *
+   * "Done" counts only records stamped with the *current* signal version, so a
+   * model upgrade honestly shows coverage falling back rather than claiming
+   * work that was done by a model no longer in use.
+   */
+  phase2Counts(): Phase2Counts {
+    const counts: Phase2Counts = {
+      total: 0,
+      ocrDone: 0,
+      ocrFailed: 0,
+      ocrSkipped: 0,
+      faceDone: 0,
+      faceFailed: 0,
+      faceSkipped: 0
+    }
+    for (const record of this.records.values()) {
+      if (record.status === 'deleted') {
+        continue
+      }
+      counts.total += 1
+      if (record.ocrStatus === 'done') counts.ocrDone += 1
+      else if (record.ocrStatus === 'failed') counts.ocrFailed += 1
+      else if (record.ocrStatus === 'skipped') counts.ocrSkipped += 1
+
+      if (record.faceStatus === 'done') counts.faceDone += 1
+      else if (record.faceStatus === 'failed') counts.faceFailed += 1
+      else if (record.faceStatus === 'skipped') counts.faceSkipped += 1
+    }
+    return counts
+  }
+
+  /**
+   * Merges an OCR outcome into an existing record.
+   *
+   * A merge rather than a `put` on purpose: a Phase-2 writer must not be able to
+   * clear the vector row, the status, or the other Phase-2 signal by
+   * round-tripping a stale copy of the record. If the record has since been
+   * deleted or re-scanned, the result is dropped rather than resurrecting it.
+   */
+  async recordOcr(
+    imageId: string,
+    outcome: {
+      status: Phase2Status
+      text?: string
+      tokens?: readonly string[]
+      failureCode?: OcrFailureCode
+      attempts?: number
+    },
+    nowMs: number
+  ): Promise<void> {
+    return this.runExclusive(() => this.recordOcrInner(imageId, outcome, nowMs))
+  }
+
+  private async recordOcrInner(
+    imageId: string,
+    outcome: {
+      status: Phase2Status
+      text?: string
+      tokens?: readonly string[]
+      failureCode?: OcrFailureCode
+      attempts?: number
+    },
+    nowMs: number
+  ): Promise<void> {
+    const existing = this.records.get(imageId)
+    if (!existing || existing.status === 'deleted') {
+      return
+    }
+
+    const stored: PhotoIndexRecord = {
+      ...existing,
+      ocrStatus: outcome.status,
+      ocrVersion: this.phase2Versions.ocr,
+      ocrAttempts: outcome.attempts ?? (existing.ocrAttempts ?? 0) + 1,
+      ocrText: outcome.status === 'done' ? boundedOcrText(outcome.text) : undefined,
+      ocrTokens: outcome.status === 'done' ? boundedOcrTokens(outcome.tokens) : undefined,
+      ocrFailureCode: outcome.failureCode,
+      updatedAtMs: nowMs
+    }
+    this.records.set(imageId, stored)
+    await this.appendLine(stored)
+  }
+
+  /** As `recordOcr`, for the visible-face count. Stores counts, never geometry. */
+  async recordFaces(
+    imageId: string,
+    outcome: {
+      status: Phase2Status
+      visibleFaceCount?: number
+      uncertainFaceCount?: number
+      failureCode?: FaceFailureCode
+      attempts?: number
+    },
+    nowMs: number
+  ): Promise<void> {
+    return this.runExclusive(() => this.recordFacesInner(imageId, outcome, nowMs))
+  }
+
+  private async recordFacesInner(
+    imageId: string,
+    outcome: {
+      status: Phase2Status
+      visibleFaceCount?: number
+      uncertainFaceCount?: number
+      failureCode?: FaceFailureCode
+      attempts?: number
+    },
+    nowMs: number
+  ): Promise<void> {
+    const existing = this.records.get(imageId)
+    if (!existing || existing.status === 'deleted') {
+      return
+    }
+
+    const stored: PhotoIndexRecord = {
+      ...existing,
+      faceStatus: outcome.status,
+      faceVersion: this.phase2Versions.face,
+      faceAttempts: outcome.attempts ?? (existing.faceAttempts ?? 0) + 1,
+      visibleFaceCount: outcome.status === 'done' ? boundedFaceCount(outcome.visibleFaceCount) : undefined,
+      uncertainFaceCount: outcome.status === 'done' ? boundedFaceCount(outcome.uncertainFaceCount) : undefined,
+      faceFailureCode: outcome.failureCode,
+      updatedAtMs: nowMs
+    }
+    this.records.set(imageId, stored)
+    await this.appendLine(stored)
   }
 
   /**
@@ -692,6 +908,43 @@ function isSafeRelativePath(relativePath: string): boolean {
   )
 }
 
+/**
+ * Every bound is applied on the way in *and* on the way out (see the parser),
+ * so a journal that was hand-edited or written by a future build still cannot
+ * load an unbounded string into memory.
+ */
+function boundedOcrText(value: unknown): string | undefined {
+  if (typeof value !== 'string') {
+    return undefined
+  }
+  const trimmed = value.slice(0, MAX_OCR_TEXT_CHARS)
+  return trimmed.length > 0 ? trimmed : undefined
+}
+
+function boundedOcrTokens(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined
+  }
+  const tokens: string[] = []
+  for (const candidate of value) {
+    if (typeof candidate !== 'string' || candidate.length === 0) {
+      continue
+    }
+    tokens.push(candidate.slice(0, MAX_OCR_TOKEN_LENGTH))
+    if (tokens.length >= MAX_OCR_TOKENS) {
+      break
+    }
+  }
+  return tokens.length > 0 ? tokens : undefined
+}
+
+function boundedFaceCount(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    return undefined
+  }
+  return Math.min(value, MAX_STORED_FACE_COUNT)
+}
+
 function assertSafeRelativePath(relativePath: string): void {
   if (typeof relativePath !== 'string' || !isSafeRelativePath(relativePath)) {
     throw new Error('A photo index record must carry a safe root-relative path.')
@@ -703,7 +956,11 @@ function assertSafeRelativePath(relativePath: string): void {
  * than coerced, so a hand-edited or corrupt journal cannot inject a record with
  * an absolute path or an out-of-range row.
  */
-function parseRecordLine(line: string, modelVersion: number): PhotoIndexRecord | undefined {
+function parseRecordLine(
+  line: string,
+  modelVersion: number,
+  phase2: Phase2Versions
+): PhotoIndexRecord | undefined {
   let parsed: unknown
   try {
     parsed = JSON.parse(line)
@@ -765,6 +1022,61 @@ function parseRecordLine(line: string, modelVersion: number): PhotoIndexRecord |
     status: value.status as IndexStatus,
     failureCode: failureCode as IndexFailureCode | undefined,
     attempts: value.attempts,
-    updatedAtMs: value.updatedAtMs
+    updatedAtMs: value.updatedAtMs,
+    ...parseOcrFields(value, phase2.ocr),
+    ...parseFaceFields(value, phase2.face)
+  }
+}
+
+/**
+ * Phase-2 fields are parsed independently of the record, and independently of
+ * each other. Three properties matter here:
+ *
+ *  - A Phase-1 journal has none of these fields. It loads cleanly, every image
+ *    reading as "never checked", and keeps its vector. That is what lets an
+ *    existing index upgrade in place instead of being rebuilt.
+ *  - A result written by a superseded OCR or face model is dropped back to
+ *    "never checked" rather than trusted, but the record and its vector row
+ *    survive untouched.
+ *  - A malformed or out-of-range field is dropped rather than coerced, so a
+ *    corrupt journal cannot inject an unbounded string or a negative count.
+ */
+function parseOcrFields(value: Record<string, unknown>, ocrVersion: number): Partial<PhotoIndexRecord> {
+  if (
+    !(PHASE2_STATUSES as readonly unknown[]).includes(value.ocrStatus) ||
+    value.ocrVersion !== ocrVersion
+  ) {
+    return {}
+  }
+  const failureCode = value.ocrFailureCode
+  return {
+    ocrStatus: value.ocrStatus as Phase2Status,
+    ocrVersion,
+    ocrText: boundedOcrText(value.ocrText),
+    ocrTokens: boundedOcrTokens(value.ocrTokens),
+    ocrFailureCode: (OCR_FAILURE_CODES as readonly unknown[]).includes(failureCode)
+      ? (failureCode as OcrFailureCode)
+      : undefined,
+    ocrAttempts: typeof value.ocrAttempts === 'number' && value.ocrAttempts >= 0 ? value.ocrAttempts : 0
+  }
+}
+
+function parseFaceFields(value: Record<string, unknown>, faceVersion: number): Partial<PhotoIndexRecord> {
+  if (
+    !(PHASE2_STATUSES as readonly unknown[]).includes(value.faceStatus) ||
+    value.faceVersion !== faceVersion
+  ) {
+    return {}
+  }
+  const failureCode = value.faceFailureCode
+  return {
+    faceStatus: value.faceStatus as Phase2Status,
+    faceVersion,
+    visibleFaceCount: boundedFaceCount(value.visibleFaceCount),
+    uncertainFaceCount: boundedFaceCount(value.uncertainFaceCount),
+    faceFailureCode: (FACE_FAILURE_CODES as readonly unknown[]).includes(failureCode)
+      ? (failureCode as FaceFailureCode)
+      : undefined,
+    faceAttempts: typeof value.faceAttempts === 'number' && value.faceAttempts >= 0 ? value.faceAttempts : 0
   }
 }
