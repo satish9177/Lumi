@@ -116,7 +116,7 @@ export function evaluateGuardedToolRequest(toolName: GuardedTool, state: Guarded
     return {
       allowed: false,
       code: 'needs_approved_folder',
-      message: 'No folder is approved for document search yet. LifeLens is asking the user to approve a folder; call search_documents again once one is approved.'
+      message: 'No folder is approved for document search yet. Lumi is asking the user to approve a folder; call search_documents again once one is approved.'
     }
   }
   return { allowed: true }

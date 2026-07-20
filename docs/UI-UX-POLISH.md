@@ -7,9 +7,31 @@ semantic-photo-search work is complete and checkpointed.
 
 ## 1. Status and scope
 
-**Status:** design approved, implementation not started. No source file,
-`package.json`, Electron configuration, or image asset has been changed for this
-work.
+**Status: implemented.** All four slices of the core MVP have landed. See
+[docs/STATUS.md](STATUS.md) for the per-slice record, the verified command
+numbers, and the decisions that departed from this document.
+
+| Slice | Scope | State |
+| --- | --- | --- |
+| 1 | Branding, icon, draggable window, position persistence, display clamping, reset | Complete |
+| 2 | Conversation-first panel, status selector, settings reorganisation | Complete |
+| 3 | Secure single-file drag-and-drop, end to end through the existing confirmation flow | Complete |
+| 4 | Copy consistency and accessibility | Complete |
+
+Two findings corrected this document during implementation:
+
+- **§6 assumed two profile directories.** Only `%APPDATA%\lifelens` exists, and
+  `build.productName` never reached `app.getName()`. The rename was therefore a
+  visible-branding change with no state migration. `appId`, `userData` and the
+  internal identifiers deliberately still say `lifelens`.
+- **§13's TTL was changed from idle to fixed.** `resolve` runs at proposal time
+  as well as approval, so an idle timer would have let merely rendering a
+  confirmation card extend the user's temporary grant.
+
+Follow-up polish (§24) — tray, global shortcut, always-on-top toggle, toasts,
+onboarding, edge snapping — remains deferred, as does everything under
+"Deferred" in §24. A full manual Windows acceptance pass is still outstanding;
+its checklist is at the end of docs/STATUS.md.
 
 **Verified checkpoint (not a permanent number).** The last recorded verification
 of the repository before this document was written:

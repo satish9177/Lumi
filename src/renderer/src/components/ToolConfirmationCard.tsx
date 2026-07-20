@@ -16,13 +16,28 @@ export function ToolConfirmationCard({ action, isConfirming = false, onConfirm, 
   const label = actionLabel(action)
 
   return (
-    <article className="lifelens-tool-confirmation-card" aria-labelledby={headingId} aria-describedby={descriptionId}>
+    // A group rather than a bare article, so the proposed action and the fact
+    // that confirmation is required are announced together on focus.
+    <article
+      className="lifelens-tool-confirmation-card"
+      role="group"
+      aria-labelledby={headingId}
+      aria-describedby={descriptionId}
+    >
       <p className="lifelens-card-eyebrow">READY TO {label.toUpperCase()}</p>
       <h2 id={headingId} className="lifelens-card-heading">{headingLabel(action)}</h2>
-      <div id={descriptionId}><ActionDetails action={action} /></div>
-      <p className="lifelens-confirmation-notice">LifeLens will act only if you choose {label}.</p>
+      <div id={descriptionId}>
+        <ActionDetails action={action} />
+        <p className="lifelens-confirmation-notice">Lumi only acts when you confirm. Nothing happens if you cancel.</p>
+      </div>
       <div className="lifelens-confirmation-actions">
-        <button className="lifelens-confirm-button" type="button" disabled={isConfirming} onClick={() => void onConfirm(action.approvalId)}>
+        <button
+          className="lifelens-confirm-button"
+          type="button"
+          disabled={isConfirming}
+          aria-busy={isConfirming || undefined}
+          onClick={() => void onConfirm(action.approvalId)}
+        >
           {isConfirming ? pendingLabel(action) : label}
         </button>
         <button className="lifelens-dismiss-button" type="button" disabled={isConfirming} onClick={() => void onDismiss(action.approvalId)}>Cancel</button>

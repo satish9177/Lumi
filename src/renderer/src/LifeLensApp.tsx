@@ -30,8 +30,10 @@ import {
   StatusPill,
   ToolConfirmationCard
 } from './components'
+import { COPY } from './copy'
 import { countDraggedFiles, decideDrop, preventFileNavigation, TOO_MANY_FILES_MESSAGE } from './drop-intake'
-import { deriveStatus } from './status'
+import { focusableWithin, nextTrappedFocus } from './focus-trap'
+import { deriveStatus, statusAnnouncement } from './status'
 
 /** Honest copy: Lumi can move a document, but it cannot read one. */
 const DOCUMENT_ANALYSIS_NOTICE =
@@ -85,6 +87,9 @@ export default function LifeLensApp() {
   const [droppedFile, setDroppedFile] = useState<DroppedFileDescriptor>()
   const [dragFileCount, setDragFileCount] = useState(0)
   const [isDroppedFileBusy, setIsDroppedFileBusy] = useState(false)
+  const settingsRef = useRef<HTMLDivElement>(null)
+  const settingsButtonRef = useRef<HTMLButtonElement>(null)
+  const composerRef = useRef<HTMLTextAreaElement>(null)
   const [online, setOnline] = useState(() => navigator.onLine)
   const conversationRef = useRef<HTMLDivElement>(null)
   const [transcript, setTranscript] = useState<string[]>([])
@@ -162,6 +167,45 @@ export default function LifeLensApp() {
     }
     region.scrollTop = region.scrollHeight
   }, [transcript, searchResults, explanation, toolResult, pendingAction, searchConfirmation])
+
+  /**
+   * Settings behaves as a modal layer: focus moves into it on open, is trapped
+   * while it is open, and returns to the gear that opened it on close.
+   */
+  useEffect(() => {
+    if (!settingsOpen) {
+      return
+    }
+    const opener = settingsButtonRef.current
+    focusableWithin(settingsRef.current ?? document.createElement('div'))[0]?.focus()
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab' || !settingsRef.current) {
+        return
+      }
+      const target = nextTrappedFocus(
+        focusableWithin(settingsRef.current),
+        document.activeElement as HTMLElement | null,
+        event.shiftKey
+      )
+      if (target) {
+        event.preventDefault()
+        target.focus()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      opener?.focus()
+    }
+  }, [settingsOpen])
+
+  // Opening the panel puts the caret where the user is going to type.
+  useEffect(() => {
+    if (expanded) {
+      composerRef.current?.focus()
+    }
+  }, [expanded])
 
   // Escape closes the topmost layer, one at a time, before collapsing.
   useEffect(() => {
@@ -1019,6 +1063,12 @@ export default function LifeLensApp() {
   const entireDisplays = captureSources.filter((source) => source.kind === 'screen')
   const visibleLinks = explanation?.signals.filter((signal) => signal.kind === 'link') ?? []
   const hasConversation = transcript.length > 0 || Boolean(explanation) || searchResults.length > 0 || Boolean(capture)
+  const sendDisabledReason = !clientRef.current
+    ? COPY.labels.sendDisabledConnecting
+    : !question.trim()
+      ? COPY.labels.sendDisabledEmpty
+      : undefined
+  const canSend = sendDisabledReason === undefined
   const status = deriveStatus({
     companionState,
     isConnecting,
@@ -1069,9 +1119,10 @@ export default function LifeLensApp() {
             <div className="header-controls">
               <StatusPill status={status} />
               <button
+                ref={settingsButtonRef}
                 className="icon-button"
                 type="button"
-                aria-label="Settings"
+                aria-label={COPY.labels.settings}
                 aria-expanded={settingsOpen}
                 onClick={() => setSettingsOpen((open) => !open)}
               >
@@ -1081,7 +1132,13 @@ export default function LifeLensApp() {
             </div>
           </header>
 
-          <div className="conversation" role="log" aria-live="polite" aria-label="Conversation with Lumi" ref={conversationRef}>
+          {/* One polite region for status, so state changes are heard without
+              interrupting, and separately from the conversation itself. */}
+          <p className="visually-hidden" aria-live="polite">{statusAnnouncement(status, photoSearchStatus)}</p>
+          {/* Assertive, because an actionable failure should interrupt. */}
+          <p className="visually-hidden" role="alert">{error ?? ''}</p>
+
+          <div className="conversation" role="log" aria-label="Conversation with Lumi" ref={conversationRef}>
           {!hasConversation && (
             <div className="conversation-empty">
               <BrandMark size={48} glow />
@@ -1233,35 +1290,52 @@ export default function LifeLensApp() {
           )}
 
           <form className="composer" onSubmit={(event) => { event.preventDefault(); void askQuestion() }}>
-            <input
+            <textarea
+              ref={composerRef}
               className="composer-input"
+              rows={1}
               value={question}
               onChange={(event) => setQuestion(event.target.value)}
-              placeholder="Ask Lumi…"
-              aria-label="Ask Lumi"
+              // Enter sends; Shift+Enter starts a new line.
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                  event.preventDefault()
+                  if (canSend) {
+                    void askQuestion()
+                  }
+                }
+              }}
+              placeholder={COPY.labels.ask + '…'}
+              aria-label={COPY.labels.ask}
             />
             <button
               className="icon-button"
               type="button"
-              aria-label={capture ? 'Look at my screen again' : 'Look at my screen'}
-              title={capture ? 'Look at my screen again' : 'Look at my screen'}
+              aria-label={capture ? COPY.labels.captureAgain : COPY.labels.captureScreen}
+              title={capture ? COPY.labels.captureAgain : COPY.labels.captureScreen}
               onClick={() => requestScreenContext()}
               disabled={!clientRef.current || isCapturing}
+              aria-busy={isCapturing || undefined}
             >
               ◉
             </button>
             <button
               className="primary-button send-button"
               type="submit"
-              disabled={!clientRef.current || !question.trim()}
-              title={!clientRef.current ? 'Lumi is still connecting.' : !question.trim() ? 'Type a question first.' : 'Send'}
+              disabled={!canSend}
+              // A disabled control says why, rather than leaving the user guessing.
+              aria-describedby={sendDisabledReason ? 'composer-send-reason' : undefined}
+              title={sendDisabledReason ?? COPY.labels.send}
             >
-              Send
+              {COPY.labels.send}
             </button>
+            {sendDisabledReason && (
+              <span id="composer-send-reason" className="visually-hidden">{sendDisabledReason}</span>
+            )}
           </form>
 
           {settingsOpen && (
-            <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Settings">
+            <div ref={settingsRef} className="settings-overlay" role="dialog" aria-modal="true" aria-label="Settings">
               <header className="settings-header">
                 <h2>Settings</h2>
                 <button className="icon-button" type="button" aria-label="Close settings" onClick={() => setSettingsOpen(false)}>&times;</button>
@@ -1315,9 +1389,17 @@ export default function LifeLensApp() {
               )}
               {(photoSearchStatus.state === 'downloading' || photoSearchStatus.state === 'verifying') && (
                 <div className="photo-search-progress">
-                  <progress max={Math.max(1, photoSearchStatus.modelDownloadBytes)} value={photoSearchStatus.downloadedBytes} />
+                  <progress
+                    max={Math.max(1, photoSearchStatus.modelDownloadBytes)}
+                    value={photoSearchStatus.downloadedBytes}
+                    aria-label="Download progress"
+                    aria-valuenow={photoSearchStatus.downloadedBytes}
+                    aria-valuemin={0}
+                    aria-valuemax={Math.max(1, photoSearchStatus.modelDownloadBytes)}
+                    aria-valuetext={`${formatMegabytes(photoSearchStatus.downloadedBytes)} of ${formatMegabytes(photoSearchStatus.modelDownloadBytes)}`}
+                  />
                   <span>{formatMegabytes(photoSearchStatus.downloadedBytes)} of {formatMegabytes(photoSearchStatus.modelDownloadBytes)}</span>
-                  <button className="text-button" type="button" onClick={() => void runPhotoSearchAction(() => window.lifeLens.cancelPhotoSearchDownload())}>Cancel</button>
+                  <button className="text-button" type="button" onClick={() => void runPhotoSearchAction(() => window.lifeLens.cancelPhotoSearchDownload())}>Cancel download</button>
                 </div>
               )}
               {photoSearchStatus.enabled && photoSearchStatus.modelInstalled && (
@@ -1479,7 +1561,7 @@ function currentSourceContext(capture: CaptureResult | undefined, explanation: E
 }
 
 /**
- * The approval surface for a search LifeLens could not yet trust (a late voice
+ * The approval surface for a search Lumi could not yet trust (a late voice
  * transcript, or a model-initiated request). Approving it continues through the
  * SearchOrchestrator as an explicit request, including opening the folder
  * chooser when none is approved; it never touches the create-pending-action path.
@@ -1496,7 +1578,7 @@ function SearchConfirmationCard({
   return (
     <article className="notice" aria-label="Confirm a stored-file search">
       <p className="eyebrow">READY TO SEARCH</p>
-      <p>Search your approved folders for <strong>{request.input.queryTerms}</strong>? If no folder is approved yet, you will choose one next. LifeLens searches only if you confirm.</p>
+      <p>Search your approved folders for <strong>{request.input.queryTerms}</strong>? If no folder is approved yet, you will choose one next. Lumi searches only if you confirm.</p>
       <div className="actions">
         <button className="secondary-button" type="button" onClick={onConfirm}>Search files</button>
         <button className="text-button" type="button" onClick={onDismiss}>Cancel</button>
@@ -1540,7 +1622,7 @@ function TelegramLoginQr({
       }
     }).catch(() => {
       if (active) {
-        setRenderError('LifeLens could not render this Telegram QR code. Wait for a refreshed code and try again.')
+        setRenderError('Lumi could not show this sign-in code. Wait for a fresh one and try again.')
       }
     })
 

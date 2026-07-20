@@ -23,7 +23,9 @@ export function PhotoResultGrid({ results, thumbnails, fallback, onOpen, onAnaly
       {results.map((result) => {
         const thumbnail = thumbnails.get(result.id)
         return (
-          <li className="lifelens-photo-card" key={result.id}>
+          // Each card is a named group, so a screen reader user hears which
+          // photo the following controls act on.
+          <li className="lifelens-photo-card" key={result.id} role="group" aria-label={result.name}>
             <div className="lifelens-photo-frame">
               {thumbnail?.status === 'ok' && thumbnail.dataUrl
                 ? <img src={thumbnail.dataUrl} alt={`Preview of ${result.name}`} loading="lazy" />
@@ -38,9 +40,9 @@ export function PhotoResultGrid({ results, thumbnails, fallback, onOpen, onAnaly
             )}
             <p className="lifelens-photo-match">{result.reason ?? (fallback ? 'Possible recent match' : 'Filename match')}</p>
             <div className="lifelens-photo-actions">
-              <button className="text-button" type="button" onClick={() => onOpen(result)}>Open</button>
-              <button className="text-button" type="button" onClick={() => onAnalyze(result)}>Ask Lumi about this photo</button>
-              <button className="text-button" type="button" onClick={() => onSend(result)}>Send via Telegram</button>
+              <button className="text-button" type="button" onClick={() => onOpen(result)} aria-label={`Open ${result.name}`}>Open</button>
+              <button className="text-button" type="button" onClick={() => onAnalyze(result)} aria-label={`Ask Lumi about ${result.name}`}>Ask Lumi about this photo</button>
+              <button className="text-button" type="button" onClick={() => onSend(result)} aria-label={`Send ${result.name} on Telegram`}>Send via Telegram</button>
             </div>
           </li>
         )

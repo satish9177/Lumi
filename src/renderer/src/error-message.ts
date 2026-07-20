@@ -1,5 +1,5 @@
 const ELECTRON_INVOKE_PREFIX = /^Error invoking remote method '[^'\r\n]+':\s*(?:Error:\s*)?/
-const FALLBACK_MESSAGE = 'LifeLens encountered an unexpected error.'
+const FALLBACK_MESSAGE = 'Something went wrong and Lumi stopped. Nothing was changed.'
 
 /**
  * Removes Electron's known ipcRenderer.invoke wrapper without rewriting the

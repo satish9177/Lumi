@@ -91,7 +91,7 @@ describe('capture source selection', () => {
     await expect(captureScreen(undefined, {
       getPrimaryDisplay: () => ({ id: 1, size: { width: 1_600, height: 900 }, scaleFactor: 1 }),
       getSources
-    })).rejects.toThrow('could not capture the primary display')
+    })).rejects.toThrow('Lumi could not capture your screen')
     expect(getSources).toHaveBeenCalledTimes(2)
   })
 })

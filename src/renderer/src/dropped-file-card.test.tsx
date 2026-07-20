@@ -45,7 +45,7 @@ describe('dropped-file card', () => {
   it('announces the file and its inaction to a screen reader', () => {
     const markup = render(DOCUMENT)
 
-    expect(markup).toContain('aria-label="Attached file contract.pdf. No action has been taken."')
+    expect(markup).toContain('aria-label="File added: contract.pdf, PDF document, 1.0 MB. No action taken."')
   })
 
   it('offers Analyse for an image', () => {

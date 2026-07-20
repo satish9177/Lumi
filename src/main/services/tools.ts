@@ -235,7 +235,7 @@ export function showReminderNotification(reminder: ReminderRecord): void {
   }
 
   new Notification({
-    title: `LifeLens reminder: ${reminder.title}`,
+    title: `Lumi reminder: ${reminder.title}`,
     body: reminder.sourceContext.summary.slice(0, 240)
   }).show()
 }

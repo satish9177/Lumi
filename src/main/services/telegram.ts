@@ -335,7 +335,7 @@ export class TelegramService {
       throw new Error('That Telegram recipient is no longer available. Search again first.')
     }
     if (recipient.kind === 'channel') {
-      throw new Error('LifeLens can send personal messages and groups, not channel posts.')
+      throw new Error('Lumi can send to people and groups, not channels. Nothing was sent.')
     }
 
     if (callId) {
@@ -358,7 +358,7 @@ export class TelegramService {
       throw new Error('This Telegram attachment was already handled.')
     }
     if (recipient.kind === 'channel') {
-      throw new Error('LifeLens can send personal messages and groups, not channel posts.')
+      throw new Error('Lumi can send to people and groups, not channels. Nothing was sent.')
     }
     if (attachment.caption !== undefined && attachment.caption.length > MAX_CAPTION_LENGTH) {
       throw new Error(`Telegram captions must be ${MAX_CAPTION_LENGTH} characters or shorter.`)

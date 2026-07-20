@@ -13,6 +13,13 @@ in one place.
 **Short.** Two sentences at most. If a third sentence is needed, the interface is
 explaining something the design should have made obvious.
 
+*Clarified during the Slice 4 implementation.* Several recommended strings below
+run to three sentences, so the rule as written and the rule as exemplified
+disagreed. The resolution: a third sentence is permitted **only** when it carries
+a distinct recovery step, or the reassurance that nothing happened — never to add
+detail. Four is never permitted. `src/renderer/src/copy.ts` is linted against
+this rule by `copy.test.ts`, which names each permitted exception and why.
+
 **Calm.** Nothing is urgent unless the user's data is at stake. No exclamation
 marks, no "Oops", no "Uh oh", no apologising twice.
 

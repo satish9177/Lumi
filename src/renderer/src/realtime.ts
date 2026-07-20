@@ -88,20 +88,20 @@ const LONG_FORM_CUE = /\b(?:explain in detail|in detail|detailed|article|story|s
 let nextRealtimeSessionGeneration = 0
 
 const SYSTEM_INSTRUCTIONS = [
-  'You are LifeLens, a concise, supportive floating desktop companion.',
+  'You are Lumi, a concise, supportive floating desktop companion.',
   'Explain captured screen content in simple English; use Telugu-English only if the user does.',
   'State important dates, links, and concrete next actions plainly.',
   'Every function is only a proposal. Never claim an action was performed until the application returns its result.',
-  'Never ask for, invent, or repeat a local file path, folder name, or folder identifier. LifeLens chooses the folders.',
+  'Never ask for, invent, or repeat a local file path, folder name, or folder identifier. Lumi chooses the folders.',
   'search_documents finds stored files, such as a resume, CV, PDF, certificate, photo, or screenshot, inside the folders the user has approved. When the user wants to find, locate, search for, or open a stored file, call search_documents immediately as your first action.',
   'Give search_documents one to three useful topic words from the user\'s own request, such as "resume" or "offer letter". Do not include words like my, latest, or file.',
-  'Never ask the user for an exact filename or which folder to search before calling search_documents. Call it even when no folder is approved yet: LifeLens asks the user to approve a folder and then runs your search automatically.',
-  'LifeLens shows the complete matching-file list in the UI. After a search result, state the total result count, mention at most the first three returned names, say the complete list is visible in the UI, and offer to hear more when there are additional results. Refer to results only by their number and name, and offer to open one with open_file.',
+  'Never ask the user for an exact filename or which folder to search before calling search_documents. Call it even when no folder is approved yet: Lumi asks the user to approve a folder and then runs your search automatically.',
+  'Lumi shows the complete matching-file list in the UI. After a search result, state the total result count, mention at most the first three returned names, say the complete list is visible in the UI, and offer to hear more when there are additional results. Refer to results only by their number and name, and offer to open one with open_file.',
   'For photo requests, search_documents can use local visual concept search over photos already indexed on this device. Put up to three short concepts copied from the user request in concepts. Photo bytes and embeddings never reach you.',
   'Local visual search does not support OCR, reading document text inside photos, counting people, or recognising a person\'s identity or face. Never claim those capabilities.',
   'If indexing is incomplete or a result is described as a filename-only possibility, repeat that limitation plainly. Do not claim a weak result depicts the requested concept.',
   'Selected-photo cloud analysis is separate from local indexing/search and happens only after the user explicitly confirms one photo. Never invoke or imply it happened automatically.',
-  'When the user explicitly chooses one photo, LifeLens sends you that single image. Answer their question about it, and answer later follow-ups from that same image without asking for it again.',
+  'When the user explicitly chooses one photo, Lumi sends you that single image. Answer their question about it, and answer later follow-ups from that same image without asking for it again.',
   'If the result list is described as recent possibilities rather than matches, say so honestly and offer the numbered options instead of asking for a filename.',
   'capture_screen_context only inspects content already visible on the user\'s screen, such as "this email", "this image", "this page", "this error", or "what is on my screen". It is never a fallback for finding stored files.',
   'If a document request such as "check my resume" does not say whether the document is visible on screen or stored in a folder, ask exactly: Should I inspect the resume currently visible, or find it in your approved folder? Substitute the document the user named.',
@@ -147,7 +147,7 @@ const TOOL_DEFINITIONS = [
   {
     type: 'function',
     name: 'search_documents',
-    description: 'Find stored files, such as a resume, CV, PDF, certificate, photo, or screenshot, inside the folders the user has approved. Call this immediately whenever the user wants to find, locate, search for, or open a stored file. It is safe to call when no folder is approved yet: LifeLens requests approval once and then runs this search automatically. Never ask for a filename or a folder first.',
+    description: 'Find stored files, such as a resume, CV, PDF, certificate, photo, or screenshot, inside the folders the user has approved. Call this immediately whenever the user wants to find, locate, search for, or open a stored file. It is safe to call when no folder is approved yet: Lumi requests approval once and then runs this search automatically. Never ask for a filename or a folder first.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -206,7 +206,7 @@ const TOOL_DEFINITIONS = [
   {
     type: 'function',
     name: TELEGRAM_ATTACHMENT_TOOL,
-    description: 'Coordinate sending exactly one already-found local photo or document through the connected personal Telegram account. This is only a request signal; LifeLens resolves both trusted identifiers locally and shows one final confirmation.',
+    description: 'Coordinate sending exactly one already-found local photo or document through the connected personal Telegram account. This is only a request signal; Lumi resolves both trusted identifiers locally and shows one final confirmation.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -222,7 +222,7 @@ const TOOL_DEFINITIONS = [
   {
     type: 'function',
     name: TELEGRAM_RECIPIENT_SEARCH_TOOL,
-    description: 'Request a local-only recipient lookup using the name in the user\'s own request. Recipient metadata and identifiers stay in LifeLens and are never returned to you. The user selects a recipient locally before any message can be proposed.',
+    description: 'Request a local-only recipient lookup using the name in the user\'s own request. Recipient metadata and identifiers stay in Lumi and are never returned to you. The user selects a recipient locally before any message can be proposed.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -240,7 +240,7 @@ const TOOL_DEFINITIONS = [
       type: 'object',
       additionalProperties: false,
       properties: {
-        recipient_result_id: { type: 'string', description: 'An opaque recipient result identifier supplied by LifeLens after local selection.' },
+        recipient_result_id: { type: 'string', description: 'An opaque recipient result identifier supplied by Lumi after local selection.' },
         message: { type: 'string', description: 'The complete plain-text message to send.' },
         reason: { type: 'string', description: 'Why this message is being proposed.' }
       },
@@ -295,7 +295,7 @@ export class RealtimeClient {
 
     if (credential.mode === 'mock') {
       this.connected = true
-      const greeting = 'Hi, I am LifeLens. I am ready to look at a screen with you.'
+      const greeting = 'Hi, I am Lumi. I am ready to look at a screen with you.'
       this.callbacks.onTranscript(greeting)
       this.callbacks.onState('speaking')
       this.speakMock(greeting)
@@ -303,7 +303,7 @@ export class RealtimeClient {
     }
 
     if (!credential.token) {
-      throw new Error('LifeLens received an incomplete Realtime credential.')
+      throw new Error('Lumi received an incomplete Realtime credential.')
     }
 
     const generation = ++nextRealtimeSessionGeneration
@@ -810,8 +810,8 @@ export class RealtimeClient {
    */
   private sessionInstructions(): string {
     const folderInstructions = this.approvedRoots.length === 0
-      ? 'No folder is approved for file search yet. Still call search_documents when the user wants a stored file; LifeLens will ask for approval and run the search.'
-      : 'The user has approved at least one folder. LifeLens searches all of them.'
+      ? 'No folder is approved for file search yet. Still call search_documents when the user wants a stored file; Lumi will ask for approval and run the search.'
+      : 'The user has approved at least one folder. Lumi searches all of them.'
     const contextInstructions = this.hasActiveScreenContext()
       ? 'A recent screen context from this conversation is available; use it for follow-ups.'
       : 'There is no current screen context.'
@@ -1094,7 +1094,7 @@ export class RealtimeClient {
         }
         this.callbacks.onTelegramRecipientSearch(query, serverCall)
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'LifeLens received malformed Telegram recipient search details.'
+        const message = error instanceof Error ? error.message : 'Lumi received malformed Telegram recipient search details.'
         this.callbacks.onError(message)
         this.sendFunctionCallOutput(serverCall, { ok: false, message })
       }
@@ -1112,7 +1112,7 @@ export class RealtimeClient {
         const caption = exactOptionalArgument(parsed, 'caption', 1_024)
         this.callbacks.onTelegramAttachmentRequest({ fileResultId, recipientQuery, caption, reason }, serverCall)
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'LifeLens received malformed Telegram attachment details.'
+        const message = error instanceof Error ? error.message : 'Lumi received malformed Telegram attachment details.'
         this.callbacks.onError(message)
         this.sendFunctionCallOutput(serverCall, { ok: false, message })
       }
@@ -1139,7 +1139,7 @@ export class RealtimeClient {
 
       this.callbacks.onToolProposal(this.createToolProposal(name, callId, parsed), serverCall)
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'LifeLens received malformed tool details from Realtime.'
+      const message = error instanceof Error ? error.message : 'Lumi received malformed tool details from Realtime.'
       this.callbacks.onError(message)
       this.sendFunctionCallOutput(serverCall, { ok: false, message })
     }
@@ -1186,7 +1186,7 @@ export class RealtimeClient {
       try {
         this.callbacks.onFileSearchRequest(parseSearchArguments(argumentsValue), serverCall)
       } catch (error) {
-        const message = error instanceof Error ? error.message : 'LifeLens received malformed search details from Realtime.'
+        const message = error instanceof Error ? error.message : 'Lumi received malformed search details from Realtime.'
         this.callbacks.onError(message)
         this.completeFileSearch(serverCall, { ok: false, message })
       }
@@ -1228,7 +1228,7 @@ export class RealtimeClient {
       case 'save_context':
         return parseToolProposal({
           ...common,
-          arguments: { label: requiredArgument(argumentsValue, 'label', 'LifeLens screen context'), sourceContext: this.currentSourceContext(reason) }
+          arguments: { label: requiredArgument(argumentsValue, 'label', 'Lumi screen context'), sourceContext: this.currentSourceContext(reason) }
         })
       case 'send_telegram_message':
         return parseToolProposal({

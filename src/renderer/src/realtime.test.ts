@@ -527,7 +527,7 @@ describe('RealtimeClient server events', () => {
     await client.connect({ mode: 'mock', model: 'gpt-realtime-2.1' })
     await client.sendCapture(capture, 'What is this email about?')
 
-    expect(transcripts).toContain('Hi, I am LifeLens. I am ready to look at a screen with you.')
+    expect(transcripts).toContain('Hi, I am Lumi. I am ready to look at a screen with you.')
     expect(explanations[0]?.sourceCaptureId).toBe(capture.id)
     expect(proposals[0]).toMatchObject({ toolName: 'create_reminder', requiresConfirmation: true })
   })

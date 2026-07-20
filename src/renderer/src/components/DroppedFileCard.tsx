@@ -1,4 +1,5 @@
 import type { DroppedFileDescriptor } from '../../../shared/contracts'
+import { COPY, formatFileSize } from '../copy'
 
 /**
  * The temporary file the user handed Lumi.
@@ -18,9 +19,14 @@ export interface DroppedFileCardProps {
 
 export function DroppedFileCard({ file, onOpen, onAnalyse, onSend, onRemove, busy = false }: DroppedFileCardProps) {
   const isPhoto = file.mediaKind === 'photo'
+  const size = formatFileSize(file.sizeBytes)
 
   return (
-    <section className="dropped-file-card" aria-label={`Attached file ${file.fileName}. No action has been taken.`}>
+    <section
+      className="dropped-file-card"
+      aria-label={COPY.drop.announce(file.fileName, file.fileTypeLabel, size)}
+      aria-busy={busy || undefined}
+    >
       <div className="dropped-file-preview">
         {file.thumbnailDataUrl
           ? <img src={file.thumbnailDataUrl} alt={`Preview of ${file.fileName}`} />
@@ -30,15 +36,27 @@ export function DroppedFileCard({ file, onOpen, onAnalyse, onSend, onRemove, bus
       <div className="dropped-file-body">
         <p className="dropped-file-name" title={file.fileName}>{file.fileName}</p>
         <p className="dropped-file-meta">
-          {file.fileTypeLabel} · {formatFileSize(file.sizeBytes)} · Stays on this device
+          {file.fileTypeLabel} · {size} · {COPY.drop.localOnly}
         </p>
-        <p className="dropped-file-note">Added locally. Nothing happens until you choose an action.</p>
+        <p className="dropped-file-note">{COPY.drop.addedNote}</p>
 
+        {/* Every action names the file, so a screen reader user hears which
+            file a button acts on without relying on surrounding context. */}
         <div className="dropped-file-actions">
-          <button className="text-button" type="button" onClick={onOpen} disabled={busy}>Open</button>
-          {isPhoto && <button className="text-button" type="button" onClick={onAnalyse} disabled={busy}>Analyse</button>}
-          <button className="text-button" type="button" onClick={onSend} disabled={busy}>Send</button>
-          <button className="text-button danger-button" type="button" onClick={onRemove} disabled={busy}>Remove</button>
+          <button className="text-button" type="button" onClick={onOpen} disabled={busy} aria-label={COPY.labels.openDroppedFile(file.fileName)}>
+            Open
+          </button>
+          {isPhoto && (
+            <button className="text-button" type="button" onClick={onAnalyse} disabled={busy} aria-label={COPY.labels.analyseDroppedFile(file.fileName)}>
+              Analyse
+            </button>
+          )}
+          <button className="text-button" type="button" onClick={onSend} disabled={busy} aria-label={COPY.labels.sendDroppedFile(file.fileName)}>
+            Send
+          </button>
+          <button className="text-button danger-button" type="button" onClick={onRemove} disabled={busy} aria-label={COPY.labels.removeDroppedFile(file.fileName)}>
+            Remove
+          </button>
         </div>
       </div>
     </section>
@@ -53,8 +71,3 @@ function glyphFor(fileTypeLabel: string): string {
   return 'FILE'
 }
 
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}

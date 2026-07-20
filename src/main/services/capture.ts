@@ -92,7 +92,7 @@ export async function captureScreen(sourceId?: string, runtime: CaptureRuntime =
   }
 
   if (!isUsableCaptureSource(source)) {
-    throw new Error(sourceId ? 'The selected capture source is no longer available. Choose it again.' : 'LifeLens could not capture the primary display.')
+    throw new Error(sourceId ? 'The selected capture source is no longer available. Choose it again.' : 'Lumi could not capture your screen. Try again, or choose a different window.')
   }
 
   const image = encodeCaptureImage(source.thumbnail)

@@ -328,9 +328,110 @@ Dropping onto the **collapsed orb** does nothing; the drop target is the open
 panel. Document-level handlers still prevent navigation in that case, so it
 fails safe, but it is a discoverability gap worth closing later.
 
-## UI/UX polish — Slice 4 (copy and accessibility) — NOT STARTED
+## UI/UX polish — Slice 4 (copy and accessibility) — COMPLETE
 
-`docs/COPY.md` has not been applied. `src/renderer/src/copy.ts`, the banned-term
-lint test, and the accessibility sweep remain outstanding. Some Slice 2 strings
-were written in the COPY.md voice as they moved, but no systematic sweep ran and
-older strings still carry the retired wording.
+| Command | Result |
+| --- | --- |
+| `npm.cmd run typecheck` | passed |
+| `npm.cmd test` | 725 passed, 2 skipped (43 files) |
+| `npm.cmd run build` | passed |
+| `npm.cmd run package` | passed — `release/0.1.0/Lumi Setup 0.1.0.exe` |
+
+### Copy
+
+`src/renderer/src/copy.ts` now holds every renderer-facing string, grouped by
+capability (voice, Telegram, files, photos, drop, confirmation, capture, window,
+empty state, control labels). `copy.test.ts` lints it against docs/COPY.md: the
+banned-terminology table, no absolute paths, no status or error codes, no
+exclamation marks, no self-blame, and a sentence cap.
+
+Wording only — no security decision moved into the renderer. Main still authors
+every confirmation preview and every bounded failure it raises; those strings
+were reworded in place.
+
+**Visible LifeLens branding is gone.** 27 user-visible strings were rewritten
+across main errors, the Realtime system instructions and tool descriptions (the
+model echoes those into speech), the shared intent policy, the demo-mode
+greeting, and the fallback error message. The Windows Task Manager service name
+for the photo-search worker also became "Lumi local photo search".
+
+Two lint suites keep it that way: one over the renderer components, one over
+main-authored text. Both allow internal identifiers — the `lifelens:` IPC
+channel prefix, the `window.lifeLens` bridge, `com.lifelens.app`,
+`lifelens-state.json`, and the `LifeLensApp` component name — which no user
+reads. The only two `LifeLens` strings left in the built bundles are that
+component identifier.
+
+One deliberate exemption: `capture.ts` matches `/(?:lifelens|lumi)/i` when
+excluding Lumi's own window from the capture source list. It must keep matching
+the old title so a window from an older build is still filtered out.
+
+### docs/COPY.md was corrected
+
+The document capped copy at two sentences but several of its own recommended
+strings ran to three. The rule as written and the rule as exemplified
+disagreed. COPY.md now states the resolution: a third sentence is permitted only
+when it carries a distinct recovery step or the reassurance that nothing
+happened, never to add detail; four is never permitted. `copy.test.ts` enforces
+that and names each permitted exception with its reason.
+
+### Keyboard
+
+The composer became a `textarea`: Enter sends, Shift+Enter adds a newline, and
+Enter does nothing while send is disabled. Escape closes layers outermost-first
+— drop overlay, settings, capture picker, then the panel — and deliberately does
+not clear a pending confirmation, which must be answered rather than dismissed
+by a stray keypress.
+
+Settings behaves as a modal layer: focus moves into it on open, `focus-trap.ts`
+traps Tab and Shift+Tab with wrap-around, and focus returns to the gear that
+opened it on close. Opening the panel focuses the composer. Hidden layers are
+unmounted rather than hidden, so nothing invisible stays tabbable.
+
+### Screen reader
+
+`role="log"` on the conversation; a polite live region for status; a separate
+assertive `role="alert"` region for actionable failures only. Indexing progress
+is quantised to ten-percent milestones by `statusAnnouncement`, so a long index
+does not re-announce every second, and raw file counts are never spoken.
+
+Every icon-only control is labelled. The dropped-file card announces
+"File added: <name>, <type>, <size>. No action taken." and every one of its
+actions names the file, including Remove. Confirmation cards are a labelled
+group whose description states that confirmation is required. Progress exposes
+`aria-valuenow`/`valuemax`/`valuetext`; real loading states set `aria-busy`.
+
+### Reduced motion, contrast, typography
+
+Orb pulse, hover lift and orb hover scale sit inside
+`prefers-reduced-motion: no-preference`; the glow itself stays, because it
+carries state. A `prefers-reduced-motion: reduce` block collapses all remaining
+animation and transition durations. A `forced-colors: active` block keeps every
+surface bounded and the focus ring visible under Windows High Contrast.
+
+No user-facing text remains below 11px — ten declarations at 9px and 10px were
+raised. Focus rings extend to the chip, textarea, summary and progress
+surfaces. Long filenames and errors wrap with `overflow-wrap: anywhere`, and
+the panel, conversation and settings scroll containers block horizontal
+overflow.
+
+### Tests added
+
++108, to 725 passed / 2 skipped: `copy.test.ts` (61), `accessibility.test.tsx`
+(40), plus focus-trap and status-announcement coverage. Two existing tests were
+updated because the copy they asserted intentionally changed; none were weakened.
+
+## Remaining for the final manual acceptance pass
+
+None of the following can be certified from automated checks, and none are
+claimed here:
+
+- real Explorer drag and drop, including a folder, a `.lnk`, a `mklink` symlink,
+  a 60 MB file, two files at once, and an Outlook attachment
+- visual inspection of the panel at 390px
+- icon rendering at 16/32/48/128/256px on light and dark taskbars
+- multi-monitor movement, unplugging, and 100/150/200% scaling
+- voice, Telegram send, screen capture, semantic photo search
+- a keyboard-only walkthrough
+- an NVDA or Narrator walkthrough
+- Windows "Show animations" off, and High Contrast

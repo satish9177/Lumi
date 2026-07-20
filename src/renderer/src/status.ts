@@ -44,6 +44,22 @@ function indexingLabel(status: Pick<PhotoSearchStatus, 'indexed' | 'total'>): st
   return 'Indexing photos'
 }
 
+/**
+ * What a screen reader should hear for a status.
+ *
+ * Indexing progress is quantised to ten-percent milestones so a long index does
+ * not interrupt the user with a fresh announcement every second. Everything
+ * else announces its label verbatim. Because the result only changes at a
+ * milestone, rendering it into a live region dedupes announcements naturally.
+ */
+export function statusAnnouncement(status: StatusDescriptor, photo?: Pick<PhotoSearchStatus, 'indexed' | 'total'>): string {
+  if (status.tone !== 'indexing' || !photo || photo.total <= 0) {
+    return status.label
+  }
+  const milestone = Math.floor((photo.indexed / photo.total) * 10) * 10
+  return `Indexing photos, ${milestone}% done`
+}
+
 export function deriveStatus(inputs: StatusInputs): StatusDescriptor {
   const suffix = inputs.mode === 'mock' ? 'Demo mode' : undefined
   const describe = (tone: StatusTone, label: string): StatusDescriptor => ({ tone, label, suffix })

@@ -257,11 +257,11 @@ function registerIpcHandlers(): void {
   ipcMain.handle(IPC_CHANNELS.chooseDocumentRoot, async (event) => {
     requireMainWindow(event)
     if (!mainWindow) {
-      throw new Error('LifeLens window is unavailable.')
+      throw new Error('The Lumi window is unavailable.')
     }
 
     const selection = await dialog.showOpenDialog(mainWindow, {
-      title: 'Choose a folder LifeLens may search',
+      title: 'Choose a folder Lumi may search',
       buttonLabel: 'Approve this folder',
       properties: ['openDirectory'],
       // Only where the chooser opens. Access still comes from the user's pick.
@@ -490,7 +490,7 @@ function validateCaptureProvenance(proposal: ToolProposal): void {
 
   const captured = captures.get(proposal.arguments.sourceContext.captureId)
   if (!captured || captured.capturedAt !== proposal.arguments.sourceContext.capturedAt) {
-    throw new Error('The requested action does not refer to a screen capture from this LifeLens session.')
+    throw new Error('That action does not match a screen capture from this session. Nothing happened.')
   }
 }
 
@@ -621,7 +621,8 @@ function createVisionEngine(): VisionEngine {
       ? { image: resolveAssetPath(userDataDir, 'imageModel'), text: resolveAssetPath(userDataDir, 'textModel') }
       : undefined,
     spawn: (): VisionWorkerHandle => {
-      const child = utilityProcess.fork(join(__dirname, 'vision-worker.cjs'), [], { serviceName: 'LifeLens local photo search' })
+      // Visible to the user in Windows Task Manager, so it carries the product name.
+      const child = utilityProcess.fork(join(__dirname, 'vision-worker.cjs'), [], { serviceName: 'Lumi local photo search' })
       if (child.pid) {
         try { setPriority(child.pid, osPriority.priority.PRIORITY_BELOW_NORMAL) } catch { /* Best effort on supported platforms. */ }
       }

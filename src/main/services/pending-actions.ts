@@ -67,7 +67,7 @@ export class PendingActionStore {
       throw new Error('That Telegram recipient is no longer available. Search again first.')
     }
     if (recipientSnapshot?.kind === 'channel') {
-      throw new Error('LifeLens can send personal messages and groups, not channel posts.')
+      throw new Error('Lumi can send to people and groups, not channels. Nothing was sent.')
     }
     const preview = await this.createTrustedPreview(proposal, approvalId, createdAt, expiresAt, attachment, recipientSnapshot)
     this.actions.set(approvalId, { proposal, preview, state: 'ready', attachment, recipientSnapshot })
@@ -300,7 +300,7 @@ export class PendingActionStore {
     }
     if (action.state !== 'ready') {
       throw new Error(action.state === 'expired'
-        ? 'That approval expired. Ask LifeLens to propose the action again.'
+        ? 'That confirmation expired, so nothing happened. Ask again and Lumi will offer it once more.'
         : 'That approval was already handled and cannot be used again.')
     }
     return action
