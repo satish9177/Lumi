@@ -87,4 +87,14 @@ describe('screen reasoning request', () => {
       .rejects.toThrow('OPENAI_API_KEY')
     expect(fetchMock).not.toHaveBeenCalled()
   })
+
+  it('fails closed when GPT-5.6 omits required structured fields', async () => {
+    vi.stubEnv('OPENAI_API_KEY', 'test-key')
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      output: [{ type: 'message', content: [{ type: 'output_text', text: JSON.stringify({ summary: 'Incomplete brief.' }) }] }]
+    }), { status: 200 })))
+
+    await expect(createScreenReasoningSummary({ id: 'capture-1', dataUrl: 'data:image/jpeg;base64,AA==' }, 'test-user'))
+      .rejects.toThrow('invalid screen brief')
+  })
 })

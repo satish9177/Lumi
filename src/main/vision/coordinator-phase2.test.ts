@@ -10,12 +10,26 @@ import type { BoundedNativeImage } from './scanner'
 let userDataDir: string
 let photosDir: string
 
+/**
+ * Every coordinator a test builds, so teardown can stop it.
+ *
+ * The coordinator starts reconciliation as a fire-and-forget promise. Deleting
+ * the temp directory while that is still writing the index meta file fails the
+ * whole run with an unhandled ENOENT — and only under load, which is what makes
+ * it a flake rather than an honest failure. Shutting each coordinator down
+ * first is the fix; suppressing the rejection would only hide it.
+ */
+const running: PhotoIndexCoordinator[] = []
+
 beforeEach(async () => {
   userDataDir = await mkdtemp(join(tmpdir(), 'lumi-coord2-'))
   photosDir = await mkdtemp(join(tmpdir(), 'lumi-photos-'))
 })
 
 afterEach(async () => {
+  for (const coordinator of running.splice(0)) {
+    await coordinator.shutdown().catch(() => undefined)
+  }
   await rm(userDataDir, { recursive: true, force: true })
   await rm(photosDir, { recursive: true, force: true })
 })
@@ -129,6 +143,7 @@ async function harness(
   }
 
   const coordinator = new PhotoIndexCoordinator(dependencies)
+  running.push(coordinator)
   await coordinator.initialize()
   return {
     coordinator,

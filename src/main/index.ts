@@ -6,7 +6,6 @@ import { pathToFileURL } from 'node:url'
 import {
   IPC_CHANNELS,
   parseFileSearchRequest,
-  type CaptureResult,
   type PendingSearchResolution,
   type TelegramStatus,
   type ToolProposal
@@ -17,6 +16,7 @@ import { captureScreen, listCaptureSources } from './services/capture'
 import { runDocumentSearch } from './services/document-search'
 import { IntentTracker } from './services/intent-policy'
 import { createRealtimeSessionCredential } from './services/realtime'
+import { RetainedCaptureStore } from './services/retained-captures'
 import { createScreenReasoningSummary } from './services/screen-reasoning'
 import { SearchOrchestrator } from './services/search-orchestrator'
 import { LocalStore } from './services/store'
@@ -47,7 +47,7 @@ let photoIndexCoordinator: PhotoIndexCoordinator
 let windowState: WindowStateStore
 let droppedFiles: DroppedFileStore
 let panelOpen = false
-const captures = new Map<string, Pick<CaptureResult, 'capturedAt' | 'dataUrl'>>()
+const retainedCapture = new RetainedCaptureStore()
 
 const CLOSED_WINDOW_SIZE = { width: 88, height: 88 }
 const OPEN_WINDOW_SIZE = { width: 390, height: 640 }
@@ -100,6 +100,12 @@ function createWindow(): BrowserWindow {
     }
   })
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  window.on('closed', () => {
+    retainedCapture.clear()
+    if (mainWindow === window) {
+      mainWindow = undefined
+    }
+  })
 
   return window
 }
@@ -209,7 +215,7 @@ function registerIpcHandlers(): void {
         await waitForDesktopRepaint()
       }
       const capture = await captureScreen(sourceId)
-      rememberCapture(capture)
+      retainedCapture.replace(capture)
       return capture
     } finally {
       if (shouldRestoreWindow && mainWindow && !mainWindow.isDestroyed()) {
@@ -223,11 +229,16 @@ function registerIpcHandlers(): void {
     if (!isCaptureId(captureId)) {
       throw new Error('Screen reasoning requires a valid capture from this session.')
     }
-    const capture = captures.get(captureId)
+    const capture = retainedCapture.get(captureId)
     if (!capture) {
       throw new Error('That screen capture is no longer available. Capture it again before asking Lumi to review it.')
     }
     return createScreenReasoningSummary({ id: captureId, dataUrl: capture.dataUrl }, app.getPath('userData'))
+  })
+
+  ipcMain.handle(IPC_CHANNELS.discardCapture, (event) => {
+    requireMainWindow(event)
+    retainedCapture.clear()
   })
 
   ipcMain.handle(IPC_CHANNELS.createRealtimeSession, async (event) => {
@@ -483,19 +494,6 @@ function waitForDesktopRepaint(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 150))
 }
 
-function rememberCapture(capture: CaptureResult): void {
-  // Main holds a bounded in-memory copy so a separately confirmed GPT-5.6
-  // review can send only this user-selected capture. It is never persisted.
-  captures.set(capture.id, { capturedAt: capture.capturedAt, dataUrl: capture.dataUrl })
-  while (captures.size > 12) {
-    const oldestId = captures.keys().next().value
-    if (!oldestId) {
-      break
-    }
-    captures.delete(oldestId)
-  }
-}
-
 function isCaptureId(value: unknown): value is string {
   return typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 }
@@ -505,7 +503,7 @@ function validateCaptureProvenance(proposal: ToolProposal): void {
     return
   }
 
-  const captured = captures.get(proposal.arguments.sourceContext.captureId)
+  const captured = retainedCapture.get(proposal.arguments.sourceContext.captureId)
   if (!captured || captured.capturedAt !== proposal.arguments.sourceContext.capturedAt) {
     throw new Error('That action does not match a screen capture from this session. Nothing happened.')
   }
@@ -583,6 +581,8 @@ app.whenReady().then(async () => {
     }
   })
 })
+
+app.on('before-quit', () => retainedCapture.clear())
 
 // A model search can outrun its own voice transcript, so the trusted intent may
 // register a beat after the request arrives. These bound how long the search

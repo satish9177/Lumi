@@ -10,6 +10,7 @@ import {
 export const IPC_CHANNELS = {
   captureScreen: 'lifelens:capture-screen',
   analyzeCapture: 'lifelens:analyze-capture',
+  discardCapture: 'lifelens:discard-capture',
   listCaptureSources: 'lifelens:list-capture-sources',
   createRealtimeSession: 'lifelens:create-realtime-session',
   noteUserRequest: 'lifelens:note-user-request',
@@ -390,6 +391,7 @@ export interface LifeLensApi {
   listCaptureSources: () => Promise<CaptureSource[]>
   captureScreen: (sourceId?: string) => Promise<CaptureResult>
   analyzeCapture: (captureId: string) => Promise<ScreenReasoningSummary>
+  discardCapture: () => Promise<void>
   createRealtimeSession: () => Promise<RealtimeSessionCredential>
   noteUserRequest: (request: string) => Promise<ClassifiedIntent>
   evaluateToolRequest: (toolName: GuardedTool) => Promise<ToolPolicyDecision>

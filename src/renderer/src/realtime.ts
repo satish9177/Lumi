@@ -9,6 +9,7 @@ import {
   type Explanation,
   type RealtimeSessionCredential,
   type SearchDocumentsInput,
+  type ScreenReasoningSummary,
   type SourceContext,
   type ToolExecutionResult,
   type ToolName,
@@ -103,14 +104,14 @@ const SYSTEM_INSTRUCTIONS = [
   'Selected-photo cloud analysis is separate from local indexing/search and happens only after the user explicitly confirms one photo. Never invoke or imply it happened automatically.',
   'When the user explicitly chooses one photo, Lumi sends you that single image. Answer their question about it, and answer later follow-ups from that same image without asking for it again.',
   'If the result list is described as recent possibilities rather than matches, say so honestly and offer the numbered options instead of asking for a filename.',
-  'capture_screen_context only inspects content already visible on the user\'s screen, such as "this email", "this image", "this page", "this error", or "what is on my screen". It is never a fallback for finding stored files.',
+  'capture_screen_context asks the user to select a screen or window for local preview and optional GPT-5.6 review. You never receive the screenshot. It is never a fallback for finding stored files.',
   'If a document request such as "check my resume" does not say whether the document is visible on screen or stored in a folder, ask exactly: Should I inspect the resume currently visible, or find it in your approved folder? Substitute the document the user named.',
   'Telegram contact and dialog metadata are local-only. You may request a local recipient search from the user\'s spoken recipient name, but never receive, repeat, or infer Telegram names, usernames, phone numbers, peer identifiers, or search results.',
   'To send one already-found local photo or document, call telegram_send_attachment. Refer to the file only as selected or by its current result number. Never provide a filename, path, file identifier, recipient identifier, peer, MIME type, or bytes.',
   'For a named file such as my latest resume, call search_documents first with query_terms resume, kind document, and recency latest. Never auto-select a fallback recent possibility; ask for its result number.',
   'Do not capture a screen when the panel opens or during a general greeting.',
   'When a user request needs visible-screen context and there is no current screen context, call capture_screen_context once. The user making that screen-relative request is consent for this one-time capture.',
-  'When a current screen context is available, answer follow-up questions from it and do not call capture_screen_context again unless the user asks to refresh, says the screen changed, refers to a new visible item, or you cannot answer reliably.',
+  'After a screen is selected, wait for the application to provide a validated textual review before answering from it. Do not call capture_screen_context again unless the user asks to refresh or says the screen changed.',
   'If it is unclear whether the user means their screen and no stored document is involved, ask exactly: Should I look at your screen?',
   'When analyzing a capture, focus on visible page or document content. Ignore browser tabs, address bars, bookmarks, taskbars, and window chrome.',
   'For simple requests, answer naturally in one or two short sentences.',
@@ -571,11 +572,77 @@ export class RealtimeClient {
   }
 
   async provideScreenContext(capture: CaptureResult, serverCall?: RealtimeServerCall): Promise<void> {
-    if (serverCall) {
-      await this.sendCaptureForRequest(capture, serverCall)
+    if (serverCall && !this.isServerCallActive(serverCall)) {
       return
     }
-    await this.sendCapture(capture, this.lastUserRequest)
+    if (!this.connected) {
+      throw new Error('Connect voice before capturing a screen.')
+    }
+
+    this.touchActivity()
+    this.currentCapture = capture
+    this.currentExplanation = undefined
+    this.textBuffer = ''
+    this.updateLiveSessionInstructions()
+
+    if (this.mode === 'mock') {
+      await delay(550)
+      const explanation = createMockExplanation(capture, this.lastUserRequest)
+      this.currentExplanation = explanation
+      this.callbacks.onExplanation(explanation)
+      this.callbacks.onTranscript(explanation.summary)
+      this.callbacks.onToolProposal(createMockReminderProposal(explanation, capture))
+      this.callbacks.onState('speaking')
+      this.speakMock(explanation.summary)
+      return
+    }
+
+    if (serverCall) {
+      this.sendFunctionCallOutput(serverCall, {
+        ok: true,
+        message: 'The user selected a screen for local preview. Wait for the application to provide a validated GPT-5.6 text review; no screenshot is available to you.'
+      })
+      return
+    }
+
+    this.callbacks.onTranscript('Your selected screen is ready for local preview. Choose GPT-5.6 review to share it for analysis.')
+    this.callbacks.onState('listening')
+  }
+
+  provideScreenReview(review: ScreenReasoningSummary): void {
+    if (!this.currentCapture || this.currentCapture.id !== review.sourceCaptureId) {
+      return
+    }
+
+    this.currentExplanation = explanationFromScreenReview(review)
+    this.textBuffer = review.summary
+    this.updateLiveSessionInstructions()
+    if (!this.isLiveConnected()) {
+      return
+    }
+
+    if (this.responseActive) {
+      this.sendEvent({ type: 'response.cancel' })
+      this.responseActive = false
+    }
+
+    try {
+      this.sendEvent({
+        type: 'conversation.item.create',
+        item: {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: screenReviewText(review) }]
+        }
+      })
+      this.sendEvent({
+        type: 'response.create',
+        response: { output_modalities: ['audio'], max_output_tokens: pickResponseBudget('long-form') }
+      })
+      this.responseActive = true
+    } catch (error) {
+      this.callbacks.onError(error instanceof Error ? error.message : 'Could not share the validated screen review with Realtime.')
+    }
   }
 
   declineScreenContext(serverCall?: RealtimeServerCall): void {
@@ -590,55 +657,6 @@ export class RealtimeClient {
     this.updateLiveSessionInstructions()
   }
 
-  async sendCapture(capture: CaptureResult, question: string): Promise<void> {
-    if (!this.connected) {
-      throw new Error('Connect voice before capturing a screen.')
-    }
-
-    this.touchActivity()
-    this.currentCapture = capture
-    this.currentExplanation = undefined
-    this.textBuffer = ''
-    this.callbacks.onState('thinking')
-
-    if (this.mode === 'mock') {
-      await delay(550)
-      const explanation = createMockExplanation(capture, question)
-      this.currentExplanation = explanation
-      this.callbacks.onExplanation(explanation)
-      this.callbacks.onTranscript(explanation.summary)
-      this.callbacks.onToolProposal(createMockReminderProposal(explanation, capture))
-      this.callbacks.onState('speaking')
-      this.speakMock(explanation.summary)
-      return
-    }
-
-    this.updateLiveSessionInstructions()
-
-    if (this.responseActive) {
-      this.sendEvent({ type: 'response.cancel' })
-      this.responseActive = false
-    }
-
-    this.sendEvent({
-      type: 'conversation.item.create',
-      item: {
-        type: 'message',
-        role: 'user',
-        content: [
-          {
-            type: 'input_text',
-            text: `${question.trim() || 'What is this screen about?'} Review the attached screen capture, taken at ${capture.capturedAt}, and include useful dates, links, and next actions.`
-          },
-          { type: 'input_image', image_url: capture.dataUrl, detail: 'auto' }
-        ]
-      }
-    })
-    this.sendEvent({
-      type: 'response.create',
-      response: { output_modalities: ['audio'], max_output_tokens: pickResponseBudget('long-form') }
-    })
-  }
 
   sendToolResult(proposal: ToolProposal, result: ToolExecutionResult, serverCall?: RealtimeServerCall): void {
     if (!serverCall || proposal.callId !== serverCall.callId) {
@@ -823,9 +841,11 @@ export class RealtimeClient {
     const folderInstructions = this.approvedRoots.length === 0
       ? 'No folder is approved for file search yet. Still call search_documents when the user wants a stored file; Lumi will ask for approval and run the search.'
       : 'The user has approved at least one folder. Lumi searches all of them.'
-    const contextInstructions = this.hasActiveScreenContext()
-      ? 'A recent screen context from this conversation is available; use it for follow-ups.'
-      : 'There is no current screen context.'
+    const contextInstructions = this.currentExplanation
+      ? 'A validated textual screen review from this conversation is available; use it for follow-ups.'
+      : this.currentCapture
+        ? 'A screen is selected locally, but no textual review is available yet. Do not claim to have seen it.'
+        : 'There is no current screen context.'
     // A boolean, never the filename, so the cacheable prefix stays stable.
     const photoInstructions = this.selectedPhoto
       ? 'The user has selected one photo in this conversation; answer follow-up questions about it from that image.'
@@ -1273,43 +1293,6 @@ export class RealtimeClient {
     }
   }
 
-  private async sendCaptureForRequest(capture: CaptureResult, serverCall: RealtimeServerCall): Promise<void> {
-    if (!this.isServerCallActive(serverCall)) {
-      return
-    }
-
-    this.touchActivity()
-    this.currentCapture = capture
-    this.currentExplanation = undefined
-    this.textBuffer = ''
-    this.updateLiveSessionInstructions()
-    if (this.mode === 'mock') {
-      await this.sendCapture(capture, this.lastUserRequest)
-      return
-    }
-
-    this.sendEvent({
-      type: 'conversation.item.create',
-      item: {
-        type: 'message',
-        role: 'user',
-        content: [
-          { type: 'input_text', text: `A one-time user-approved screen capture, taken at ${capture.capturedAt}, is attached. Use it to answer the user's current request.` },
-          { type: 'input_image', image_url: capture.dataUrl, detail: 'auto' }
-        ]
-      }
-    })
-    this.sendFunctionCallOutput(serverCall, { ok: true, message: 'A one-time screen capture is available for the current request.' }, false)
-    if (!this.isServerCallCurrent(serverCall)) {
-      return
-    }
-    this.sendEvent({
-      type: 'response.create',
-      response: { output_modalities: ['audio'], max_output_tokens: pickResponseBudget('long-form') }
-    })
-    this.responseActive = true
-  }
-
   private resolveAttachmentReference(value: unknown): string {
     if (typeof value === 'string' && /^(?:[1-9]|10)$/.test(value)) {
       const ordinal = Number.parseInt(value, 10)
@@ -1682,6 +1665,29 @@ function extractResponseText(response: Record<string, unknown>): string {
     }
   }
   return parts.join(' ').trim()
+}
+
+function explanationFromScreenReview(review: ScreenReasoningSummary): Explanation {
+  return {
+    summary: review.summary,
+    sourceCaptureId: review.sourceCaptureId,
+    signals: [
+      ...review.dates.map((value) => ({ kind: 'date' as const, label: 'Important date', value })),
+      ...review.links.map((value) => ({ kind: 'link' as const, label: 'Visible link', value })),
+      ...review.nextActions.map((value) => ({ kind: 'next_action' as const, label: 'Suggested next action', value }))
+    ]
+  }
+}
+
+function screenReviewText(review: ScreenReasoningSummary): string {
+  return [
+    'The application completed a user-approved GPT-5.6 screen review. This is validated text only; no screenshot is attached or available.',
+    `Summary: ${review.summary}`,
+    `Dates: ${review.dates.join('; ') || 'None'}`,
+    `Links: ${review.links.join('; ') || 'None'}`,
+    `Risks: ${review.risks.join('; ') || 'None'}`,
+    `Next actions: ${review.nextActions.join('; ') || 'None'}`
+  ].join('\n')
 }
 
 /**

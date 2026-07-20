@@ -153,6 +153,10 @@ export default function LifeLensApp() {
   // A stray drop must never navigate the window to a file:// page.
   useEffect(() => preventFileNavigation(document), [])
 
+  useEffect(() => () => {
+    void window.lifeLens.discardCapture()
+  }, [])
+
   useEffect(() => {
     const update = () => setOnline(navigator.onLine)
     window.addEventListener('online', update)
@@ -354,7 +358,12 @@ export default function LifeLensApp() {
           onError: setError,
           onSessionEnded: (reason, generation) => {
             void window.lifeLens.setRealtimeActive(false)
+            void window.lifeLens.discardCapture()
             expireServerGeneration(generation)
+            setCapture(undefined)
+            setExplanation(undefined)
+            setScreenReasoning(undefined)
+            setScreenReasoningConfirmationOpen(false)
             if (reason === 'error') {
               setCompanionState('error')
               return
@@ -493,6 +502,7 @@ export default function LifeLensApp() {
       setScreenReasoning(result)
       setScreenReasoningConfirmationOpen(false)
       setExplanation(explanationFromScreenReasoning(result))
+      clientRef.current?.provideScreenReview(result)
       setCompanionState('success')
     } catch (reasoningError) {
       setCompanionState('error')
@@ -1072,6 +1082,7 @@ export default function LifeLensApp() {
   }
 
   const selectCaptureSource = (source: CaptureSource): void => {
+    void window.lifeLens.discardCapture()
     setSelectedCaptureSourceId(source.id)
     setCapturePickerOpen(false)
     clientRef.current?.invalidateScreenContext()

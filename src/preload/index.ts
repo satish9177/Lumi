@@ -13,6 +13,7 @@ const lifeLensApi: LifeLensApi = {
   listCaptureSources: () => ipcRenderer.invoke(IPC_CHANNELS.listCaptureSources),
   captureScreen: (sourceId?: string) => ipcRenderer.invoke(IPC_CHANNELS.captureScreen, sourceId),
   analyzeCapture: (captureId: string) => ipcRenderer.invoke(IPC_CHANNELS.analyzeCapture, captureId),
+  discardCapture: () => ipcRenderer.invoke(IPC_CHANNELS.discardCapture),
   createRealtimeSession: () => ipcRenderer.invoke(IPC_CHANNELS.createRealtimeSession),
   noteUserRequest: (request: string) => ipcRenderer.invoke(IPC_CHANNELS.noteUserRequest, request),
   evaluateToolRequest: (toolName: GuardedTool) => ipcRenderer.invoke(IPC_CHANNELS.evaluateToolRequest, toolName),

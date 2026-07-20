@@ -12,7 +12,7 @@ Important details are often scattered across one busy screen: deadlines, prepara
 
 - A lightweight floating Windows companion with a deterministic no-key demo mode.
 - User-initiated capture of one selected screen or application window.
-- Live voice, text, and image-context conversation through OpenAI Realtime when an API key is configured.
+- Live voice and text conversation through OpenAI Realtime when an API key is configured; selected-photo analysis remains separately confirmed.
 - An explicit GPT-5.6 review of that one captured image, returning a validated brief of visible dates, links, risks, and suggested next actions.
 - Confirmed reminders, approved-folder search, opening a returned local file, and opening an extracted `http` or `https` link.
 - Optional Telegram connection and confirmed attachment sending when configured locally.
@@ -43,13 +43,15 @@ The complete manual path is in [docs/DEMO-CHECKLIST.md](docs/DEMO-CHECKLIST.md).
 
 | Model | Exact role |
 | --- | --- |
-| `gpt-realtime-2.1-mini` | Default live Realtime model for Lumi's WebRTC voice, text, image-context, and bounded tool-proposal flow. `LIFELENS_REALTIME_MODEL` may select a supported alternative. |
+| `gpt-realtime-2.1-mini` | Default live Realtime model for Lumi's WebRTC voice, text, selected-photo context, and bounded tool-proposal flow. Screen reviews provide it only validated text. `LIFELENS_REALTIME_MODEL` may select a supported alternative. |
 | `gpt-4o-mini-transcribe` | Input transcription for the Realtime voice flow. |
 | `gpt-5.6-terra` | Default model for the separate, explicitly confirmed screen-review request through the Responses API. |
 
 ### GPT-5.6 in Lumi
 
 GPT-5.6 is genuinely used at runtime; it is not a renamed Realtime model. After a user captures a chosen screen or window, Lumi shows a second renderer confirmation. Only after the user chooses **Review this capture with GPT-5.6** does Electron main send that retained in-memory image to the Responses API.
+
+Captures are initiated and previewed locally. A selected capture is sent to GPT-5.6 Terra only after the user explicitly requests review. The Realtime voice session receives the validated textual review rather than the screenshot.
 
 The request uses `gpt-5.6-terra`, `reasoning.effort: low`, `store: false`, and strict JSON Schema output. Main validates the closed response schema before returning the summary, date list, safe `http`/`https` links, risks, and suggested next actions to the UI. GPT-5.6 has no desktop-control tools and cannot execute actions. The model and strict-output call were verified against the live Responses API on 20 July 2026.
 

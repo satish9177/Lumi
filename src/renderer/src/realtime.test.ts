@@ -389,7 +389,7 @@ describe('RealtimeClient server events', () => {
     })
   })
 
-  it('marks screen captures as auto detail and uses the long-form ceiling', async () => {
+  it('keeps selected capture bytes out of Realtime and sends only the validated review text', async () => {
     const events: Array<Record<string, unknown>> = []
     const client = createClient()
     injectDataChannel(client, events)
@@ -407,9 +407,25 @@ describe('RealtimeClient server events', () => {
       capturedAt: '2026-07-19T09:00:00.000Z'
     }
 
-    await client.sendCapture(capture, 'Summarize this page')
+    await client.provideScreenContext(capture)
 
-    expect(JSON.stringify(events)).toContain('"detail":"auto"')
+    expect(JSON.stringify(events)).not.toContain(capture.dataUrl)
+    expect(JSON.stringify(events)).not.toContain('input_image')
+
+    client.provideScreenReview({
+      sourceCaptureId: capture.id,
+      summary: 'Interview invitation with a deadline tomorrow.',
+      dates: ['Tomorrow'],
+      links: ['https://example.com/interview'],
+      risks: ['The deadline is tomorrow.'],
+      nextActions: ['Review the interview details.']
+    })
+
+    const serializedEvents = JSON.stringify(events)
+    expect(serializedEvents).toContain('Interview invitation with a deadline tomorrow.')
+    expect(serializedEvents).toContain('https://example.com/interview')
+    expect(serializedEvents).not.toContain(capture.dataUrl)
+    expect(serializedEvents).not.toContain('input_image')
     expect(events.at(-1)).toMatchObject({
       type: 'response.create',
       response: { max_output_tokens: 2048 }
@@ -525,7 +541,7 @@ describe('RealtimeClient server events', () => {
     }
 
     await client.connect({ mode: 'mock', model: 'gpt-realtime-2.1' })
-    await client.sendCapture(capture, 'What is this email about?')
+    await client.provideScreenContext(capture)
 
     expect(transcripts).toContain('Hi, I am Lumi. I am ready to look at a screen with you.')
     expect(explanations[0]?.sourceCaptureId).toBe(capture.id)

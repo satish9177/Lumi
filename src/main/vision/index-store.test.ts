@@ -267,15 +267,15 @@ describe('compaction', () => {
 
   it('waits until a real fraction of the file is dead', async () => {
     const store = await loadedStore()
-    await fill(store, 100)
+    await fill(store, 64)
     expect(store.shouldCompact()).toBe(false)
 
-    for (let index = 0; index < 10; index += 1) {
+    for (let index = 0; index < 6; index += 1) {
       await store.markDeleted(computeImageId('root-a', `photo-${index}.jpg`), 5_000)
     }
     expect(store.shouldCompact()).toBe(false)
 
-    for (let index = 10; index < 40; index += 1) {
+    for (let index = 6; index < 20; index += 1) {
       await store.markDeleted(computeImageId('root-a', `photo-${index}.jpg`), 5_000)
     }
     expect(store.shouldCompact()).toBe(true)

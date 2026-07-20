@@ -6,7 +6,7 @@
 
 ## Starting point
 
-Before Build Week, Lumi was a working Electron MVP with a floating Windows companion, one-time user-selected screen capture, a deterministic mock path, OpenAI Realtime voice/image context, and confirmation-gated reminders, approved-folder search, file opening, and URL opening.
+Before Build Week, Lumi was a working Electron MVP with a floating Windows companion, one-time user-selected screen capture, a deterministic mock path, OpenAI Realtime voice/text conversation, and confirmation-gated reminders, approved-folder search, file opening, and URL opening.
 
 ## What was built during Build Week
 
@@ -22,6 +22,8 @@ Before Build Week, Lumi was a working Electron MVP with a floating Windows compa
 When a user has selected and captured a screen or window, Lumi presents **Review this capture with GPT-5.6**. Choosing it explicitly authorizes one read-only Responses API request from Electron main.
 
 The request sends only the retained in-memory capture to `gpt-5.6-terra` with `reasoning.effort: low`, `store: false`, and strict JSON Schema output. GPT-5.6 produces a concise summary plus visible dates, `http`/`https` links, risks, and suggested next actions. Lumi validates that closed schema before showing anything. The model has no desktop-control tool, cannot access files, and cannot carry out a reminder, file open, URL open, or message send.
+
+Captures are initiated and previewed locally. A selected capture is sent to GPT-5.6 Terra only after the user explicitly requests review. The Realtime voice session receives the validated textual review rather than the screenshot.
 
 The configured `gpt-5.6-terra` model and strict structured-output Responses API request were verified live on 20 July 2026.
 
