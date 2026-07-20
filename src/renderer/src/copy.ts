@@ -121,6 +121,70 @@ export const COPY = {
     notCheckedForFaces: 'Not checked for visible faces yet'
   },
 
+  /* ---------------------------------------------------- labelled people */
+  people: {
+    off: 'People search is off.',
+    privacy: 'Lumi can match faces you label. Face matching stays on this device and may make mistakes.',
+    enable: 'Enable people search',
+    addPerson: 'Add person',
+    pauseScan: 'Pause scan',
+    resumeScan: 'Resume scan',
+    deleteAll: 'Delete all people data',
+    confirmDeleteAll: 'Delete all labelled people and their face data? This cannot be undone, and every match record for them is removed too.',
+    noProfiles: 'You haven’t labelled anyone yet.',
+    modelDownload: (megabytes: string) => `Download the local face-matching model (${megabytes})`,
+    modelRequired: 'The face-matching model is not installed yet.',
+    storeUnavailable: 'Lumi could not read your saved people on this device. They have not been deleted; face matching is paused until this is resolved.',
+    stateLabel: {
+      off: 'Off',
+      model_required: 'Model needed',
+      downloading: 'Downloading model…',
+      no_profiles: 'No one labelled yet',
+      not_started: 'Not started',
+      scanning: 'Scanning…',
+      partially_checked: 'Partially checked',
+      complete: 'Up to date',
+      paused: 'Paused',
+      profile_store_unavailable: 'Unavailable'
+    },
+    profileStatusLabel: {
+      ready: 'Ready',
+      needs_rescan: 'Needs rescan',
+      needs_reenrolment: 'Needs re-enrolment'
+    },
+    referenceCount: (count: number) => `${count} reference photo${count === 1 ? '' : 's'}`,
+    coverage: (checked: number, total: number) => `${checked.toLocaleString()} of ${total.toLocaleString()} photos checked`,
+    matched: (count: number) => (count === 0 ? 'No matches yet' : count === 1 ? '1 photo matched' : `${count} photos matched`),
+    addReference: (label: string) => `Add reference photo for ${label}`,
+    rename: (label: string) => `Rename ${label}`,
+    rescan: (label: string) => `Rescan for ${label}`,
+    deleteProfile: (label: string) => `Delete ${label}`,
+    confirmDeleteProfile: (label: string) => `Delete ${label} and every photo match for them? This cannot be undone.`,
+    confirmRescan: (label: string) => `Check every photo for ${label} again?`,
+
+    /* -------------------------------------------------------- enrolment */
+    enrolStep1Title: 'Who is this?',
+    enrolLabelPlaceholder: 'Their name, such as Father',
+    enrolStart: 'Continue',
+    enrolStep2Title: (label: string) => `Choose photos of ${label}`,
+    enrolStep2Hint: 'Pick photos where their face is clear. Choose at least three; Lumi keeps up to eight.',
+    enrolUseAsReference: (label: string) => `Use as a reference photo for ${label}`,
+    enrolReferenceAccepted: 'Accepted',
+    enrolCandidatesTitle: 'This photo has more than one face. Which one is theirs?',
+    enrolSelectFace: (index: number) => `Choose face ${index}`,
+    enrolNotSelectable: (reason: string) => `Not usable: ${reason}`,
+    enrolCancel: 'Cancel',
+    enrolCreate: 'Create profile',
+    enrolCreating: 'Creating…',
+    enrolAddReferenceTitle: (label: string) => `Add a reference photo for ${label}`,
+    enrolSaveReference: 'Save reference',
+    enrolSummary: (count: number) => `${count} of 8 reference photos accepted.`,
+    enrolReadyToCreate: 'Ready to create the profile.',
+    enrolNeedsMore: (remaining: number) => `Choose ${remaining} more photo${remaining === 1 ? '' : 's'} to continue.`,
+    droppingDoesNotEnrol: 'Choosing a photo here only offers it as a reference — nothing is saved until you confirm.',
+    previewLocalOnly: 'This preview is generated on this device and is never sent anywhere.'
+  },
+
   /* --------------------------------------------------------- drag and drop */
   drop: {
     hoverOne: 'Drop to add this file to Lumi.',

@@ -26,6 +26,8 @@ import {
 } from '../../shared/search-query'
 import type { PhotoIndexRecord } from './index-store'
 import { matchOcr, NO_OCR_MATCH, type OcrMatch } from './ocr-match'
+import { qualifiesAsMatch, resolveMatch } from './people-records'
+import { peopleReason } from './people-search'
 import { CLIP_EMBEDDING_LENGTH } from './protocol'
 import { dot, POSSIBLE_VISUAL_MATCH, STRONG_VISUAL_MATCH } from './semantic-search'
 
@@ -41,6 +43,8 @@ export const HYBRID_WEIGHTS = Object.freeze({
 
 /** How a result is allowed to be described. Closed set, app-authored. */
 export const HYBRID_TIERS = [
+  'people_likely',
+  'people_possible',
   'text_exact',
   'text_fuzzy',
   'strong_visual',
@@ -49,6 +53,23 @@ export const HYBRID_TIERS = [
   'face_count_only'
 ] as const
 export type HybridTier = (typeof HYBRID_TIERS)[number]
+
+/** One labelled person the request named, resolved to a profile main trusts. */
+export interface PeopleLabelRequirement {
+  id: string
+  /** See StoredPersonProfile.revision; stale stored outcomes must not resolve. */
+  revision: number
+  /** The user's own casing, for the reason string. */
+  label: string
+}
+
+export interface PeopleLabelOutcome {
+  matches: boolean
+  /** True when at least one requested profile has not been checked yet. */
+  unchecked: boolean
+  /** Present only when `matches`. One entry per requested profile. */
+  tiers: Array<{ label: string; tier: 'likely' | 'possible' }>
+}
 
 export interface FaceFilterOutcome {
   /** Whether the record satisfies the requested count. */
@@ -74,6 +95,8 @@ export interface HybridCoverage {
   ocrUnchecked: number
   /** Records excluded because their faces have not been counted yet. */
   faceUnchecked: number
+  /** Records excluded because a requested profile has not been checked yet. */
+  peopleUnchecked: number
 }
 
 export interface HybridSearchResult {
@@ -128,6 +151,49 @@ export function applyFaceFilter(record: PhotoIndexRecord, filter: PeopleFilter):
 }
 
 /**
+ * Applies a labelled-person constraint to one record.
+ *
+ * AND semantics by default: naming two people asks for photos with *both*, not
+ * either. A firm miss on any one of them ends the check immediately — the
+ * request cannot be satisfied regardless of what the others say. Only when
+ * nothing has firmly failed does an unresolved profile change the answer to
+ * "not checked", because that is the one circumstance where the true answer
+ * might still be yes.
+ */
+export function applyPeopleFilter(
+  record: PhotoIndexRecord,
+  profiles: readonly PeopleLabelRequirement[],
+  inFlight?: ReadonlySet<string>
+): PeopleLabelOutcome {
+  let firmMiss = false
+  let anyUnchecked = false
+  const tiers: Array<{ label: string; tier: 'likely' | 'possible' }> = []
+
+  for (const profile of profiles) {
+    const resolved = resolveMatch(record, profile, inFlight?.has(record.imageId) ?? false)
+    if (resolved.status === 'not_checked' || resolved.status === 'checking') {
+      anyUnchecked = true
+      continue
+    }
+    if (qualifiesAsMatch(resolved)) {
+      tiers.push({ label: profile.label, tier: resolved.status as 'likely' | 'possible' })
+      continue
+    }
+    // checked_no_reliable_match, failed_retryable, failed_permanent, or
+    // profile_unavailable: a real answer, and it is no.
+    firmMiss = true
+  }
+
+  if (firmMiss) {
+    return { matches: false, unchecked: false, tiers: [] }
+  }
+  if (anyUnchecked) {
+    return { matches: false, unchecked: true, tiers: [] }
+  }
+  return { matches: true, unchecked: false, tiers }
+}
+
+/**
  * Ranks the index against a query.
  *
  * `vectors` may be empty and `queryVector` absent — a `contains_text` or
@@ -138,17 +204,20 @@ export function rankHybridPhotos(
   vectors: ReadonlyMap<string, Float32Array>,
   queryVector: Float32Array | undefined,
   query: NormalizedSearchQuery,
-  nowMs: number
+  nowMs: number,
+  peopleProfiles: readonly PeopleLabelRequirement[] = [],
+  peopleInFlight?: ReadonlySet<string>
 ): HybridSearchResult {
   const wantsSemantic = queryVector !== undefined && query.concepts.length > 0
   const wantsOcr = query.containsTextTokens.length > 0
+  const wantsPeople = peopleProfiles.length > 0
   const conceptLabel = query.concepts.join(' / ')
 
   const ranked: HybridRankedPhoto[] = []
-  const coverage: HybridCoverage = { ocrUnchecked: 0, faceUnchecked: 0 }
+  const coverage: HybridCoverage = { ocrUnchecked: 0, faceUnchecked: 0, peopleUnchecked: 0 }
 
   for (const record of records) {
-    // --- the hard filter comes first, so nothing else is computed for a
+    // --- the hard filters come first, so nothing else is computed for a
     // record that cannot be returned at all.
     let faces: FaceFilterOutcome = { matches: true, uncertain: false, unchecked: false }
     if (query.people) {
@@ -158,6 +227,18 @@ export function rankHybridPhotos(
         continue
       }
       if (!faces.matches) {
+        continue
+      }
+    }
+
+    let people: PeopleLabelOutcome = { matches: true, unchecked: false, tiers: [] }
+    if (wantsPeople) {
+      people = applyPeopleFilter(record, peopleProfiles, peopleInFlight)
+      if (people.unchecked) {
+        coverage.peopleUnchecked += 1
+        continue
+      }
+      if (!people.matches) {
         continue
       }
     }
@@ -188,9 +269,10 @@ export function rankHybridPhotos(
         }
       }
       // A concept-only query with nothing above the honesty floor is not a
-      // match. With a text or people constraint also present, the other
-      // evidence carries it and the visual signal simply contributes nothing.
-      if (!wantsOcr && !query.people && (cosine === undefined || cosine < POSSIBLE_VISUAL_MATCH)) {
+      // match. With a text, face-count, or labelled-person constraint also
+      // present, the other evidence carries it and the visual signal simply
+      // contributes to ranking rather than gating admission.
+      if (!wantsOcr && !query.people && !wantsPeople && (cosine === undefined || cosine < POSSIBLE_VISUAL_MATCH)) {
         continue
       }
     }
@@ -218,22 +300,35 @@ export function rankHybridPhotos(
     available += HYBRID_WEIGHTS.recency
 
     const fusedScore = available > 0 ? weighted / available : 0
-    const tier = tierFor({ ocr, cosine, faces, filenameSignal, hasPeopleFilter: query.people !== undefined })
+    const tier = tierFor({
+      ocr,
+      cosine,
+      faces,
+      filenameSignal,
+      hasPeopleFilter: query.people !== undefined,
+      peopleTiers: wantsPeople ? people.tiers : undefined
+    })
 
     ranked.push({
       record,
       fusedScore,
       tier,
-      reason: reasonFor(tier, { conceptLabel, record, faces, nowMs }),
+      reason: reasonFor(tier, { conceptLabel, record, faces, nowMs, peopleTiers: people.tiers }),
       ocr,
       faces
     })
   }
 
-  // Deterministic ordering: score, then most recent, then a stable path
-  // comparison, so two runs over the same index never disagree.
+  // Deterministic ordering: a labelled-person likely match ranks above a
+  // possible one regardless of the other signals — that is what "likely
+  // matches rank above possible matches" means structurally. Every other tier
+  // ranks equally on this key, so a search with no people constraint sorts
+  // exactly as it did before. Semantic score, recency and filename still order
+  // results *within* a tier, which is how they may rank a qualifying match
+  // without ever being able to manufacture one.
   ranked.sort(
     (left, right) =>
+      peopleTierRank(right.tier) - peopleTierRank(left.tier) ||
       right.fusedScore - left.fusedScore ||
       right.record.mtimeMs - left.record.mtimeMs ||
       compareRelative(left.record.relativePath, right.record.relativePath)
@@ -242,13 +337,27 @@ export function rankHybridPhotos(
   return { ranked, coverage }
 }
 
+function peopleTierRank(tier: HybridTier): number {
+  if (tier === 'people_likely') return 2
+  if (tier === 'people_possible') return 1
+  return 0
+}
+
 function tierFor(context: {
   ocr: OcrMatch
   cosine: number | undefined
   faces: FaceFilterOutcome
   filenameSignal: number
   hasPeopleFilter: boolean
+  peopleTiers?: ReadonlyArray<{ label: string; tier: 'likely' | 'possible' }>
 }): HybridTier {
+  // A labelled-person request is the headline claim whenever it is present: it
+  // is the strongest, most specific thing Lumi can say about a photo, and it
+  // takes priority over text or visual similarity in what gets said, even
+  // though those signals still shape the ranking through fusedScore.
+  if (context.peopleTiers && context.peopleTiers.length > 0) {
+    return context.peopleTiers.every((entry) => entry.tier === 'likely') ? 'people_likely' : 'people_possible'
+  }
   // Text found verbatim is the strongest and least ambiguous evidence there is.
   if (context.ocr.strength === 'exact' || context.ocr.strength === 'all_tokens') {
     return 'text_exact'
@@ -278,9 +387,18 @@ function tierFor(context: {
  */
 function reasonFor(
   tier: HybridTier,
-  context: { conceptLabel: string; record: PhotoIndexRecord; faces: FaceFilterOutcome; nowMs: number }
+  context: {
+    conceptLabel: string
+    record: PhotoIndexRecord
+    faces: FaceFilterOutcome
+    nowMs: number
+    peopleTiers?: ReadonlyArray<{ label: string; tier: 'likely' | 'possible' }>
+  }
 ): string {
   switch (tier) {
+    case 'people_likely':
+    case 'people_possible':
+      return context.peopleTiers ? peopleReason(context.peopleTiers) : 'No reliable match found'
     case 'text_exact':
       return 'Contains the text you searched for'
     case 'text_fuzzy':

@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { FACE_EMBED_DIMENSIONS } from './people-manifest'
-import { normalizeEmbedding, PersonProfileStore, type SafeStoragePort } from './person-profiles'
+import { normalizeEmbedding, PersonProfileError, PersonProfileStore, type SafeStoragePort } from './person-profiles'
 import {
   DRAFT_TTL_MS,
   EnrolmentError,
@@ -511,5 +511,127 @@ describe('what survives after creation', () => {
     await expect(h.service.confirm(await draftWith(h, MIN_REFERENCES, 'b'))).rejects.toMatchObject({
       code: 'label_duplicate'
     })
+  })
+})
+
+describe('adding one reference to an already-created profile', () => {
+  it('appends to the existing profile rather than creating a new one', async () => {
+    const h = harness()
+    await h.load()
+    const summary = await h.service.confirm(await draftWith(h, MIN_REFERENCES, 'a'))
+    expect(h.profiles.list()).toHaveLength(1)
+
+    const draft = h.service.beginAddition(summary.id, summary.label)
+    await h.service.addReference(draft.draftId, 'extra-ref')
+    const updated = await h.service.confirm(draft.draftId)
+
+    expect(updated.id).toBe(summary.id)
+    expect(h.profiles.list()).toHaveLength(1)
+    expect(h.profiles.byId(summary.id)!.references).toHaveLength(MIN_REFERENCES + 1)
+  })
+
+  it('needs only one reference, not the three-reference enrolment floor', async () => {
+    const h = harness()
+    await h.load()
+    const summary = await h.service.confirm(await draftWith(h, MIN_REFERENCES, 'a'))
+
+    const draft = h.service.beginAddition(summary.id, summary.label)
+    // Confirming with zero references still fails; one is enough to succeed.
+    await expect(h.service.confirm(draft.draftId)).rejects.toMatchObject({ code: 'too_few_references' })
+
+    await h.service.addReference(draft.draftId, 'one-more')
+    await expect(h.service.confirm(draft.draftId)).resolves.toMatchObject({ id: summary.id })
+  })
+
+  it('does not run the cross-reference consistency check against the addition alone', async () => {
+    // The consistency check compares references *within one submission*, and
+    // an addition only ever submits one. It intentionally does not compare
+    // against the profile's existing embeddings, which addReference() never
+    // exposes outside the store.
+    // The three references that create the profile are all the same person
+    // (index 0-2); the addition submits a different one (index 3).
+    const h = harness({ embeddings: [0, 0, 0, 5] })
+    await h.load()
+    const summary = await h.service.confirm(await draftWith(h, MIN_REFERENCES, 'a'))
+
+    const draft = h.service.beginAddition(summary.id, summary.label)
+    await h.service.addReference(draft.draftId, 'different-person')
+    await expect(h.service.confirm(draft.draftId)).resolves.toMatchObject({ id: summary.id })
+  })
+
+  it('still requires the same trusted-id, revalidation and multi-face rules', async () => {
+    // Single-face detections build the profile; the group photo used for the
+    // addition is the one call that returns two faces.
+    let calls = 0
+    const h = harness({
+      detect: () => {
+        calls += 1
+        return calls > MIN_REFERENCES ? geometry([{}, { offset: 300 }]) : geometry([{}])
+      }
+    })
+    await h.load()
+    const summary = await h.service.confirm(await draftWith(h, MIN_REFERENCES, 'a'))
+
+    const draft = h.service.beginAddition(summary.id, summary.label)
+    const withCandidates = await h.service.addReference(draft.draftId, 'group-photo')
+    expect(withCandidates.candidates).toHaveLength(2)
+    // Confirming while a face choice is still pending is refused, exactly as
+    // it is for a fresh enrolment.
+    await expect(h.service.confirm(draft.draftId)).rejects.toMatchObject({ code: 'selection_required' })
+  })
+
+  it('refuses to open an addition for a profile that does not exist', async () => {
+    const h = harness()
+    await h.load()
+    expect(() => h.service.beginAddition('not-a-real-profile', 'Father')).toThrow(EnrolmentError)
+  })
+
+  it('rejects a bare label the same way begin() does', async () => {
+    // Both call the shared cleanLabel(), so both raise the store's own
+    // PersonProfileError rather than an enrolment-specific one.
+    const h = harness()
+    await h.load()
+    const summary = await h.service.confirm(await draftWith(h, MIN_REFERENCES, 'a'))
+    expect(() => h.service.beginAddition(summary.id, '   ')).toThrow(PersonProfileError)
+  })
+})
+
+describe('deleting a profile clears its in-progress addition draft', () => {
+  it('drops a draft appending to the deleted profile', async () => {
+    const h = harness()
+    await h.load()
+    const summary = await h.service.confirm(await draftWith(h, MIN_REFERENCES, 'a'))
+    const draft = h.service.beginAddition(summary.id, summary.label)
+
+    h.service.cancelForProfile(summary.id)
+
+    expect(() => h.service.list(draft.draftId)).toThrow(EnrolmentError)
+  })
+
+  it('leaves a draft for a different profile untouched', async () => {
+    const h = harness()
+    await h.load()
+    const father = await h.service.confirm(await draftWith(h, MIN_REFERENCES, 'a'))
+    const motherDraft = h.service.begin('Mother')
+    for (let index = 0; index < MIN_REFERENCES; index += 1) {
+      await h.service.addReference(motherDraft.draftId, `mother-ref-${index}`)
+    }
+    const mother = await h.service.confirm(motherDraft.draftId)
+    const draft = h.service.beginAddition(mother.id, mother.label)
+
+    h.service.cancelForProfile(father.id)
+
+    expect(() => h.service.list(draft.draftId)).not.toThrow()
+  })
+
+  it('leaves a fresh-enrolment draft (no appendTo) untouched by either cancellation call', async () => {
+    const h = harness()
+    await h.load()
+    const summary = await h.service.confirm(await draftWith(h, MIN_REFERENCES, 'a'))
+    const freshDraft = h.service.begin('New Person')
+
+    h.service.cancelForProfile(summary.id)
+
+    expect(() => h.service.list(freshDraft.draftId)).not.toThrow()
   })
 })

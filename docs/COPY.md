@@ -199,6 +199,37 @@ For an action that leaves the device, name the destination plainly:
 
 > Lumi is back at the bottom-right of your main screen.
 
+### People (labelled-person matching)
+
+Privacy notice, shown before and after enabling:
+
+> Lumi can match faces you label. Face matching stays on this device and may
+> make mistakes.
+
+Match reasons are app-authored from a tier and the user's own label, never a
+raw score:
+
+> Likely match for Father
+
+> Possible match for Father
+
+> Likely matches for Mother and Father
+
+There is no phrase asserting identity. Never "This is Father", never "Father
+confirmed", never "Definitely Father", never "Certain match" — the underlying
+measurement cannot support that claim, and stating it would be a lie the user
+might act on.
+
+Coverage that is incomplete says so rather than reading as absence:
+
+> Some photos haven't been checked for Father yet.
+
+An unrecognised name states the fact and stops — it never offers to create the
+profile, because enrolment is a flow the user starts, not one a search talks
+them into:
+
+> You haven't created a profile called Father yet.
+
 ### Model download or verification failure
 
 Download interrupted:

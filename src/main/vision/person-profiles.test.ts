@@ -262,6 +262,32 @@ describe('deletion', () => {
     // The photo index is a sibling directory and must survive intact.
     expect(await readFile(join(neighbour, 'vectors.bin'), 'utf8')).toBe('clip data')
   })
+
+  it('a deleted profile does not return from a fresh store instance', async () => {
+    const first = await store()
+    const father = await first.create('Father', references())
+    await first.create('Mother', references())
+
+    await first.remove(father.id)
+
+    // A brand-new store, over the same directory, is what a restart is.
+    const second = await store()
+    expect(second.list().map((summary) => summary.label)).toEqual(['Mother'])
+    expect(second.resolveLabel('Father')).toBeUndefined()
+  })
+
+  it('delete-all leaves nothing for a fresh store instance to find', async () => {
+    const first = await store()
+    await first.create('Father', references())
+    await first.create('Mother', references())
+
+    await first.removeAll()
+
+    const second = await store()
+    expect(second.list()).toHaveLength(0)
+    expect(second.resolveLabel('Father')).toBeUndefined()
+    expect(second.recoveredFromCorruption()).toBe(false)
+  })
 })
 
 describe('persistence', () => {

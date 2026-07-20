@@ -10,6 +10,17 @@ export interface PhotoResultGridProps {
   onOpen: (result: DocumentSearchResult) => void
   onAnalyze: (result: DocumentSearchResult) => void
   onSend: (result: DocumentSearchResult) => void
+  /**
+   * Present only while a people-enrolment draft is open. Adds one more action
+   * per card so choosing a reference photo reuses the same trusted-result id
+   * every other action here already uses — there is no separate photo picker.
+   * The label names whose profile the reference is for, so the action is
+   * unambiguous even with two enrolments never open at once but reused across
+   * sessions.
+   */
+  onUseAsReference?: (result: DocumentSearchResult) => void
+  /** The person the "Use as reference" action is currently collecting for. */
+  referenceForLabel?: string
 }
 
 /**
@@ -17,7 +28,16 @@ export interface PhotoResultGridProps {
  * the main process and are never sent anywhere. Original bytes leave the
  * machine only after the separate analysis or Telegram confirmation flow.
  */
-export function PhotoResultGrid({ results, thumbnails, fallback, onOpen, onAnalyze, onSend }: PhotoResultGridProps) {
+export function PhotoResultGrid({
+  results,
+  thumbnails,
+  fallback,
+  onOpen,
+  onAnalyze,
+  onSend,
+  onUseAsReference,
+  referenceForLabel
+}: PhotoResultGridProps) {
   return (
     <ul className="lifelens-photo-grid">
       {results.map((result) => {
@@ -43,6 +63,16 @@ export function PhotoResultGrid({ results, thumbnails, fallback, onOpen, onAnaly
               <button className="text-button" type="button" onClick={() => onOpen(result)} aria-label={`Open ${result.name}`}>Open</button>
               <button className="text-button" type="button" onClick={() => onAnalyze(result)} aria-label={`Ask Lumi about ${result.name}`}>Ask Lumi about this photo</button>
               <button className="text-button" type="button" onClick={() => onSend(result)} aria-label={`Send ${result.name} on Telegram`}>Send via Telegram</button>
+              {onUseAsReference && referenceForLabel && (
+                <button
+                  className="text-button"
+                  type="button"
+                  onClick={() => onUseAsReference(result)}
+                  aria-label={`Use ${result.name} as a reference photo for ${referenceForLabel}`}
+                >
+                  Use as reference for {referenceForLabel}
+                </button>
+              )}
             </div>
           </li>
         )

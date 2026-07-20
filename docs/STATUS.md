@@ -509,13 +509,139 @@ Face identity, labelled people, automatic naming, any trait inference,
 handwriting, non-English OCR, video, HEIC/RAW, PDF content, and DirectML all
 remain deliberately out of scope and unimplemented.
 
-## Local photo search — Phase 3 (user-labelled people) — NOT CODE COMPLETE
+## Local photo search — Phase 3 (user-labelled people) — CODE COMPLETE
 
-Slices A-D and the query contract are implemented and verified. The index
-records, coordinator scheduling and People UI are not. Nothing from Phase 3 is
-reachable from the running application yet: there is no IPC channel and no
-settings UI, so the feature cannot be exercised by a user. Phases 1 and 2 are
-untouched and behave exactly as before.
+Every slice from the original plan — records, coordinator, IPC/preload, search
+and Realtime integration, the People settings and enrolment UI, deletion, the
+real-model synthetic integration test, and the security suite — is implemented
+and verified. The feature is reachable end to end from the running application:
+Settings → People has enable/disable, enrolment, per-profile management,
+pause/resume, and delete-all; search and the Realtime `people_labels` argument
+resolve against it. Phases 1 and 2 are untouched and behave exactly as before.
+
+### Match-record schema
+
+Per-photo Phase-3 fields (`index-store.ts`) are additive, independently
+versioned, and closed-schema on both write and read: `peopleStatus`,
+`peopleModelVersion`, `peopleIndexVersion`, `peopleFailureCode`,
+`peopleAttempts`, and `peopleMatches` — an array of
+`{ profileId, status, matchingFaces, profileRevision }` and nothing else. A
+match record cannot carry a similarity value, a face box, a landmark, a
+reference path, or a label; the closed parser drops anything else on load, and
+a test (`index-store-phase3.test.ts`) proves a caller cannot smuggle those
+fields through even by trying.
+
+`StoredPersonProfile.revision` is new: it increments on any change to a
+profile's *evidence* (a reference added or removed), and deliberately not on
+rename. A stored match record carries the revision it was computed against;
+`people-records.ts:resolveMatch` treats a mismatch as `not_checked`, which is
+what makes "renaming does not require a rescan" and "adding a reference
+invalidates only that profile's outcomes" structural facts rather than
+promises. `PEOPLE_MATCH_STATUSES` includes `not_checked` and `checking` as
+states that are computed, never persisted — only the six terminal statuses
+ever reach the journal.
+
+### Transient embedding lifecycle
+
+`people-scan.ts:scanPhotoForPeople` is the only place in the codebase where a
+library face — belonging to someone who was *not* enrolled — becomes a vector.
+The aligned tensor, the batch, and every embedding are locals; the function
+returns only bounded `{ profileId, status, matchingFaces, profileRevision }`
+rows. `people-scan.test.ts` and `coordinator-phase3.test.ts` both serialize the
+full return value and assert it never contains the words "embedding",
+"landmark", "score", or "similarity".
+
+### Coordinator behaviour
+
+Labelled-person matching is slotted into the existing single-worker Phase-2/3
+scheduler at priority 4: after face counting, before OCR. `nextPeopleRecord()`
+derives the work queue from `resolveMatch` rather than a separate invalidation
+flag, so a new profile, a changed profile, and a model-version bump all
+self-schedule through the same mechanism. Coverage
+(`people-records.ts:coverageFor`) distinguishes `not_started`, `partially
+_checked`, `complete`, `paused`, `no_profiles`, `model_required`, and
+`profile_store_unavailable` — `peopleStatus().state` can never read "complete"
+while any requested photo is genuinely unchecked.
+
+### IPC and preload boundary
+
+Every payload is parsed in `people-ipc.ts`, never cast; every reply is
+projected field-by-field, never spread, so a field added to a stored type
+later cannot reach the renderer by inheritance. Profile ids are the one
+exception the renderer receives — required for Rename/Delete — and their
+inertness elsewhere is a tested property: they fail the search-query contract's
+own identifier check, and the Realtime tool schema has no field shaped to
+accept one (`people-ipc.test.ts`, `people-security.test.ts`).
+
+### Search and Realtime integration
+
+`hybrid-search.ts:applyPeopleFilter` enforces AND semantics for multiple named
+people, with a written distinction between a firm miss (excludes immediately)
+and an unresolved profile (excludes as coverage, never as a negative). A likely
+match ranks above a possible one via a dedicated sort key, ahead of every other
+tie-breaker, so ranking cannot be defeated by recency or filename score. The
+Realtime tool schema gained `people_labels` (bounded array, ≤3 names, ≤40
+chars each); the renderer performs no resolution and forwards the strings
+verbatim, and prompt-injection-shaped labels (`"ignore previous
+instructions"`, JSON fragments, tool-call-shaped strings) are proven inert —
+either rejected by the existing query contract or carried through as plain
+displayed text with no effect on which photos are returned
+(`realtime.test.ts`, `coordinator-phase3.test.ts`).
+
+### People UI
+
+`components/PeopleSettings.tsx` extends the existing intelligent-photo-search
+card rather than introducing a second settings surface. Reference-photo
+selection reuses the app's only existing photo browser — approved-folder
+search results gain a "Use as reference" action while a draft is open
+(`PhotoResultGrid.tsx`) — instead of a new picker. "Add person" reveals a
+local-only label field; nothing reaches main until that field is submitted, so
+no draft exists anywhere until the user has typed a name. The enrolment view is
+a nested section of the settings dialog and inherits its existing focus trap
+rather than adding a second one to keep in sync. No enrolment state is
+color-only: an unusable candidate face states its reason in the accessible
+name and the visible caption text.
+
+### Deletion
+
+Deleting one profile removes its per-photo records (`index.removeProfileRecords`,
+which compacts the journal so the id is gone from the bytes, not merely
+superseded), cancels its queued scan work, and clears any in-progress
+"add reference" draft scoped to it
+(`person-enrollment.ts:cancelForProfile`) — the previously undocumented
+Slice-H requirement that a per-profile deletion also clears profile-specific
+previews. Delete-all clears the encrypted people directory, strips every
+Phase-3 field from the photo index while leaving CLIP vectors, OCR text and
+face counts untouched, clears every draft, and turns the feature off. Both
+paths are proven to survive a process restart, not just an in-memory check
+(`person-profiles.test.ts`, `index-store-phase3.test.ts`,
+`coordinator-phase3.test.ts`).
+
+### Real-model integration test
+
+`real-people-inference.test.ts` runs the actual installed YuNet export's
+landmark head (`kps_*` tensors, shapes, decode) and, when the SFace pack is
+installed, the actual SFace graph: exactly-128-float output, determinism, a
+same-input-vs-different-input similarity gap, and alignment through
+`alignFaceToTensor` into a real embedding — all against procedurally generated
+pixel data, with an explicit assertion that no network call occurs. On this
+machine the extras pack (YuNet) is installed and its three tests ran for real;
+the people pack (SFace) is not installed here, so its four tests are skipped
+rather than faked. No claim of production face-matching accuracy is made from
+this synthetic-input suite.
+
+### Security suite
+
+`people-security.test.ts` proves, by reading `main/index.ts` and
+`realtime.ts` rather than mocking a full Electron runtime: capture, Telegram,
+and dropped-file handling never reference the profile store or enrolment
+service; the Realtime tool schema and its parser have no field shaped to
+accept a profile id, a similarity, or an embedding; `CompactSearchResult` (what
+Realtime actually receives) has no id field at all; and a people-pack download
+with a digest mismatch is discarded exactly like every other pack. Combined
+with existing coverage elsewhere (enrolment confirmation gating,
+profile/record isolation, coverage honesty, no-network scanning), every
+security property from the original task list has a direct test.
 
 ### Done
 
@@ -553,21 +679,20 @@ untouched and behave exactly as before.
 
 ### Not done
 
-- Slice E — per-photo people-match records in the photo index
-- Slice F — coordinator scheduling, cancellation, invalidation and coverage
-- Slice H — People settings UI and the enrolment screens
-- IPC channels, preload bridge and renderer wiring for any of the above
-- The Realtime tool-schema entry for `people_labels`
-- Deletion of per-photo match records on profile delete (the profile store side
-  exists; there are no records to delete yet)
-- Real-model integration test for SFace on synthetic faces
-- Manual acceptance checklist
+- The manual acceptance checklist (docs/LOCAL-PHOTO-SEARCH.md) — every item on
+  it requires a human pass on real photographs and a real Windows install;
+  none of it can be certified from automated checks, and none is claimed here.
+- The SFace real-model integration tests are skipped on this machine because
+  the people pack is not installed locally; the code path and its four tests
+  exist and ran clean the last time the pack was present (shape, determinism,
+  same/different-input similarity, alignment-to-real-embedding).
 
 ### Verification
 
 `npm run typecheck`, `npm test`, `npm run build`, `npm run package` all pass, run
-after each completed slice rather than deferred. 1,225 tests pass, 2 skipped, 67
-files.
+after every slice rather than deferred. Final count: **1,422 tests pass, 6
+skipped** (2 pre-existing, 4 SFace real-model tests awaiting the people pack),
+76 files.
 
 ### A Phase-2 security test was narrowed, deliberately
 

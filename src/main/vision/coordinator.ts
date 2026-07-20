@@ -1,7 +1,7 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { basename, dirname, extname, join } from 'node:path'
 import { canonicalizeApprovedRoots } from '../../features/document-tools/search'
-import type { PhotoSearchStatus } from '../../shared/contracts'
+import type { PeopleProfileView, PeopleSearchState, PeopleSearchStatus, PhotoSearchStatus } from '../../shared/contracts'
 import { classifyFileKind, type NormalizedSearchQuery } from '../../shared/search-query'
 import type { StoredDocumentRoot } from '../services/store'
 import type { VisionEngine } from './engine'
@@ -10,14 +10,26 @@ import { EXTRAS_PACK_TOTAL_BYTES } from './extras-manifest'
 import { MODEL_PACK_TOTAL_BYTES, MODEL_PACK_VERSION } from './manifest'
 import {
   clearModelPack,
+  clearPeoplePack,
   downloadExtrasPack,
   downloadModelPack,
+  downloadPeoplePack,
   extrasLanguageDirectory,
   isExtrasPackInstalled,
   isModelPackInstalled,
+  isPeoplePackInstalled,
   ModelPackError,
   type ModelPackRuntime
 } from './model-pack'
+import { PEOPLE_PACK_TOTAL_BYTES } from './people-manifest'
+import { coverageFor, resolveMatch, type PeopleCoverage } from './people-records'
+import { missingProfileMessage, resolvePeopleLabels, coverageMessage as peopleCoverageMessage } from './people-search'
+import { PeopleScanError, scanPhotoForPeople } from './people-scan'
+import {
+  PersonProfileError,
+  PersonProfileStore,
+  type StoredPersonProfile
+} from './person-profiles'
 import {
   decodePhotoSnapshot,
   PhotoDecodeError,
@@ -29,11 +41,11 @@ import {
 } from './scanner'
 import { countFaces } from './face-detect'
 import { decodeForFaceDetection } from './face-image'
-import { rankHybridPhotos, type HybridCoverage } from './hybrid-search'
+import { rankHybridPhotos, type HybridCoverage, type PeopleLabelRequirement } from './hybrid-search'
 import { LocalOcrEngine, OcrEngineError, type OcrWorkerHandle } from './ocr-engine'
 import { decodeForOcr } from './ocr-image'
 import { LocalQueryEmbedder } from './semantic-search'
-import type { FaceFailureCode, OcrFailureCode } from './index-store'
+import type { FaceFailureCode, OcrFailureCode, PeopleFailureCode } from './index-store'
 
 const MAX_QUEUE = 512
 const BASE_YIELD_MS = 75
@@ -51,6 +63,15 @@ interface PhotoPreferences {
   textSearchEnabled: boolean
   faceCountEnabled: boolean
   extrasConsented: boolean
+  /** Phase 3, opt-in separately again from both semantic search and Phase 2. */
+  peopleSearchEnabled: boolean
+  peopleConsented: boolean
+  /**
+   * Pausing people scanning independently of photo indexing, because they are
+   * different costs the user may want to control separately: someone happy to
+   * let the library index overnight may still want face matching off right now.
+   */
+  peoplePaused: boolean
 }
 
 /**
@@ -60,6 +81,12 @@ interface PhotoPreferences {
  */
 const OCR_YIELD_MS = 600
 const FACE_YIELD_MS = 150
+/**
+ * Between face counting and OCR, matching the priority order. A people scan
+ * runs a detection and then one batched SFace inference, so it costs more than
+ * counting and much less than reading a page of text.
+ */
+const PEOPLE_YIELD_MS = 300
 
 export interface PhotoIndexCoordinatorDependencies {
   userDataDir: string
@@ -68,6 +95,8 @@ export interface PhotoIndexCoordinatorDependencies {
   decodeThumbnail: ThumbnailDecoder
   modelRuntime: ModelPackRuntime
   emitStatus?: (status: PhotoSearchStatus) => void
+  /** Separate from `emitStatus`: the People card updates on its own cadence. */
+  emitPeopleStatus?: (status: PeopleSearchStatus) => void
   isOnBattery?: () => boolean
   now?: () => number
   delay?: (milliseconds: number) => Promise<void>
@@ -82,6 +111,16 @@ export interface PhotoIndexCoordinatorDependencies {
   downloadExtras?: (options: { signal?: AbortSignal; onProgress: (received: number, total: number) => void }) => Promise<void>
   clearExtras?: () => Promise<void>
   createOcrWorker?: (languageDirectory: string) => Promise<OcrWorkerHandle>
+  /**
+   * Phase-3 seams. The profile store is injected rather than constructed here
+   * so tests can supply a fake safeStorage; production passes the real one from
+   * main. There is deliberately no seam for the *matching* itself — a test that
+   * could replace the tier logic would not be testing the tier logic.
+   */
+  profileStore?: PersonProfileStore
+  isPeopleInstalled?: () => Promise<boolean>
+  downloadPeople?: (options: { signal?: AbortSignal; onProgress: (received: number, total: number) => void }) => Promise<void>
+  clearPeople?: () => Promise<void>
 }
 
 export interface TrustedSemanticCandidate {
@@ -115,10 +154,25 @@ export class PhotoIndexCoordinator {
     onlyWhilePluggedIn: true,
     textSearchEnabled: false,
     faceCountEnabled: false,
-    extrasConsented: false
+    extrasConsented: false,
+    peopleSearchEnabled: false,
+    peopleConsented: false,
+    peoplePaused: false
   }
   private modelInstalled = false
   private extrasInstalled = false
+  private peopleInstalled = false
+  private peopleDownloadedBytes = 0
+  private peopleDownloading = false
+  /**
+   * Images currently being matched. Read by the coverage calculation so an
+   * in-flight photo reports as `checking` rather than as an answer, and cleared
+   * in a `finally` so a thrown scan cannot leave a photo permanently "checking".
+   */
+  private peopleInFlight = new Set<string>()
+  /** App-authored note when the profile store could not be read or written. */
+  private peopleMessage: string | undefined
+  private lastPeopleEmit = 0
   private ocrEngine: LocalOcrEngine | undefined
   /** Aborted on pause, revocation, disable, and shutdown, so OCR stops now. */
   private phase2Abort: AbortController | undefined
@@ -154,6 +208,9 @@ export class PhotoIndexCoordinator {
     await this.index.load(MODEL_PACK_VERSION)
     this.modelInstalled = await this.checkModelInstalled()
     this.extrasInstalled = await (this.dependencies.isExtrasInstalled?.() ?? isExtrasPackInstalled(this.dependencies.userDataDir))
+    this.peopleInstalled = await (this.dependencies.isPeopleInstalled?.() ??
+      isPeoplePackInstalled(this.dependencies.userDataDir))
+    await this.loadProfiles()
     if (!this.preferences.enabled) {
       this.state = 'off'
     } else if (!this.modelInstalled) {
@@ -302,6 +359,400 @@ export class PhotoIndexCoordinator {
     }
   }
 
+  // --- Phase 3: labelled people ---------------------------------------------
+
+  /**
+   * Loads the profile store, tolerating its absence and reporting its failure.
+   *
+   * A store that cannot be decrypted must never present as "no people". Someone
+   * who enrolled three family members and then sees an empty list has been told
+   * their data is gone, when in fact it is intact and unreadable — and they may
+   * respond by enrolling everyone again, doubling the biometric data on disk to
+   * work around a transient platform problem.
+   */
+  private async loadProfiles(): Promise<void> {
+    const store = this.dependencies.profileStore
+    if (!store) {
+      return
+    }
+    try {
+      await store.load()
+      this.peopleMessage = store.recoveredFromCorruption()
+        ? 'Lumi could not read your saved people. They have not been deleted; face matching is paused until this is resolved.'
+        : undefined
+    } catch {
+      // Deliberately no error text: it can quote the document, and the document
+      // is biometric data.
+      this.peopleMessage = 'Lumi could not open your saved people on this device.'
+    }
+  }
+
+  /** The profiles that can produce matches right now, or an empty list. */
+  private matchableProfiles(): StoredPersonProfile[] {
+    const store = this.dependencies.profileStore
+    if (!store || !this.profileStoreUsable()) {
+      return []
+    }
+    try {
+      return store.matchable().filter((profile) => profile.references.length > 0)
+    } catch {
+      return []
+    }
+  }
+
+  private profileStoreUsable(): boolean {
+    const store = this.dependencies.profileStore
+    return store !== undefined && store.storageAvailable() && !store.recoveredFromCorruption()
+  }
+
+  peopleStatus(): PeopleSearchStatus {
+    const store = this.dependencies.profileStore
+    const records = this.index.isLoaded() ? this.index.all().filter((record) => record.status !== 'deleted') : []
+    const total = records.length
+    const profiles = this.matchableProfiles()
+
+    const views: PeopleProfileView[] = []
+    let anyUnchecked = false
+    let anyChecked = false
+
+    if (store && this.profileStoreUsable()) {
+      for (const summary of store.list()) {
+        const profile = profiles.find((candidate) => candidate.id === summary.id)
+        const coverage: PeopleCoverage = profile
+          ? coverageFor(records, profile, this.peopleInFlight)
+          : { total, checked: 0, unchecked: total, failed: 0, matched: 0 }
+        if (coverage.unchecked > 0) anyUnchecked = true
+        if (coverage.checked > 0) anyChecked = true
+        views.push({
+          id: summary.id,
+          label: summary.label,
+          referenceCount: summary.referenceCount,
+          status: summary.status,
+          createdAt: summary.createdAt,
+          updatedAt: summary.updatedAt,
+          checked: coverage.checked,
+          matched: coverage.matched
+        })
+      }
+    }
+
+    return {
+      state: this.peopleState(views.length, anyChecked, anyUnchecked),
+      enabled: this.preferences.peopleSearchEnabled,
+      modelInstalled: this.peopleInstalled,
+      modelDownloadBytes: PEOPLE_PACK_TOTAL_BYTES,
+      downloadedBytes: this.peopleDownloadedBytes,
+      paused: this.preferences.peoplePaused,
+      total,
+      profiles: views,
+      message: this.peopleMessage
+    }
+  }
+
+  /**
+   * The one place partial coverage is distinguished from completion.
+   *
+   * `complete` is returned only when at least one photo was checked and nothing
+   * is outstanding. Every other combination degrades to a state that says so,
+   * because "no matches found" and "we have not finished looking" produce the
+   * same empty result list and must not produce the same sentence.
+   */
+  private peopleState(profileCount: number, anyChecked: boolean, anyUnchecked: boolean): PeopleSearchState {
+    if (!this.preferences.peopleSearchEnabled) return 'off'
+    if (this.dependencies.profileStore && !this.profileStoreUsable()) return 'profile_store_unavailable'
+    if (this.peopleDownloading) return 'downloading'
+    if (!this.peopleInstalled) return 'model_required'
+    if (profileCount === 0) return 'no_profiles'
+    if (this.preferences.peoplePaused || this.preferences.paused || this.shouldPauseForPower()) return 'paused'
+    if (!anyChecked && anyUnchecked) return 'not_started'
+    if (anyUnchecked) return this.peopleInFlight.size > 0 ? 'scanning' : 'partially_checked'
+    return anyChecked ? 'complete' : 'no_profiles'
+  }
+
+  async setPeopleSearchEnabled(enabled: boolean): Promise<PeopleSearchStatus> {
+    this.assertLive()
+    this.preferences.peopleSearchEnabled = enabled
+    await this.persistPreferences()
+    if (enabled) {
+      await this.ensurePeoplePack()
+    } else {
+      // Turning it off releases both models immediately rather than at the next
+      // idle sweep. Nothing about face matching should stay resident once the
+      // user has said no.
+      this.engine?.releaseFaceEmbedModel()
+      this.peopleInFlight.clear()
+    }
+    this.emitPeople()
+    if (this.canIndex()) void this.processQueue()
+    return this.peopleStatus()
+  }
+
+  async pausePeopleScan(): Promise<PeopleSearchStatus> {
+    this.preferences.peoplePaused = true
+    this.phase2Abort?.abort()
+    this.peopleInFlight.clear()
+    await this.persistPreferences()
+    this.emitPeople()
+    return this.peopleStatus()
+  }
+
+  async resumePeopleScan(): Promise<PeopleSearchStatus> {
+    this.preferences.peoplePaused = false
+    await this.persistPreferences()
+    this.emitPeople()
+    if (this.canIndex()) void this.processQueue()
+    return this.peopleStatus()
+  }
+
+  private async ensurePeoplePack(): Promise<void> {
+    // YuNet lives in the extras pack and Phase 3 cannot detect a face without
+    // it, so both are secured together.
+    await this.ensureExtras()
+    this.peopleInstalled = await (this.dependencies.isPeopleInstalled?.() ??
+      isPeoplePackInstalled(this.dependencies.userDataDir))
+    if (this.peopleInstalled) {
+      return
+    }
+
+    this.preferences.peopleConsented = true
+    await this.persistPreferences()
+    this.peopleDownloading = true
+    this.emitPeople()
+    try {
+      const report = (received: number): void => {
+        this.peopleDownloadedBytes = received
+        this.emitPeople()
+      }
+      if (this.dependencies.downloadPeople) {
+        await this.dependencies.downloadPeople({ onProgress: report })
+      } else {
+        await downloadPeoplePack(this.dependencies.userDataDir, this.dependencies.modelRuntime, {
+          consented: true,
+          onProgress: (progress) => report(progress.receivedBytes)
+        })
+      }
+      this.peopleInstalled = true
+      this.peopleDownloadedBytes = PEOPLE_PACK_TOTAL_BYTES
+      this.peopleMessage = undefined
+    } catch {
+      // Phases 1 and 2 are unaffected, so this feature stays off rather than
+      // taking photo search down with it.
+      this.peopleInstalled = false
+      this.peopleMessage = 'The face matching model could not be downloaded. The rest of photo search still works.'
+    } finally {
+      this.peopleDownloading = false
+      this.emitPeople()
+    }
+  }
+
+  /**
+   * Schedules Phase-3 work for a newly created profile.
+   *
+   * Nothing needs to be invalidated: a new profile has a revision no stored
+   * record mentions, so every photo already reads as `not_checked` for it and
+   * the ordinary queue picks them up. This exists to *start* that promptly
+   * rather than waiting for the next reconcile.
+   */
+  async profileCreated(): Promise<void> {
+    this.emitPeople()
+    if (this.canIndex()) void this.processQueue()
+  }
+
+  /**
+   * Rescans one profile after its references changed.
+   *
+   * Also relies on the revision bump rather than rewriting the index: the store
+   * has already moved the profile's revision, which invalidates exactly that
+   * profile's records and leaves every other person's outcomes — and every CLIP
+   * vector, OCR result and face count — untouched.
+   */
+  async rescanProfile(profileId: string): Promise<void> {
+    const store = this.dependencies.profileStore
+    if (!store) {
+      return
+    }
+    try {
+      await store.invalidateScan(profileId)
+    } catch (error) {
+      if (!(error instanceof PersonProfileError)) throw error
+      return
+    }
+    this.emitPeople()
+    if (this.canIndex()) void this.processQueue()
+  }
+
+  /**
+   * Deletes one profile: its encrypted enrolment, its per-photo records, and any
+   * queued work for it.
+   *
+   * Order matters. The records go first, so a crash between the two steps leaves
+   * a profile with no outcomes (which rescans harmlessly) rather than orphaned
+   * outcomes with no profile to explain them.
+   */
+  async deleteProfile(profileId: string): Promise<boolean> {
+    const store = this.dependencies.profileStore
+    if (!store) {
+      return false
+    }
+    this.peopleInFlight.clear()
+    await this.index.removeProfileRecords(profileId, this.now())
+    const removed = await store.remove(profileId)
+    // Any in-flight scan was computed against a profile set that included this
+    // person; discarding the generation stops it committing that result.
+    this.generation += 1
+    this.emitPeople()
+    if (this.canIndex()) void this.processQueue()
+    return removed
+  }
+
+  /**
+   * Removes every trace of labelled-person data.
+   *
+   * Three separate stores have to be cleared and none of them can be assumed to
+   * have succeeded from the others: the encrypted profile directory, the
+   * Phase-3 fields inside the photo index, and the in-memory enrolment drafts
+   * owned by the caller. People search is switched off afterwards, so a restart
+   * cannot quietly resume scanning against a store that is now empty.
+   */
+  async deleteAllPeopleData(): Promise<PeopleSearchStatus> {
+    this.generation += 1
+    this.phase2Abort?.abort()
+    this.peopleInFlight.clear()
+    this.engine?.releaseFaceEmbedModel()
+
+    await this.index.clearPeopleRecords(this.now())
+    await this.dependencies.profileStore?.removeAll()
+
+    this.preferences.peopleSearchEnabled = false
+    this.preferences.peopleConsented = false
+    this.preferences.peoplePaused = false
+    await this.persistPreferences()
+
+    this.peopleMessage = undefined
+    this.emitPeople()
+    return this.peopleStatus()
+  }
+
+  /**
+   * True when a people scan may run right now.
+   *
+   * Note the extras requirement: the landmarks SFace consumes come from YuNet,
+   * which ships in the Phase-2 extras pack. Phase 3 needs both packs, which is
+   * why enabling people search installs the extras pack too rather than failing
+   * later with a puzzling detection error.
+   */
+  private canScanPeople(): boolean {
+    return (
+      this.canIndex() &&
+      this.preferences.peopleSearchEnabled &&
+      !this.preferences.peoplePaused &&
+      this.peopleInstalled &&
+      this.extrasInstalled &&
+      this.profileStoreUsable()
+    )
+  }
+
+  /**
+   * The next photo needing a people scan.
+   *
+   * "Needing" is defined by the same resolver the search path uses: a photo is
+   * outstanding if *any* matchable profile resolves to `not_checked` against it.
+   * Deriving it rather than storing a queue flag is what makes a new profile, a
+   * changed profile, a model bump and a never-scanned photo all schedule
+   * themselves without a separate invalidation pass for each.
+   */
+  private nextPeopleRecord(): PhotoIndexRecord | undefined {
+    if (!this.canScanPeople()) {
+      return undefined
+    }
+    const profiles = this.matchableProfiles()
+    if (profiles.length === 0) {
+      return undefined
+    }
+    return this.index
+      .indexed()
+      .find(
+        (record) =>
+          !this.peopleInFlight.has(record.imageId) &&
+          profiles.some((profile) => resolveMatch(record, profile).status === 'not_checked')
+      )
+  }
+
+  private async scanPeople(record: PhotoIndexRecord, generation: number, signal?: AbortSignal): Promise<void> {
+    const profiles = this.matchableProfiles()
+    if (profiles.length === 0) {
+      return
+    }
+    const snapshot = await this.snapshotFor(record)
+    if (!snapshot) {
+      // The root is gone or the file moved; reconcile owns that.
+      return
+    }
+
+    this.peopleInFlight.add(record.imageId)
+    try {
+      const { bitmap, scale } = await decodeForFaceDetection(snapshot, this.dependencies.decodeThumbnail)
+      const geometry = await this.getEngine().detectFacesDetailed(bitmap)
+
+      // Authority is rechecked between the two inferences as well as after
+      // both, because SFace is the more expensive of the pair and a root
+      // revoked mid-scan must not have its faces embedded at all.
+      if (generation !== this.generation || signal?.aborted || !(await revalidateSnapshot(snapshot))) {
+        return
+      }
+
+      const outcome = await scanPhotoForPeople({
+        source: { data: new Uint8Array(bitmap), width: 640, height: 640 },
+        geometry,
+        scale,
+        profiles,
+        embed: (tensors, count) => this.getEngine().embedFaces(tensors, count)
+      })
+
+      if (generation !== this.generation || signal?.aborted || !(await revalidateSnapshot(snapshot))) {
+        // Computed under authority that has since been withdrawn. The outcome
+        // is dropped rather than written; the embeddings behind it are already
+        // out of scope.
+        return
+      }
+
+      await this.index.recordPeople(record.imageId, { status: 'done', matches: outcome.matches }, this.now())
+    } catch (error) {
+      if (generation !== this.generation || signal?.aborted) {
+        return
+      }
+      const code = peopleFailureCode(error)
+      const attempts = (record.peopleAttempts ?? 0) + 1
+      const transient = (RETRYABLE_SCAN_FAILURES as readonly string[]).includes(code)
+      await this.index.recordPeople(
+        record.imageId,
+        {
+          status: transient && attempts < MAX_TRANSIENT_ATTEMPTS ? 'pending' : transient ? 'failed' : 'skipped',
+          failureCode: code,
+          attempts
+        },
+        this.now()
+      )
+    } finally {
+      // Unconditional: a photo left in this set would report as permanently
+      // "checking" and hold coverage below complete forever.
+      this.peopleInFlight.delete(record.imageId)
+    }
+  }
+
+  /**
+   * Throttled on the same clock as the photo status, so a long scan does not
+   * flood the renderer with a status object per image.
+   */
+  private emitPeople(force = true): void {
+    const now = this.now()
+    if (!force && now - this.lastPeopleEmit < STATUS_THROTTLE_MS) {
+      return
+    }
+    this.lastPeopleEmit = now
+    this.dependencies.emitPeopleStatus?.(this.peopleStatus())
+  }
+
   async enable(): Promise<PhotoSearchStatus> {
     this.assertLive()
     this.preferences.enabled = true
@@ -436,6 +887,9 @@ export class PhotoIndexCoordinator {
   async revokeRoot(rootId: string): Promise<void> {
     this.phase2Abort?.abort()
     this.generation += 1
+    // A scan in flight for this root must not commit; clearing the set also
+    // stops those photos reporting as "checking" after their records are gone.
+    this.peopleInFlight.clear()
     this.queue = this.queue.filter((snapshot) => snapshot.rootId !== rootId)
     this.queued = new Set(this.queue.map((snapshot) => computeImageId(snapshot.rootId, snapshot.relativePath)))
     this.knownRootIds.delete(rootId)
@@ -482,6 +936,7 @@ export class PhotoIndexCoordinator {
     this.generation += 1
     this.queue = []
     this.queued.clear()
+    this.peopleInFlight.clear()
     this.downloadAbort?.abort()
     await this.downloadPromise?.catch(() => undefined)
     this.disposeEngine()
@@ -517,12 +972,27 @@ export class PhotoIndexCoordinator {
     if (!this.preferences.enabled) {
       return { ...base, candidates: [], available: false, message: 'Intelligent photo search is not enabled. I searched filenames and dates only.' }
     }
-    // A Phase-2 request needs no visual concept at all: "photos containing the
-    // number 1234" and "photos with two people" are answerable from the text
-    // and face signals alone.
-    const wantsPhase2 = query.containsTextTokens.length > 0 || query.people !== undefined
+    // A Phase-2 or Phase-3 request needs no visual concept at all: "photos
+    // containing the number 1234", "photos with two people", and "photos of
+    // Father" are all answerable from their own signal alone.
+    const wantsPeople = query.peopleLabels.length > 0
+    const wantsPhase2 = query.containsTextTokens.length > 0 || query.people !== undefined || wantsPeople
     if (!this.modelInstalled || (query.concepts.length === 0 && !wantsPhase2)) {
       return { ...base, candidates: [], available: false, message: 'The local photo model is unavailable. I searched filenames and dates only.' }
+    }
+
+    let peopleProfiles: PeopleLabelRequirement[] = []
+    if (wantsPeople) {
+      const resolution = this.resolvePeopleForSearch(query.peopleLabels)
+      if (resolution.blocked) {
+        // The person constraint could not even be evaluated, so nothing found
+        // by any other signal would answer the question that was actually
+        // asked. Stopping here also means a missing profile never falls back
+        // to "everything matching the concept", which would misrepresent an
+        // unenrolled name as a search that ran and found nothing.
+        return { ...base, candidates: [], available: true, message: resolution.message }
+      }
+      peopleProfiles = resolution.profiles
     }
 
     try {
@@ -533,7 +1003,9 @@ export class PhotoIndexCoordinator {
         vectors,
         queryVector,
         query,
-        this.now()
+        this.now(),
+        peopleProfiles,
+        this.peopleInFlight
       )
       const roots = await this.liveRoots()
       const byId = new Map(roots.map((root) => [root.id, root]))
@@ -555,9 +1027,55 @@ export class PhotoIndexCoordinator {
           reason: match.reason
         })
       }
-      return { ...base, candidates, available: true, message: coverageMessage(coverage) }
+      const messages = [coverageMessage(coverage)].filter((text): text is string => !!text)
+      if (wantsPeople && coverage.peopleUnchecked > 0) {
+        // Separate from the Phase-2 wording above: "not checked for Father yet"
+        // is a different claim from "not checked for text yet", and folding
+        // them into one sentence would blur which signal is incomplete.
+        messages.push(peopleCoverageMessage(query.peopleLabels, coverage.peopleUnchecked))
+      }
+      return { ...base, candidates, available: true, message: messages.length > 0 ? messages.join(' ') : undefined }
     } catch {
       return { ...base, candidates: [], available: false, message: 'Intelligent photo search is temporarily unavailable. I searched filenames and dates only.' }
+    }
+  }
+
+  /**
+   * Resolves the labels a search named against enrolled profiles, or explains
+   * why it cannot.
+   *
+   * Every early return here is a *blocking* condition: the person constraint is
+   * the reason the request was made, so a store that cannot be read or a name
+   * that was never enrolled ends the search rather than silently falling back
+   * to results that ignore the person entirely.
+   */
+  private resolvePeopleForSearch(
+    labels: readonly string[]
+  ): { blocked: true; message: string } | { blocked: false; profiles: PeopleLabelRequirement[] } {
+    const store = this.dependencies.profileStore
+    if (!store) {
+      return { blocked: true, message: 'Labelled-person search is not set up on this device.' }
+    }
+    if (!this.preferences.peopleSearchEnabled) {
+      return { blocked: true, message: 'People search is off. Turn it on in settings to check for a labelled person.' }
+    }
+    if (!this.profileStoreUsable()) {
+      return {
+        blocked: true,
+        message: 'Lumi could not read your saved people on this device, so it could not check for them.'
+      }
+    }
+    if (!this.peopleInstalled) {
+      return { blocked: true, message: 'The face-matching model is not installed yet, so Lumi could not check for them.' }
+    }
+
+    const { found, missing } = resolvePeopleLabels(store, labels)
+    if (missing.length > 0) {
+      return { blocked: true, message: missingProfileMessage(missing) }
+    }
+    return {
+      blocked: false,
+      profiles: found.map((profile) => ({ id: profile.id, revision: profile.revision, label: profile.label }))
     }
   }
 
@@ -565,6 +1083,7 @@ export class PhotoIndexCoordinator {
     this.phase2Abort?.abort()
     this.disposed = true
     this.generation += 1
+    this.peopleInFlight.clear()
     this.queue = []
     this.queued.clear()
     this.downloadAbort?.abort()
@@ -708,6 +1227,18 @@ export class PhotoIndexCoordinator {
       await this.wait(Math.max(FACE_YIELD_MS, this.realtimeActive ? REALTIME_YIELD_MS : 0))
     }
 
+    // Labelled-person matching sits between counting and text: more expensive
+    // than a count, far cheaper than a page of OCR, and more immediately useful
+    // than either once someone has enrolled a person.
+    while (this.canScanPeople() && generation === this.generation) {
+      const record = this.nextPeopleRecord()
+      if (!record) break
+      await this.scanPeople(record, generation, signal)
+      this.emit()
+      this.emitPeople(false)
+      await this.wait(Math.max(PEOPLE_YIELD_MS, this.realtimeActive ? REALTIME_YIELD_MS : 0))
+    }
+
     while (this.canIndexPhase2() && generation === this.generation) {
       const record = this.nextOcrRecord()
       if (!record) break
@@ -716,8 +1247,10 @@ export class PhotoIndexCoordinator {
       await this.wait(Math.max(OCR_YIELD_MS, this.realtimeActive ? REALTIME_YIELD_MS : 0))
     }
 
-    // Neither model needs to stay resident once its backlog is clear.
-    if (!this.nextFaceRecord()) this.engine?.releaseFaceModel()
+    // No model needs to stay resident once its backlog is clear. SFace is the
+    // largest of the three, so releasing it promptly matters most.
+    if (!this.nextPeopleRecord()) this.engine?.releaseFaceEmbedModel()
+    if (!this.nextFaceRecord() && !this.nextPeopleRecord()) this.engine?.releaseFaceModel()
     if (!this.nextOcrRecord()) await this.ocrEngine?.release()
   }
 
@@ -913,6 +1446,20 @@ export class PhotoIndexCoordinator {
     return this.engine
   }
 
+  /**
+   * The shared inference engine, for enrolment.
+   *
+   * Enrolment runs detection and embedding on a photo the user picked, which is
+   * exactly as expensive as a scan step. Handing it *this* engine rather than
+   * letting it build its own is what keeps "one expensive image operation at a
+   * time" true across the whole feature: both paths queue on the same engine,
+   * so choosing a reference photo cannot run SFace concurrently with a
+   * background scan and double the memory footprint on a laptop.
+   */
+  visionEngine(): VisionEngine {
+    return this.getEngine()
+  }
+
   private disposeEngine(): void {
     this.phase2Abort?.abort()
     void this.ocrEngine?.dispose()
@@ -953,6 +1500,41 @@ export class PhotoIndexCoordinator {
  */
 function looksLikeText(record: PhotoIndexRecord): boolean {
   return classifyFileKind(record.name, extname(record.name), record.relativePath.split('/').slice(0, -1)) === 'screenshot'
+}
+
+/**
+ * Failures a later attempt could plausibly resolve. A decode problem is not one
+ * of them: the same bytes will fail the same way, so retrying costs power and
+ * changes nothing until the file itself does.
+ */
+const RETRYABLE_SCAN_FAILURES: readonly PeopleFailureCode[] = [
+  'file_locked',
+  'detection_failed',
+  'embedding_failed',
+  'face_model_unavailable',
+  'profile_store_unavailable'
+]
+
+/** Maps a decode, alignment or inference failure onto the bounded people codes. */
+function peopleFailureCode(error: unknown): PeopleFailureCode {
+  if (error instanceof PeopleScanError) {
+    return error.code
+  }
+  if (error instanceof PhotoDecodeError) {
+    switch (error.code) {
+      case 'file_locked':
+        return 'file_locked'
+      case 'too_many_pixels':
+        return 'too_many_pixels'
+      case 'unsupported_format':
+        return 'unsupported_format'
+      case 'outside_approved_root':
+        return 'outside_approved_root'
+      default:
+        return 'decode_failed'
+    }
+  }
+  return 'detection_failed'
 }
 
 /** Maps a decode or engine failure onto the index's bounded face codes. */
@@ -1051,7 +1633,10 @@ async function readPreferences(path: string): Promise<PhotoPreferences> {
       onlyWhilePluggedIn: value.onlyWhilePluggedIn !== false,
       textSearchEnabled: value.textSearchEnabled === true,
       faceCountEnabled: value.faceCountEnabled === true,
-      extrasConsented: value.extrasConsented === true
+      extrasConsented: value.extrasConsented === true,
+      peopleSearchEnabled: value.peopleSearchEnabled === true,
+      peopleConsented: value.peopleConsented === true,
+      peoplePaused: value.peoplePaused === true
     }
   } catch {
     return {
@@ -1061,7 +1646,10 @@ async function readPreferences(path: string): Promise<PhotoPreferences> {
       onlyWhilePluggedIn: true,
       textSearchEnabled: false,
       faceCountEnabled: false,
-      extrasConsented: false
+      extrasConsented: false,
+      peopleSearchEnabled: false,
+      peopleConsented: false,
+      peoplePaused: false
     }
   }
 }

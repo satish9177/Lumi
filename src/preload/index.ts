@@ -75,7 +75,41 @@ const lifeLensApi: LifeLensApi = {
    */
   registerDroppedFile: (file: File) =>
     ipcRenderer.invoke(IPC_CHANNELS.registerDroppedFile, webUtils.getPathForFile(file)),
-  removeDroppedFile: (droppedId: string) => ipcRenderer.invoke(IPC_CHANNELS.removeDroppedFile, droppedId)
+  removeDroppedFile: (droppedId: string) => ipcRenderer.invoke(IPC_CHANNELS.removeDroppedFile, droppedId),
+
+  // --- Phase 3: labelled people --------------------------------------------
+  // Straight pass-throughs. Preload adds no validation of its own, because
+  // preload runs in the renderer's process and a check here would be a check
+  // an attacker controls. Every payload is parsed in main; see people-ipc.ts.
+  getPeopleSearchStatus: () => ipcRenderer.invoke(IPC_CHANNELS.getPeopleSearchStatus),
+  setPeopleSearchEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke(IPC_CHANNELS.setPeopleSearchEnabled, enabled),
+  pausePeopleScan: () => ipcRenderer.invoke(IPC_CHANNELS.pausePeopleScan),
+  resumePeopleScan: () => ipcRenderer.invoke(IPC_CHANNELS.resumePeopleScan),
+  listPeopleProfiles: () => ipcRenderer.invoke(IPC_CHANNELS.listPeopleProfiles),
+  beginPeopleEnrolment: (label: string) => ipcRenderer.invoke(IPC_CHANNELS.beginPeopleEnrolment, label),
+  beginPersonReferenceAddition: (profileId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.beginPersonReferenceAddition, profileId),
+  addPeopleReference: (enrolmentId: string, trustedId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.addPeopleReference, enrolmentId, trustedId),
+  selectPeopleFace: (enrolmentId: string, candidateId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.selectPeopleFace, enrolmentId, candidateId),
+  confirmPeopleEnrolment: (enrolmentId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.confirmPeopleEnrolment, enrolmentId),
+  cancelPeopleEnrolment: (enrolmentId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.cancelPeopleEnrolment, enrolmentId),
+  renamePeopleProfile: (profileId: string, label: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.renamePeopleProfile, profileId, label),
+  rescanPeopleProfile: (profileId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.rescanPeopleProfile, profileId),
+  deletePeopleProfile: (profileId: string) =>
+    ipcRenderer.invoke(IPC_CHANNELS.deletePeopleProfile, profileId),
+  deleteAllPeopleData: () => ipcRenderer.invoke(IPC_CHANNELS.deleteAllPeopleData),
+  onPeopleSearchStatusChanged: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, status: Parameters<typeof listener>[0]) => listener(status)
+    ipcRenderer.on(IPC_CHANNELS.peopleSearchStatusChanged, handler)
+    return () => ipcRenderer.removeListener(IPC_CHANNELS.peopleSearchStatusChanged, handler)
+  }
 }
 
 contextBridge.exposeInMainWorld('lifeLens', lifeLensApi)

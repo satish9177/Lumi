@@ -99,7 +99,9 @@ const SYSTEM_INSTRUCTIONS = [
   'Never ask the user for an exact filename or which folder to search before calling search_documents. Call it even when no folder is approved yet: Lumi asks the user to approve a folder and then runs your search automatically.',
   'Lumi shows the complete matching-file list in the UI. After a search result, state the total result count, mention at most the first three returned names, say the complete list is visible in the UI, and offer to hear more when there are additional results. Refer to results only by their number and name, and offer to open one with open_file.',
   'For photo requests, search_documents can use local visual concept search over photos already indexed on this device. Put up to three short concepts copied from the user request in concepts. Photo bytes and embeddings never reach you.',
-  'Local visual search does not support OCR, reading document text inside photos, counting people, or recognising a person\'s identity or face. Never claim those capabilities.',
+  'search_documents also supports contains_text (words or a number written inside the photo itself) and people (a count of visible faces). Neither reveals or reasons about who anyone is.',
+  'search_documents supports people_labels only for a specific name the user has already labelled on this device, such as "Father". Use it only when the user names that exact person in this request; never guess, infer, or invent a name, and never use it for an unlabelled or general description of someone. A result may say likely match or possible match for that name — never say the photo shows them, never say confirmed or certain, and always say which of the two words the result used. If Lumi reports the name has not been labelled, tell the user so plainly rather than trying a plain visual search instead.',
+  'Local visual and text search never reveal a face, a biometric score, or any recognised identity beyond a labelled name the user already gave Lumi.',
   'If indexing is incomplete or a result is described as a filename-only possibility, repeat that limitation plainly. Do not claim a weak result depicts the requested concept.',
   'Selected-photo cloud analysis is separate from local indexing/search and happens only after the user explicitly confirms one photo. Never invoke or imply it happened automatically.',
   'When the user explicitly chooses one photo, Lumi sends you that single image. Answer their question about it, and answer later follow-ups from that same image without asking for it again.',
@@ -167,6 +169,13 @@ const TOOL_DEFINITIONS = [
             n: { type: 'number', minimum: 0, maximum: 10, description: 'The number of people, for eq and gte only.' }
           },
           required: ['op']
+        },
+        people_labels: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 3,
+          items: { type: 'string', maxLength: 40 },
+          description: 'Names of specific people the user has labelled on this device, such as "Father" or "Mother", copied exactly from what the user said. Only use a name the user actually said in this request. Lumi resolves the name locally; you never receive a photo, a face, or any identifying detail as a result.'
         },
         reason: { type: 'string', description: 'Why this approved-folder search helps.' }
       },
@@ -1588,13 +1597,32 @@ function parseSearchArguments(argumentsValue: Record<string, unknown>): SearchDo
     people = { op: op as PeopleFilter['op'], ...(typeof n === 'number' ? { n } : {}) }
   }
 
+  // Read here exactly like every other argument: shaped into an array of
+  // strings, and nothing more. Whether a name is real, whether it is even
+  // shaped like a name rather than an identifier, is decided in main — this
+  // function has no opinion and performs no lookup.
+  const rawPeopleLabels = argumentsValue.people_labels ?? argumentsValue.peopleLabels
+  let peopleLabels: string[] | undefined
+  if (rawPeopleLabels !== undefined) {
+    if (!Array.isArray(rawPeopleLabels)) {
+      throw new Error('Realtime supplied an invalid people_labels list.')
+    }
+    peopleLabels = rawPeopleLabels.map((label) => {
+      if (typeof label !== 'string' || !label.trim()) {
+        throw new Error('Realtime supplied an invalid people_labels list.')
+      }
+      return label.trim()
+    })
+  }
+
   return {
     queryTerms,
     kind: isSearchKind(kind) ? kind : undefined,
     recency: isSearchRecency(recency) ? recency : undefined,
     concepts,
     containsText,
-    people
+    people,
+    peopleLabels
   }
 }
 

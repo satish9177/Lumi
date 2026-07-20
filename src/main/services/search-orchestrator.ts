@@ -87,7 +87,8 @@ export class SearchOrchestrator {
           kind: query.kind,
           recency: query.recency,
           ...(query.containsText ? { containsText: query.containsText } : {}),
-          ...(query.people ? { people: query.people } : {})
+          ...(query.people ? { people: query.people } : {}),
+          ...(query.peopleLabels.length > 0 ? { peopleLabels: query.peopleLabels } : {})
         }
       }
     }

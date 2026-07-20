@@ -390,7 +390,7 @@ describe('existing semantic-only search still works', () => {
       query({ queryTerms: 'beach', concepts: ['beach'] }),
       NOW
     )
-    expect(result.coverage).toEqual({ ocrUnchecked: 0, faceUnchecked: 0 })
+    expect(result.coverage).toEqual({ ocrUnchecked: 0, faceUnchecked: 0, peopleUnchecked: 0 })
   })
 })
 

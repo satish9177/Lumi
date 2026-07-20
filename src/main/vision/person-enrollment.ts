@@ -196,6 +196,13 @@ interface Draft {
   references: DraftReference[]
   pending?: { trustedId: string; source: SourceImage; candidates: Candidate[] }
   expiresAt: number
+  /**
+   * Set only for a draft opened by `beginAddition`. Everything about adding
+   * and selecting a face is identical either way; only `confirm` branches —
+   * appending one embedding to an existing profile is a different write than
+   * creating a new one, and needs a different reference-count floor.
+   */
+  appendTo?: string
 }
 
 export class PersonEnrollmentService {
@@ -249,6 +256,34 @@ export class PersonEnrollmentService {
 
   list(draftId: string): DraftView {
     return view(this.draftOrThrow(draftId))
+  }
+
+  /**
+   * Opens a draft that will append one new reference to an existing profile
+   * rather than create one.
+   *
+   * Deliberately reuses `addReference` and `selectFace` unchanged: the
+   * revalidation, the quality gates, and the multi-face stop-and-ask are the
+   * same photo-safety rules either way. Only `confirm` needs to know the
+   * difference, because appending is a smaller, different write.
+   */
+  beginAddition(profileId: string, label: string): DraftView {
+    this.sweep()
+    if (this.drafts.size >= MAX_DRAFTS) {
+      throw new EnrolmentError('too_many_drafts')
+    }
+    if (this.dependencies.profiles.byId(profileId) === undefined) {
+      throw new EnrolmentError('unknown_draft')
+    }
+    const draft: Draft = {
+      draftId: randomUUID(),
+      label: cleanLabel(label),
+      references: [],
+      expiresAt: this.now() + DRAFT_TTL_MS,
+      appendTo: profileId
+    }
+    this.drafts.set(draft.draftId, draft)
+    return view(draft)
   }
 
   /**
@@ -320,6 +355,33 @@ export class PersonEnrollmentService {
   }
 
   /**
+   * Abandons every draft, for "delete all people data".
+   *
+   * Drafts hold face previews and candidate ids. They were never written to
+   * disk, but they are still images of a person's face sitting in memory, and
+   * someone asking for their face data to be deleted means those too.
+   */
+  cancelAll(): void {
+    this.drafts.clear()
+  }
+
+  /**
+   * Abandons any draft appending to `profileId`, for deleting one profile.
+   *
+   * A draft in progress for the profile being deleted holds a reference photo
+   * chosen for a person who, in a moment, will no longer be enrolled — its
+   * preview and candidate ids are exactly the "profile-specific previews" a
+   * single-profile deletion has to clear, not only the wholesale one.
+   */
+  cancelForProfile(profileId: string): void {
+    for (const [draftId, draft] of this.drafts) {
+      if (draft.appendTo === profileId) {
+        this.drafts.delete(draftId)
+      }
+    }
+  }
+
+  /**
    * Creates the profile. The explicit act that this whole module exists to
    * gate — nothing before this point has written anything.
    */
@@ -328,7 +390,11 @@ export class PersonEnrollmentService {
     if (draft.pending) {
       throw new EnrolmentError('selection_required')
     }
-    if (draft.references.length < MIN_REFERENCES) {
+    // An addition needs only the one reference it was opened to collect; the
+    // three-reference floor is an enrolment-quality rule, not a rule about
+    // what a single new photo of an already-established person requires.
+    const minimum = draft.appendTo ? 1 : MIN_REFERENCES
+    if (draft.references.length < minimum) {
       throw new EnrolmentError('too_few_references')
     }
 
@@ -345,9 +411,11 @@ export class PersonEnrollmentService {
       }
     }
 
-    const inconsistent = findInconsistentReference(draft.references.map((reference) => reference.embedding))
-    if (inconsistent !== undefined) {
-      throw new EnrolmentError('inconsistent_reference')
+    if (!draft.appendTo) {
+      const inconsistent = findInconsistentReference(draft.references.map((reference) => reference.embedding))
+      if (inconsistent !== undefined) {
+        throw new EnrolmentError('inconsistent_reference')
+      }
     }
 
     const stored: StoredReference[] = draft.references.map((reference) => ({
@@ -357,7 +425,9 @@ export class PersonEnrollmentService {
       addedAt: reference.addedAt
     }))
 
-    const summary = await this.dependencies.profiles.create(draft.label, stored)
+    const summary = draft.appendTo
+      ? await appendAll(this.dependencies.profiles, draft.appendTo, stored)
+      : await this.dependencies.profiles.create(draft.label, stored)
     // The draft held the only copy of the source paths and pixels. Dropping it
     // is what makes "no reference paths are stored" true.
     this.drafts.delete(draftId)
@@ -494,6 +564,22 @@ export class PersonEnrollmentService {
       fingerprint
     })
   }
+}
+
+/** Appends every collected reference, in order, returning the final summary. */
+async function appendAll(
+  profiles: PersonProfileStore,
+  profileId: string,
+  references: readonly StoredReference[]
+): Promise<PersonProfileSummary> {
+  let summary: PersonProfileSummary | undefined
+  for (const reference of references) {
+    summary = await profiles.addReference(profileId, reference)
+  }
+  if (!summary) {
+    throw new EnrolmentError('too_few_references')
+  }
+  return summary
 }
 
 const PREVIEW_TOO_SMALL = 'Too small to learn from'

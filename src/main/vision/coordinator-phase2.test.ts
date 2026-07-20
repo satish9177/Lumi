@@ -99,6 +99,9 @@ async function harness(
         },
         releaseImageModel: () => undefined,
         releaseFaceModel: () => undefined,
+        // Present on the real engine; the coordinator releases SFace once the
+        // people backlog is clear, and does so on every pass through Phase 2.
+        releaseFaceEmbedModel: () => undefined,
         dispose: () => undefined,
         isRunning: () => true,
         loadedModels: () => []

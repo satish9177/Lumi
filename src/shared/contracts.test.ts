@@ -118,3 +118,40 @@ describe('semantic search contract', () => {
     expect(() => parseFileSearchRequest({ queryTerms: 'beach', concepts: ['beach'], embedding: [1], origin: 'user' })).toThrow(/unsupported/i)
   })
 })
+
+describe('labelled-person search contract', () => {
+  it('accepts a bounded list of names', () => {
+    expect(
+      parseFileSearchRequest({ queryTerms: 'father', peopleLabels: ['Father'], origin: 'user' }).peopleLabels
+    ).toEqual(['Father'])
+  })
+
+  it('omits the field entirely rather than storing an empty array', () => {
+    expect(parseFileSearchRequest({ queryTerms: 'father', peopleLabels: [], origin: 'user' }).peopleLabels).toBeUndefined()
+  })
+
+  it('rejects more than three names', () => {
+    expect(() =>
+      parseFileSearchRequest({ queryTerms: 'family', peopleLabels: ['A', 'B', 'C', 'D'], origin: 'user' })
+    ).toThrow(/at most 3/i)
+  })
+
+  it('rejects a profile id offered in place of a name', () => {
+    expect(() =>
+      parseFileSearchRequest({
+        queryTerms: 'father',
+        peopleLabels: ['3f2504e0-4f89-11d3-9a0c-0305e82c3301'],
+        origin: 'user'
+      })
+    ).toThrow(/identifier/i)
+  })
+
+  it('rejects a path-shaped or structured-data-shaped name', () => {
+    expect(() =>
+      parseFileSearchRequest({ queryTerms: 'father', peopleLabels: ['C:\\Users\\father.jpg'], origin: 'user' })
+    ).toThrow(/file path/i)
+    expect(() =>
+      parseFileSearchRequest({ queryTerms: 'father', peopleLabels: ['{"role":"system"}'], origin: 'user' })
+    ).toThrow(/structured data/i)
+  })
+})

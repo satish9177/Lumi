@@ -990,6 +990,200 @@ button:disabled {
   color: #ffb8c7;
 }
 
+/* ------------------------------------------------------- people (Phase 3) */
+
+.people-settings {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid rgba(179, 211, 255, 0.16);
+  border-radius: 14px;
+  background: rgba(1, 7, 28, 0.27);
+}
+
+.people-state {
+  padding: 3px 7px;
+  border: 1px solid rgba(131, 239, 255, 0.28);
+  border-radius: 999px;
+  color: #9df5ff;
+  background: rgba(71, 194, 211, 0.1);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* Paused and unavailable read as attention states without relying on colour
+   alone: the label text itself always says which state applies. */
+.people-state.state-paused,
+.people-state.state-not_started {
+  color: #ffe08a;
+  background: rgba(214, 175, 62, 0.12);
+  border-color: rgba(255, 224, 138, 0.32);
+}
+
+.people-state.state-profile_store_unavailable {
+  color: #ffb8c7;
+  background: rgba(214, 62, 90, 0.12);
+  border-color: rgba(255, 184, 199, 0.32);
+}
+
+.people-progress {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  color: #b8c9e4;
+  font-size: 11px;
+}
+
+.people-progress progress {
+  width: 100%;
+}
+
+.people-profile-list {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.people-profile-card {
+  padding: 10px;
+  border: 1px solid rgba(179, 211, 255, 0.16);
+  border-radius: 10px;
+  background: rgba(112, 151, 225, 0.06);
+}
+
+.people-profile-name {
+  margin: 0;
+  color: #f0f6ff;
+  font-size: 13px;
+  font-weight: 620;
+}
+
+.people-profile-meta {
+  margin: 3px 0 0;
+  color: #b8c9e4;
+  font-size: 11px;
+}
+
+/* A profile needing attention says so in text (see COPY.people.profileStatusLabel),
+   and the colour is a reinforcement rather than the only signal. */
+.people-profile-warning {
+  color: #ffe08a;
+}
+
+.people-profile-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.people-rename-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.people-rename-form input {
+  min-width: 0;
+  min-height: 32px;
+  padding: 6px 8px;
+  color: #f3f8ff;
+  border: 1px solid rgba(174, 209, 255, 0.22);
+  border-radius: 8px;
+  background: rgba(1, 7, 28, 0.45);
+  font: inherit;
+}
+
+.people-enrolment-view {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid rgba(131, 239, 255, 0.28);
+  border-radius: 12px;
+  background: rgba(71, 194, 211, 0.06);
+}
+
+.people-enrolment-view h3 {
+  margin: 0 0 6px;
+  color: #f0f6ff;
+  font-size: 13px;
+}
+
+.people-enrolment-view label {
+  display: block;
+  margin-bottom: 5px;
+  color: #c8d8f2;
+  font-size: 11px;
+}
+
+.people-enrolment-view input[type='text'],
+.people-enrolment-view input:not([type]) {
+  width: 100%;
+  min-width: 0;
+  min-height: 36px;
+  padding: 8px 9px;
+  color: #f3f8ff;
+  border: 1px solid rgba(174, 209, 255, 0.22);
+  border-radius: 10px;
+  background: rgba(1, 7, 28, 0.45);
+  font: inherit;
+}
+
+.people-rejection {
+  color: #ffb8c7;
+}
+
+.people-candidate-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 8px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.people-candidate-button {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  padding: 0;
+  overflow: hidden;
+  color: #dcecff;
+  border: 1px solid rgba(179, 211, 255, 0.18);
+  border-radius: 10px;
+  background: rgba(112, 151, 225, 0.08);
+  text-align: left;
+  cursor: pointer;
+}
+
+.people-candidate-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.people-candidate-button img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+}
+
+.people-candidate-caption {
+  display: block;
+  padding: 5px 6px;
+  overflow: hidden;
+  color: #c9dbf7;
+  font-size: 11px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.people-candidate-button:disabled .people-candidate-caption {
+  color: #ffb8c7;
+}
+
 .root-select-field {
   display: grid;
   gap: 5px;
@@ -1308,8 +1502,18 @@ progress:focus-visible,
   .dropped-file-card,
   .drop-overlay,
   .chip,
-  .status-pill {
+  .status-pill,
+  .people-settings,
+  .people-profile-card,
+  .people-enrolment-view,
+  .people-candidate-button {
     border: 1px solid CanvasText;
+  }
+
+  .people-candidate-button:disabled {
+    /* The custom opacity fade is unreliable here; the caption text already
+       says "not usable", so this only needs to keep the border legible. */
+    opacity: 1;
   }
 
   .icon-button,

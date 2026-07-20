@@ -4,6 +4,7 @@ import {
   isSearchRecency,
   normalizeContainsText,
   normalizePeopleFilter,
+  normalizePeopleLabels,
   type FileKind,
   type PeopleFilter,
   type SearchKind,
@@ -55,7 +56,30 @@ export const IPC_CHANNELS = {
   setPanelOpen: 'lifelens:set-panel-open',
   resetWindowPosition: 'lifelens:reset-window-position',
   registerDroppedFile: 'lifelens:register-dropped-file',
-  removeDroppedFile: 'lifelens:remove-dropped-file'
+  removeDroppedFile: 'lifelens:remove-dropped-file',
+
+  // --- Phase 3: labelled people --------------------------------------------
+  // Each channel does exactly one thing and takes the narrowest payload that
+  // can express it. There is deliberately no general "people command" channel:
+  // a single entry point taking an action name is one validation slip away from
+  // being a way to reach anything.
+  getPeopleSearchStatus: 'lifelens:get-people-search-status',
+  setPeopleSearchEnabled: 'lifelens:set-people-search-enabled',
+  pausePeopleScan: 'lifelens:pause-people-scan',
+  resumePeopleScan: 'lifelens:resume-people-scan',
+  listPeopleProfiles: 'lifelens:list-people-profiles',
+  beginPeopleEnrolment: 'lifelens:begin-people-enrolment',
+  /** Opens a draft that appends one reference to an already-created profile. */
+  beginPersonReferenceAddition: 'lifelens:begin-person-reference-addition',
+  addPeopleReference: 'lifelens:add-people-reference',
+  selectPeopleFace: 'lifelens:select-people-face',
+  confirmPeopleEnrolment: 'lifelens:confirm-people-enrolment',
+  cancelPeopleEnrolment: 'lifelens:cancel-people-enrolment',
+  renamePeopleProfile: 'lifelens:rename-people-profile',
+  rescanPeopleProfile: 'lifelens:rescan-people-profile',
+  deletePeopleProfile: 'lifelens:delete-people-profile',
+  deleteAllPeopleData: 'lifelens:delete-all-people-data',
+  peopleSearchStatusChanged: 'lifelens:people-search-status-changed'
 } as const
 
 export const COMPANION_STATES = ['idle', 'listening', 'thinking', 'speaking', 'success', 'error'] as const
@@ -138,6 +162,8 @@ export interface SearchDocumentsInput {
   containsText?: string
   /** How many visible faces the photo should contain. Counting only, never identity. */
   people?: PeopleFilter
+  /** Names of people the user has labelled. Never a profile id; resolved in main only. */
+  peopleLabels?: string[]
 }
 
 export interface OpenFileInput {
@@ -278,6 +304,98 @@ export interface PhotoSearchStatus {
   faceScanned: number
 }
 
+// --- Phase 3: labelled people ----------------------------------------------
+
+/**
+ * Why labelled-person matching is or is not producing answers.
+ *
+ * Deliberately more granular than "on/off". Every one of these states leads to
+ * different, honest wording in the UI, and collapsing them would mean telling
+ * someone "no matches" when the truth is "the scan has not started", "your
+ * profiles could not be decrypted", or "the model is not installed". Those are
+ * different problems with different fixes and only one of them is about the
+ * photos.
+ */
+export const PEOPLE_SEARCH_STATES = [
+  'off',
+  'model_required',
+  'downloading',
+  'no_profiles',
+  'not_started',
+  'scanning',
+  'partially_checked',
+  'complete',
+  'paused',
+  'profile_store_unavailable'
+] as const
+export type PeopleSearchState = (typeof PEOPLE_SEARCH_STATES)[number]
+
+/**
+ * One enrolled person, as the renderer is allowed to see them.
+ *
+ * The id is here because the settings UI has to be able to say *which* profile
+ * a Rename or Delete applies to, and there is no safer handle than an opaque
+ * one. It is inert everywhere else: it is not accepted as a search term, it is
+ * not accepted as a Realtime tool argument, and main resolves search requests
+ * from labels only. See the tests in people-ipc.test.ts.
+ *
+ * Note what is absent: embeddings, reference paths, similarity values, face
+ * previews, and the case-folded label used for uniqueness.
+ */
+export interface PeopleProfileView {
+  id: string
+  label: string
+  referenceCount: number
+  /** Whether this profile can currently produce matches. */
+  status: 'ready' | 'needs_rescan' | 'needs_reenrolment'
+  createdAt: string
+  updatedAt: string
+  /** Photos checked against this profile, out of `total` in PeopleSearchStatus. */
+  checked: number
+  /** Photos that reached `likely` or `possible`. Never a score. */
+  matched: number
+}
+
+export interface PeopleSearchStatus {
+  state: PeopleSearchState
+  enabled: boolean
+  modelInstalled: boolean
+  modelDownloadBytes: number
+  downloadedBytes: number
+  paused: boolean
+  /** Eligible photos in the library. The denominator for every profile. */
+  total: number
+  profiles: PeopleProfileView[]
+  /** App-authored. Never quotes a label, a path, or an error from disk. */
+  message?: string
+}
+
+/** A face offered for selection during enrolment. Bounded and temporary. */
+export interface PeopleFaceCandidateView {
+  candidateId: string
+  /** A small locally-rendered crop. Never leaves the device. */
+  previewDataUrl: string
+  /** True when this face passed the quality gates and may be chosen. */
+  selectable: boolean
+  /** App-authored reason it cannot be chosen, when it cannot. */
+  note?: string
+}
+
+/** The live state of one enrolment draft, as the renderer sees it. */
+export interface PeopleEnrolmentView {
+  enrolmentId: string
+  label: string
+  acceptedReferences: number
+  requiredReferences: number
+  maximumReferences: number
+  /** Present while the user must point at one face in a multi-face photo. */
+  candidates?: PeopleFaceCandidateView[]
+  /** True once enough references are accepted for Create to be offered. */
+  readyToCreate: boolean
+  /** App-authored rejection for the most recent attempt, when one failed. */
+  lastRejection?: string
+}
+
 export type FileSearchOrigin = 'model' | 'user'
 
 export interface FileSearchRequest {
@@ -287,6 +405,7 @@ export interface FileSearchRequest {
   concepts?: string[]
   containsText?: string
   people?: PeopleFilter
+  peopleLabels?: string[]
   /** The Realtime function call awaiting a terminal result, when model-driven. */
   callId?: string
   origin: FileSearchOrigin
@@ -461,6 +580,31 @@ export interface LifeLensApi {
    */
   registerDroppedFile: (file: File) => Promise<DroppedFileDescriptor>
   removeDroppedFile: (droppedId: string) => Promise<void>
+
+  // --- Phase 3: labelled people --------------------------------------------
+  // Every call below is app-authored and narrow. Note what the renderer never
+  // supplies: a photo path, a model path, an embedding, a threshold, or a
+  // similarity. Reference photos are named by trusted ids the renderer already
+  // holds from an approved-root search result or a live dropped file.
+  getPeopleSearchStatus: () => Promise<PeopleSearchStatus>
+  setPeopleSearchEnabled: (enabled: boolean) => Promise<PeopleSearchStatus>
+  pausePeopleScan: () => Promise<PeopleSearchStatus>
+  resumePeopleScan: () => Promise<PeopleSearchStatus>
+  listPeopleProfiles: () => Promise<PeopleProfileView[]>
+  /** Opens a draft. Creates nothing until `confirmPeopleEnrolment`. */
+  beginPeopleEnrolment: (label: string) => Promise<PeopleEnrolmentView>
+  /** Opens a draft that appends one reference to an existing profile. */
+  beginPersonReferenceAddition: (profileId: string) => Promise<PeopleEnrolmentView>
+  addPeopleReference: (enrolmentId: string, trustedId: string) => Promise<PeopleEnrolmentView>
+  selectPeopleFace: (enrolmentId: string, candidateId: string) => Promise<PeopleEnrolmentView>
+  /** The explicit act that creates a profile. Nothing else does. */
+  confirmPeopleEnrolment: (enrolmentId: string) => Promise<PeopleProfileView>
+  cancelPeopleEnrolment: (enrolmentId: string) => Promise<void>
+  renamePeopleProfile: (profileId: string, label: string) => Promise<PeopleProfileView>
+  rescanPeopleProfile: (profileId: string) => Promise<PeopleSearchStatus>
+  deletePeopleProfile: (profileId: string) => Promise<PeopleSearchStatus>
+  deleteAllPeopleData: () => Promise<PeopleSearchStatus>
+  onPeopleSearchStatusChanged: (listener: (status: PeopleSearchStatus) => void) => () => void
 }
 
 /**
@@ -569,7 +713,7 @@ function parseSearchDocumentsInput(value: unknown, allowedExtra: readonly string
 
   assertOnlyKeys(
     value,
-    ['queryTerms', 'kind', 'recency', 'concepts', 'containsText', 'people', ...allowedExtra],
+    ['queryTerms', 'kind', 'recency', 'concepts', 'containsText', 'people', 'peopleLabels', ...allowedExtra],
     'Search arguments'
   )
 
@@ -625,6 +769,17 @@ function parseSearchDocumentsInput(value: unknown, allowedExtra: readonly string
       }
     } catch (error) {
       throw new PayloadValidationError(error instanceof Error ? error.message : 'people is not valid.')
+    }
+  }
+
+  if (value.peopleLabels !== undefined) {
+    try {
+      const peopleLabels = normalizePeopleLabels(value.peopleLabels)
+      if (peopleLabels.length > 0) {
+        input.peopleLabels = peopleLabels
+      }
+    } catch (error) {
+      throw new PayloadValidationError(error instanceof Error ? error.message : 'peopleLabels is not valid.')
     }
   }
 

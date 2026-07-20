@@ -224,7 +224,7 @@ then face scanning, then OCR at the lowest duty cycle. One expensive image task
 at a time. Pause, revocation, disable, and shutdown abort in-flight Phase-2 work
 immediately.
 
-# Phase 3 — user-labelled people (foundation, integration pending)
+# Phase 3 — user-labelled people
 
 Matching faces against people the **user has explicitly labelled**. This is not
 identity discovery: nothing is named automatically, no profile is created
@@ -409,8 +409,255 @@ worst failure this feature has. An unrecognised label is reported as missing.
 Filename matches and biometric matches stay separate signals. A photo named
 `father-birthday.jpg` does not become a face match.
 
+## Per-photo match records
+
+Additive fields on the same `PhotoIndexRecord`, independently versioned from
+every Phase-1 and Phase-2 field: `peopleStatus`, `peopleModelVersion`,
+`peopleIndexVersion`, `peopleFailureCode`, `peopleAttempts`, and
+`peopleMatches`. A match entry is exactly
+`{ profileId, status, matchingFaces, profileRevision }` — bounded, closed on
+parse, and structurally unable to carry a similarity value, a face box, a
+landmark, a reference path, or a label. Every one of those is app metadata the
+scan pipeline never has in scope by the time it writes a record.
+
+Status is one of `not_checked`, `checking`, `likely`, `possible`,
+`checked_no_reliable_match`, `failed_retryable`, `failed_permanent`, or
+`profile_unavailable`. Only the terminal six are ever written; `not_checked`
+and `checking` are computed by `people-records.ts:resolveMatch` from *absence*
+or from the coordinator's live in-flight set, never persisted — a persisted
+"checking" would survive a crash and become a permanent lie.
+
+A completed scan writes an explicit outcome for every profile it considered,
+including a negative one, which is what makes absence of a row mean
+"not checked" rather than being ambiguous with "checked and it wasn't them."
+A profile created after a photo was already scanned is, correctly, absent from
+that photo's `peopleMatches` — and `resolveMatch` reads that as `not_checked`,
+not as a negative.
+
+Each profile carries a `revision`, bumped when its references change (not on
+rename). A stored match's `profileRevision` is compared against the live
+profile's; a mismatch resolves to `not_checked`. This is the entire mechanism
+behind "adding a reference invalidates only that profile's records" and
+"renaming does not require a rescan" — both are consequences of one comparison,
+not separate code paths that could drift apart.
+
+## Scan pipeline and embedding lifetime
+
+For every eligible indexed photo, once matchable profiles exist: decode
+(bounded, revalidated), detect with `detect_faces_detailed`, gate each face on
+size and detector confidence, align with the same similarity transform
+enrolment uses, batch-embed with `embed_faces`, score against every matchable
+profile's references, and write bounded outcomes.
+
+`people-scan.ts:scanPhotoForPeople` is the one place a face belonging to
+someone **not** enrolled becomes a vector at all. The tensor, the batch, and
+every embedding it produces are function-local; nothing above this function's
+own stack frame can hold a reference to one. What survives the call is an
+array of `{ profileId, status, matchingFaces, profileRevision }` rows — a type
+that has no field to carry an embedding even if a future caller wanted one to.
+This is a structural claim, not a policy one, and it is under test:
+`people-scan.test.ts` serializes the full return value and asserts it never
+contains an embedding, a landmark, or a score.
+
+## Coordinator scheduling
+
+Labelled-person matching sits at priority 4 in the existing single-worker
+scheduler — after visible-face counting, before the OCR backlog — because it
+costs more than a count and far less than reading a page of text, and search
+becomes more immediately useful once someone has enrolled a person than once
+their photos are OCR-searchable. `nextPeopleRecord()` derives what still needs
+scanning from `resolveMatch` itself rather than a separate dirty flag, so a
+newly created profile, a changed profile, and a face-embedding-model version
+bump all self-schedule through the same mechanism rather than three bespoke
+invalidation passes.
+
+Coverage distinguishes `not_started`, `partially_checked`, `complete`,
+`paused`, `no_profiles`, `model_required`, and `profile_store_unavailable`.
+`complete` is reachable only when every requested photo has a terminal answer
+for every matchable profile — a retryable failure, an unresolved profile, or
+an in-flight scan all keep it out of reach.
+
+Shutdown, root revocation, pause, and disabling people search all abort the
+in-flight scan and clear the coordinator's in-flight set, so a photo can never
+be stuck reporting `checking` after the work that would have finished it was
+cancelled.
+
+## IPC and preload boundary
+
+`services/people-ipc.ts` is the single point every People payload crosses.
+Inbound values are parsed into narrow types or rejected — never cast. Outbound
+values are projected field by field into `PeopleProfileView`,
+`PeopleEnrolmentView`, and `PeopleFaceCandidateView` — never spread from an
+internal type — so a field added to a stored shape later (an embedding, a
+reference path) cannot reach the renderer by inheriting a spread; the compiler
+would have to be told about it explicitly at the one place these views are
+built.
+
+The renderer does receive an opaque profile id, because Rename and Delete need
+a handle and there is no safer one. Its inertness everywhere else is a tested
+property rather than an assumption: the search-query contract rejects
+UUID-shaped label entries outright, so an id offered as a `people_labels`
+value fails validation instead of resolving; the Realtime tool schema has no
+field shaped to accept one; and label-to-profile resolution happens in main
+only, never from an id an outside caller supplies.
+
+## Search integration
+
+`hybrid-search.ts:applyPeopleFilter` is a hard pre-filter, exactly like the
+existing face-count filter: it runs before semantic, text, or filename scoring,
+and nothing downstream can admit a photo it excluded. Multiple named people use
+AND semantics, with one asymmetry that matters: a **firm miss** on any
+requested profile excludes the photo immediately (the answer cannot become yes
+regardless of what the others say), while an **unresolved** profile excludes
+it as coverage — because that is the one circumstance where the true answer
+might still be yes. Ranking gives a likely match priority over a possible one
+via a dedicated sort key ahead of every existing tie-breaker, so recency or a
+filename match cannot push a weaker person-match result above a stronger one.
+
+Filename and OCR-text matches never become biometric evidence: the people
+filter reads only `peopleMatches`, and a photo named or containing the
+requested label with no scanned match is excluded exactly as it would be for
+anyone else. Semantic relevance still orders results within a tier — "may rank
+but cannot manufacture" — because the concept score contributes to `fusedScore`
+but never to filter admission when a person constraint is present.
+
+## Realtime integration
+
+`people_labels` joined the closed `search_documents` tool schema: at most
+three names, 40 characters each. The renderer performs zero resolution — it
+reads the array as plain strings and forwards it, exactly like every other
+argument on that tool. Stored and spoken labels are untrusted text that can
+reach a reason string (`"Likely match for Father"`) but nothing in the path
+from tool call to displayed text ever evaluates a label as an instruction, a
+template, or structured data. Labels shaped like a prompt-injection attempt —
+`"ignore previous instructions"`, a JSON fragment, a tool-call-shaped string —
+are proven inert two ways: shape-based ones are rejected outright by the
+existing query contract (`shared/search-query.ts`, unchanged from Slices A-D),
+and shape-legal ones are carried through as plain displayed text with no effect
+on which photos are returned or how they are ranked.
+
+## People settings and enrolment UI
+
+`components/PeopleSettings.tsx` extends the existing intelligent-photo-search
+settings card rather than adding a second surface. Enable/disable,
+enable-triggered model download with a real progress bar, pause/resume,
+per-profile Add reference / Rename / Rescan / Delete, and Delete all people
+data are all present.
+
+Enrolment reuses the app's only existing photo browser instead of building a
+new one: while a draft is open, approved-folder search results in
+`PhotoResultGrid` gain a "Use as reference for `<label>`" action, and choosing
+one calls the same `addPeopleReference` IPC entry the rest of the enrolment
+flow uses. "Add person" reveals a local, renderer-only label field first —
+nothing crosses into main, and no draft exists anywhere, until that field is
+submitted — which is what makes "dropping or selecting a file must not
+automatically enrol it" true from the very first click rather than only once a
+photo is involved. A multi-face reference stops and asks, with each candidate
+rendered as an image plus a text caption; an unusable face states its reason in
+both the caption and the accessible name, never in colour alone.
+
+Adding one more reference to an **already-created** profile is a second,
+lighter draft type (`person-enrollment.ts:beginAddition`): it reuses the exact
+same add/select-face machinery and revalidation as a fresh enrolment, but needs
+only one accepted reference rather than three, and — because it only ever
+submits one reference — never runs the cross-reference consistency check that
+compares a *submission* against itself.
+
+The enrolment view is a nested section of the existing settings dialog and
+inherits its focus trap rather than introducing a second one to keep
+synchronized with the first.
+
+## Deletion
+
+Deleting one profile: removes its encrypted enrolment; removes its per-photo
+`peopleMatches` entries from the index by compacting the journal, so the
+profile id is gone from the bytes on disk rather than merely superseded by a
+later line; cancels any of its queued scan work; and clears any in-progress
+"add reference" draft scoped to it
+(`person-enrollment.ts:cancelForProfile`) — a preview and a candidate id for a
+person who is, in the same operation, about to no longer be enrolled.
+
+Delete-all: clears the entire encrypted people directory in one recursive
+removal; strips every Phase-3 field from every photo-index record while
+leaving CLIP vectors, OCR text, and face counts untouched; clears every
+in-memory enrolment draft; and turns people search off. Both single-profile
+and delete-all are proven to survive a process restart — a fresh store or
+coordinator instance over the same on-disk directory, not merely an in-memory
+check — because "delete-all leaves no recoverable people data" is a claim
+about disk state, not about the object that happened to receive the request.
+
+## Real-model integration test
+
+`real-people-inference.test.ts` runs the real installed models rather than
+synthesized tensors, against procedurally generated pixel data — no
+third-party or personal photograph is loaded from disk or committed. It is
+skipped whenever the corresponding pack is absent, so the suite stays runnable
+offline. Against YuNet (Phase 2's extras pack): the `kps_*` landmark tensors
+exist at the shape the decoder assumes, and decoded points are finite and
+score above the uncertain floor on structured noise. Against SFace, when the
+people pack is installed: output is exactly 128 floats, the same input
+produces the same output twice, normalizing to a unit vector holds, the same
+input scores similarity 1 against itself and measurably lower against a
+different input, and a landmark-driven alignment feeds a real embedding
+without a shape mismatch. A test explicitly makes `fetch` throw and asserts
+inference still completes, so "no network access" is demonstrated rather than
+merely assumed from the absence of a call. No accuracy claim beyond these
+structural properties is made from one synthetic-input suite.
+
+## Security suite
+
+Beyond the properties already under test throughout this document,
+`people-security.test.ts` proves the boundaries between features hold as the
+app grows: it reads `main/index.ts` and asserts that `personProfiles` and
+`personEnrollment` are referenced nowhere outside the People IPC handler
+block — not by capture, not by Telegram, not by dropped-file registration.
+It reads the Realtime tool schema and `CompactSearchResult` and asserts
+neither has a field shaped to carry a profile id, a similarity, or an
+embedding. And it proves the people-pack download pipeline discards a digest
+mismatch exactly like its CLIP and extras siblings, using the real pinned
+manifest rather than a stand-in.
+
+## Manual acceptance checklist
+
+None of the following can be certified from automated checks. Prepared, not
+claimed complete — a human pass on a real Windows install with real
+photographs is required before Phase 3 can be called done in practice, not
+only in code.
+
+- create one profile from exactly three references
+- multi-face reference photo: explicit face selection required, largest face
+  never assumed
+- a photo with no detectable face is rejected with a plain explanation
+- a low-quality/too-small face is rejected with a plain explanation
+- a clear likely match on a real photograph
+- a clear possible match (partial angle, poorer lighting) on a real photograph
+- a clear non-match on a real photograph
+- a side-profile face
+- a low-resolution face
+- a group photo containing the labelled person among others
+- a search naming two labelled people (AND semantics) on real photographs
+- a semantic-concept query combined with a `people_labels` constraint
+- an OCR `contains_text` query combined with a `people_labels` constraint
+- an incomplete-scan state: search while some photos are still unchecked
+- pause, resume, and a full application restart mid-scan
+- rename a profile and confirm no rescan occurs
+- add a reference to an existing profile and confirm only that profile rescans
+- rescan a profile on demand
+- delete one profile and confirm its matches disappear from search
+- delete all people data and confirm nothing returns after a restart
+- revoke an approved root mid-scan and mid-enrolment
+- the installed Windows build (`Lumi Setup 0.1.0.exe`), not only the dev build
+- CPU, RAM, and per-photo timing for SFace on a real photo library
+- Phase 1/2 regression: semantic search, OCR, face counting all still work
+- Telegram, voice, and screen-capture regression: unaffected by Phase 3
+- keyboard-only walkthrough of the full enrolment flow
+- a screen-reader walkthrough (NVDA or Narrator) of the People section
+- Windows High Contrast and "Show animations" off
+
 ## Status
 
-Slices A-D and the query contract are implemented and verified. The per-photo
-match records, coordinator scheduling and People UI are not yet built, and
-nothing is wired into the running application. See docs/STATUS.md.
+Code-complete: records, coordinator, IPC/preload, search and Realtime
+integration, the People UI, deletion, the real-model integration test, and the
+security suite are all implemented and verified. Reachable end to end from
+Settings → People. The manual acceptance checklist above is the one thing
+automated checks cannot certify. See docs/STATUS.md for exact counts.

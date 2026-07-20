@@ -38,6 +38,8 @@ import { appendFile, mkdir, open, readdir, readFile, rename, rm, stat, writeFile
 import { join } from 'node:path'
 import { MAX_OCR_TEXT_CHARS, MAX_OCR_TOKENS, MAX_OCR_TOKEN_LENGTH } from '../../shared/ocr-text'
 import { FACE_MODEL_VERSION, OCR_MODEL_VERSION } from './extras-manifest'
+import { FACE_EMBED_MODEL_VERSION, PEOPLE_INDEX_VERSION } from './people-manifest'
+import { MAX_PROFILES } from './person-profiles'
 import { CLIP_EMBEDDING_LENGTH } from './protocol'
 import {
   INDEX_JOURNAL_FILE,
@@ -99,6 +101,100 @@ export type FaceFailureCode = (typeof FACE_FAILURE_CODES)[number]
 
 export const MAX_STORED_FACE_COUNT = 50
 
+// --- Phase 3: labelled-person matching -------------------------------------
+
+/**
+ * What a stored per-(photo, profile) outcome can say.
+ *
+ * Only *terminal* answers are written to disk. `not_checked` is the absence of a
+ * record — including a record invalidated by a model, index or profile-revision
+ * change — and `checking` is in-flight coordinator state that outlives no
+ * process. Persisting either would let a crash mid-scan resurrect as a claim,
+ * and "we never looked" must always be recoverable from what is *missing*
+ * rather than from what was written.
+ *
+ * Note what is not here: a tier meaning "definitely". `likely` is the ceiling,
+ * matching the vocabulary in face-matching.ts, and there is nothing in this
+ * schema that could carry a stronger claim even if some future caller wanted to
+ * make one.
+ */
+export const PEOPLE_MATCH_STATUSES = [
+  'not_checked',
+  'checking',
+  'likely',
+  'possible',
+  'checked_no_reliable_match',
+  'failed_retryable',
+  'failed_permanent',
+  'profile_unavailable'
+] as const
+export type PeopleMatchStatus = (typeof PEOPLE_MATCH_STATUSES)[number]
+
+/** The subset that is ever written to the journal. */
+const PERSISTED_PEOPLE_MATCH_STATUSES: readonly PeopleMatchStatus[] = [
+  'likely',
+  'possible',
+  'checked_no_reliable_match',
+  'failed_retryable',
+  'failed_permanent',
+  'profile_unavailable'
+]
+
+export const PEOPLE_FAILURE_CODES = [
+  'decode_failed',
+  'unsupported_format',
+  'too_many_pixels',
+  'file_locked',
+  'outside_approved_root',
+  'detection_failed',
+  'alignment_failed',
+  'embedding_failed',
+  'face_model_unavailable',
+  'profile_store_unavailable'
+] as const
+export type PeopleFailureCode = (typeof PEOPLE_FAILURE_CODES)[number]
+
+/** Failures that a later attempt could plausibly resolve. */
+export const RETRYABLE_PEOPLE_FAILURES: readonly PeopleFailureCode[] = [
+  'file_locked',
+  'detection_failed',
+  'embedding_failed',
+  'face_model_unavailable',
+  'profile_store_unavailable'
+]
+
+/** One profile cannot appear twice, and there are only ever MAX_PROFILES of them. */
+export const MAX_PEOPLE_MATCH_RECORDS = MAX_PROFILES
+
+/** A photo cannot record more matching faces than Phase 2 would ever count. */
+export const MAX_MATCHING_FACES = MAX_STORED_FACE_COUNT
+
+/**
+ * One profile's outcome for one photo.
+ *
+ * Every field here is bounded and non-reversible. There is deliberately no place
+ * to put a similarity value, a face box, a landmark, a crop, an embedding, a
+ * reference path, or the user's label — the schema is the enforcement, not a
+ * convention the writer is trusted to follow. A caller holding one of these
+ * learns that a profile reached a tier, and nothing about the face that did it.
+ */
+export interface PeopleMatchRecord {
+  /** Opaque profile id. Meaningless outside the local profile store. */
+  profileId: string
+  status: PeopleMatchStatus
+  /** How many visible faces in this photo reached at least `possible`. */
+  matchingFaces: number
+  /** The profile's evidence revision at scan time; see StoredPersonProfile. */
+  profileRevision: number
+}
+
+export interface PeopleVersions {
+  /** The embedding model the outcomes were produced by. */
+  model: number
+  /** The matching rules the outcomes were produced under. */
+  index: number
+}
+
 export interface PhotoIndexRecord {
   imageId: string
   rootId: string
@@ -138,6 +234,18 @@ export interface PhotoIndexRecord {
   faceVersion?: number
   faceFailureCode?: FaceFailureCode
   faceAttempts?: number
+
+  // --- Phase 3: labelled-person matching ----------------------------------
+  /** Absent means this image has never been checked against any profile. */
+  peopleStatus?: Phase2Status
+  /** Stamped with FACE_EMBED_MODEL_VERSION; a new model drops these rows only. */
+  peopleModelVersion?: number
+  /** Stamped with PEOPLE_INDEX_VERSION; new matching rules drop these rows only. */
+  peopleIndexVersion?: number
+  peopleFailureCode?: PeopleFailureCode
+  peopleAttempts?: number
+  /** One entry per profile checked. Never a vector, a box, or a label. */
+  peopleMatches?: PeopleMatchRecord[]
 }
 
 /** Coverage of each Phase-2 signal, for the separate settings progress lines. */
@@ -208,6 +316,15 @@ export class PhotoIndexStore {
    * the re-index this phase must avoid.
    */
   private phase2Versions: Phase2Versions = { ocr: OCR_MODEL_VERSION, face: FACE_MODEL_VERSION }
+  /**
+   * Held apart from both the generation version and the Phase-2 versions for the
+   * same reason those were split: bumping the face-embedding model must drop
+   * match records and leave every CLIP vector, OCR result and face count intact.
+   */
+  private peopleVersions: PeopleVersions = {
+    model: FACE_EMBED_MODEL_VERSION,
+    index: PEOPLE_INDEX_VERSION
+  }
   private loaded = false
   /** Journal lines written since load, used to decide when to compact. */
   private appendedLines = 0
@@ -227,9 +344,11 @@ export class PhotoIndexStore {
    */
   async load(
     modelVersion: number,
-    phase2: Phase2Versions = { ocr: OCR_MODEL_VERSION, face: FACE_MODEL_VERSION }
+    phase2: Phase2Versions = { ocr: OCR_MODEL_VERSION, face: FACE_MODEL_VERSION },
+    people: PeopleVersions = { model: FACE_EMBED_MODEL_VERSION, index: PEOPLE_INDEX_VERSION }
   ): Promise<{ rebuilt: boolean; droppedLines: number }> {
     this.phase2Versions = phase2
+    this.peopleVersions = people
     return this.runExclusive(() => this.loadInner(modelVersion))
   }
 
@@ -278,7 +397,7 @@ export class PhotoIndexStore {
       if (line.trim().length === 0) {
         continue
       }
-      const record = parseRecordLine(line, modelVersion, this.phase2Versions)
+      const record = parseRecordLine(line, modelVersion, this.phase2Versions, this.peopleVersions)
       if (!record) {
         // A torn final line from an interrupted write, or a corrupt entry.
         droppedLines += 1
@@ -472,6 +591,125 @@ export class PhotoIndexStore {
     }
     this.records.set(imageId, stored)
     await this.appendLine(stored)
+  }
+
+  /**
+   * Merges a labelled-person scan outcome into an existing record.
+   *
+   * A merge, like the Phase-2 writers, so a Phase-3 result cannot round-trip a
+   * stale copy of the record and clear the vector row, the OCR text, or the face
+   * count. The matches supplied replace the previous set wholesale: a rescan
+   * that no longer finds a profile must not leave that profile's old answer
+   * sitting beside the new ones.
+   */
+  async recordPeople(
+    imageId: string,
+    outcome: {
+      status: Phase2Status
+      matches?: readonly PeopleMatchRecord[]
+      failureCode?: PeopleFailureCode
+      attempts?: number
+    },
+    nowMs: number
+  ): Promise<void> {
+    return this.runExclusive(() => this.recordPeopleInner(imageId, outcome, nowMs))
+  }
+
+  private async recordPeopleInner(
+    imageId: string,
+    outcome: {
+      status: Phase2Status
+      matches?: readonly PeopleMatchRecord[]
+      failureCode?: PeopleFailureCode
+      attempts?: number
+    },
+    nowMs: number
+  ): Promise<void> {
+    const existing = this.records.get(imageId)
+    if (!existing || existing.status === 'deleted') {
+      return
+    }
+
+    const stored: PhotoIndexRecord = {
+      ...existing,
+      peopleStatus: outcome.status,
+      peopleModelVersion: this.peopleVersions.model,
+      peopleIndexVersion: this.peopleVersions.index,
+      peopleAttempts: outcome.attempts ?? (existing.peopleAttempts ?? 0) + 1,
+      peopleMatches: outcome.status === 'done' ? boundedPeopleMatches(outcome.matches) : undefined,
+      peopleFailureCode: outcome.failureCode,
+      updatedAtMs: nowMs
+    }
+    this.records.set(imageId, stored)
+    await this.appendLine(stored)
+  }
+
+  /**
+   * Removes one profile's outcomes from every photo.
+   *
+   * Compacts rather than appending a tombstone line per photo. That is not an
+   * optimization: an append-only journal would keep the deleted profile's rows
+   * readable in superseded lines until some later compaction happened to run,
+   * and "delete this person" has to mean the bytes are gone. Rewriting the
+   * generation and flipping the pointer leaves no line that ever named them.
+   */
+  async removeProfileRecords(profileId: string, nowMs: number): Promise<number> {
+    return this.runExclusive(() => this.removeProfileRecordsInner(profileId, nowMs))
+  }
+
+  private async removeProfileRecordsInner(profileId: string, nowMs: number): Promise<number> {
+    let touched = 0
+    for (const [imageId, record] of this.records) {
+      const matches = record.peopleMatches
+      if (!matches?.some((match) => match.profileId === profileId)) {
+        continue
+      }
+      const remaining = matches.filter((match) => match.profileId !== profileId)
+      this.records.set(imageId, {
+        ...record,
+        peopleMatches: remaining.length > 0 ? remaining : undefined,
+        updatedAtMs: nowMs
+      })
+      touched += 1
+    }
+    if (touched > 0) {
+      await this.compactInner()
+    }
+    return touched
+  }
+
+  /**
+   * Strips every Phase-3 field from every photo, for "delete all people data".
+   *
+   * Phase-1 and Phase-2 fields are untouched by construction: this rewrites the
+   * records it already holds, dropping named fields, rather than resetting the
+   * index. A user removing their face data does not expect to lose the photo
+   * search that took an hour to build.
+   */
+  async clearPeopleRecords(nowMs: number): Promise<number> {
+    return this.runExclusive(() => this.clearPeopleRecordsInner(nowMs))
+  }
+
+  private async clearPeopleRecordsInner(nowMs: number): Promise<number> {
+    let touched = 0
+    for (const [imageId, record] of this.records) {
+      if (record.peopleStatus === undefined && record.peopleMatches === undefined) {
+        continue
+      }
+      const stripped: PhotoIndexRecord = { ...record, updatedAtMs: nowMs }
+      delete stripped.peopleStatus
+      delete stripped.peopleModelVersion
+      delete stripped.peopleIndexVersion
+      delete stripped.peopleFailureCode
+      delete stripped.peopleAttempts
+      delete stripped.peopleMatches
+      this.records.set(imageId, stripped)
+      touched += 1
+    }
+    if (touched > 0) {
+      await this.compactInner()
+    }
+    return touched
   }
 
   /**
@@ -959,7 +1197,8 @@ function assertSafeRelativePath(relativePath: string): void {
 function parseRecordLine(
   line: string,
   modelVersion: number,
-  phase2: Phase2Versions
+  phase2: Phase2Versions,
+  people: PeopleVersions
 ): PhotoIndexRecord | undefined {
   let parsed: unknown
   try {
@@ -1024,7 +1263,8 @@ function parseRecordLine(
     attempts: value.attempts,
     updatedAtMs: value.updatedAtMs,
     ...parseOcrFields(value, phase2.ocr),
-    ...parseFaceFields(value, phase2.face)
+    ...parseFaceFields(value, phase2.face),
+    ...parsePeopleFields(value, people)
   }
 }
 
@@ -1059,6 +1299,96 @@ function parseOcrFields(value: Record<string, unknown>, ocrVersion: number): Par
       : undefined,
     ocrAttempts: typeof value.ocrAttempts === 'number' && value.ocrAttempts >= 0 ? value.ocrAttempts : 0
   }
+}
+
+/**
+ * Phase-3 fields, parsed independently of Phase 1 and Phase 2 and gated on
+ * *both* people versions.
+ *
+ * A mismatch on either drops the outcomes back to "never checked" and leaves the
+ * vector, the OCR text and the face count exactly where they were. That is the
+ * whole point of keeping these versions out of `index-meta.json`: shipping a new
+ * face-embedding model must cost a face rescan, not a re-embed of the library.
+ *
+ * A record whose fields survive but whose profile has since gained a reference
+ * is *not* filtered here — the store does not know about profiles. It is caught
+ * at read time by comparing `profileRevision`, which is why that field is stored
+ * rather than inferred.
+ */
+function parsePeopleFields(
+  value: Record<string, unknown>,
+  people: PeopleVersions
+): Partial<PhotoIndexRecord> {
+  if (
+    !(PHASE2_STATUSES as readonly unknown[]).includes(value.peopleStatus) ||
+    value.peopleModelVersion !== people.model ||
+    value.peopleIndexVersion !== people.index
+  ) {
+    return {}
+  }
+  const failureCode = value.peopleFailureCode
+  return {
+    peopleStatus: value.peopleStatus as Phase2Status,
+    peopleModelVersion: people.model,
+    peopleIndexVersion: people.index,
+    peopleMatches: boundedPeopleMatches(value.peopleMatches),
+    peopleFailureCode: (PEOPLE_FAILURE_CODES as readonly unknown[]).includes(failureCode)
+      ? (failureCode as PeopleFailureCode)
+      : undefined,
+    peopleAttempts: typeof value.peopleAttempts === 'number' && value.peopleAttempts >= 0 ? value.peopleAttempts : 0
+  }
+}
+
+/**
+ * Applied on the way in and on the way out, like the OCR bounds above, so a
+ * hand-edited or future-written journal cannot load an unbounded array or a
+ * status this build does not implement.
+ *
+ * Duplicate profile ids are dropped rather than merged: two disagreeing answers
+ * for one person is a corrupt record, and picking one of them would be guessing.
+ */
+function boundedPeopleMatches(value: unknown): PeopleMatchRecord[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined
+  }
+  const matches: PeopleMatchRecord[] = []
+  const seen = new Set<string>()
+
+  for (const candidate of value) {
+    if (typeof candidate !== 'object' || candidate === null) {
+      continue
+    }
+    const raw = candidate as Record<string, unknown>
+    if (
+      typeof raw.profileId !== 'string' ||
+      raw.profileId.length === 0 ||
+      raw.profileId.length > 64 ||
+      !PERSISTED_PEOPLE_MATCH_STATUSES.includes(raw.status as PeopleMatchStatus) ||
+      typeof raw.matchingFaces !== 'number' ||
+      !Number.isInteger(raw.matchingFaces) ||
+      raw.matchingFaces < 0 ||
+      typeof raw.profileRevision !== 'number' ||
+      !Number.isInteger(raw.profileRevision) ||
+      raw.profileRevision < 0
+    ) {
+      continue
+    }
+    if (seen.has(raw.profileId)) {
+      continue
+    }
+    seen.add(raw.profileId)
+    matches.push({
+      profileId: raw.profileId,
+      status: raw.status as PeopleMatchStatus,
+      matchingFaces: Math.min(raw.matchingFaces, MAX_MATCHING_FACES),
+      profileRevision: raw.profileRevision
+    })
+    if (matches.length >= MAX_PEOPLE_MATCH_RECORDS) {
+      break
+    }
+  }
+
+  return matches.length > 0 ? matches : undefined
 }
 
 function parseFaceFields(value: Record<string, unknown>, faceVersion: number): Partial<PhotoIndexRecord> {

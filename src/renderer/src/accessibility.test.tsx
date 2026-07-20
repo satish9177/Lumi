@@ -297,6 +297,42 @@ describe('reduced motion', () => {
   })
 })
 
+describe('People settings accessibility', () => {
+  it('mounts the People section inside the settings dialog, so it inherits its focus trap', () => {
+    // There is no separate focus trap for the enrolment view: it is a nested
+    // section of the settings dialog, which already traps Tab (see 'settings
+    // focus trap' below), so every enrolment control stays reachable and
+    // bounded without a second trap to keep in sync with the first.
+    const settingsStart = app.indexOf('role="dialog"')
+    const peopleIndex = app.indexOf('<PeopleSettings')
+    expect(settingsStart).toBeGreaterThan(-1)
+    expect(peopleIndex).toBeGreaterThan(settingsStart)
+  })
+
+  it('gives the People section its own border in forced-colors mode', () => {
+    const forcedColors = styles.slice(styles.indexOf('@media (forced-colors: active)'))
+    expect(forcedColors).toContain('.people-settings')
+    expect(forcedColors).toContain('.people-profile-card')
+    expect(forcedColors).toContain('.people-enrolment-view')
+    expect(forcedColors).toContain('.people-candidate-button')
+  })
+
+  it('states an unusable enrolment candidate in text, not only in colour', () => {
+    const peopleComponent = readFileSync(join(process.cwd(), 'src/renderer/src/components/PeopleSettings.tsx'), 'utf8')
+    expect(peopleComponent).toContain('enrolNotSelectable')
+    expect(peopleComponent).toContain('aria-label=')
+
+    const copy = readFileSync(join(process.cwd(), 'src/renderer/src/copy.ts'), 'utf8')
+    expect(copy).toMatch(/enrolNotSelectable.*Not usable/)
+  })
+
+  it('offers the reference-photo action through the existing search results rather than a new picker', () => {
+    const photoGrid = readFileSync(join(process.cwd(), 'src/renderer/src/components/PhotoResultGrid.tsx'), 'utf8')
+    expect(photoGrid).toContain('onUseAsReference')
+    expect(photoGrid).toMatch(/aria-label=\{`Use \$\{result\.name\}/)
+  })
+})
+
 describe('typography and contrast', () => {
   it('has no user-facing text below 11px', () => {
     const offenders = [...styles.matchAll(/font-size:\s*(\d+(?:\.\d+)?)px/g)]

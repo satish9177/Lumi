@@ -82,6 +82,7 @@ function profile(id: string, embeddings: number[][], label = id): StoredPersonPr
     normalizedLabel: label.toLowerCase(),
     modelVersion: 1,
     indexVersion: 1,
+    revision: 1,
     references: embeddings.map((embedding, index) => ({
       id: `${id}-r${index}`,
       embedding,

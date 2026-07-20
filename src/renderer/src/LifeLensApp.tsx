@@ -9,6 +9,8 @@ import type {
   DroppedFileDescriptor,
   Explanation,
   FileSearchResults,
+  PeopleEnrolmentView,
+  PeopleSearchStatus,
   PendingActionPreview,
   PhotoSearchStatus,
   RealtimeMode,
@@ -27,6 +29,7 @@ import {
   DropOverlay,
   DroppedFileCard,
   ExplanationCard,
+  PeopleSettings,
   PhotoResultGrid,
   StatusPill,
   ToolConfirmationCard
@@ -126,6 +129,13 @@ export default function LifeLensApp() {
     textIndexed: 0, faceScanned: 0
   })
   const [isPhotoSearchWorking, setIsPhotoSearchWorking] = useState(false)
+  const [peopleStatus, setPeopleStatus] = useState<PeopleSearchStatus>({
+    state: 'off', enabled: false, modelInstalled: false, modelDownloadBytes: 0, downloadedBytes: 0,
+    paused: false, total: 0, profiles: []
+  })
+  const [isPeopleWorking, setIsPeopleWorking] = useState(false)
+  const [isEnrolmentWorking, setIsEnrolmentWorking] = useState(false)
+  const [peopleEnrolment, setPeopleEnrolment] = useState<PeopleEnrolmentView>()
 
   const clearExpiredTelegramQr = useCallback((qrUrl: string): void => {
     setTelegramStatus((current) => current.qrUrl === qrUrl
@@ -247,6 +257,7 @@ export default function LifeLensApp() {
     void refreshDocumentRoots()
     void refreshTelegramStatus()
     void window.lifeLens.getPhotoSearchStatus().then(setPhotoSearchStatus, () => undefined)
+    void window.lifeLens.getPeopleSearchStatus().then(setPeopleStatus, () => undefined)
     const removeSearchListener = window.lifeLens.onFileSearchResolved((resolution) => controllerRef.current?.resolve(resolution))
     const removeTelegramListener = window.lifeLens.onTelegramAuthUpdate((status) => {
       setTelegramStatus(status)
@@ -259,10 +270,12 @@ export default function LifeLensApp() {
       }
     })
     const removePhotoSearchListener = window.lifeLens.onPhotoSearchStatusChanged(setPhotoSearchStatus)
+    const removePeopleSearchListener = window.lifeLens.onPeopleSearchStatusChanged(setPeopleStatus)
     return () => {
       removeSearchListener()
       removeTelegramListener()
       removePhotoSearchListener()
+      removePeopleSearchListener()
       void window.lifeLens.cancelFileSearch()
       // No approved-but-unsent photo may outlive the session.
       void window.lifeLens.cancelPhotoAnalysis()
@@ -742,6 +755,82 @@ export default function LifeLensApp() {
       setError(messageFrom(actionError))
     } finally {
       setIsPhotoSearchWorking(false)
+    }
+  }
+
+  const runPeopleAction = async (action: () => Promise<PeopleSearchStatus>): Promise<void> => {
+    setIsPeopleWorking(true)
+    setError(undefined)
+    try {
+      setPeopleStatus(await action())
+    } catch (actionError) {
+      setError(messageFrom(actionError))
+    } finally {
+      setIsPeopleWorking(false)
+    }
+  }
+
+  /**
+   * Runs one enrolment step and refreshes the draft view from whatever main
+   * returns. A rejection is not routed to the global error banner: main
+   * already turns it into a bounded `lastRejection` on the draft (see
+   * addPeopleReference/selectPeopleFace in index.ts), and showing it there
+   * keeps the user inside the flow instead of bouncing them out of it.
+   */
+  const runEnrolmentStep = async (action: () => Promise<PeopleEnrolmentView>): Promise<void> => {
+    setIsEnrolmentWorking(true)
+    try {
+      setPeopleEnrolment(await action())
+    } catch (actionError) {
+      setError(messageFrom(actionError))
+    } finally {
+      setIsEnrolmentWorking(false)
+    }
+  }
+
+  const beginPeopleEnrolment = (label: string): void => {
+    void runEnrolmentStep(() => window.lifeLens.beginPeopleEnrolment(label))
+  }
+
+  const beginPersonAddition = (profileId: string): void => {
+    void runEnrolmentStep(() => window.lifeLens.beginPersonReferenceAddition(profileId))
+  }
+
+  const useSearchResultAsReference = (result: DocumentSearchResult): void => {
+    if (!peopleEnrolment) {
+      return
+    }
+    void runEnrolmentStep(() => window.lifeLens.addPeopleReference(peopleEnrolment.enrolmentId, result.id))
+  }
+
+  const selectEnrolmentFace = (candidateId: string): void => {
+    if (!peopleEnrolment) {
+      return
+    }
+    void runEnrolmentStep(() => window.lifeLens.selectPeopleFace(peopleEnrolment.enrolmentId, candidateId))
+  }
+
+  const cancelPeopleEnrolment = (): void => {
+    if (peopleEnrolment) {
+      void window.lifeLens.cancelPeopleEnrolment(peopleEnrolment.enrolmentId)
+    }
+    setPeopleEnrolment(undefined)
+  }
+
+  const confirmPeopleEnrolment = async (): Promise<void> => {
+    if (!peopleEnrolment) {
+      return
+    }
+    setIsEnrolmentWorking(true)
+    setError(undefined)
+    try {
+      await window.lifeLens.confirmPeopleEnrolment(peopleEnrolment.enrolmentId)
+      setPeopleEnrolment(undefined)
+      setPeopleStatus(await window.lifeLens.getPeopleSearchStatus())
+    } catch (actionError) {
+      setError(messageFrom(actionError))
+    } finally {
+      setIsEnrolmentWorking(false)
     }
   }
 
@@ -1302,6 +1391,8 @@ export default function LifeLensApp() {
                     onOpen={proposeOpenFile}
                     onAnalyze={proposeAnalyzePhoto}
                     onSend={proposeTelegramAttachment}
+                    onUseAsReference={peopleEnrolment ? useSearchResultAsReference : undefined}
+                    referenceForLabel={peopleEnrolment?.label}
                   />
                 ) : (
                   <ul className="search-results">
@@ -1557,6 +1648,31 @@ export default function LifeLensApp() {
                 </div>
               )}
             </section>
+
+            <PeopleSettings
+              status={peopleStatus}
+              enrolment={peopleEnrolment}
+              enrolmentBusy={isEnrolmentWorking}
+              busy={isPeopleWorking}
+              onEnable={() => void runPeopleAction(() => window.lifeLens.setPeopleSearchEnabled(true))}
+              onPause={() => void runPeopleAction(() => window.lifeLens.pausePeopleScan())}
+              onResume={() => void runPeopleAction(() => window.lifeLens.resumePeopleScan())}
+              onDeleteAll={() => {
+                setPeopleEnrolment(undefined)
+                void runPeopleAction(() => window.lifeLens.deleteAllPeopleData())
+              }}
+              onBeginEnrolment={beginPeopleEnrolment}
+              onBeginAddition={beginPersonAddition}
+              onSelectFace={selectEnrolmentFace}
+              onConfirmEnrolment={() => void confirmPeopleEnrolment()}
+              onCancelEnrolment={cancelPeopleEnrolment}
+              onRenameProfile={(profileId, label) => void runPeopleAction(async () => {
+                await window.lifeLens.renamePeopleProfile(profileId, label)
+                return window.lifeLens.getPeopleSearchStatus()
+              })}
+              onRescanProfile={(profileId) => void runPeopleAction(() => window.lifeLens.rescanPeopleProfile(profileId))}
+              onDeleteProfile={(profileId) => void runPeopleAction(() => window.lifeLens.deletePeopleProfile(profileId))}
+            />
 
             <section className="telegram-workspace" aria-label="Telegram integration">
               <div className="section-heading-row">

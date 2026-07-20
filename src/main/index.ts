@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, powerMonitor, safeStorage, screen, utilityProcess } from 'electron'
 import { existsSync } from 'node:fs'
+import { stat } from 'node:fs/promises'
 import { constants as osPriority, setPriority } from 'node:os'
 import { basename, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -20,12 +21,25 @@ import { RetainedCaptureStore } from './services/retained-captures'
 import { createScreenReasoningSummary } from './services/screen-reasoning'
 import { SearchOrchestrator } from './services/search-orchestrator'
 import { LocalStore } from './services/store'
-import { createResultThumbnails, MAX_THUMBNAILS } from './services/thumbnails'
+import { createResultThumbnails, MAX_THUMBNAILS, resolveTrustedPath } from './services/thumbnails'
+import {
+  parseBoolean,
+  parseCandidateId,
+  parseEnrolmentId,
+  parseLabel,
+  parseProfileId,
+  parseTrustedId,
+  projectEnrolment,
+  projectProfile
+} from './services/people-ipc'
 import { restoreReminderTimers } from './services/tools'
 import { TelegramService } from './services/telegram'
 import { PendingActionStore } from './services/pending-actions'
 import { DroppedFileStore } from './services/dropped-files'
 import { PhotoIndexCoordinator } from './vision/coordinator'
+import { letterbox } from './vision/face-image'
+import { PersonEnrollmentService, EnrolmentError } from './vision/person-enrollment'
+import { PersonProfileStore, PersonProfileError, MIN_REFERENCES, MAX_REFERENCES } from './vision/person-profiles'
 import { VisionEngine, type VisionWorkerHandle } from './vision/engine'
 import { isModelPackInstalled, resolveAssetPath } from './vision/model-pack'
 import {
@@ -44,6 +58,9 @@ let pendingActions: PendingActionStore
 let intentTracker: IntentTracker
 let searchOrchestrator: SearchOrchestrator
 let photoIndexCoordinator: PhotoIndexCoordinator
+/** The only store of biometric data, and the only thing that reads it. */
+let personProfiles: PersonProfileStore
+let personEnrollment: PersonEnrollmentService
 let windowState: WindowStateStore
 let droppedFiles: DroppedFileStore
 let panelOpen = false
@@ -389,6 +406,157 @@ function registerIpcHandlers(): void {
     photoIndexCoordinator.setRealtimeActive(active)
   })
 
+  // --- Phase 3: labelled people ---------------------------------------------
+  // Every payload is parsed before it reaches a service, and every reply is
+  // projected rather than forwarded. See services/people-ipc.ts.
+
+  ipcMain.handle(IPC_CHANNELS.getPeopleSearchStatus, (event) => {
+    requireMainWindow(event)
+    return photoIndexCoordinator.peopleStatus()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.setPeopleSearchEnabled, async (event, enabled: unknown) => {
+    requireMainWindow(event)
+    return photoIndexCoordinator.setPeopleSearchEnabled(parseBoolean(enabled))
+  })
+
+  ipcMain.handle(IPC_CHANNELS.pausePeopleScan, async (event) => {
+    requireMainWindow(event)
+    return photoIndexCoordinator.pausePeopleScan()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.resumePeopleScan, async (event) => {
+    requireMainWindow(event)
+    return photoIndexCoordinator.resumePeopleScan()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.listPeopleProfiles, (event) => {
+    requireMainWindow(event)
+    return photoIndexCoordinator.peopleStatus().profiles
+  })
+
+  ipcMain.handle(IPC_CHANNELS.beginPeopleEnrolment, (event, label: unknown) => {
+    requireMainWindow(event)
+    try {
+      const draft = personEnrollment.begin(parseLabel(label))
+      return projectEnrolment(enrolmentSource(draft))
+    } catch (error) {
+      rethrowAsSafeError(error)
+    }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.beginPersonReferenceAddition, (event, profileId: unknown) => {
+    requireMainWindow(event)
+    const id = parseProfileId(profileId)
+    const profile = photoIndexCoordinator.peopleStatus().profiles.find((candidate) => candidate.id === id)
+    if (!profile) {
+      throw new Error('That person is no longer saved.')
+    }
+    try {
+      const draft = personEnrollment.beginAddition(id, profile.label)
+      return projectEnrolment(enrolmentSource(draft))
+    } catch (error) {
+      rethrowAsSafeError(error)
+    }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.addPeopleReference, async (event, enrolmentId: unknown, trustedId: unknown) => {
+    requireMainWindow(event)
+    const draftId = parseEnrolmentId(enrolmentId)
+    const trusted = parseTrustedId(trustedId)
+    try {
+      const draft = await personEnrollment.addReference(draftId, trusted)
+      return projectEnrolment(enrolmentSource(draft))
+    } catch (error) {
+      // A rejection is an ordinary outcome here — the photo had no face, or the
+      // wrong one — so it is reported on the draft rather than thrown away.
+      try {
+        const draft = personEnrollment.list(draftId)
+        return projectEnrolment({ ...enrolmentSource(draft), lastRejection: peopleErrorMessage(error) })
+      } catch {
+        rethrowAsSafeError(error)
+      }
+    }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.selectPeopleFace, async (event, enrolmentId: unknown, candidateId: unknown) => {
+    requireMainWindow(event)
+    const draftId = parseEnrolmentId(enrolmentId)
+    const candidate = parseCandidateId(candidateId)
+    try {
+      const draft = await personEnrollment.selectFace(draftId, candidate)
+      return projectEnrolment(enrolmentSource(draft))
+    } catch (error) {
+      try {
+        const draft = personEnrollment.list(draftId)
+        return projectEnrolment({ ...enrolmentSource(draft), lastRejection: peopleErrorMessage(error) })
+      } catch {
+        rethrowAsSafeError(error)
+      }
+    }
+  })
+
+  /**
+   * The one call that creates a profile.
+   *
+   * Nothing above this line writes anything: begin, add and select all operate
+   * on an in-memory draft that expires on its own. A profile exists only because
+   * this handler ran, and this handler runs only because the user pressed a
+   * button labelled "Create profile".
+   */
+  ipcMain.handle(IPC_CHANNELS.confirmPeopleEnrolment, async (event, enrolmentId: unknown) => {
+    requireMainWindow(event)
+    try {
+      const summary = await personEnrollment.confirm(parseEnrolmentId(enrolmentId))
+      await photoIndexCoordinator.profileCreated()
+      return projectProfile({ ...summary, checked: 0, matched: 0 })
+    } catch (error) {
+      rethrowAsSafeError(error)
+    }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.cancelPeopleEnrolment, (event, enrolmentId: unknown) => {
+    requireMainWindow(event)
+    // Discards the draft and every preview and candidate id held for it.
+    personEnrollment.cancel(parseEnrolmentId(enrolmentId))
+  })
+
+  ipcMain.handle(IPC_CHANNELS.renamePeopleProfile, async (event, profileId: unknown, label: unknown) => {
+    requireMainWindow(event)
+    try {
+      const summary = await personProfiles.rename(parseProfileId(profileId), parseLabel(label))
+      const view = photoIndexCoordinator.peopleStatus().profiles.find((profile) => profile.id === summary.id)
+      // A rename does not invalidate anything, so the existing coverage stands.
+      return view ?? projectProfile({ ...summary, checked: 0, matched: 0 })
+    } catch (error) {
+      rethrowAsSafeError(error)
+    }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.rescanPeopleProfile, async (event, profileId: unknown) => {
+    requireMainWindow(event)
+    await photoIndexCoordinator.rescanProfile(parseProfileId(profileId))
+    return photoIndexCoordinator.peopleStatus()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.deletePeopleProfile, async (event, profileId: unknown) => {
+    requireMainWindow(event)
+    const id = parseProfileId(profileId)
+    // A draft appending a reference to this exact profile holds a preview and
+    // candidate ids for a person who is about to no longer be enrolled.
+    personEnrollment.cancelForProfile(id)
+    await photoIndexCoordinator.deleteProfile(id)
+    return photoIndexCoordinator.peopleStatus()
+  })
+
+  ipcMain.handle(IPC_CHANNELS.deleteAllPeopleData, async (event) => {
+    requireMainWindow(event)
+    // Drafts first: they hold previews and candidate ids in memory, and those
+    // are people data too even though they were never written.
+    personEnrollment.cancelAll()
+    return photoIndexCoordinator.deleteAllPeopleData()
+  })
+
   ipcMain.handle(IPC_CHANNELS.listDocumentRoots, async (event) => {
     requireMainWindow(event)
     return localStore.listDocumentRoots()
@@ -541,6 +709,13 @@ app.whenReady().then(async () => {
     const image = nativeImage.createFromPath(path)
     return image.isEmpty() ? undefined : image.getSize()
   })
+  // safeStorage is passed in rather than reached for inside the store, so the
+  // one place face data is encrypted is visible from here.
+  personProfiles = new PersonProfileStore({
+    userDataDir: app.getPath('userData'),
+    secureStorage: safeStorage
+  })
+
   photoIndexCoordinator = new PhotoIndexCoordinator({
     userDataDir: app.getPath('userData'),
     listRoots: () => localStore.listStoredDocumentRoots(),
@@ -548,7 +723,42 @@ app.whenReady().then(async () => {
     decodeThumbnail: (path, size) => nativeImage.createThumbnailFromPath(path, size),
     modelRuntime: { fetch },
     isOnBattery: () => powerMonitor.isOnBatteryPower(),
-    emitStatus: emitPhotoSearchStatus
+    emitStatus: emitPhotoSearchStatus,
+    emitPeopleStatus: emitPeopleSearchStatus,
+    profileStore: personProfiles
+  })
+
+  personEnrollment = new PersonEnrollmentService({
+    profiles: personProfiles,
+    // An opaque id in, a path out, and only for ids main already issued. There
+    // is no branch here that accepts a path from the renderer.
+    resolveTrustedPath: (trustedId) => resolveTrustedPath(localStore, droppedFiles, trustedId),
+    fingerprint: async (path) => {
+      try {
+        const details = await stat(path)
+        return details.isFile() ? { sizeBytes: details.size, mtimeMs: details.mtimeMs } : undefined
+      } catch {
+        return undefined
+      }
+    },
+    decodeImage: async (path) => {
+      const image = nativeImage.createFromPath(path)
+      return image.isEmpty() ? undefined : image
+    },
+    prepareDetectionBitmap: (image) => {
+      const { width, height } = image.getSize()
+      const scale = Math.min(1, 640 / width, 640 / height)
+      const resized = image.resize({
+        width: Math.max(1, Math.round(width * scale)),
+        height: Math.max(1, Math.round(height * scale))
+      })
+      const size = resized.getSize()
+      return { bitmap: letterbox(resized.toBitmap(), size.width, size.height), scale }
+    },
+    // The coordinator's engine, not a second one: enrolment and background
+    // scanning must share one inference queue.
+    detectFaces: (bitmap) => photoIndexCoordinator.visionEngine().detectFacesDetailed(bitmap),
+    embedFaces: (tensors, count) => photoIndexCoordinator.visionEngine().embedFaces(tensors, count)
   })
 
   ipcMain.handle(IPC_CHANNELS.removeDocumentRoot, async (event, rootId: unknown) => {
@@ -646,6 +856,59 @@ function emitTelegramStatus(status: TelegramStatus): void {
 function emitPhotoSearchStatus(status: ReturnType<PhotoIndexCoordinator['status']>): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(IPC_CHANNELS.photoSearchStatusChanged, status)
+  }
+}
+
+function emitPeopleSearchStatus(status: ReturnType<PhotoIndexCoordinator['peopleStatus']>): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(IPC_CHANNELS.peopleSearchStatusChanged, status)
+  }
+}
+
+/**
+ * Turns a people-path failure into something safe to show.
+ *
+ * Both error classes carry app-authored messages keyed by a bounded code, so
+ * they can be surfaced verbatim. Anything else is replaced: an arbitrary error
+ * on this path may have been thrown by the profile store, and those messages can
+ * quote the document they failed to parse.
+ */
+function peopleErrorMessage(error: unknown): string {
+  if (error instanceof EnrolmentError || error instanceof PersonProfileError) {
+    return error.message
+  }
+  if (error instanceof Error && error.name === 'PeopleIpcError') {
+    return error.message
+  }
+  return 'Lumi could not complete that.'
+}
+
+function rethrowAsSafeError(error: unknown): never {
+  throw new Error(peopleErrorMessage(error))
+}
+
+/**
+ * Maps an enrolment draft onto the shape the projection accepts.
+ *
+ * Note that only the reference *count* crosses, never the reference entries:
+ * the renderer has no use for a reference id, and every field not carried here
+ * is a field that cannot leak later.
+ */
+function enrolmentSource(draft: ReturnType<PersonEnrollmentService['begin']>): {
+  enrolmentId: string
+  label: string
+  acceptedReferences: number
+  requiredReferences: number
+  maximumReferences: number
+  candidates?: Array<{ candidateId: string; previewDataUrl: string; selectable: boolean; note?: string }>
+} {
+  return {
+    enrolmentId: draft.draftId,
+    label: draft.label,
+    acceptedReferences: draft.references.length,
+    requiredReferences: MIN_REFERENCES,
+    maximumReferences: MAX_REFERENCES,
+    ...(draft.candidates ? { candidates: draft.candidates } : {})
   }
 }
 

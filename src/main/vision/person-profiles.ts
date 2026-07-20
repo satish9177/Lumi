@@ -123,6 +123,17 @@ export interface StoredPersonProfile {
   modelVersion: number
   /** The matching rules the stored per-photo outcomes were produced under. */
   indexVersion: number
+  /**
+   * Bumped every time the *evidence* changes — a reference added or removed —
+   * and deliberately not when the label changes.
+   *
+   * Per-photo match records carry the revision they were computed against, so a
+   * new reference invalidates exactly this profile's outcomes and nothing else:
+   * not another person's, and not the CLIP, OCR or face-count fields sharing the
+   * record. A rename leaves the revision alone, which is what makes "renaming
+   * does not require a rescan" a structural fact rather than a promise.
+   */
+  revision: number
   references: StoredReference[]
   createdAt: string
   updatedAt: string
@@ -141,6 +152,9 @@ export interface PersonProfileSummary {
   createdAt: string
   updatedAt: string
 }
+
+/** The starting revision for a freshly created profile. */
+export const INITIAL_PROFILE_REVISION = 1
 
 /**
  * Case-insensitive and whitespace-insensitive, so "father", "Father" and
@@ -195,8 +209,16 @@ export function normalizeEmbedding(values: ArrayLike<number>): number[] {
   return normalized
 }
 
-/** Cosine similarity of two already-normalized vectors. */
-export function cosineSimilarity(left: readonly number[], right: readonly number[]): number {
+/**
+ * Cosine similarity of two already-normalized vectors.
+ *
+ * Takes `ArrayLike` rather than `number[]` so a caller can pass a `Float32Array`
+ * view straight from the worker's output. Copying 128 floats into a JS array per
+ * face would be pure waste, and — more to the point — it would create a second
+ * copy of a library-face embedding whose lifetime someone then has to reason
+ * about. See people-scan.ts.
+ */
+export function cosineSimilarity(left: ArrayLike<number>, right: ArrayLike<number>): number {
   if (left.length !== right.length) {
     return 0
   }
@@ -356,6 +378,7 @@ export class PersonProfileStore {
       normalizedLabel,
       modelVersion: FACE_EMBED_MODEL_VERSION,
       indexVersion: PEOPLE_INDEX_VERSION,
+      revision: INITIAL_PROFILE_REVISION,
       references: references.map((reference) => ({
         id: reference.id,
         embedding: normalizeEmbedding(reference.embedding),
@@ -407,7 +430,9 @@ export class PersonProfileStore {
     })
     profile.updatedAt = this.now()
     // New evidence changes what this profile will match, so previously computed
-    // outcomes are no longer trustworthy.
+    // outcomes are no longer trustworthy. Bumping the revision is what makes
+    // every stored match record for *this* profile read as "not checked".
+    profile.revision += 1
     profile.indexVersion = -1
     await this.persist()
     return this.list().find((summary) => summary.id === profileId)!
@@ -424,6 +449,7 @@ export class PersonProfileStore {
     }
     profile.references = remaining
     profile.updatedAt = this.now()
+    profile.revision += 1
     profile.indexVersion = -1
     await this.persist()
     return this.list().find((summary) => summary.id === profileId)!
@@ -439,12 +465,19 @@ export class PersonProfileStore {
     await this.persist()
   }
 
-  /** Forces a rescan of one profile without disturbing its enrolment. */
+  /**
+   * Forces a rescan of one profile without disturbing its enrolment.
+   *
+   * The revision moves too, so the records already on disk stop being read as
+   * answers. Leaving them readable while claiming a rescan was queued would show
+   * the user stale matches under a progress bar that said otherwise.
+   */
   async invalidateScan(profileId: string): Promise<void> {
     const profile = this.byId(profileId)
     if (!profile) {
       throw new PersonProfileError('unknown_profile')
     }
+    profile.revision += 1
     profile.indexVersion = -1
     await this.persist()
   }
@@ -569,12 +602,22 @@ function parseProfile(value: unknown): StoredPersonProfile | undefined {
     return undefined
   }
 
+  // A document written before revisions existed reads as the initial revision.
+  // That is the conservative direction: stored match records carrying no
+  // revision are already dropped by the index parser, so the worst case is a
+  // rescan, never a stale match presented as current.
+  const revision =
+    typeof raw.revision === 'number' && Number.isInteger(raw.revision) && raw.revision >= INITIAL_PROFILE_REVISION
+      ? raw.revision
+      : INITIAL_PROFILE_REVISION
+
   return {
     id: raw.id,
     label: raw.label.slice(0, MAX_LABEL_LENGTH),
     normalizedLabel: raw.normalizedLabel,
     modelVersion: raw.modelVersion,
     indexVersion: raw.indexVersion,
+    revision,
     references,
     createdAt: raw.createdAt,
     updatedAt: raw.updatedAt

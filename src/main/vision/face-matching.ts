@@ -81,7 +81,7 @@ export const THIN_PROFILE_REFERENCES = 3
  * match; averaging would wash that out.
  */
 export function scoreAgainstProfile(
-  faceEmbedding: readonly number[],
+  faceEmbedding: ArrayLike<number>,
   profile: Pick<StoredPersonProfile, 'references'>
 ): number {
   let best = -1
@@ -114,16 +114,24 @@ export function tierFor(score: number, caution: MatchCaution = NO_CAUTION): Matc
 
 export interface FaceObservation {
   /** L2-normalized embedding of one detected face. */
-  embedding: readonly number[]
+  embedding: ArrayLike<number>
   /** The detector's confidence in this face. */
   detectionScore: number
   /** The face's longer edge in source-image pixels. */
   faceSizePx: number
 }
 
+/** A tier that actually asserts something. `none` is expressed by absence. */
+export type QualifyingTier = Exclude<MatchTier, 'none'>
+
 export interface ProfileMatch {
   profileId: string
-  tier: MatchTier
+  /**
+   * Never `none`. `matchImage` omits profiles that reached no tier rather than
+   * listing them with a negative, so the type says what the function does and a
+   * caller does not have to handle a case that cannot occur.
+   */
+  tier: QualifyingTier
   /** How many faces in this image reached at least the `possible` tier. */
   matchingFaces: number
 }
@@ -139,7 +147,7 @@ export function matchImage(
   faces: readonly FaceObservation[],
   profiles: readonly StoredPersonProfile[]
 ): ProfileMatch[] {
-  const byProfile = new Map<string, { tier: MatchTier; matchingFaces: number }>()
+  const byProfile = new Map<string, { tier: QualifyingTier; matchingFaces: number }>()
 
   for (const face of faces) {
     // Score this face against every profile first, so ambiguity between two
