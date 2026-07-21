@@ -2,7 +2,7 @@
 
 ## 1. Status and scope
 
-- **Status:** Planned. Nothing in this document is implemented yet. Every fact in §2 was verified against the repository on 19 July 2026; everything else is design.
+- **Status:** Historical implementation plan. Phase A is implemented; §2 and every item marked **(proposed)** describe the repository snapshot from 19 July 2026, before implementation. Current behavior and verification are recorded in [docs/STATUS.md](../STATUS.md).
 - **Scope:** Phase A only — reduce OpenAI Realtime API cost while keeping the existing natural realtime voice experience for cloud-handled conversation. Phase B (local-first hybrid) is a roadmap in §15 and must **not** be implemented in this change.
 - **Audience:** A Codex implementation session. This document is intended to be sufficient without repeating the architectural investigation.
 - Anything marked **(proposed)** does not exist in the repository today.

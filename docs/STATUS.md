@@ -1,6 +1,10 @@
 # Delivery status
 
-Last verified: 19 July 2026 (Asia/Kolkata).
+Last documentation-readiness verification: 22 July 2026 (Asia/Kolkata).
+`npm.cmd run typecheck`, the full `npm.cmd test` suite, and `npm.cmd run build`
+passed on the documentation-only working tree. Packaging was not rerun because
+no application, dependency, or packaging file changed; the historical package
+checkpoints below remain point-in-time records.
 
 ## Realtime API cost reduction (Phase A): implemented; live smoke completed with follow-up issues
 
@@ -32,7 +36,7 @@ The successful live `session.updated` event reported `gpt-realtime-2.1-mini`, `g
 | --- | --- | --- |
 | Model and session configuration | FAIL | The Phase A default path connected and the server echoed the expected model, transcription model, and 1024-token session limit, but the existing local `.env` override still selected `gpt-realtime-mini` and made the app fail at credential creation until that override was unset for the child process. |
 | Normal conversation and greeting | NOT TESTED | One first-connection greeting produced audio-buffer events and was not replayed on later connections. A typed question received one natural, complete answer (`The capital of Japan is Tokyo.`) with no duplicate response. A controlled spoken question could not be injected because both installed Windows TTS paths were unavailable, so the requested normal voice turn was not claimed. The first greeting transcript itself stopped mid-sentence. |
-| Trusted local resume search | FAIL | The typed `Find my resume.` request reached the trusted intent path, invoked the server-backed search, and rendered six approved-folder results. The 192-token result narration stopped mid-filename (`Second, “Satish`), so that budget was not sufficient. The exact spoken utterance/transcription-to-IntentTracker variant was not reproduced. |
+| Trusted local resume search | FAIL | The typed `Find my resume.` request reached the trusted intent path, invoked the server-backed search, and rendered six approved-folder results. The 192-token result narration stopped mid-filename (`Second, “[redacted local filename]`), so that budget was not sufficient. The exact spoken utterance/transcription-to-IntentTracker variant was not reproduced. |
 | Collapse teardown | PASS | Collapse immediately set the microphone track to disabled and sent the narrow audio-only `session.update`. With no pending work, after 65 seconds the track was ended, the data channel was closed, and exactly one close callback had fired. |
 | Lazy reconnect | PASS | Reopening displayed `Reconnecting…`, created one new channel, reached `Listening`, did not replay the greeting, and a follow-up returned exactly `reconnected`. |
 | Expanded idle teardown | NOT TESTED | Two attempted four-minute quiet intervals were interrupted by real VAD speech/transcription events from ambient microphone input before the deadline. Those events correctly reset activity, so neither interval satisfied the requested inactive precondition and no `Voice paused` claim was made. |
@@ -830,7 +834,8 @@ High Contrast blocks are unchanged.
 
 ### Not done, and not claimed
 
-The manual checklist in [docs/DEMO-CHECKLIST.md](DEMO-CHECKLIST.md) requires a
-human pass on a real Windows desktop with real screenshots — including the
-prompt-injection screenshot and the screen-reader walkthrough — and none of it
-can be certified from automated checks.
+A human Windows pass of the scam-check flow, including generated fictional
+prompt-injection samples and a screen-reader walkthrough, is still pending.
+It is separate from the public judge path in
+[docs/DEMO-CHECKLIST.md](DEMO-CHECKLIST.md), and no fraud-detection accuracy is
+claimed from either automated or manual samples.

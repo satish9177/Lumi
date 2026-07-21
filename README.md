@@ -13,7 +13,7 @@ Category: *Apps for Your Life*
 
 ## The problem
 
-The thing you need to act on is usually already on your screen — an interview email with a date, a portal with a deadline, a form with a link you have to open before Friday. The details are visible but scattered, and the next step is buried in the middle of a paragraph.
+The thing you need to act on is usually already on your screen — a hospital appointment with preparation instructions, a bank message with a warning, or a form with a deadline. The details are visible but scattered, and the next step is buried in the middle of a paragraph.
 
 The obvious fix is an assistant that watches your desktop and clicks things for you. That trade is bad: continuous screen recording and autonomous computer control are a lot of risk for a small convenience.
 
@@ -42,9 +42,9 @@ Lumi takes the narrow version of that bet. You choose one window. You capture it
 - No image, thumbnail, embedding, or query vector from this subsystem is ever sent to OpenAI or anywhere else. Details in [docs/LOCAL-PHOTO-SEARCH.md](docs/LOCAL-PHOTO-SEARCH.md).
 
 **Works with no API key**
-- A deterministic mock path demonstrates the full interaction and confirmation flow and sends nothing to OpenAI.
+- A deterministic mock path demonstrates the local capture, reminder, search, and confirmation flow and sends nothing to OpenAI. It does not perform a GPT-5.6 review.
 
-### What Lumi deliberately does not do
+### What Lumi deliberately does not do currently
 
 No Gmail or Calendar access. No continuous monitoring or recording. No autonomous desktop control. No whole-drive scanning. No message sending without confirmation. No cloud sync.
 
@@ -52,16 +52,18 @@ No Gmail or Calendar access. No continuous monitoring or recording. No autonomou
 
 ## Try it in two minutes
 
-1. Start Lumi and open the floating companion.
-2. Keep an interview email or event page visible — something with a date, a preparation request, and a link.
-3. Select that window, then capture it once.
-4. Choose **Review this capture with GPT-5.6** in the confirmation card.
-5. Read the structured brief: summary, dates, links, risks, next actions.
-6. Confirm a reminder or a link if it's useful. **Reject one first** to see that rejection performs no action.
+This live hero demo needs an `OPENAI_API_KEY`; the no-key path is an offline simulation and does not call GPT-5.6.
+
+1. Open [the fictional hospital appointment](docs/demo/fictional-hospital-appointment.html) in a browser. It contains no real patient or provider data.
+2. Start Lumi, open the floating companion, and wait for **Listening**.
+3. Choose the capture control, select the browser window under **Application windows**, then choose the capture control again.
+4. Check the local preview, then choose **Review this capture with GPT-5.6**. This second approval is the point at which the one retained capture may leave the device.
+5. Verify the brief identifies the visible appointment date and time, preparation instruction, check-in step, and `example.com` link without inventing facts.
+6. Choose **Open extracted link**, then **Cancel**. Verify Lumi reports that nothing was changed, opened, or sent.
 
 The full repeatable path is in [docs/DEMO-CHECKLIST.md](docs/DEMO-CHECKLIST.md).
 
-**Sample data:** none required. Any email, calendar invite, or event page on screen exercises the hero flow. Without an API key, the deterministic mock path runs the same interaction end to end.
+**Sample data:** use only the committed fictional appointment above. The mock path remains useful for offline confirmation testing, but its canned explanation is not a test of the appointment content.
 
 ---
 
@@ -73,7 +75,7 @@ GPT-5.6 is genuinely used at runtime — it is not a renamed Realtime model.
 
 | Model | Exact role |
 | --- | --- |
-| `gpt-5.6-terra` | The confirmed screen review, through the Responses API. |
+| `gpt-5.6` | The confirmed screen review, through the Responses API. |
 | `gpt-realtime-2.1-mini` | Default live Realtime model for voice, text, and bounded tool proposals. `LIFELENS_REALTIME_MODEL` selects a supported alternative. |
 | `gpt-4o-mini-transcribe` | Input transcription for the Realtime voice flow. |
 | `clip-vit-base-patch32` | OpenAI's CLIP, run **locally** on ONNX Runtime for photo search. Never a network call. |
@@ -180,22 +182,22 @@ More detail: [docs/DECISIONS.md](docs/DECISIONS.md) and [docs/GOAL.md](docs/GOAL
 
 ## Setup
 
-**Requirements:** Windows 10 or 11 (x64), a current Node.js LTS release, and npm.
+**Requirements:** Windows 10 or 11 (x64), Git, a current Node.js LTS release, and npm. A microphone is optional unless you want to test live voice.
 
 ```powershell
 git clone https://github.com/satish9177/Lumi.git
 Set-Location Lumi
-npm.cmd install
+npm.cmd ci
 ```
 
-An OpenAI API key is required for live Realtime and GPT-5.6 review. Without one, Lumi runs its deterministic mock flow. Set secrets only in your local process environment or another ignored local file — `.env.example` documents every supported variable and contains no credentials.
+An OpenAI API key is required for live Realtime and GPT-5.6 review. Without one, Lumi runs its deterministic mock flow. For a one-shell judge run, set the key in PowerShell:
 
 ```powershell
 $env:OPENAI_API_KEY = "your-key-for-this-shell-only"
 npm.cmd run dev
 ```
 
-`LUMI_REASONING_MODEL` defaults to `gpt-5.6-terra` and `LUMI_REASONING_EFFORT` to `low`; both can be overridden. Optional Telegram variables are documented in [.env.example](.env.example). Never commit `.env`, session files, logs, or local databases.
+During `npm.cmd run dev`, Electron main also loads ignored `.env` and `.env.local` files from the repository root. Inherited shell variables take precedence, and `.env.local` overrides values loaded from `.env`. `LUMI_REASONING_MODEL` defaults to `gpt-5.6-terra` and `LUMI_REASONING_EFFORT` to `low`; both can be overridden. All supported variables, including the optional Telegram settings, are documented in [.env.example](.env.example). Never commit `.env`, session files, logs, local databases, or keys.
 
 ### Development commands
 
@@ -212,7 +214,7 @@ npm.cmd run package
 
 ## For judges
 
-Use the [demo checklist](docs/DEMO-CHECKLIST.md), and confirm these boundaries while testing:
+Use the fictional hospital path in the [demo checklist](docs/DEMO-CHECKLIST.md), and confirm these boundaries while testing:
 
 - **No key:** the mock interaction stays usable and sends nothing to OpenAI.
 - **Live key:** a user-selected capture requires the GPT-5.6 review confirmation before any Responses API call.
@@ -225,7 +227,8 @@ Use the [demo checklist](docs/DEMO-CHECKLIST.md), and confirm these boundaries w
 - The packaged Windows build is not yet code signed.
 - A full live hero-scenario acceptance run still needs to be recorded five consecutive times.
 - GPT-5.6 review is intentionally image-only and covers only a capture you explicitly approve; it does not read arbitrary local documents.
-- The deterministic no-key path demonstrates the interaction and confirmation flow but does not call GPT-5.6.
+- The deterministic no-key path uses canned content to demonstrate local interaction and confirmation; it does not call GPT-5.6 or interpret the fictional appointment.
+- The repository does not yet contain a public demo-video URL or submission Codex `/feedback` session ID.
 
 ## Status
 

@@ -1,9 +1,9 @@
 # Lumi UI/UX polish
 
-A planned, not-yet-implemented pass over Lumi's identity, window behaviour,
-file intake, panel layout, copy, and accessibility. Nothing in this document is
-built. It exists so the work can be started safely once the local
-semantic-photo-search work is complete and checkpointed.
+The historical implementation plan for Lumi's identity, window behaviour, file
+intake, panel layout, copy, and accessibility. The four core slices are now
+implemented; later sections preserve the original design and deferred ideas,
+not claims that every proposed follow-up shipped.
 
 ## 1. Status and scope
 

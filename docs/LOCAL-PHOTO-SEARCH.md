@@ -3,9 +3,12 @@
 Photos are embedded and searched **on this device**. No image, thumbnail,
 embedding, or query vector is sent to OpenAI or anywhere else.
 
-Status: the Phase 1 local-inference and user-facing semantic-photo-search path
-are built. OCR, face identity, people counting, video, RAW/HEIC, and cloud
-folder analysis remain deliberately out of scope.
+Status: Phase 1 semantic search, Phase 2 local OCR and visible-face counting,
+and Phase 3 user-labelled people matching are implemented. Video, RAW/HEIC,
+and cloud-folder analysis remain deliberately out of scope. People matching is
+labelled as uncertain, may make mistakes, and still requires a manual Windows
+acceptance pass with non-personal test images before release claims go beyond
+the automated checks described below.
 
 ## Shape of the system
 
@@ -58,10 +61,10 @@ on a corrupt prefix. Transport faults retry three times with backoff.
 - `vectors.bin` — fixed 512-float rows, row *N* at `N * 2048`
 - `index-meta.json` — format and model versions, row count
 
-Records hold only local metadata: image id, root id, root-relative path, name,
+Phase 1 records hold only local metadata: image id, root id, root-relative path, name,
 mtime, size, dimensions, vector row, model version, status, a bounded failure
 code, attempts, updated time. **No absolute paths, image bytes, thumbnails, OCR,
-face data, or OpenAI data.** Absolute paths stay main-owned and are rebuilt from
+Phase 3 face data, or OpenAI data.** Absolute paths stay main-owned and are rebuilt from
 the live approved-root store on demand.
 
 Crash safety comes from ordering, not transactions: the vector is written and

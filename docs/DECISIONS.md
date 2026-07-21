@@ -38,6 +38,9 @@ The model can only propose a typed `ToolProposal`. The renderer visibly renders 
 | `open_file` | Requires confirmation; only opens a file returned by a previous approved search. |
 | `open_url` | Requires confirmation; only permits `https:` and `http:` URLs. |
 | `save_context` | Requires confirmation; stores only minimal structured context. |
+| `analyze_photo` | Requires confirmation; sends only the selected, revalidated photo for the stated question. |
+| `send_telegram_message` | Requires confirmation; uses the selected local Telegram account and resolved recipient. |
+| `send_telegram_attachment` | Requires confirmation; revalidates the selected file before sending it to the resolved recipient. |
 
 ## Local storage
 
@@ -59,11 +62,11 @@ The main and preload bundles use explicit `.cjs` entrypoints. Electron's sandbox
 
 ## Confirmation and provenance
 
-Renderer confirmation is useful interaction feedback but is not trusted as the final authority. The main process parses every proposal again, checks capture provenance before `create_reminder` or `save_context`, and displays a native confirmation dialog before it creates a reminder, searches an approved folder, opens a returned file, opens a URL, or stores context.
+The renderer confirmation card is the explicit user approval surface, but it is not trusted as the final authority. Its details come from an immutable main-process preview rather than renderer-supplied prose. On approval, main parses the proposal again, checks its provenance and current authorization, and stops without acting if the retained capture, file, folder, URL, recipient, or pending approval is no longer valid.
 
 ## Release signing
 
-Electron Builder produces the Windows installer and unpacked executable, but the repository deliberately contains no certificate or private signing material. A trusted Authenticode signing process is an external release prerequisite: Windows Smart App Control will block an unsigned release and must not be disabled or bypassed as part of LifeLens validation.
+Electron Builder produces the Windows installer and unpacked executable, but the repository deliberately contains no certificate or private signing material. A trusted Authenticode signing process is an external release prerequisite: Windows Smart App Control may block an unsigned release and must not be disabled or bypassed as part of Lumi validation.
 
 ## UI design
 

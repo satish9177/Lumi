@@ -116,11 +116,11 @@ Where it accelerated the work:
 ## Judge-ready path
 
 1. Configure a local `OPENAI_API_KEY` and run `npm.cmd run dev`.
-2. Open an interview email or calendar-like event page containing a visible date, a preparation request, and an `https` link.
-3. Open Lumi, choose that window, and capture it once.
-4. Confirm **Review this capture with GPT-5.6**.
-5. Verify the structured brief names supported dates, links, risks, and suggested next actions.
-6. Optionally confirm a reminder or an extracted link; reject one first to verify that rejection does nothing.
+2. Open the committed [fictional hospital appointment](demo/fictional-hospital-appointment.html) in a browser. Do not substitute real medical or account data.
+3. Open Lumi, choose that browser window, and capture it once.
+4. Check the local preview, then separately confirm **Review this capture with GPT-5.6**.
+5. Verify the structured brief stays grounded in the visible appointment date, time, preparation, check-in step, fictional items, and `example.com` link.
+6. Choose **Open extracted link**, then **Cancel**, and verify that nothing is opened or sent.
 
 The repeatable manual checklist is [DEMO-CHECKLIST.md](DEMO-CHECKLIST.md).
 
@@ -129,7 +129,7 @@ The repeatable manual checklist is [DEMO-CHECKLIST.md](DEMO-CHECKLIST.md).
 - Windows release artifacts are not code signed.
 - The five-consecutive-run live hero-scenario record is still pending.
 - GPT-5.6 review is intentionally limited to an explicitly confirmed screen capture; arbitrary document reading and autonomous computer use are not supported.
-- The deterministic no-key path demonstrates the interaction and confirmation flow but does not call GPT-5.6.
+- The deterministic no-key path demonstrates local interaction and confirmation with canned content; it does not call GPT-5.6 or interpret the fictional appointment.
 
 ## Submission checklist
 
@@ -137,7 +137,7 @@ The repeatable manual checklist is [DEMO-CHECKLIST.md](DEMO-CHECKLIST.md).
 | --- | --- | --- |
 | Demo video | Public YouTube, under 3 minutes, audio covering what was built and how Codex **and** GPT-5.6 were used | **Add URL before submitting** |
 | Codex session ID | `/feedback` session ID for the thread where the majority of core functionality was built | **Add ID before submitting** |
-| Code repository | Public, or shared with `testing@devpost.com` and `build-week-event@openai.com` | Public — https://github.com/satish9177/Lumi |
+| Code repository | Public repository with relevant licensing | Public — https://github.com/satish9177/Lumi |
 | README | Setup instructions, sample data if needed, and the Codex collaboration narrative | Done — [../README.md](../README.md) |
 | Built in period | Newly created during the submission period, or meaningfully extended within it | Newly created — first commit 17 July 2026 |
 

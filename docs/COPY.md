@@ -3,10 +3,11 @@
 How Lumi talks. This is the reference for every string a user can read: labels,
 status, notices, errors, confirmations, and empty states.
 
-Companion document: [docs/UI-UX-POLISH.md](UI-UX-POLISH.md). The copy sweep is
-part of that pass and is not yet implemented; the intended home for these strings
-is a single `src/renderer/src/copy.ts` module so they can be reviewed and linted
-in one place.
+Companion document: [docs/UI-UX-POLISH.md](UI-UX-POLISH.md). The core copy sweep
+is implemented, and shared user-facing strings live in
+`src/renderer/src/copy.ts` so they can be reviewed and linted in one place.
+Items explicitly labelled as recommendations or strings to retire remain
+guidance until the current renderer is checked against them.
 
 ## Voice and tone
 
