@@ -84,7 +84,7 @@ After you capture a chosen window, Lumi shows a second renderer confirmation. On
 
 The request is deliberately constrained ([`src/main/services/screen-reasoning.ts`](src/main/services/screen-reasoning.ts)):
 
-- `model: gpt-5.6-terra`, `reasoning.effort: low`, `store: false`
+- `model: gpt-5.6`, `reasoning.effort: low`, `store: false`
 - Strict JSON Schema output (`lumi_screen_brief`, `strict: true`, `additionalProperties: false`)
 - A developer instruction restricting the model to facts visible in the image, with no tool calls, no credential requests, no inferred private information, and no local file paths
 - A 30-second timeout and a 900-token output ceiling
@@ -197,7 +197,7 @@ $env:OPENAI_API_KEY = "your-key-for-this-shell-only"
 npm.cmd run dev
 ```
 
-During `npm.cmd run dev`, Electron main also loads ignored `.env` and `.env.local` files from the repository root. Inherited shell variables take precedence, and `.env.local` overrides values loaded from `.env`. `LUMI_REASONING_MODEL` defaults to `gpt-5.6-terra` and `LUMI_REASONING_EFFORT` to `low`; both can be overridden. All supported variables, including the optional Telegram settings, are documented in [.env.example](.env.example). Never commit `.env`, session files, logs, local databases, or keys.
+During `npm.cmd run dev`, Electron main also loads ignored `.env` and `.env.local` files from the repository root. Inherited shell variables take precedence, and `.env.local` overrides values loaded from `.env`. `LUMI_REASONING_MODEL` defaults to `gpt-5.6` and `LUMI_REASONING_EFFORT` to `low`; both can be overridden. All supported variables, including the optional Telegram settings, are documented in [.env.example](.env.example). Never commit `.env`, session files, logs, local databases, or keys.
 
 ### Development commands
 
