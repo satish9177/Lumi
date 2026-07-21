@@ -44,7 +44,7 @@ export function getRealtimeReasoningEffort(value = process.env.LIFELENS_REALTIME
 export async function createRealtimeSessionCredential(safetySeed: string): Promise<RealtimeSessionCredential> {
   const apiKey = process.env.OPENAI_API_KEY?.trim()
   if (!apiKey) {
-    return { mode: 'mock', model: REALTIME_MODEL }
+    return { mode: 'mock', model: REALTIME_MODEL, configurationStatus: 'openai_api_key_missing' }
   }
 
   const includesReasoning = supportsRealtimeReasoning(REALTIME_MODEL)

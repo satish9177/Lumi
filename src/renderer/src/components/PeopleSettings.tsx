@@ -1,6 +1,7 @@
 import { useId, useState } from 'react'
 import type { PeopleEnrolmentView, PeopleFaceCandidateView, PeopleProfileView, PeopleSearchStatus } from '../../../shared/contracts'
 import { COPY, formatFileSize } from '../copy'
+import type { RequestConfirmation } from './ConfirmDialog'
 import './components.css'
 
 export interface PeopleSettingsProps {
@@ -10,6 +11,11 @@ export interface PeopleSettingsProps {
   /** True while an enrolment mutation is in flight, to disable double-submits. */
   enrolmentBusy?: boolean
   busy?: boolean
+  /**
+   * Asks the user before anything here deletes or re-does work. Supplied by the
+   * app so the question opens on Lumi's own surface, above the settings layer.
+   */
+  requestConfirmation: RequestConfirmation
   onEnable: () => void
   onPause: () => void
   onResume: () => void
@@ -46,6 +52,7 @@ export function PeopleSettings({
   enrolment,
   enrolmentBusy = false,
   busy = false,
+  requestConfirmation,
   onEnable,
   onPause,
   onResume,
@@ -160,12 +167,8 @@ export function PeopleSettings({
                     }}
                     onCancelRename={() => setRenamingId(undefined)}
                     onAddReference={() => onBeginAddition(profile.id)}
-                    onRescan={() => {
-                      if (window.confirm(COPY.people.confirmRescan(profile.label))) onRescanProfile(profile.id)
-                    }}
-                    onDelete={() => {
-                      if (window.confirm(COPY.people.confirmDeleteProfile(profile.label))) onDeleteProfile(profile.id)
-                    }}
+                    onRescan={() => requestConfirmation(COPY.people.confirmRescan(profile.label), () => onRescanProfile(profile.id))}
+                    onDelete={() => requestConfirmation(COPY.people.confirmDeleteProfile(profile.label), () => onDeleteProfile(profile.id))}
                   />
                 ))}
               </ul>
@@ -176,9 +179,7 @@ export function PeopleSettings({
               className="text-button danger-button"
               type="button"
               disabled={busy}
-              onClick={() => {
-                if (window.confirm(COPY.people.confirmDeleteAll)) onDeleteAll()
-              }}
+              onClick={() => requestConfirmation(COPY.people.confirmDeleteAll, onDeleteAll)}
             >
               {COPY.people.deleteAll}
             </button>

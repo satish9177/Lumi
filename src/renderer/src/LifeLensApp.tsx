@@ -13,6 +13,7 @@ import type {
   PeopleSearchStatus,
   PendingActionPreview,
   PhotoSearchStatus,
+  RealtimeConfigurationStatus,
   RealtimeMode,
   ResultThumbnail,
   ScreenReasoningSummary,
@@ -25,6 +26,7 @@ import type {
 import { fileKindLabel } from '../../shared/search-query'
 import {
   BrandMark,
+  ConfirmDialog,
   DragGrip,
   DropOverlay,
   DroppedFileCard,
@@ -34,6 +36,7 @@ import {
   StatusPill,
   ToolConfirmationCard
 } from './components'
+import type { ConfirmRequest, RequestConfirmation } from './components'
 import { COPY } from './copy'
 import { countDraggedFiles, decideDrop, preventFileNavigation, TOO_MANY_FILES_MESSAGE } from './drop-intake'
 import { focusableWithin, nextTrappedFocus } from './focus-trap'
@@ -76,6 +79,7 @@ export default function LifeLensApp() {
   const [expanded, setExpanded] = useState(false)
   const [companionState, setCompanionState] = useState<CompanionState>('idle')
   const [mode, setMode] = useState<RealtimeMode | undefined>()
+  const [configurationStatus, setConfigurationStatus] = useState<RealtimeConfigurationStatus | undefined>()
   const [question, setQuestion] = useState('')
   const [capture, setCapture] = useState<CaptureResult>()
   const [captureSources, setCaptureSources] = useState<CaptureSource[]>([])
@@ -91,6 +95,7 @@ export default function LifeLensApp() {
   const [toolResult, setToolResult] = useState<ToolExecutionResult>()
   const [windowNotice, setWindowNotice] = useState<string>()
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest>()
   const [droppedFile, setDroppedFile] = useState<DroppedFileDescriptor>()
   const [dragFileCount, setDragFileCount] = useState(0)
   const [isDroppedFileBusy, setIsDroppedFileBusy] = useState(false)
@@ -189,6 +194,34 @@ export default function LifeLensApp() {
   }, [transcript, searchResults, explanation, toolResult, pendingAction, searchConfirmation])
 
   /**
+   * Asks the user a yes-or-no question on Lumi's own surface.
+   *
+   * Everything destructive routes through here rather than `window.confirm`,
+   * which would open a separate operating-system window outside Lumi's frame
+   * and block the panel until it was answered.
+   */
+  const requestConfirmation: RequestConfirmation = useCallback((content, onConfirm) => {
+    setConfirmRequest({ content, onConfirm })
+  }, [])
+
+  const answerConfirmation = (confirmed: boolean): void => {
+    setConfirmRequest(undefined)
+    if (confirmed) {
+      confirmRequest?.onConfirm()
+    }
+  }
+
+  /*
+   * The settings trap and the confirm dialog both want Tab. A ref lets the
+   * settings handler stand down while a dialog is open without re-running the
+   * trap effect, whose cleanup would pull focus back to the gear button.
+   */
+  const confirmRequestRef = useRef<ConfirmRequest | undefined>(undefined)
+  useEffect(() => {
+    confirmRequestRef.current = confirmRequest
+  }, [confirmRequest])
+
+  /**
    * Settings behaves as a modal layer: focus moves into it on open, is trapped
    * while it is open, and returns to the gear that opened it on close.
    */
@@ -200,7 +233,8 @@ export default function LifeLensApp() {
     focusableWithin(settingsRef.current ?? document.createElement('div'))[0]?.focus()
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Tab' || !settingsRef.current) {
+      // A confirm dialog sits above settings and traps Tab itself.
+      if (event.key !== 'Tab' || !settingsRef.current || confirmRequestRef.current) {
         return
       }
       const target = nextTrappedFocus(
@@ -227,6 +261,53 @@ export default function LifeLensApp() {
     }
   }, [expanded])
 
+  /*
+   * The composer is one row tall and grows with what is typed, up to the
+   * max-height in the stylesheet, after which it scrolls. Measuring from `auto`
+   * first is what lets it shrink again as text is deleted.
+   */
+  const fitComposer = useCallback(() => {
+    const input = composerRef.current
+    if (!input) {
+      return
+    }
+    input.style.height = 'auto'
+    // scrollHeight stops at the padding edge, but the box is sized border-box,
+    // so the border has to be added back or a single line lands two pixels
+    // short of its own height and scrolls.
+    const border = input.offsetHeight - input.clientHeight
+    input.style.height = `${input.scrollHeight + border}px`
+  }, [])
+
+  useEffect(() => {
+    fitComposer()
+  }, [fitComposer, question, expanded])
+
+  /*
+   * Expanding the panel renders it before the window has finished growing, so
+   * the first measurement can land while the composer is only a couple of dozen
+   * pixels wide — which wraps the text into a tall box and leaves it there. A
+   * re-fit on width settles it. Only width is watched: reacting to the height
+   * this sets would feed itself.
+   */
+  useEffect(() => {
+    const input = composerRef.current
+    if (!input || !expanded) {
+      return
+    }
+    let lastWidth = input.getBoundingClientRect().width
+    const observer = new ResizeObserver((entries) => {
+      const width = entries[0]?.contentRect.width
+      if (width === undefined || width === lastWidth) {
+        return
+      }
+      lastWidth = width
+      fitComposer()
+    })
+    observer.observe(input)
+    return () => observer.disconnect()
+  }, [expanded, fitComposer])
+
   // Escape closes the topmost layer, one at a time, before collapsing.
   useEffect(() => {
     if (!expanded) {
@@ -237,9 +318,13 @@ export default function LifeLensApp() {
         return
       }
       event.preventDefault()
-      // Layers close outermost first: drop overlay, settings, capture picker,
-      // then the panel itself.
-      if (dragFileCount > 0) {
+      // Layers close outermost first: the confirm dialog, drop overlay,
+      // settings, capture picker, then the panel itself. Escape answers the
+      // dialog "no", which is the safe answer and the one that changes nothing
+      // — unlike a pending action's confirmation, which must be answered.
+      if (confirmRequest) {
+        setConfirmRequest(undefined)
+      } else if (dragFileCount > 0) {
         setDragFileCount(0)
       } else if (settingsOpen) {
         setSettingsOpen(false)
@@ -251,7 +336,7 @@ export default function LifeLensApp() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [expanded, settingsOpen, capturePickerOpen, dragFileCount])
+  }, [expanded, settingsOpen, capturePickerOpen, dragFileCount, confirmRequest])
 
   useEffect(() => {
     void refreshDocumentRoots()
@@ -391,6 +476,7 @@ export default function LifeLensApp() {
         client.setApprovedRoots(documentRoots)
         clientRef.current = client
         setMode(credential.mode)
+        setConfigurationStatus(credential.configurationStatus)
         const pendingConnection = client.connect(credential, {
           greet: credential.mode === 'live' ? !hasConnectedOnceRef.current : true
         })
@@ -734,16 +820,19 @@ export default function LifeLensApp() {
     })
   }
 
-  const revokeDocumentRoot = async (root: ApprovedDocumentRoot): Promise<void> => {
-    if (!window.confirm(`Stop searching and indexing ${root.label}?`)) return
-    try {
-      await window.lifeLens.removeDocumentRoot(root.id)
-      updateDocumentRoots(await window.lifeLens.listDocumentRoots())
-      setSearchResults([])
-      setThumbnails(new Map())
-    } catch (rootError) {
-      setError(messageFrom(rootError))
-    }
+  const revokeDocumentRoot = (root: ApprovedDocumentRoot): void => {
+    requestConfirmation(COPY.files.confirmRevoke(root.label), () => {
+      void (async () => {
+        try {
+          await window.lifeLens.removeDocumentRoot(root.id)
+          updateDocumentRoots(await window.lifeLens.listDocumentRoots())
+          setSearchResults([])
+          setThumbnails(new Map())
+        } catch (rootError) {
+          setError(messageFrom(rootError))
+        }
+      })()
+    })
   }
 
   const runPhotoSearchAction = async (action: () => Promise<PhotoSearchStatus>): Promise<void> => {
@@ -1327,7 +1416,9 @@ export default function LifeLensApp() {
           {error && <p className="notice error-notice">{error}</p>}
           {pausedNotice && <p className="notice">{pausedNotice}</p>}
           {isCapturing && <p className="notice privacy-notice"><strong>Looking at your screen</strong> once to answer this request. Lumi does not save or continuously monitor it.</p>}
-          {mode === 'mock' && <p className="notice">Demo mode is active because no API key is configured. It exercises the same capture and confirmation path.</p>}
+          {mode === 'mock' && <p className="notice">{configurationStatus === 'openai_api_key_missing'
+            ? "Demo mode is active because the OpenAI API key is not configured in Lumi's main process. It exercises the same capture and confirmation path."
+            : 'Demo mode is active. It exercises the same capture and confirmation path.'}</p>}
 
           {capture && (
             <figure className="capture-card">
@@ -1516,7 +1607,7 @@ export default function LifeLensApp() {
                   {documentRoots.length === 0
                     ? <p className="workspace-note">Lumi can only search folders you approve. Ask for a file and Lumi will offer the folder chooser once.</p>
                     : <ul className="approved-root-list">{documentRoots.map((root) => (
-                      <li key={root.id}><span>{root.label}</span><button className="text-button" type="button" onClick={() => void revokeDocumentRoot(root)}>Revoke</button></li>
+                      <li key={root.id}><span>{root.label}</span><button className="text-button" type="button" onClick={() => revokeDocumentRoot(root)}>Revoke</button></li>
                     ))}</ul>}
                   <div className="actions">
                     <button className="secondary-button" type="button" disabled={isChoosingFolder} onClick={() => void chooseDocumentRoot()}>
@@ -1623,12 +1714,12 @@ export default function LifeLensApp() {
                       <div className="actions">
                         {photoSearchStatus.textSearchEnabled && (
                           <button className="text-button" type="button" disabled={isPhotoSearchWorking} onClick={() => {
-                            if (window.confirm(COPY.photos.confirmRebuildText)) void runPhotoSearchAction(() => window.lifeLens.rebuildPhotoTextIndex())
+                            requestConfirmation(COPY.photos.confirmRebuildText, () => void runPhotoSearchAction(() => window.lifeLens.rebuildPhotoTextIndex()))
                           }}>{COPY.photos.rebuildTextIndex}</button>
                         )}
                         {photoSearchStatus.faceCountEnabled && (
                           <button className="text-button" type="button" disabled={isPhotoSearchWorking} onClick={() => {
-                            if (window.confirm(COPY.photos.confirmRebuildFaces)) void runPhotoSearchAction(() => window.lifeLens.rebuildPhotoFaceIndex())
+                            requestConfirmation(COPY.photos.confirmRebuildFaces, () => void runPhotoSearchAction(() => window.lifeLens.rebuildPhotoFaceIndex()))
                           }}>{COPY.photos.rebuildFaceIndex}</button>
                         )}
                       </div>
@@ -1640,11 +1731,11 @@ export default function LifeLensApp() {
               {photoSearchStatus.enabled && (
                 <div className="actions">
                   <button className="text-button" type="button" disabled={isPhotoSearchWorking} onClick={() => {
-                    if (window.confirm('Clear the local model and photo index? You will need to download and index again.')) void runPhotoSearchAction(() => window.lifeLens.rebuildPhotoIndex())
-                  }}>Clear and rebuild</button>
+                    requestConfirmation(COPY.photos.confirmRebuild, () => void runPhotoSearchAction(() => window.lifeLens.rebuildPhotoIndex()))
+                  }}>{COPY.photos.confirmRebuild.confirmLabel}</button>
                   <button className="text-button danger-button" type="button" disabled={isPhotoSearchWorking} onClick={() => {
-                    if (window.confirm('Disable intelligent photo search? Filename and date search will keep working.')) void runPhotoSearchAction(() => window.lifeLens.disablePhotoSearch())
-                  }}>Disable</button>
+                    requestConfirmation(COPY.photos.confirmDisable, () => void runPhotoSearchAction(() => window.lifeLens.disablePhotoSearch()))
+                  }}>{COPY.photos.confirmDisable.confirmLabel}</button>
                 </div>
               )}
             </section>
@@ -1654,6 +1745,7 @@ export default function LifeLensApp() {
               enrolment={peopleEnrolment}
               enrolmentBusy={isEnrolmentWorking}
               busy={isPeopleWorking}
+              requestConfirmation={requestConfirmation}
               onEnable={() => void runPeopleAction(() => window.lifeLens.setPeopleSearchEnabled(true))}
               onPause={() => void runPeopleAction(() => window.lifeLens.pausePeopleScan())}
               onResume={() => void runPeopleAction(() => window.lifeLens.resumePeopleScan())}
@@ -1773,6 +1865,15 @@ export default function LifeLensApp() {
                 </section>
               </div>
             </div>
+          )}
+
+          {/* Last inside the panel, so it covers settings as well as the conversation. */}
+          {confirmRequest && (
+            <ConfirmDialog
+              content={confirmRequest.content}
+              onConfirm={() => answerConfirmation(true)}
+              onCancel={() => answerConfirmation(false)}
+            />
           )}
         </section>
       )}

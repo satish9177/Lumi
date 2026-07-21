@@ -87,6 +87,9 @@ export type CompanionState = (typeof COMPANION_STATES)[number]
 
 export type RealtimeMode = 'live' | 'mock'
 
+/** A non-secret reason the main process selected the deterministic demo path. */
+export type RealtimeConfigurationStatus = 'openai_api_key_missing'
+
 export type CaptureSourceKind = 'screen' | 'window'
 
 export interface CaptureSource {
@@ -113,6 +116,7 @@ export interface RealtimeSessionCredential {
   model: string
   token?: string
   expiresAt?: string
+  configurationStatus?: RealtimeConfigurationStatus
 }
 
 export type SignalKind = 'date' | 'link' | 'next_action'

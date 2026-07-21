@@ -348,11 +348,18 @@ input:focus-visible {
 
 .composer {
   display: flex;
-  align-items: center;
+  /* Bottom-aligned, so the controls stay put as the input grows upward. */
+  align-items: flex-end;
   gap: 6px;
   padding-top: 10px;
   margin-top: 8px;
   border-top: 1px solid rgba(195, 223, 255, 0.16);
+}
+
+/* Matches the input's height so all three controls share one baseline. */
+.composer .icon-button {
+  width: 38px;
+  height: 38px;
 }
 
 .composer-input {
@@ -368,7 +375,32 @@ input:focus-visible {
   /* A textarea so Shift+Enter can add a line; it grows a little, then scrolls. */
   resize: none;
   max-height: 84px;
+  overflow-y: auto;
   font-family: inherit;
+}
+
+/*
+ * Windows draws a full-width scrollbar with arrow buttons inside a short
+ * textarea, which reads as a number spinner rather than a text field. This
+ * keeps it to the same hairline the conversation uses.
+ *
+ * Deliberately not paired with `scrollbar-width`/`scrollbar-color`: setting
+ * either of those standard properties makes Chromium fall back to its own
+ * scrollbar and ignore every rule below, arrow buttons included.
+ */
+.composer-input::-webkit-scrollbar {
+  width: 6px;
+}
+
+.composer-input::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(165, 213, 255, 0.35);
+}
+
+.composer-input::-webkit-scrollbar-button {
+  width: 0;
+  height: 0;
+  display: none;
 }
 
 .composer-input::placeholder {
@@ -376,7 +408,17 @@ input:focus-visible {
   color: #91a6cc;
 }
 
-.send-button {
+/*
+ * Sized to its own label. Without this it inherits `.primary-button`'s
+ * `flex: 1 1 130px` and takes half the composer's free space away from the
+ * input, leaving a field too narrow to show even its own placeholder.
+ *
+ * Deliberately two classes deep: `.primary-button` is declared later in this
+ * file, so at equal specificity it would win and the fix would silently do
+ * nothing.
+ */
+.composer .send-button {
+  flex: 0 0 auto;
   padding: 9px 14px;
   font-size: 13px;
 }
@@ -1506,7 +1548,8 @@ progress:focus-visible,
   .people-settings,
   .people-profile-card,
   .people-enrolment-view,
-  .people-candidate-button {
+  .people-candidate-button,
+  .confirm-dialog {
     border: 1px solid CanvasText;
   }
 

@@ -211,6 +211,7 @@ describe('branding', () => {
 describe('no visible LifeLens anywhere a user can read', () => {
   const sources = [
     'src/renderer/src/LifeLensApp.tsx',
+    'src/renderer/src/components/ConfirmDialog.tsx',
     'src/renderer/src/components/ToolConfirmationCard.tsx',
     'src/renderer/src/components/DroppedFileCard.tsx',
     'src/renderer/src/components/DropOverlay.tsx',

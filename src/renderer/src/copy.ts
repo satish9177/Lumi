@@ -72,7 +72,11 @@ export const COPY = {
     filenameFallback: 'No filename matched, so these are the most recent near-matches, newest first.',
     bestMatches: 'Best matches, newest first.',
     revokedFolder: (label: string) => `Lumi no longer searches ${label}.`,
-    confirmRevoke: (label: string) => `Stop searching and indexing ${label}?`
+    confirmRevoke: (label: string) => ({
+      title: `Stop searching ${label}?`,
+      body: 'Lumi forgets what it learned about this folder. The folder and everything in it are left untouched.',
+      confirmLabel: 'Stop searching'
+    })
   },
 
   /* --------------------------------------------------------- photo search */
@@ -90,8 +94,17 @@ export const COPY = {
     semanticResults:
       'These matches came from photo content indexed on this device. Lumi can count visible faces but cannot recognise who someone is. Analysing one photo is a separate confirmed action.',
     nameResults: 'These are name, folder, and date matches. Choose one for the separate confirmed photo analysis.',
-    confirmRebuild: 'Clear what Lumi has learned about your photos and start again? You will need to download and index again.',
-    confirmDisable: 'Turn off photo search by content? Searching by name and date keeps working.',
+    confirmRebuild: {
+      title: 'Clear what Lumi has learned about your photos?',
+      body: 'Lumi starts again from nothing, so it downloads and indexes once more before search by content works.',
+      confirmLabel: 'Clear and rebuild'
+    },
+    confirmDisable: {
+      title: 'Turn off photo search by content?',
+      body: 'Searching photos by name, folder, and date keeps working.',
+      confirmLabel: 'Disable',
+      destructive: true
+    },
 
     /* ------------------------------------------- Phase 2: text and faces */
     phase2LocalOnly: 'Photo text and visible faces are checked on this device.',
@@ -112,8 +125,16 @@ export const COPY = {
     visualReady: 'Visual search ready',
     rebuildTextIndex: 'Rebuild text index',
     rebuildFaceIndex: 'Rebuild face-count index',
-    confirmRebuildText: 'Read the text in your photos again? Visual search is not affected.',
-    confirmRebuildFaces: 'Count visible faces again? Visual search is not affected.',
+    confirmRebuildText: {
+      title: 'Read the text in your photos again?',
+      body: 'Lumi checks every photo for words and numbers once more. Visual search is not affected.',
+      confirmLabel: 'Rebuild'
+    },
+    confirmRebuildFaces: {
+      title: 'Count visible faces again?',
+      body: 'Lumi checks every photo for visible faces once more. Visual search is not affected.',
+      confirmLabel: 'Rebuild'
+    },
     // The answer when someone asks Lumi to find a specific person. It says what
     // Lumi can do instead of only refusing, and the word "yet" is deliberate.
     namedPersonUnsupported: 'Lumi can count visible faces, but it can’t recognise who someone is yet.',
@@ -130,7 +151,12 @@ export const COPY = {
     pauseScan: 'Pause scan',
     resumeScan: 'Resume scan',
     deleteAll: 'Delete all people data',
-    confirmDeleteAll: 'Delete all labelled people and their face data? This cannot be undone, and every match record for them is removed too.',
+    confirmDeleteAll: {
+      title: 'Delete all people data?',
+      body: 'Every labelled person, their face data, and their photo matches are removed. This cannot be undone.',
+      confirmLabel: 'Delete all',
+      destructive: true
+    },
     noProfiles: 'You haven’t labelled anyone yet.',
     modelDownload: (megabytes: string) => `Download the local face-matching model (${megabytes})`,
     modelRequired: 'The face-matching model is not installed yet.',
@@ -159,8 +185,17 @@ export const COPY = {
     rename: (label: string) => `Rename ${label}`,
     rescan: (label: string) => `Rescan for ${label}`,
     deleteProfile: (label: string) => `Delete ${label}`,
-    confirmDeleteProfile: (label: string) => `Delete ${label} and every photo match for them? This cannot be undone.`,
-    confirmRescan: (label: string) => `Check every photo for ${label} again?`,
+    confirmDeleteProfile: (label: string) => ({
+      title: `Delete ${label}?`,
+      body: 'Their face data and every photo match for them are removed. This cannot be undone.',
+      confirmLabel: 'Delete',
+      destructive: true
+    }),
+    confirmRescan: (label: string) => ({
+      title: `Check every photo for ${label} again?`,
+      body: 'Lumi looks through your photos once more, which can take a while on a large library.',
+      confirmLabel: 'Rescan'
+    }),
 
     /* -------------------------------------------------------- enrolment */
     enrolStep1Title: 'Who is this?',

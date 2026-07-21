@@ -284,3 +284,58 @@
   gap: 6px;
   margin-top: 6px;
 }
+
+/* ------------------------------------------------------- confirm dialog */
+
+/*
+ * Covers the panel — including the settings slide-over above it — so the
+ * question is unmissable without opening a second window. The radius matches
+ * the panel's so the dim stops exactly at Lumi's edge.
+ */
+.confirm-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  border-radius: 24px;
+  background: rgba(4, 8, 24, 0.74);
+}
+
+.confirm-dialog {
+  width: 100%;
+  max-width: 320px;
+  padding: 16px;
+  border: 1px solid rgba(130, 239, 255, 0.32);
+  border-radius: 16px;
+  color: #eaf2ff;
+  background: linear-gradient(150deg, rgba(23, 34, 78, 0.99), rgba(12, 18, 45, 0.99));
+  box-shadow: 0 18px 44px rgba(2, 6, 23, 0.62);
+}
+
+.confirm-title {
+  margin: 0;
+  color: #f7fbff;
+  font-size: 15px;
+  line-height: 1.3;
+}
+
+.confirm-body {
+  margin: 8px 0 0;
+  color: #c9dbf7;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.confirm-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+/* Cancel is listed first so the safe answer is the nearer one to reach. */
+.confirm-destructive {
+  background: linear-gradient(135deg, #ffb0c0, #ff8098);
+}

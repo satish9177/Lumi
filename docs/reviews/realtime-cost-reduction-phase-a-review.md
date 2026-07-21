@@ -1,7 +1,7 @@
 # Independent review — Realtime API cost reduction, Phase A
 
 - **Review date:** 19 July 2026 (Asia/Kolkata)
-- **Reviewer:** Claude Code (independent code and architecture review; no implementation, test, or doc-content changes were made outside this new review file)
+- **Review type:** Independent code and architecture review (no implementation, test, or doc-content changes were made outside this new review file)
 - **Canonical specification:** [docs/plans/realtime-cost-reduction-phase-a.md](../plans/realtime-cost-reduction-phase-a.md)
 - **Reviewed state:** uncommitted working tree on `main` at HEAD `0ed3245`
 
@@ -210,7 +210,7 @@ All run on this working tree during the review; no code was modified before or a
 # Targeted M1/M2 Follow-up Review
 
 - **Review date:** 19 July 2026 (Asia/Kolkata), follow-up to the Phase A review above
-- **Reviewer:** Claude Code (review only; no implementation, test, or doc-content changes outside this section)
+- **Review type:** Independent review only (no implementation, test, or doc-content changes outside this section)
 - **Reviewed state:** uncommitted working tree on `main` at HEAD `0ed3245` — now 14 modified files, 1,314 insertions / 234 deletions (the hardening added `src/renderer/src/file-search-controller.ts` and its test to the previously reviewed 12-file diff)
 
 ## 1. Verdict
@@ -332,7 +332,7 @@ The §12 cost benchmark remains pending; STATUS.md's "Not measured" table is sti
 # Final F1/F2 Verification
 
 - **Review date:** 19 July 2026 (Asia/Kolkata), final targeted pass over findings F1 and F2 only
-- **Reviewer:** Claude Code (review only)
+- **Review type:** Independent review only
 - **Reviewed state:** uncommitted working tree on `main` at HEAD `0ed3245` — 14 modified files, 1,449 insertions / 236 deletions. Delta since the follow-up review is confined to `src/renderer/src/realtime.ts` (the one-line F1 fix), `src/renderer/src/file-search-controller.ts` (request-identity rework), their two test files, and the two docs. `LifeLensApp.tsx` and all main-process files are byte-identical to the previously approved state.
 
 ## Verdict: APPROVE

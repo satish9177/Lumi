@@ -50,6 +50,7 @@
     "npmRebuild": false
   },
   "dependencies": {
+    "dotenv": "16.6.1",
     "onnxruntime-node": "^1.27.0",
     "qrcode": "^1.5.4",
     "react": "^19.1.1",

@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 import type { DroppedFileDescriptor, PendingActionPreview } from '../../shared/contracts'
-import { DroppedFileCard, ToolConfirmationCard } from './components'
+import { ConfirmDialog, DroppedFileCard, ToolConfirmationCard } from './components'
 import { focusableWithin, nextTrappedFocus } from './focus-trap'
 import { deriveStatus, statusAnnouncement } from './status'
 
@@ -179,6 +179,53 @@ describe('composer keyboard behaviour', () => {
   })
 })
 
+describe('composer layout', () => {
+  it('sizes the send button to its label rather than letting it grow', () => {
+    /*
+     * `.primary-button` is `flex: 1 1 130px`, and inheriting that here made Send
+     * compete with the input for the free space — squeezing the field down to a
+     * sliver too narrow to show even its own placeholder, which then wrapped and
+     * summoned a scrollbar inside a one-row box.
+     */
+    const start = styles.indexOf('.composer .send-button {')
+    const sendButton = styles.slice(start, styles.indexOf('}', start))
+
+    expect(sendButton).toContain('flex: 0 0 auto')
+  })
+
+  it('outranks the button rule it has to beat', () => {
+    // `.primary-button` is declared later in the file, so a single-class
+    // `.send-button` rule would lose the cascade and silently do nothing.
+    expect(styles.indexOf('.composer .send-button {')).toBeLessThan(styles.lastIndexOf('.primary-button'))
+    expect(styles).not.toMatch(/^\.send-button \{/m)
+  })
+
+  it('draws its own hairline scrollbar instead of the platform one', () => {
+    expect(styles).toContain('.composer-input::-webkit-scrollbar-thumb')
+
+    // The arrow buttons are what made a short textarea read as a number spinner.
+    const start = styles.indexOf('.composer-input::-webkit-scrollbar-button {')
+    expect(start).toBeGreaterThan(-1)
+    expect(styles.slice(start, styles.indexOf('}', start))).toContain('display: none')
+  })
+
+  it('does not set the standard scrollbar properties on the composer', () => {
+    // Setting either makes Chromium use its own scrollbar and ignore every
+    // ::-webkit-scrollbar rule above, arrow buttons included.
+    const start = styles.indexOf('.composer-input {')
+    const rule = styles.slice(start, styles.indexOf('}', start))
+
+    expect(rule).not.toContain('scrollbar-width')
+    expect(rule).not.toContain('scrollbar-color')
+  })
+
+  it('grows the input with the text rather than scrolling a fixed row', () => {
+    // Measuring from `auto` is what lets it shrink back as text is deleted.
+    expect(app).toMatch(/input\.style\.height = 'auto'/)
+    expect(app).toMatch(/input\.scrollHeight/)
+  })
+})
+
 describe('escape layering', () => {
   it('closes the drop overlay, then settings, then the picker, then the panel', () => {
     const order = app.slice(app.indexOf('event.key !== \'Escape\''))
@@ -267,6 +314,79 @@ describe('confirmation card accessibility', () => {
   it('does not imply approved-folder trust for a dropped file', () => {
     expect(markup).toContain('Dropped file — temporary, not an approved folder')
     expect(markup).not.toContain('Approved folder')
+  })
+})
+
+describe('confirm dialog accessibility', () => {
+  const markup = renderToStaticMarkup(
+    <ConfirmDialog
+      content={{ title: 'Delete Father?', body: 'This cannot be undone.', confirmLabel: 'Delete', destructive: true }}
+      onConfirm={vi.fn()}
+      onCancel={vi.fn()}
+    />
+  )
+
+  it('interrupts as an alert dialog rather than a passive layer', () => {
+    expect(markup).toContain('role="alertdialog"')
+    expect(markup).toContain('aria-modal="true"')
+  })
+
+  it('carries both the question and the consequence into the announcement', () => {
+    expect(markup).toContain('aria-labelledby')
+    expect(markup).toContain('aria-describedby')
+    expect(markup).toContain('Delete Father?')
+    expect(markup).toContain('This cannot be undone.')
+  })
+
+  it('names the action in the button rather than saying OK', () => {
+    expect(markup).toContain('>Delete</button>')
+    expect(markup).not.toMatch(/>OK</)
+  })
+
+  it('offers exactly two answers, both real buttons', () => {
+    expect((markup.match(/<button/g) ?? []).length).toBe(2)
+  })
+
+  it('opens on Cancel when the action cannot be undone', () => {
+    const component = readFileSync(join(process.cwd(), 'src/renderer/src/components/ConfirmDialog.tsx'), 'utf8')
+
+    // So a reflexive Enter cannot delete something the user has not read yet.
+    expect(component).toContain('destructive ? cancelRef.current : confirmRef.current')
+  })
+
+  it('hands focus back to whatever opened it', () => {
+    const component = readFileSync(join(process.cwd(), 'src/renderer/src/components/ConfirmDialog.tsx'), 'utf8')
+
+    expect(component).toMatch(/opener\?\.focus\(\)/)
+  })
+})
+
+describe('questions are asked inside the panel', () => {
+  const sources = ['src/renderer/src/LifeLensApp.tsx', 'src/renderer/src/components/PeopleSettings.tsx']
+
+  /*
+   * A native confirm opens a second operating-system window: outside Lumi's
+   * frameless always-on-top frame, in another visual language, and blocking the
+   * panel until it is answered. Every question goes through ConfirmDialog.
+   */
+  it.each(sources)('%s opens no operating-system dialog', (relative) => {
+    const contents = readFileSync(join(process.cwd(), relative), 'utf8')
+
+    expect(contents).not.toMatch(/window\.(?:confirm|alert|prompt)\(/)
+  })
+
+  it('puts the dialog above settings, so a question there is not trapped behind it', () => {
+    const dialogIndex = app.indexOf('<ConfirmDialog')
+    const settingsIndex = app.indexOf('className="settings-overlay"')
+
+    expect(dialogIndex).toBeGreaterThan(settingsIndex)
+    // Settings is z-index 5; the scrim has to clear it to cover the question.
+    const scrim = componentStyles.slice(componentStyles.indexOf('.confirm-scrim {'))
+    expect(Number(/z-index: (\d+)/.exec(scrim)?.[1])).toBeGreaterThan(5)
+  })
+
+  it('stands the settings trap down while a dialog is open, rather than racing it', () => {
+    expect(app).toMatch(/event\.key !== 'Tab' \|\| !settingsRef\.current \|\| confirmRequestRef\.current/)
   })
 })
 

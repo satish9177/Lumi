@@ -51,6 +51,7 @@ const CANDIDATES_ENROLMENT: PeopleEnrolmentView = {
 
 function baseProps() {
   return {
+    requestConfirmation: vi.fn(),
     onEnable: vi.fn(),
     onPause: vi.fn(),
     onResume: vi.fn(),

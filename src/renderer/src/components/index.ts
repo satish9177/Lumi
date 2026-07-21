@@ -1,4 +1,6 @@
 export { BrandMark } from './BrandMark'
+export { ConfirmDialog } from './ConfirmDialog'
+export type { ConfirmContent, ConfirmDialogProps, ConfirmRequest, RequestConfirmation } from './ConfirmDialog'
 export { DragGrip } from './DragGrip'
 export { DropOverlay } from './DropOverlay'
 export type { DropOverlayProps } from './DropOverlay'

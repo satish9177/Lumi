@@ -6,16 +6,22 @@
 
 ## Starting point
 
-Before Build Week, Lumi was a working Electron MVP with a floating Windows companion, one-time user-selected screen capture, a deterministic mock path, OpenAI Realtime voice/text conversation, and confirmation-gated reminders, approved-folder search, file opening, and URL opening.
+None. Lumi was created inside the Build Week submission period.
+
+The repository's first commit is `044d701` on **17 July 2026**, and all 31 commits fall between 17 and 21 July 2026 — after the submission period opened on 13 July. `git log --reverse --date=iso` is the timestamped evidence. There is no prior codebase to distinguish from new work.
 
 ## What was built during Build Week
 
-- Prepared the product for public submission under the Lumi name.
-- Added a distinct GPT-5.6 screen-review workflow to the core capture experience.
-- Kept the permanent OpenAI key in Electron main and added a narrow typed IPC route that accepts only a retained capture ID.
-- Added strict JSON Schema output plus application-side validation for summaries, dates, safe links, risks, and next actions.
-- Added a visible renderer confirmation before the GPT-5.6 request, while preserving main-process validation and the existing confirmation model for every follow-up action.
-- Added focused tests, public documentation, safe environment defaults, an MIT license, and repository hygiene checks.
+Everything. In order:
+
+- The Electron + React + TypeScript vertical slice, and the floating Windows companion.
+- The security boundary: a narrow typed `contextBridge`, main-process IPC validation, and the permanent OpenAI key confined to main.
+- One-time user-selected screen capture, plus a deterministic mock path that sends nothing to OpenAI.
+- Realtime voice and text conversation over WebRTC, with bounded tool proposals.
+- Confirmation-gated reminders, approved-folder document search, file opening, URL opening, and optional Telegram attachment sending.
+- A distinct GPT-5.6 screen-review workflow with its own visible confirmation, strict JSON Schema output, and application-side validation of the closed schema.
+- An entirely on-device vision stack: CLIP ViT-B/32 on ONNX Runtime for semantic photo search, local OCR, visible-face counting, and user-labelled people search.
+- 76 test files and 1,422 passing tests, public documentation, safe environment defaults, an MIT license, and repository hygiene checks.
 
 ## GPT-5.6's exact role
 
@@ -27,9 +33,36 @@ Captures are initiated and previewed locally. A selected capture is sent to GPT-
 
 The configured `gpt-5.6-terra` model and strict structured-output Responses API request were verified live on 20 July 2026.
 
+## GPT-5.6's build-time role
+
+Before Codex implemented a subsystem, GPT-5.6 designed it. Every substantial piece of Lumi started as a written specification worked out with GPT-5.6 in ChatGPT: [the Realtime cost-reduction plan](plans/realtime-cost-reduction-phase-a.md), [the on-device photo search architecture](LOCAL-PHOTO-SEARCH.md), and [the UI/UX pass](UI-UX-POLISH.md).
+
+The loop: plan with GPT-5.6 → hand the spec to a Codex implementation session → review the diff against the plan with GPT-5.6 → record what actually shipped in [STATUS.md](STATUS.md).
+
+The Phase A plan names its own audience — *"A Codex implementation session. This document is intended to be sufficient without repeating the architectural investigation."* Codex implemented against briefs, not vague prompts. The [Phase A review](reviews/realtime-cost-reduction-phase-a-review.md) shows the other half of the loop: an approval that still flagged two medium-severity lifecycle gaps for Codex to address, checked against a plan that had fenced Phase B off as out of scope.
+
+Planning separately from implementation is what made scope discipline enforceable rather than aspirational.
+
 ## Codex's exact role
 
-Codex was used during Build Week to inspect the Electron security boundary, implement and test the GPT-5.6 main-process integration, verify the structured Responses API request, improve the README and environment guidance, audit repository hygiene, and run the submission validation commands.
+Codex built Lumi. Its work is visible in the branch structure: `codex/lifelens-mvp` (merged as PR #1), `codex/lifelens-document-tools`, and `codex/lifelens-ui`.
+
+Where it accelerated the work:
+
+- **Scaffolding** — the Electron + React + TypeScript skeleton, electron-vite configuration, and the first working capture → conversation loop.
+- **The security boundary** — the narrow typed `contextBridge`, the main-process IPC validators, and a self-audit for leaks: no generic IPC channel, no Node in the renderer, no permanent key outside main.
+- **The GPT-5.6 integration** — the Responses API call, the strict JSON Schema, the application-side validator that re-checks the closed schema, and tests for all three.
+- **The local vision stack** — the pinned-and-hashed model pack, the CLIP tokenizer reimplementation, the ONNX worker lifecycle, and the append-only index store.
+- **Test coverage** — grown alongside the features to 76 files and 1,422 passing tests, including adversarial cases such as hostile person-labels that must never be interpolated as instructions.
+- **Release hygiene** — environment defaults, third-party notices, `.gitignore` coverage for keys and databases, and judge-facing documentation.
+
+## Where the human decisions were made
+
+- **The core trade-off.** An always-on assistant that watches the screen and acts autonomously was the tempting build. It was rejected. One user-chosen window, captured once, reviewed only on explicit confirmation — that constraint defines the product and was held when it made features harder.
+- **A second confirmation for GPT-5.6.** Capturing and *sending to a model* are different decisions deserving different consent. Commit `a2d4adc` is where that became non-negotiable.
+- **Text to the voice session, never the image.** The Realtime model receives the validated review rather than the screenshot, which makes the strict schema the boundary everything downstream depends on.
+- **Vision stays on-device.** Photo search, OCR, and people search could have been cloud calls. Running CLIP locally cost real effort and is why those images provably never leave the machine.
+- **Scope discipline.** Gmail, Calendar, autonomous control, and cloud sync were cut and stayed cut.
 
 ## Safety and privacy model
 
@@ -58,7 +91,14 @@ The repeatable manual checklist is [DEMO-CHECKLIST.md](DEMO-CHECKLIST.md).
 - GPT-5.6 review is intentionally limited to an explicitly confirmed screen capture; arbitrary document reading and autonomous computer use are not supported.
 - The deterministic no-key path demonstrates the interaction and confirmation flow but does not call GPT-5.6.
 
-## Submission placeholders
+## Submission checklist
 
-- **Final YouTube demo:** Add the final URL before submission.
-- **Primary Codex `/feedback` session ID:** Add the session ID before submission.
+| Item | Requirement | Status |
+| --- | --- | --- |
+| Demo video | Public YouTube, under 3 minutes, audio covering what was built and how Codex **and** GPT-5.6 were used | **Add URL before submitting** |
+| Codex session ID | `/feedback` session ID for the thread where the majority of core functionality was built | **Add ID before submitting** |
+| Code repository | Public, or shared with `testing@devpost.com` and `build-week-event@openai.com` | Public — https://github.com/satish9177/Lumi |
+| README | Setup instructions, sample data if needed, and the Codex collaboration narrative | Done — [../README.md](../README.md) |
+| Built in period | Newly created during the submission period, or meaningfully extended within it | Newly created — first commit 17 July 2026 |
+
+Submissions close **21 July 2026, 5:00 pm Pacific**.

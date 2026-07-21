@@ -1,3 +1,7 @@
+// Must remain the first import: Realtime and reasoning read configuration at
+// module evaluation, so development env files have to load before them.
+import './development-env'
+
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, powerMonitor, safeStorage, screen, utilityProcess } from 'electron'
 import { existsSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
