@@ -14,6 +14,7 @@ import {
 export const IPC_CHANNELS = {
   captureScreen: 'lifelens:capture-screen',
   analyzeCapture: 'lifelens:analyze-capture',
+  checkCaptureForScam: 'lifelens:check-capture-for-scam',
   discardCapture: 'lifelens:discard-capture',
   listCaptureSources: 'lifelens:list-capture-sources',
   createRealtimeSession: 'lifelens:create-realtime-session',
@@ -140,6 +141,74 @@ export interface ScreenReasoningSummary {
   links: string[]
   risks: string[]
   nextActions: string[]
+}
+
+// --- Screenshot scam check ---------------------------------------------------
+
+/**
+ * The only four outcomes a scam check can report.
+ *
+ * There is deliberately no "safe", "genuine", "verified", or "legitimate"
+ * level. A screenshot cannot establish sender identity, account ownership,
+ * email authentication, or a link's final destination, so a level asserting any
+ * of those would be a claim the evidence cannot support and that someone might
+ * act on. The weakest thing Lumi will ever say is that no warning sign is
+ * *visible* — which is why `no_obvious_warning_signs` always ships with the
+ * assessment disclaimer attached.
+ */
+export const SCAM_RISK_LEVELS = ['high_risk', 'warning_signs', 'no_obvious_warning_signs', 'unable_to_assess'] as const
+export type ScamRiskLevel = (typeof SCAM_RISK_LEVELS)[number]
+
+/**
+ * Safer next steps are chosen by *code*, never written by the model.
+ *
+ * The model picks from this fixed vocabulary and Lumi supplies the wording, so
+ * a compromised or injected assessment cannot author an instruction telling
+ * someone to call a number, open a link, or pay anyone. Adding a step means
+ * adding a code here and its app-authored sentence in `copy.ts` — there is no
+ * path by which model text becomes advice.
+ */
+export const SCAM_SAFER_STEPS = [
+  'open_official_app',
+  'type_official_website',
+  'call_number_on_card',
+  'use_saved_contact',
+  'never_share_otp',
+  'refuse_remote_software',
+  'avoid_link_in_message',
+  'ask_trusted_person',
+  'india_financial_fraud_recovery'
+] as const
+export type ScamSaferStep = (typeof SCAM_SAFER_STEPS)[number]
+
+/**
+ * Identifiers the model reports as *visible in the image*. Untrusted text.
+ *
+ * Lumi never resolves, opens, calls, copies, sends, or executes any of these.
+ * They are rendered as plain text so the user can compare them by eye against
+ * something they already trust.
+ */
+export interface ScamVisibleIdentifiers {
+  domains: string[]
+  phoneNumbers: string[]
+  emailAddresses: string[]
+  upiIds: string[]
+  shortenedLinks: string[]
+}
+
+export interface ScamCheckAssessment {
+  sourceCaptureId: string
+  riskLevel: ScamRiskLevel
+  /** Who the message *claims* to be from. Never treated as who it is from. */
+  claimedSender?: string
+  requestedAction?: string
+  urgencyOrPressure: string[]
+  sensitiveRequests: string[]
+  visibleIdentifiers: ScamVisibleIdentifiers
+  warningSigns: string[]
+  /** Codes only. The wording is app-authored; see COPY.scamCheck.steps. */
+  saferNextSteps: ScamSaferStep[]
+  summary: string
 }
 
 export interface SourceContext {
@@ -538,6 +607,14 @@ export interface LifeLensApi {
   listCaptureSources: () => Promise<CaptureSource[]>
   captureScreen: (sourceId?: string) => Promise<CaptureResult>
   analyzeCapture: (captureId: string) => Promise<ScreenReasoningSummary>
+  /**
+   * Reviews one already-confirmed capture for scam warning signs.
+   *
+   * Takes a capture id and nothing else: the image is resolved from main's own
+   * memory, exactly as `analyzeCapture` does. Returns a risk assessment; it
+   * opens no link, calls no number, sends no message, and files no report.
+   */
+  checkCaptureForScam: (captureId: string) => Promise<ScamCheckAssessment>
   discardCapture: () => Promise<void>
   createRealtimeSession: () => Promise<RealtimeSessionCredential>
   noteUserRequest: (request: string) => Promise<ClassifiedIntent>

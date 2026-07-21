@@ -194,6 +194,51 @@ describe('honesty', () => {
   })
 })
 
+describe('scam check never oversells what it knows', () => {
+  const scam = COPY.scamCheck
+
+  it('offers no level meaning safe, verified, genuine, or legitimate', () => {
+    for (const level of Object.values(scam.level)) {
+      expect(level).not.toMatch(/\b(?:safe|verified|genuine|legitimate|trustworthy)\b/i)
+    }
+    expect(Object.values(scam.level)).toEqual([
+      'High scam risk',
+      'Some warning signs',
+      'No obvious warning signs',
+      'Lumi couldn’t assess this message reliably.'
+    ])
+  })
+
+  it('states the assessment disclaimer in the required words', () => {
+    expect(scam.disclaimer).toBe('This is a risk assessment, not proof that the sender is genuine.')
+  })
+
+  it('says explicitly that nothing happened when the user cancels or a step fails', () => {
+    for (const text of [scam.cancelled, scam.captureFailed, scam.assessmentFailed, scam.confirmBody]) {
+      expect(text).toMatch(/nothing (?:was|will be)/i)
+    }
+  })
+
+  it('promises no verification it cannot perform', () => {
+    for (const [, text] of collectStrings(scam)) {
+      expect(text).not.toMatch(/\b(?:verif(?:y|ies|ied)|authenticat\w+|SPF|DKIM|DMARC)\b/i)
+    }
+  })
+
+  it('never tells the user to use something from inside the suspicious message', () => {
+    expect(scam.steps.avoid_link_in_message).toMatch(/do not use the link/i)
+    expect(scam.steps.never_share_otp).toMatch(/do not share/i)
+    expect(scam.steps.refuse_remote_software).toMatch(/do not install/i)
+  })
+
+  it('publishes no emergency number and no official web address', () => {
+    for (const [, text] of collectStrings(scam.steps)) {
+      expect(text).not.toMatch(/\d/)
+      expect(text).not.toMatch(/https?:|www\./)
+    }
+  })
+})
+
 describe('branding', () => {
   it('calls the product Lumi and never LifeLens', () => {
     const offenders = strings.filter(([, text]) => /lifelens/i.test(text))

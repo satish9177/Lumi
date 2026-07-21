@@ -346,6 +346,26 @@ input:focus-visible {
   margin-top: 6px;
 }
 
+/*
+ * Sits directly above the composer, inside the pinned zone rather than the
+ * scrolling conversation, so the quick action is always reachable without
+ * scrolling and the three-zone layout is unchanged.
+ */
+.quick-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 8px;
+  margin-top: 8px;
+  border-top: 1px solid rgba(195, 223, 255, 0.16);
+}
+
+.quick-actions + .composer {
+  padding-top: 6px;
+  margin-top: 0;
+  border-top: 0;
+}
+
 .composer {
   display: flex;
   /* Bottom-aligned, so the controls stay put as the input grows upward. */

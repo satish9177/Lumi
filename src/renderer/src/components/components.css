@@ -339,3 +339,99 @@
 .confirm-destructive {
   background: linear-gradient(135deg, #ffb0c0, #ff8098);
 }
+
+/* ---------------------------------------------------------- scam check */
+
+/*
+ * The risk level is carried by its glyph and its words. Colour is a third,
+ * redundant signal only — remove it entirely and the card still reads
+ * correctly, which is what makes it usable in High Contrast and greyscale.
+ * There is no animation here on purpose: a high-risk result should be calm and
+ * legible, not alarming.
+ */
+.lifelens-scam-card {
+  margin: 12px 0 0;
+  padding: 13px;
+  border: 1px solid rgba(179, 211, 255, 0.17);
+  border-left-width: 3px;
+  border-radius: 14px;
+  color: #eaf2ff;
+  background: rgba(7, 15, 47, 0.58);
+}
+
+.lifelens-scam-card.risk-high_risk {
+  border-left-color: #ff9db0;
+}
+
+.lifelens-scam-card.risk-warning_signs {
+  border-left-color: #ffd28a;
+}
+
+.lifelens-scam-card.risk-no_obvious_warning_signs {
+  border-left-color: #8fefff;
+}
+
+.lifelens-scam-card.risk-unable_to_assess {
+  border-left-color: #b9cced;
+}
+
+.lifelens-scam-level-icon {
+  margin-right: 7px;
+  font-size: 14px;
+}
+
+.lifelens-scam-field {
+  margin: 7px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.lifelens-scam-identifiers {
+  margin-top: 12px;
+  padding: 9px 11px;
+  border: 1px dashed rgba(179, 211, 255, 0.28);
+  border-radius: 11px;
+}
+
+.lifelens-scam-identifiers > summary {
+  color: #9ec5ff;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.lifelens-scam-identifiers > summary:focus-visible {
+  outline: 2px solid #8fefff;
+  outline-offset: 2px;
+}
+
+.lifelens-scam-untrusted-note {
+  margin: 7px 0 0;
+  color: #c9dbf7;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* Permanent. Styled so it cannot be mistaken for decoration and skipped. */
+.lifelens-scam-disclaimer {
+  margin: 13px 0 0;
+  padding-top: 9px;
+  border-top: 1px solid rgba(179, 211, 255, 0.17);
+  color: #f7fbff;
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.lifelens-scam-limits {
+  margin: 5px 0 0;
+  color: #c9dbf7;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+@media (forced-colors: active) {
+  .lifelens-scam-card,
+  .lifelens-scam-identifiers {
+    border: 1px solid CanvasText;
+  }
+}

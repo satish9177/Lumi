@@ -230,6 +230,83 @@ them into:
 
 > You haven't created a profile called Father yet.
 
+### Scam check (screenshot risk assessment)
+
+This is the copy for a feature whose whole value is being trusted, so it is the
+copy most capable of doing harm by overstating. Two rules govern all of it:
+
+**There is no "safe".** The four levels are exactly:
+
+> High scam risk
+
+> Some warning signs
+
+> No obvious warning signs
+
+> Lumi couldn’t assess this message reliably.
+
+"No obvious warning signs" is a statement about what was *visible*, not about
+the sender. It is never shortened to "Safe", "Looks fine", or "Nothing wrong".
+
+**The disclaimer is unconditional**, at every level including the reassuring
+one:
+
+> This is a risk assessment, not proof that the sender is genuine.
+
+The quick action and its confirmation:
+
+> Check this screen for scam warning signs
+
+> Lumi will capture the current screen and review the visible message for scam
+> warning signs. Nothing will be opened or sent.
+
+Cancelling:
+
+> Nothing was captured or checked.
+
+The limits, shown with every result:
+
+> Lumi read only what was visible on screen. It cannot check who really sent a
+> message, where a link leads, or whether a number belongs to who it claims.
+
+Identifiers taken from the message are labelled as exactly that, because they
+are the message's own words and not Lumi's findings:
+
+> Copied from the message as-is. Lumi does not open, call, or check any of
+> these.
+
+Safer next steps are **app-authored**. The model chooses a code from a fixed
+list; Lumi writes the sentence. Each one points at something the user already
+holds — a card, a saved contact, an installed app — and never at a number or web
+address Lumi supplies:
+
+> Open the company’s official app yourself.
+
+> Call the number printed on your bank card or official document.
+
+> Contact the person on a number already saved in your contacts.
+
+> Do not share an OTP, PIN, password or card security code.
+
+> Do not use the link or phone number inside the suspicious message.
+
+> If money has already been transferred, contact your bank immediately and use
+> India’s official cyber-fraud reporting channels.
+
+That last note deliberately names no helpline number and no URL. Publishing a
+number Lumi has not verified and does not maintain would be exactly the mistake
+the feature exists to prevent. If one is ever added it must come with its
+authoritative source, recorded in the repository and kept separately
+maintainable.
+
+Errors are bounded and say what did not happen:
+
+> Lumi couldn’t capture the screen. Nothing was checked.
+
+> Lumi couldn’t assess this message right now. Nothing was opened or sent.
+
+> Lumi couldn’t read enough of the message to assess it reliably.
+
 ### Model download or verification failure
 
 Download interrupted:

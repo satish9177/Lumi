@@ -16,6 +16,7 @@ import type {
   RealtimeConfigurationStatus,
   RealtimeMode,
   ResultThumbnail,
+  ScamCheckAssessment,
   ScreenReasoningSummary,
   SourceContext,
   TelegramRecipient,
@@ -23,6 +24,7 @@ import type {
   ToolExecutionResult,
   ToolProposal
 } from '../../shared/contracts'
+import { classifyUserIntent } from '../../shared/intent'
 import { fileKindLabel } from '../../shared/search-query'
 import {
   BrandMark,
@@ -33,6 +35,7 @@ import {
   ExplanationCard,
   PeopleSettings,
   PhotoResultGrid,
+  ScamCheckCard,
   StatusPill,
   ToolConfirmationCard
 } from './components'
@@ -89,6 +92,12 @@ export default function LifeLensApp() {
   const [screenReasoning, setScreenReasoning] = useState<ScreenReasoningSummary>()
   const [screenReasoningConfirmationOpen, setScreenReasoningConfirmationOpen] = useState(false)
   const [isScreenReasoning, setIsScreenReasoning] = useState(false)
+  // Scam check. `scamConfirmationOpen` is the whole consent gate: choosing the
+  // quick action only opens it, and nothing is captured until it is answered.
+  const [scamConfirmationOpen, setScamConfirmationOpen] = useState(false)
+  const [scamAssessment, setScamAssessment] = useState<ScamCheckAssessment>()
+  const [isScamChecking, setIsScamChecking] = useState(false)
+  const [scamNotice, setScamNotice] = useState<string>()
   const [pendingAction, setPendingAction] = useState<PendingActionPreview>()
   const [searchConfirmation, setSearchConfirmation] = useState<SearchConfirmationRequest | undefined>()
   const pendingProposalsRef = useRef(new Map<string, PendingProposal>())
@@ -464,6 +473,8 @@ export default function LifeLensApp() {
             setExplanation(undefined)
             setScreenReasoning(undefined)
             setScreenReasoningConfirmationOpen(false)
+            setScamAssessment(undefined)
+            setScamConfirmationOpen(false)
             if (reason === 'error') {
               setCompanionState('error')
               return
@@ -564,6 +575,9 @@ export default function LifeLensApp() {
       setExplanation(undefined)
       setScreenReasoning(undefined)
       setScreenReasoningConfirmationOpen(true)
+      // A new capture invalidates the previous assessment; it described a
+      // different screen.
+      setScamAssessment(undefined)
       setPendingAction(undefined)
       setToolResult(undefined)
       setSearchResults([])
@@ -613,6 +627,75 @@ export default function LifeLensApp() {
     }
   }
 
+  /**
+   * Opens the scam-check confirmation. Captures nothing.
+   *
+   * This is the entire effect of choosing "Check for scam": one visible
+   * question. The capture happens in `runScamCheck`, which only the confirm
+   * button can reach.
+   */
+  const requestScamCheck = (): void => {
+    setError(undefined)
+    setScamNotice(undefined)
+    setScamAssessment(undefined)
+    setScamConfirmationOpen(true)
+  }
+
+  const cancelScamCheck = (): void => {
+    setScamConfirmationOpen(false)
+    setScamNotice(COPY.scamCheck.cancelled)
+  }
+
+  /**
+   * Captures once, then assesses that one capture.
+   *
+   * Capture failure and assessment failure are separated deliberately: they are
+   * different facts about what did and did not happen, and the user is told
+   * which. Neither path opens a link, calls a number, sends a message, or
+   * creates a reminder — a result is text on a card and nothing else.
+   */
+  const runScamCheck = async (): Promise<void> => {
+    setError(undefined)
+    setScamNotice(undefined)
+    setIsScamChecking(true)
+    setCompanionState('thinking')
+
+    let captured: CaptureResult
+    try {
+      await ensureConnected()
+      captured = await window.lifeLens.captureScreen(selectedCaptureSourceId)
+      setCapture(captured)
+      setExplanation(undefined)
+      setScreenReasoning(undefined)
+      setScreenReasoningConfirmationOpen(false)
+    } catch {
+      setIsScamChecking(false)
+      setCompanionState('error')
+      setScamConfirmationOpen(false)
+      setError(COPY.scamCheck.captureFailed)
+      return
+    }
+
+    try {
+      const assessment = await window.lifeLens.checkCaptureForScam(captured.id)
+      if (assessment.sourceCaptureId !== captured.id) {
+        throw new Error('mismatched capture')
+      }
+      setScamAssessment(assessment)
+      setScamConfirmationOpen(false)
+      clientRef.current?.provideScamCheckResult(assessment)
+      setCompanionState('success')
+    } catch {
+      // Provider status, response bodies, and model identifiers never reach a
+      // user; one app-authored sentence does.
+      setCompanionState('error')
+      setScamConfirmationOpen(false)
+      setError(COPY.scamCheck.assessmentFailed)
+    } finally {
+      setIsScamChecking(false)
+    }
+  }
+
   const requestScreenContext = (serverCall?: RealtimeServerCall): void => {
     const client = clientRef.current
     if (!client) {
@@ -643,6 +726,11 @@ export default function LifeLensApp() {
         // Intent tracking is advisory; the request itself still proceeds.
       }
       await client.sendUserRequest(question)
+      // Lumi, not the model, decides that a scam question opens the scam-check
+      // gate — and opening the gate still captures nothing.
+      if (classifyUserIntent(question).intent === 'scam_check') {
+        requestScamCheck()
+      }
       setQuestion('')
     } catch (requestError) {
       setCompanionState('error')
@@ -1270,6 +1358,8 @@ export default function LifeLensApp() {
     setExplanation(undefined)
     setScreenReasoning(undefined)
     setScreenReasoningConfirmationOpen(false)
+    setScamAssessment(undefined)
+    setScamConfirmationOpen(false)
     const serverCall = pendingScreenCaptureCall ?? undefined
     setPendingScreenCaptureCall(undefined)
     if (pendingScreenCaptureCall !== undefined) {
@@ -1449,6 +1539,42 @@ export default function LifeLensApp() {
             </section>
           )}
 
+          {/*
+            The scam-check consent gate. It is rendered before any capture
+            exists, because answering it is what causes the capture.
+          */}
+          {scamConfirmationOpen && (
+            <section className="screen-reasoning-confirmation" aria-label={COPY.scamCheck.confirmTitle}>
+              <p className="eyebrow">SCAM CHECK</p>
+              <p>{COPY.scamCheck.confirmBody}</p>
+              <div className="actions">
+                <button
+                  className="secondary-button"
+                  type="button"
+                  onClick={() => void runScamCheck()}
+                  disabled={isScamChecking}
+                  aria-busy={isScamChecking || undefined}
+                >
+                  {isScamChecking ? COPY.scamCheck.checking : COPY.scamCheck.confirmAction}
+                </button>
+                <button className="text-button" type="button" onClick={cancelScamCheck} disabled={isScamChecking}>
+                  {COPY.scamCheck.cancel}
+                </button>
+              </div>
+            </section>
+          )}
+
+          {scamNotice && <p className="notice">{scamNotice}</p>}
+          {scamAssessment && (
+            <>
+              {/* Polite, so the level is heard without cutting off the reader. */}
+              <p className="visually-hidden" aria-live="polite">
+                {COPY.scamCheck.announce(COPY.scamCheck.level[scamAssessment.riskLevel])}
+              </p>
+              <ScamCheckCard assessment={scamAssessment} />
+            </>
+          )}
+
           {explanation && <ExplanationCard explanation={explanation} />}
           {explanation && (
             <section className="context-actions" aria-label="Screen follow-up actions">
@@ -1537,6 +1663,21 @@ export default function LifeLensApp() {
               }}
             />
           )}
+
+          {/*
+            One quick action, sitting with the capture control it depends on.
+            It opens a confirmation and nothing else.
+          */}
+          <div className="quick-actions" aria-label="Quick actions">
+            <button
+              className="chip"
+              type="button"
+              onClick={requestScamCheck}
+              disabled={isScamChecking || isCapturing}
+            >
+              {COPY.scamCheck.quickAction}
+            </button>
+          </div>
 
           <form className="composer" onSubmit={(event) => { event.preventDefault(); void askQuestion() }}>
             <textarea

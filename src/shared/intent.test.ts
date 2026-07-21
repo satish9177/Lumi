@@ -34,6 +34,34 @@ describe('classifyUserIntent', () => {
     expect(classifyUserIntent(request).intent).toBe('local_file_search')
   })
 
+  it.each([
+    'Is this message a scam?',
+    'Check this email for a scam',
+    'Is this payment link suspicious?',
+    'Can I trust this message?',
+    'Check this WhatsApp message for fraud',
+    'Is this a phishing email?',
+    'Is this sender impersonating my bank?'
+  ])('classifies "%s" as scam_check', (request) => {
+    expect(classifyUserIntent(request).intent).toBe('scam_check')
+  })
+
+  it('needs both a scam cue and something to check, so it stays narrow', () => {
+    // A bare "check this email" is deliberately *not* a scam check: it is the
+    // ordinary screen brief, and hijacking it would change what an existing
+    // request does.
+    expect(classifyUserIntent('Check this email').intent).toBe('visible_screen_question')
+    // A general question about scams is not a request to review the screen.
+    expect(classifyUserIntent('How do phone scams usually work?').intent).toBe('general_question')
+    // And a reminder about a scam is still a reminder.
+    expect(classifyUserIntent('Remind me to report that scam call tomorrow').intent).toBe('reminder')
+  })
+
+  it('leaves an ordinary screen question alone', () => {
+    expect(classifyUserIntent('What is this email about?').intent).toBe('visible_screen_question')
+    expect(classifyUserIntent('Summarise this message').intent).toBe('visible_screen_question')
+  })
+
   it('still treats a deictic image request as a question about the visible screen', () => {
     expect(classifyUserIntent('Explain this image on my screen').intent).toBe('visible_screen_question')
     expect(classifyUserIntent('What is this picture showing?').intent).toBe('visible_screen_question')

@@ -6,6 +6,8 @@
 export type UserIntent =
   | 'local_file_search'
   | 'visible_screen_question'
+  /** "Is this a scam?" — a narrower case of a visible-screen question. */
+  | 'scam_check'
   | 'reminder'
   | 'open_target'
   | 'general_question'
@@ -45,6 +47,12 @@ const DEICTIC_REFERENCE = /\b(?:this|these|here)\b/
 const REMINDER_CUE = /\bremind\w*\b|\bremember\s+to\b/
 const LINK_TARGET = /\bhttps?:\/\/|\bwww\.|\b(?:link|url|website|webpage|site)\b|\b[a-z0-9-]+\.(?:com|org|net|io|dev|ai)\b/
 const OPEN_TARGET_VERB = /\b(?:open|visit|launch)\b|\bgo\s+to\b/
+// Deliberately narrow. A scam cue on its own is not enough — the request must
+// also point at something visible or name a kind of message — so that
+// "remind me about that scam call" stays a reminder and a general question
+// about scams stays a general question.
+const SCAM_CUE = /\bscam\w*\b|\bfraud\w*\b|\bphish\w*\b|\b(?:suspicious|spoofed?|impersonat\w+)\b|\bcan\s+i\s+trust\b|\bis\s+(?:this|it)\s+(?:\w+\s+)?(?:real|genuine|legit|legitimate|safe)\b/
+const MESSAGE_NOUN = /\b(?:message|messages|email|emails|mail|sms|texts?|whats\s?app|payment|link|url|request|invoice|otp|sender|caller|call)\b/
 
 export function normalizeUserRequest(request: string): string {
   return request.trim().replace(/\s+/g, ' ')
@@ -63,6 +71,14 @@ export function classifyUserIntent(request: string, context: IntentContext = {})
 
   if (OPEN_TARGET_VERB.test(text) && LINK_TARGET.test(text)) {
     return { normalizedRequest, intent: 'open_target' }
+  }
+
+  // Checked before the screen and stored-file rules so that "is this email a
+  // scam?" reaches the scam preset rather than the generic screen brief. It
+  // still resolves to a screen capture behind the existing confirmation; the
+  // only thing that changes is which review the user is offered.
+  if (SCAM_CUE.test(text) && (DEICTIC_REFERENCE.test(text) || SCREEN_REFERENCE.test(text) || MESSAGE_NOUN.test(text))) {
+    return { normalizedRequest, intent: 'scam_check' }
   }
 
   // "Find my newest screenshot" is a stored-file request, even though it names

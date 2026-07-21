@@ -46,6 +46,47 @@ describe('screen-reader semantics', () => {
   })
 })
 
+describe('scam check accessibility', () => {
+  it('reaches the quick action by keyboard as an ordinary button', () => {
+    expect(app).toContain('COPY.scamCheck.quickAction')
+    // A real <button>, so Tab and Enter work without any handler of ours.
+    expect(app).toMatch(/<button\s+[^>]*className="chip"[\s\S]*?onClick=\{requestScamCheck\}/)
+  })
+
+  it('labels the confirmation surface and marks the running check busy', () => {
+    expect(app).toContain('aria-label={COPY.scamCheck.confirmTitle}')
+    expect(app).toContain('aria-busy={isScamChecking || undefined}')
+  })
+
+  it('announces the result politely rather than interrupting', () => {
+    expect(app).toMatch(/aria-live="polite">\s*\{COPY\.scamCheck\.announce/)
+  })
+
+  it('never animates the high-risk state', () => {
+    const scamStyles = componentStyles.slice(componentStyles.indexOf('.lifelens-scam-card'))
+
+    expect(scamStyles).not.toContain('animation')
+    expect(scamStyles).not.toContain('@keyframes')
+  })
+
+  it('keeps the level legible without colour, and bounded under High Contrast', () => {
+    expect(componentStyles).toContain('.lifelens-scam-card,\n  .lifelens-scam-identifiers {\n    border: 1px solid CanvasText;')
+    expect(app).not.toMatch(/scam[\s\S]{0,200}color:/i)
+  })
+
+  it('keeps every scam-card text size at or above 11px', () => {
+    const scamStyles = componentStyles.slice(componentStyles.indexOf('.lifelens-scam-card'))
+    const sizes = [...scamStyles.matchAll(/font-size:\s*(\d+)px/g)].map((match) => Number(match[1]))
+
+    expect(sizes.length).toBeGreaterThan(0)
+    expect(Math.min(...sizes)).toBeGreaterThanOrEqual(11)
+  })
+
+  it('gives the identifier disclosure a visible focus ring', () => {
+    expect(componentStyles).toContain('.lifelens-scam-identifiers > summary:focus-visible')
+  })
+})
+
 /* --------------------------------------------------- throttled announcements */
 
 describe('status announcements', () => {

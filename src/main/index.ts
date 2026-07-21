@@ -22,6 +22,7 @@ import { runDocumentSearch } from './services/document-search'
 import { IntentTracker } from './services/intent-policy'
 import { createRealtimeSessionCredential } from './services/realtime'
 import { RetainedCaptureStore } from './services/retained-captures'
+import { createScamCheckAssessment } from './services/scam-check'
 import { createScreenReasoningSummary } from './services/screen-reasoning'
 import { SearchOrchestrator } from './services/search-orchestrator'
 import { LocalStore } from './services/store'
@@ -255,6 +256,26 @@ function registerIpcHandlers(): void {
       throw new Error('That screen capture is no longer available. Capture it again before asking Lumi to review it.')
     }
     return createScreenReasoningSummary({ id: captureId, dataUrl: capture.dataUrl }, app.getPath('userData'))
+  })
+
+  /**
+   * Reviews one already-confirmed capture for scam warning signs.
+   *
+   * Deliberately identical in shape to `analyzeCapture`: a capture id and
+   * nothing else crosses from the renderer, and the image is resolved from
+   * main's own memory. This handler reads a capture and returns an
+   * assessment — it opens nothing, sends nothing, and stores nothing.
+   */
+  ipcMain.handle(IPC_CHANNELS.checkCaptureForScam, async (event, captureId: unknown) => {
+    requireMainWindow(event)
+    if (!isCaptureId(captureId)) {
+      throw new Error('A scam check needs a valid capture from this session.')
+    }
+    const capture = retainedCapture.get(captureId)
+    if (!capture) {
+      throw new Error('That screen capture is no longer available. Capture it again before asking Lumi to check it.')
+    }
+    return createScamCheckAssessment({ id: captureId, dataUrl: capture.dataUrl }, app.getPath('userData'))
   })
 
   ipcMain.handle(IPC_CHANNELS.discardCapture, (event) => {

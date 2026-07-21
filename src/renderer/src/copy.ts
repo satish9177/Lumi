@@ -262,6 +262,86 @@ export const COPY = {
     sourceGone: 'That window is no longer open. Choose another one.'
   },
 
+  /* ------------------------------------------------------------ scam check */
+  /**
+   * Every word a user reads about a scam check.
+   *
+   * The model supplies findings; this file supplies the framing and all of the
+   * advice. Note that no level says "safe", the disclaimer is unconditional,
+   * and none of the safer steps names a phone number or a web address — Lumi
+   * points at something the user already trusts and stops there.
+   */
+  scamCheck: {
+    quickAction: 'Check this screen for scam warning signs',
+    confirmTitle: 'Check this message for scam warning signs?',
+    confirmBody:
+      'Lumi will capture the current screen and review the visible message for scam warning signs. Nothing will be opened or sent.',
+    confirmAction: 'Capture and check',
+    cancel: 'Not now',
+    cancelled: 'Nothing was captured or checked.',
+    checking: 'Checking the visible message…',
+
+    /** The four levels, worded exactly as they may appear. */
+    level: {
+      high_risk: 'High scam risk',
+      warning_signs: 'Some warning signs',
+      no_obvious_warning_signs: 'No obvious warning signs',
+      unable_to_assess: 'Lumi couldn’t assess this message reliably.'
+    },
+    /** Paired with each level so meaning never rests on colour alone. */
+    levelIcon: {
+      high_risk: '▲',
+      warning_signs: '●',
+      no_obvious_warning_signs: '○',
+      unable_to_assess: '—'
+    },
+
+    /** Shown with every result, at every level, without exception. */
+    disclaimer: 'This is a risk assessment, not proof that the sender is genuine.',
+    limits:
+      'Lumi read only what was visible on screen. It cannot check who really sent a message, where a link leads, or whether a number belongs to who it claims.',
+
+    warningSignsHeading: 'What Lumi noticed',
+    saferStepsHeading: 'Safer things to do',
+    identifiersHeading: 'Text taken from the message',
+    identifiersNote: 'Copied from the message as-is. Lumi does not open, call, or check any of these.',
+    claimedSenderLabel: 'Claims to be from',
+    requestedActionLabel: 'Asks you to',
+    pressureLabel: 'Pressure to act',
+    sensitiveLabel: 'Asks for',
+    domainsLabel: 'Web addresses',
+    phoneNumbersLabel: 'Phone numbers',
+    emailAddressesLabel: 'Email addresses',
+    upiIdsLabel: 'UPI IDs',
+    shortenedLinksLabel: 'Shortened links',
+    noIdentifiers: 'No web address, number, or ID was legible.',
+
+    /**
+     * App-authored advice, selected by code. The model never writes these.
+     * Each one points somewhere the user can reach independently of the
+     * suspicious message.
+     */
+    steps: {
+      open_official_app: 'Open the company’s official app yourself.',
+      type_official_website: 'Type the company’s official website address in yourself.',
+      call_number_on_card: 'Call the number printed on your bank card or official document.',
+      use_saved_contact: 'Contact the person on a number already saved in your contacts.',
+      never_share_otp: 'Do not share an OTP, PIN, password or card security code.',
+      refuse_remote_software: 'Do not install remote-control software an unexpected caller asks for.',
+      avoid_link_in_message: 'Do not use the link or phone number inside the suspicious message.',
+      ask_trusted_person: 'Ask someone you trust to look at it before you act.',
+      india_financial_fraud_recovery:
+        'If money has already been transferred, contact your bank immediately and use India’s official cyber-fraud reporting channels.'
+    },
+
+    /* Bounded failures. None names a status, a provider, or a file. */
+    captureFailed: 'Lumi couldn’t capture the screen. Nothing was checked.',
+    assessmentFailed: 'Lumi couldn’t assess this message right now. Nothing was opened or sent.',
+    insufficient: 'Lumi couldn’t read enough of the message to assess it reliably.',
+    /** Spoken the moment a result lands, so the level is not sight-only. */
+    announce: (level: string) => `Scam check finished: ${level}. This is a risk assessment, not proof.`
+  },
+
   /* ---------------------------------------------------------------- window */
   window: {
     positionReset: 'Lumi is back at the bottom-right of your main screen.',
