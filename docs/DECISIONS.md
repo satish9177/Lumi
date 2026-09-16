@@ -46,6 +46,10 @@ The model can only propose a typed `ToolProposal`. The renderer visibly renders 
 
 Use a small JSON store inside Electron's `userData` directory for the MVP. It is sufficient for reminders, allowed roots, search result identifiers, and context records, avoids native SQLite packaging risk, and can later be migrated behind the existing service boundary.
 
+## Durable agent task runtime
+
+Agent tasks live in a separate Python sidecar (`services/agent`, FastAPI and async SQLAlchemy) backed by PostgreSQL (`infra/docker-compose.yml`), not in the JSON store. Task state must survive restarts and support optimistic concurrency. Each state change is a single transaction that updates the task's `revision` with compare-and-swap and appends one ordered event. The Electron app is not wired to the runtime yet. When it is, only Electron main will talk to it, and the renderer's security boundary stays as described above. See [`AGENT-RUNTIME.md`](AGENT-RUNTIME.md).
+
 ## Shared contracts
 
 `src/shared/contracts.ts` is the source of truth for the following:

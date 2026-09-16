@@ -1,0 +1,28 @@
+# Development infrastructure only. Electron and the Windows GUI are not
+# containerized. Copy infra/.env.example to infra/.env (ignored) first.
+name: lumi-dev
+
+services:
+  postgres:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${LUMI_POSTGRES_USER:-lumi}
+      POSTGRES_PASSWORD: ${LUMI_POSTGRES_PASSWORD:?Set LUMI_POSTGRES_PASSWORD in infra/.env}
+      POSTGRES_DB: ${LUMI_POSTGRES_DB:-lumi_agent}
+    ports:
+      # Loopback only: the database must never be reachable from the network.
+      - "127.0.0.1:${LUMI_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # PostgreSQL 18+ images keep versioned data under /var/lib/postgresql.
+      - lumi-postgres-data:/var/lib/postgresql
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  lumi-postgres-data:
