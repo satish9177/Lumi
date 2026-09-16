@@ -5,7 +5,7 @@ from alembic import context
 from sqlalchemy import Connection, pool
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.config import Settings
+from app.config import DatabaseSettings
 from app.db.tables import metadata
 
 config = context.config
@@ -18,7 +18,7 @@ def _database_url() -> str:
     url = config.attributes.get("database_url")
     if isinstance(url, str):
         return url
-    return Settings().database_url.get_secret_value()
+    return DatabaseSettings().database_url.get_secret_value()
 
 
 def _run(connection: Connection) -> None:

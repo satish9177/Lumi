@@ -8,6 +8,8 @@ from fastapi.responses import JSONResponse
 from app.api.schemas import (
     ActionListResponse,
     ActionResponse,
+    BookingSearchResponse,
+    BookingSlotResponse,
     BrowserDispatchListResponse,
     BrowserDispatchResponse,
     CancelTaskBody,
@@ -17,6 +19,7 @@ from app.api.schemas import (
     FinishAttemptBody,
     FinishReconciliationBody,
     HealthResponse,
+    PrepareBookingBody,
     ProposeActionBody,
     RejectActionBody,
     TaskEventListResponse,
@@ -25,6 +28,7 @@ from app.api.schemas import (
 )
 from app.db.engine import ping_database
 from app.services.actions import ActionService
+from app.services.booking_preparation import BookingPreparationService
 from app.services.browser_execution import BrowserExecutionService
 from app.services.tasks import TaskService
 
@@ -60,9 +64,25 @@ async def health(request: Request) -> HealthResponse | JSONResponse:
         logger.warning("Health check could not reach the database", exc_info=True)
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content=HealthResponse(status="unavailable", database="unreachable").model_dump(),
+            content=HealthResponse(
+                status="unavailable",
+                database="unreachable",
+                runtime_generation=request.app.state.runtime_generation.id,
+            ).model_dump(mode="json"),
         )
-    return HealthResponse(status="ok", database="ok")
+    return HealthResponse(
+        status="ok",
+        database="ok",
+        runtime_generation=request.app.state.runtime_generation.id,
+    )
+
+
+@router.post("/lifecycle/shutdown", status_code=status.HTTP_202_ACCEPTED)
+async def shutdown(request: Request) -> Response:
+    """Ask this authenticated runtime generation to stop gracefully."""
+    callback: Any = request.app.state.request_shutdown
+    callback()
+    return Response(status_code=status.HTTP_202_ACCEPTED)
 
 
 @router.post("/tasks", status_code=status.HTTP_201_CREATED, response_model=TaskResponse)
@@ -319,15 +339,20 @@ _UNAVAILABLE: dict[int | str, dict[str, Any]] = {
     summary="Execute an approved booking in the browser (internal)",
 )
 async def execute_action_in_browser(
-    action_id: uuid.UUID, service: BrowserServiceDep
+    action_id: uuid.UUID,
+    service: BrowserServiceDep,
+    body: Annotated[ExpectedRevisionBody | None, Body()] = None,
 ) -> ActionResponse:
     """Claims the approval, dispatches to the worker, records what came back.
 
     The body is empty on purpose. Everything that governs the side effect --
     which slot, which doctor, which price, which site -- comes from the
-    immutable proposal the approval was bound to.
+    immutable proposal the approval was bound to. The only optional input is
+    the action revision the user reviewed, which the approval claim enforces.
     """
-    return ActionResponse.from_view(await service.execute_booking(action_id))
+    return ActionResponse.from_view(
+        await service.execute_booking(action_id, expected_revision=_expected_revision(body))
+    )
 
 
 @router.post(
@@ -337,10 +362,14 @@ async def execute_action_in_browser(
     summary="Establish what actually happened, by reading the site (internal)",
 )
 async def reconcile_action_in_browser(
-    action_id: uuid.UUID, service: BrowserServiceDep
+    action_id: uuid.UUID,
+    service: BrowserServiceDep,
+    body: Annotated[ExpectedRevisionBody | None, Body()] = None,
 ) -> ActionResponse:
     """Runs the read-only lookup. It cannot book anything, and never retries."""
-    return ActionResponse.from_view(await service.reconcile_booking(action_id))
+    return ActionResponse.from_view(
+        await service.reconcile_booking(action_id, expected_revision=_expected_revision(body))
+    )
 
 
 @router.get(
@@ -357,3 +386,49 @@ async def list_browser_dispatches(
         action_id=action_id,
         dispatches=[BrowserDispatchResponse.model_validate(row) for row in dispatches],
     )
+
+
+# --- Booking preparation ----------------------------------------------------
+#
+# Read-only discovery for the trusted desktop broker. Search takes nothing but
+# the task id (criteria come from the persisted task request); prepare takes a
+# slot id and nothing else, and builds the proposal from what the worker reads.
+
+
+def get_booking_preparation_service(request: Request) -> BookingPreparationService:
+    service: BookingPreparationService = request.app.state.booking_preparation_service
+    return service
+
+
+BookingServiceDep = Annotated[
+    BookingPreparationService, Depends(get_booking_preparation_service)
+]
+
+
+@router.post(
+    "/tasks/{task_id}/booking/search",
+    response_model=BookingSearchResponse,
+    responses={**_NOT_FOUND, **_CONFLICT, **_UNAVAILABLE},
+    summary="Search the reviewed appointment site (read-only)",
+)
+async def search_booking_slots(
+    task_id: uuid.UUID, service: BookingServiceDep
+) -> BookingSearchResponse:
+    slots = await service.search(task_id)
+    return BookingSearchResponse(
+        task_id=task_id,
+        slots=[BookingSlotResponse(**slot.model_dump()) for slot in slots],
+    )
+
+
+@router.post(
+    "/tasks/{task_id}/booking/prepare",
+    status_code=status.HTTP_201_CREATED,
+    response_model=ActionResponse,
+    responses={**_NOT_FOUND, **_CONFLICT, **_UNAVAILABLE},
+    summary="Observe a slot and propose booking it, awaiting approval",
+)
+async def prepare_booking_action(
+    task_id: uuid.UUID, body: PrepareBookingBody, service: BookingServiceDep
+) -> ActionResponse:
+    return ActionResponse.from_view(await service.prepare(task_id, body.slot_id))

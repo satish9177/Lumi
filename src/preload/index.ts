@@ -8,8 +8,38 @@ import {
   type ToolProposal
 } from '../shared/contracts'
 import type { GuardedTool } from '../shared/intent'
+import { AGENT_IPC_CHANNELS, type AgentApi, type AgentBookingCriteria, type AgentRuntimeView } from '../shared/agent-contracts'
+
+// Fixed channels and positional primitives only. Main validates everything;
+// nothing here can name a runtime route, a URL, or a booked value.
+const agentApi: AgentApi = {
+  getRuntimeStatus: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getRuntimeStatus),
+  onRuntimeStatus: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, status: AgentRuntimeView) => listener(status)
+    ipcRenderer.on(AGENT_IPC_CHANNELS.runtimeStatusChanged, handler)
+    return () => ipcRenderer.removeListener(AGENT_IPC_CHANNELS.runtimeStatusChanged, handler)
+  },
+  restartRuntime: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.restartRuntime),
+  loadActiveTask: (afterSequence: number) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.loadActiveTask, afterSequence),
+  createBookingTask: (criteria: AgentBookingCriteria) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.createBookingTask, { specialty: criteria.specialty, day: criteria.day }),
+  closeActiveTask: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.closeActiveTask),
+  searchAppointments: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.searchAppointments),
+  prepareBooking: (slotId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.prepareBooking, slotId),
+  requestApproval: (actionId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.requestApproval, actionId, expectedRevision),
+  approveAction: (actionId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.approveAction, actionId, expectedRevision),
+  rejectAction: (actionId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.rejectAction, actionId, expectedRevision),
+  executeAction: (actionId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.executeAction, actionId, expectedRevision),
+  reconcileAction: (actionId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.reconcileAction, actionId, expectedRevision)
+}
 
 const lifeLensApi: LifeLensApi = {
+  agent: agentApi,
   listCaptureSources: () => ipcRenderer.invoke(IPC_CHANNELS.listCaptureSources),
   captureScreen: (sourceId?: string) => ipcRenderer.invoke(IPC_CHANNELS.captureScreen, sourceId),
   analyzeCapture: (captureId: string) => ipcRenderer.invoke(IPC_CHANNELS.analyzeCapture, captureId),

@@ -9,9 +9,12 @@ interrupted mid-flight becomes `OUTCOME_UNKNOWN` rather than being guessed at or
 retried. Milestone 3 makes the action real: an isolated browser worker drives
 Chromium against a deterministic appointment site, and a booking that succeeded
 while the response was lost is reconciled rather than repeated. It still does no
-planning and runs no LLM. See
-[`docs/AGENT-RUNTIME.md`](../../docs/AGENT-RUNTIME.md) and
-[Browser execution](#browser-execution-milestone-3) below.
+planning and runs no LLM. Milestone 4 connects it to the real desktop app:
+Electron main supervises the runtime (which owns its browser worker), and the
+renderer drives a trusted task/approval UI through a narrow typed bridge. See
+[`docs/AGENT-RUNTIME.md`](../../docs/AGENT-RUNTIME.md),
+[Browser execution](#browser-execution-milestone-3) and
+[Desktop bridge](#desktop-bridge-milestone-4) below.
 
 ## Setup (Windows, PowerShell)
 
@@ -30,14 +33,21 @@ uv sync
 # 3. Schema (the runtime never creates tables itself)
 uv run alembic upgrade head
 
-# 4. Run
-uv run uvicorn --factory app.main:create_app --host 127.0.0.1 --port 8765
+# 4. Run manually (Electron normally mints this per process generation)
+$env:LUMI_RUNTIME_TOKEN = uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
+uv run python -m app.server --port 8765
 ```
 
 The runtime refuses to start if `DATABASE_URL` is missing or invalid, the
 database is unreachable, or the schema is not at the Alembic head. On startup it
 also recovers unfinished execution attempts left by a previous process (see
 [Crash recovery](#crash-recovery)) before it accepts any request.
+
+Every endpoint, including health, docs and unknown paths, requires `Authorization:
+Bearer <LUMI_RUNTIME_TOKEN>`. The fixed `app.server` entry binds only to
+`127.0.0.1`, rejects non-loopback Host values and every supplied Origin, and
+does not write access logs. Electron main passes a fresh token through the child
+environment; it never crosses preload or reaches the renderer.
 
 `infra/postgres/init` creates `lumi_agent_test` only when the data volume is
 first initialized. For an existing volume, create it manually.
@@ -47,6 +57,8 @@ first initialized. For an existing volume, create it manually.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `DATABASE_URL` | — | Required. Must use `postgresql+asyncpg://`. |
+| `LUMI_RUNTIME_TOKEN` | — | Required. Per-process credential minted by Electron main; at least 32 characters. |
+| `LUMI_RUNTIME_PARENT_PID` | — | Electron pid. When present, the runtime exits if that exact process handle closes. |
 | `DATABASE_POOL_SIZE` | `5` | Connection pool size. |
 | `DATABASE_CONNECT_TIMEOUT_SECONDS` | `5.0` | Connection timeout. |
 | `APPROVAL_TTL_SECONDS` | `300` | How long a granted approval may be claimed. |
@@ -54,6 +66,8 @@ first initialized. For an existing volume, create it manually.
 | `BROWSER_WORKER_URL` | — | Loopback URL of the browser worker. Unset disables browser execution. |
 | `BROWSER_WORKER_TOKEN` | — | Shared credential for that worker. Required together with the URL. |
 | `BROWSER_WORKER_TIMEOUT_SECONDS` | `120` | How long the runtime waits for one dispatch. |
+| `LUMI_BROWSER_SITE_ORIGIN` | — | Managed mode: with no external worker, the runtime launches and owns a worker allowed to visit only this `http://127.0.0.1:<port>` origin. |
+| `LUMI_BROWSER_HEADLESS` | `true` | Headless flag for the managed worker. |
 
 ## Checks
 
@@ -103,7 +117,7 @@ browser submission, and exactly one booking.
 
 | Method | Path | Result |
 | --- | --- | --- |
-| `GET` | `/health` | `200 {"status":"ok","database":"ok"}`, or `503` when the database is unreachable |
+| `GET` | `/health` | Authenticated `200` with database status and runtime generation, or `503` |
 | `POST` | `/tasks` | `201` task in `CREATED`, revision 1, with a `task.created` event |
 | `GET` | `/tasks/{id}` | `200` task, `404 task_not_found`, `422` malformed UUID |
 | `GET` | `/tasks/{id}/events?after_sequence=0&limit=100` | `200` events ordered by `sequence` |
@@ -204,6 +218,14 @@ re-executed; the only way forward is reconciliation.
 | `browser_execution_not_supported` | `409` | The action's tool has no browser implementation |
 | `invalid_booking_proposal` | `409` | The stored proposal is not a valid booking; it is never executed on a partial reading |
 | `browser_worker_not_configured` | `503` | No browser worker is configured, so the capability is absent |
+| `browser_worker_unavailable` | `503` | The worker could not be reached before anything was dispatched |
+| `browser_observation_failed` | `503` | A read-only search or slot observation produced no usable facts |
+| `booking_slot_unavailable` | `409` | The site no longer offers the slot; nothing was proposed |
+| `action_already_open` | `409` | The task already has a booking that is unresolved or succeeded |
+| `task_kind_mismatch` | `409` | Booking preparation on a task that is not `appointment_booking` |
+
+The complete list is generated into `src/shared/agent-runtime-contract.json`
+(see [Contract](#contract-python--typescript)).
 
 ## Browser execution (Milestone 3)
 
@@ -250,7 +272,8 @@ uv run python -m app.browser.main --port 8802
 # 4. The runtime, told where the worker is
 $env:BROWSER_WORKER_URL = "http://127.0.0.1:8802"
 $env:BROWSER_WORKER_TOKEN = $token
-uv run uvicorn --factory app.main:create_app --host 127.0.0.1 --port 8765
+$env:LUMI_RUNTIME_TOKEN = uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
+uv run python -m app.server --port 8765
 ```
 
 With `BROWSER_WORKER_URL` or `BROWSER_WORKER_TOKEN` unset the runtime has no
@@ -350,3 +373,110 @@ exists and only then hard-kills both the runtime and the worker; fresh processes
 start; startup recovery marks the action `OUTCOME_UNKNOWN`; and `lookup_booking`
 establishes the truth. It asserts exactly one execution attempt, exactly one
 browser submission, and exactly one booking.
+
+## Desktop bridge (Milestone 4)
+
+```text
+React renderer -> typed preload (window.lifeLens.agent)
+  -> Electron main (sender/frame check, validation, domain client)
+  -> authenticated loopback runtime (app.server) -> PostgreSQL ledger
+                                                  -> owned browser worker -> fixture site
+```
+
+### Process ownership
+
+- Electron main (`src/main/services/agent-runtime-supervisor.ts`) launches
+  `.venv\Scripts\python.exe -m app.server --port N` with `shell: false`, a
+  constructed environment and a fresh 32-byte credential per process; it sends
+  the credential only after the child reports its bound port on a private pipe.
+  Restarts are bounded; a user can restart explicitly afterwards.
+- The runtime launches its **own** browser worker (`app/browser/managed.py`)
+  when `LUMI_BROWSER_SITE_ORIGIN` is set and no external worker is configured.
+  The worker's environment is built from an allowlist: a fresh worker token,
+  the single site origin, headless flag, the runtime pid and OS basics. It
+  never receives `DATABASE_URL`, the runtime token or provider keys. The
+  worker binds port 0 and reports the port it owns on its stdout pipe, so the
+  worker token is never sent to a guessed port. It is a child inside the
+  runtime's kill-on-close Windows job and also watches the runtime's process
+  handle; a dead worker is replaced (bounded) with a new credential.
+- The fixture site is **not** owned by Lumi. It is an evaluation site that must
+  survive runtime crashes; start it yourself (see below).
+
+### Desktop routes
+
+The only runtime routes Electron main can call are allowlisted in the
+supervisor: create/get task, paged events, list actions, get action,
+approval-request, approve, reject, `browser-execution`,
+`browser-reconciliation`, and the two booking preparation routes:
+
+| Method | Path | Result |
+| --- | --- | --- |
+| `POST` | `/tasks/{id}/booking/search` | Read-only `search_appointments` using the criteria stored in the task request |
+| `POST` | `/tasks/{id}/booking/prepare` | Body `{"slot_id": "..."}` only. Read-only `read_available_slots`; the proposal is built from what the worker observed, then an approval is requested |
+
+`browser-execution` and `browser-reconciliation` accept an optional
+`{"expected_revision": N}`. For execution it is enforced by the transaction
+that claims the approval; reconciliation is refused before any lookup unless
+the action is `OUTCOME_UNKNOWN` or `RECONCILING`, and its verdict is written
+only against the revision the check started from. A task may hold at most one
+booking that is not `FAILED` or `REJECTED`, checked under the task lock, so an
+unknown outcome cannot be side-stepped by preparing a new booking.
+
+`GET /tasks/{id}` now includes `last_event_sequence`, so a replaying client
+knows when it has caught up.
+
+### Contract (Python / TypeScript)
+
+`app/api/contract.py` generates `src/shared/agent-runtime-contract.json` from
+the real enums and Pydantic models, including model-validated example payloads.
+`tests/test_desktop_contract.py` fails when the committed file is stale, and
+`src/main/services/agent-wire.test.ts` checks the TypeScript enums and wire
+parsers against the same file.
+
+```powershell
+uv run python -m app.api.contract --write
+```
+
+### Running the desktop flow in development
+
+```powershell
+# 1. The fixture site (keep it running; it is the authoritative booking store)
+cd services\agent
+uv run python -m evals.sites.appointments.server --port 8801
+
+# 2. Lumi (repository root). Main starts the runtime, which starts the worker.
+npm run dev
+```
+
+Development-only main-process settings (never sent to the renderer):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `LUMI_APPOINTMENT_FIXTURE_ORIGIN` | `http://127.0.0.1:8801` | The one site origin the worker may visit |
+| `LUMI_BROWSER_HEADED` | unset | `1` shows the Chromium window |
+| `LUMI_AGENT_DATABASE_URL` | unset | Overrides the runtime's `.env` database (tests use the `_test` database) |
+| `LUMI_USER_DATA_DIR` | unset | Absolute path of an isolated Electron profile |
+
+Packaged builds do not bundle the Python runtime yet; the task panel then
+reports that the agent runtime is not available.
+
+Only one `app.server` may run per Windows session (named mutex) and per
+database (advisory lock), so stop `npm run dev` before running the hard-kill
+or Electron acceptance tests.
+
+### Real Electron acceptance
+
+```powershell
+npm run build                              # repository root
+cd services\agent
+$env:LUMI_ELECTRON_E2E = "1"
+uv run pytest tests/test_electron_acceptance.py -s
+```
+
+The tests launch the built app with an isolated profile and the `_test`
+database, drive the rendered controls over the DevTools protocol (renderer ->
+preload -> main -> runtime; they never call the runtime themselves), and count
+tasks, actions, attempts and dispatches in PostgreSQL and submissions and
+bookings on the fixture. The lost-response test hard-kills Electron after the
+fixture has created the booking, checks that the runtime and worker died with
+it, restarts the same profile, and reconciles read-only.

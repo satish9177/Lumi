@@ -37,7 +37,9 @@ async def _force_status(engine: AsyncEngine, task_id: str, status: TaskStatus) -
 async def test_health_reports_database(client: httpx.AsyncClient) -> None:
     response = await client.get("/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "database": "ok"}
+    assert response.json()["status"] == "ok"
+    assert response.json()["database"] == "ok"
+    assert uuid.UUID(response.json()["runtime_generation"])
 
 
 async def test_create_task_persists_row_and_initial_event(

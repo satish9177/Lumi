@@ -8,7 +8,6 @@ OUTCOME_UNKNOWN, and the only way out of it is authoritative reconciliation --
 never a blind retry.
 """
 
-import os
 import socket
 import subprocess
 import sys
@@ -26,7 +25,17 @@ from app.services.actions import ActionService
 from app.services.recovery import RecoveryService
 from app.services.runtime import register_runtime_generation
 from app.services.tasks import TaskService
+from tests.browser_harness import (
+    RuntimeHttp,
+    mint_runtime_token,
+    runtime_arguments,
+    runtime_environment,
+)
 from tests.conftest import truncate_all
+
+#: One credential for every runtime this module starts. Rotation is covered by
+#: test_persistence; these tests are about recovery, not credentials.
+TOKEN = mint_runtime_token()
 
 REQUEST = {"type": "appointment_booking", "text": "Book Saturday evening"}
 PROPOSAL = {
@@ -56,12 +65,9 @@ def _free_port() -> int:
 def _start_runtime(database_url: str, port: int, log: IO[bytes]) -> subprocess.Popen[bytes]:
     from app.config import AGENT_ROOT
 
-    environment = {**os.environ, "DATABASE_URL": database_url}
+    environment = runtime_environment(database_url, TOKEN)
     return subprocess.Popen(
-        [
-            sys.executable, "-m", "uvicorn", "--factory", "app.main:create_app",
-            "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning",
-        ],
+        [sys.executable, *runtime_arguments(port)],
         cwd=AGENT_ROOT,
         env=environment,
         stdout=log,
@@ -75,7 +81,7 @@ def _wait_healthy(process: subprocess.Popen[bytes], base_url: str, log_path: Pat
         if process.poll() is not None:
             pytest.fail(f"runtime exited early:\n{log_path.read_text(errors='replace')}")
         try:
-            if httpx.get(f"{base_url}/health", timeout=1).status_code == 200:
+            if RuntimeHttp(base_url, TOKEN).get(f"{base_url}/health", timeout=1).status_code == 200:
                 return
         except httpx.TransportError:
             pass
@@ -97,23 +103,24 @@ def _json(response: httpx.Response) -> dict[str, Any]:
 
 def _drive_to_executing(base_url: str) -> dict[str, Any]:
     """Task -> proposal -> approval request -> approval -> execution attempt."""
-    task = _json(httpx.post(f"{base_url}/tasks", json={"request": REQUEST}))
-    action = _json(httpx.post(f"{base_url}/tasks/{task['id']}/actions", json=PROPOSE))
+    api = RuntimeHttp(base_url, TOKEN)
+    task = _json(api.post(f"{base_url}/tasks", json={"request": REQUEST}))
+    action = _json(api.post(f"{base_url}/tasks/{task['id']}/actions", json=PROPOSE))
     action = _json(
-        httpx.post(
+        api.post(
             f"{base_url}/actions/{action['id']}/approval-request",
             json={"expected_revision": action["revision"]},
         )
     )
     action = _json(
-        httpx.post(
+        api.post(
             f"{base_url}/actions/{action['id']}/approve",
             json={"expected_revision": action["revision"]},
         )
     )
     assert action["status"] == "APPROVED"
     return _json(
-        httpx.post(
+        api.post(
             f"{base_url}/actions/{action['id']}/attempts",
             json={"expected_revision": action["revision"]},
         )
@@ -141,6 +148,7 @@ def test_a_hard_killed_execution_becomes_outcome_unknown_and_is_reconciled(
     truncate_all(migrated_database_url)
     port = _free_port()
     base_url = f"http://127.0.0.1:{port}"
+    api = RuntimeHttp(base_url, TOKEN)
 
     # 1-6. Runtime A: approve a consequential action and persist the intent to
     # execute it, then confirm the ledger really is mid-flight.
@@ -159,7 +167,7 @@ def test_a_hard_killed_execution_becomes_outcome_unknown_and_is_reconciled(
             assert original_attempt["finished_at"] is None
             assert original_attempt["outcome"] is None
             assert executing["approval"] is None  # Claimed by this attempt.
-            assert _json(httpx.get(f"{base_url}/tasks/{task_id}"))["status"] == "EXECUTING"
+            assert _json(api.get(f"{base_url}/tasks/{task_id}"))["status"] == "EXECUTING"
         finally:
             # 7. Hard kill. No graceful shutdown, no cleanup hook, nothing
             # in-process gets a chance to record what happened.
@@ -174,10 +182,10 @@ def test_a_hard_killed_execution_becomes_outcome_unknown_and_is_reconciled(
         try:
             _wait_healthy(second, base_url, second_log)
             assert second.pid != first.pid
-            recovered = _json(httpx.get(f"{base_url}/actions/{action_id}"))
+            recovered = _json(api.get(f"{base_url}/actions/{action_id}"))
 
             assert recovered["status"] == "OUTCOME_UNKNOWN"
-            assert _json(httpx.get(f"{base_url}/tasks/{task_id}"))["status"] == "OUTCOME_UNKNOWN"
+            assert _json(api.get(f"{base_url}/tasks/{task_id}"))["status"] == "OUTCOME_UNKNOWN"
             # The original attempt is still there, now carrying an unknown
             # outcome. It was not rewritten into a failure.
             assert len(recovered["attempts"]) == 1
@@ -193,14 +201,14 @@ def test_a_hard_killed_execution_becomes_outcome_unknown_and_is_reconciled(
 
             # 11-13. Authoritative reconciliation, which looks rather than acts.
             reconciling = _json(
-                httpx.post(
+                api.post(
                     f"{base_url}/actions/{action_id}/reconciliation",
                     json={"expected_revision": recovered["revision"]},
                 )
             )
             assert reconciling["status"] == "RECONCILING"
             final = _json(
-                httpx.post(
+                api.post(
                     f"{base_url}/actions/{action_id}/reconciliation/finish",
                     json={
                         "result": reconciled_as,
@@ -209,7 +217,7 @@ def test_a_hard_killed_execution_becomes_outcome_unknown_and_is_reconciled(
                     },
                 )
             )
-            events = _json(httpx.get(f"{base_url}/tasks/{task_id}/events"))["events"]
+            events = _json(api.get(f"{base_url}/tasks/{task_id}/events"))["events"]
         finally:
             _stop(second)
 
@@ -244,6 +252,7 @@ def test_a_recovered_action_is_still_refused_a_second_attempt(
     truncate_all(migrated_database_url)
     port = _free_port()
     base_url = f"http://127.0.0.1:{port}"
+    api = RuntimeHttp(base_url, TOKEN)
 
     first_log = tmp_path / "first.log"
     with first_log.open("wb") as log:
@@ -261,13 +270,13 @@ def test_a_recovered_action_is_still_refused_a_second_attempt(
             _wait_healthy(second, base_url, second_log)
             action_id = executing["id"]
 
-            retry = httpx.post(f"{base_url}/actions/{action_id}/attempts")
-            reapprove = httpx.post(f"{base_url}/actions/{action_id}/approval-request")
-            finish = httpx.post(
+            retry = api.post(f"{base_url}/actions/{action_id}/attempts")
+            reapprove = api.post(f"{base_url}/actions/{action_id}/approval-request")
+            finish = api.post(
                 f"{base_url}/actions/{action_id}/attempts/finish",
                 json={"outcome": "SUCCEEDED"},
             )
-            final = _json(httpx.get(f"{base_url}/actions/{action_id}"))
+            final = _json(api.get(f"{base_url}/actions/{action_id}"))
         finally:
             _stop(second)
 
@@ -284,6 +293,7 @@ def test_restarting_twice_does_not_re_recover_or_duplicate_events(
     truncate_all(migrated_database_url)
     port = _free_port()
     base_url = f"http://127.0.0.1:{port}"
+    api = RuntimeHttp(base_url, TOKEN)
 
     with (tmp_path / "first.log").open("wb") as log:
         first = _start_runtime(migrated_database_url, port, log)
@@ -301,7 +311,7 @@ def test_restarting_twice_does_not_re_recover_or_duplicate_events(
             try:
                 _wait_healthy(runtime, base_url, log_path)
                 events = _json(
-                    httpx.get(f"{base_url}/tasks/{executing['task_id']}/events")
+                    api.get(f"{base_url}/tasks/{executing['task_id']}/events")
                 )["events"]
                 timelines.append([event["event_type"] for event in events])
             finally:

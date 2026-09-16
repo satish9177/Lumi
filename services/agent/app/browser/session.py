@@ -42,7 +42,12 @@ def token_matches(presented: str | None, expected: SecretStr) -> bool:
     """Constant-time comparison, and a missing token is simply a mismatch."""
     if not presented:
         return False
-    return hmac.compare_digest(presented, expected.get_secret_value())
+    try:
+        presented_bytes = presented.encode("ascii")
+    except UnicodeEncodeError:
+        # compare_digest raises on non-ASCII str; a non-ASCII token is simply wrong.
+        return False
+    return hmac.compare_digest(presented_bytes, expected.get_secret_value().encode("ascii"))
 
 
 @dataclass(frozen=True, slots=True)

@@ -16,7 +16,7 @@ from app.domain.action_status import ActionStatus, ApprovalStatus, AttemptOutcom
 from app.domain.browser_dispatch import DispatchStatus
 from app.domain.task_status import TaskStatus
 from app.main import create_app
-from tests.conftest import downgrade, migrate
+from tests.conftest import TEST_RUNTIME_TOKEN, downgrade, migrate
 
 
 def _diff(connection: Connection) -> list[object]:
@@ -82,7 +82,9 @@ async def test_the_proposal_immutability_trigger_is_installed(settings: Settings
 
 def test_startup_refuses_an_unmigrated_database(migrated_database_url: str) -> None:
     # Sync test: Alembic's env.py runs its own event loop.
-    settings = Settings(database_url=SecretStr(migrated_database_url))
+    settings = Settings(
+        database_url=SecretStr(migrated_database_url), runtime_token=TEST_RUNTIME_TOKEN
+    )
     downgrade(migrated_database_url, "base")
     try:
         app = create_app(settings)

@@ -221,6 +221,14 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
                 generation.id,
             )
 
+        if operation.effect is not Effect.READ_ONLY and body.action_id is None:
+            return _error(
+                status.HTTP_400_BAD_REQUEST,
+                "action_required",
+                "Only read-only observation may run without a persisted action.",
+                generation.id,
+            )
+
         if operation.effect is Effect.CONSEQUENTIAL and body.attempt_id is None:
             # Consequential work is only ever done on behalf of a persisted
             # execution attempt. Without one there is nothing to reconcile
@@ -334,7 +342,7 @@ async def _run(
     logger.info(
         "browser operation finished",
         extra={
-            "action_id": str(body.action_id),
+            "action_id": str(body.action_id) if body.action_id else None,
             "attempt_id": str(body.attempt_id) if body.attempt_id else None,
             "runtime_generation": str(body.runtime_generation),
             "worker_generation": str(generation.id),

@@ -18,6 +18,7 @@ from app.domain.action_status import (
 )
 from app.domain.digest import proposal_digest as compute_digest
 from app.domain.errors import (
+    ActionAlreadyOpenError,
     ActionConcurrencyError,
     ActionNotFoundError,
     ActionProposalConflictError,
@@ -208,27 +209,80 @@ class ActionService:
                     raise ActionProposalConflictError(task_id, idempotency_key, existing.id)
                 return await self._view(connection, existing), False
 
-            tasks_repository = TaskRepository(connection)
-            # Proposing does not move the task; it only adds to its timeline.
-            advanced = await tasks_repository.advance_task(
-                task_id=task.id, expected_revision=task.revision
-            )
-            assert advanced is not None  # The task row lock is held.
-            await tasks_repository.append_event(
-                task=advanced,
-                event_type=TaskEventType.ACTION_PROPOSED,
-                payload={
-                    "action_id": str(created.id),
-                    "tool_name": created.tool_name,
-                    "risk_tier": created.risk_tier.value,
-                    "proposal_digest": created.proposal_digest,
-                    "action_status": created.status.value,
-                    "action_revision": created.revision,
-                    "idempotency_key": created.idempotency_key,
-                    "requires_approval": requires_approval(created.risk_tier),
-                },
-            )
+            await self._record_proposed(connection, task, created)
             return await self._view(connection, created), True
+
+    async def _record_proposed(
+        self, connection: AsyncConnection, task: TaskRecord, created: ActionRecord
+    ) -> None:
+        tasks_repository = TaskRepository(connection)
+        # Proposing does not move the task; it only adds to its timeline.
+        advanced = await tasks_repository.advance_task(
+            task_id=task.id, expected_revision=task.revision
+        )
+        assert advanced is not None  # The task row lock is held.
+        await tasks_repository.append_event(
+            task=advanced,
+            event_type=TaskEventType.ACTION_PROPOSED,
+            payload={
+                "action_id": str(created.id),
+                "tool_name": created.tool_name,
+                "risk_tier": created.risk_tier.value,
+                "proposal_digest": created.proposal_digest,
+                "action_status": created.status.value,
+                "action_revision": created.revision,
+                "idempotency_key": created.idempotency_key,
+                "requires_approval": requires_approval(created.risk_tier),
+            },
+        )
+
+    async def propose_exclusive_action(
+        self,
+        task_id: uuid.UUID,
+        *,
+        tool_name: str,
+        risk_tier: RiskTier,
+        proposal: dict[str, Any],
+    ) -> ActionView:
+        """Propose a tool action only if the task has no other live one.
+
+        Under the task row lock: any action of this tool that is not FAILED or
+        REJECTED -- waiting, approved, executing, of unknown outcome, being
+        reconciled, or already succeeded -- blocks a new proposal. That keeps an
+        unresolved booking from being side-stepped by preparing a fresh one.
+        The idempotency key is the tool's ordinal within the task, so two
+        concurrent requests serialize on the lock and the second is refused.
+        """
+        digest = compute_digest(proposal)
+        async with self._engine.begin() as connection:
+            repository = ActionRepository(connection)
+            task = await self._lock_task(TaskRepository(connection), task_id)
+            self._check_task_open(task)
+            limit = 500
+            existing = [
+                action
+                for action in await repository.list_actions(task_id, limit=limit)
+                if action.tool_name == tool_name
+            ]
+            if len(existing) >= limit:  # pragma: no cover - defensive bound.
+                raise ActionAlreadyOpenError(task_id, existing[-1].id, existing[-1].status)
+            for action in existing:
+                if action.status not in (ActionStatus.FAILED, ActionStatus.REJECTED):
+                    raise ActionAlreadyOpenError(task_id, action.id, action.status)
+            created = await repository.insert_action_if_absent(
+                action_id=uuid.uuid4(),
+                task_id=task_id,
+                idempotency_key=f"{tool_name}-{len(existing) + 1}",
+                tool_name=tool_name,
+                risk_tier=risk_tier,
+                proposal=proposal,
+                proposal_digest=digest,
+                status=ActionStatus.PROPOSED,
+            )
+            if created is None:  # pragma: no cover - the ordinal is taken under the lock.
+                raise ActionConcurrencyError(task_id)
+            await self._record_proposed(connection, task, created)
+            return await self._view(connection, created)
 
     async def get_action(self, action_id: uuid.UUID) -> ActionView:
         async with self._engine.connect() as connection:

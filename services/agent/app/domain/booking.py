@@ -74,6 +74,10 @@ class ObservedSlot(BaseModel):
     currency: str
 
 
+#: The consequential fields a re-observation compares, in report order.
+CHANGED_FACT_FIELDS = ("slot_id", "doctor", "time", "price", "currency")
+
+
 @dataclass(frozen=True, slots=True)
 class ChangedFact:
     field: str
