@@ -1,17 +1,33 @@
 # Agent task runtime
 
 Evolving Lumi into a voice, vision, browser and memory agent. Milestone 1 made a
-task durable. Milestone 2 makes *acting* durable: a ledger of proposed actions,
+task durable. Milestone 2 made *acting* durable: a ledger of proposed actions,
 durable approvals, execution attempts, and an honest answer when the runtime
-dies mid-action. Setup and API details are in
+dies mid-action. Milestone 3 makes the action **real**: an isolated browser
+worker drives Chromium against a deterministic appointment site, and a booking
+that succeeded while the response was lost is reconciled rather than repeated.
+Setup and API details are in
 [`services/agent/README.md`](../services/agent/README.md).
+
+> **Milestone 3 does not establish reliability on arbitrary public websites.**
+> It establishes reliable execution and reconciliation *semantics* against
+> deterministic browser fixtures. Nothing here has been tried against a real
+> clinic, a real booking engine, or any site Lumi does not control, and the
+> `lookup_booking` trust assumption that lets an absent booking be reported as a
+> known failure is explicitly a property of the fixture, not of the web.
 
 ## Shape
 
 ```text
-Electron app (unchanged)          services/agent (Python sidecar)
-  renderer ─ preload ─ main          FastAPI ─ services ─ repositories ─ PostgreSQL
-                                                                        (infra/docker-compose.yml)
+Electron app (unchanged)      services/agent (Python sidecar)        separate processes
+  renderer ─ preload ─ main     FastAPI ─ services ─ repositories       browser worker
+                                            │           │                  │ Chromium
+                                            │        PostgreSQL            ↓
+                                            └── typed dispatch ────→  reviewed adapter
+                                                (loopback + token)         │
+                                                                           ↓
+                                                                 evals/sites/appointments
+                                                                  (deterministic fixture)
 ```
 
 - One modular Python application, not a set of services. PostgreSQL is the only
@@ -74,6 +90,18 @@ unique), `runtime_generation` (FK), `started_at`, `finished_at`, `outcome`,
 `(action_id, attempt_number)`.
 
 `runtime_generations`: `id`, `started_at`. One row per runtime process.
+
+### Browser dispatches (migration `0003`)
+
+`browser_worker_generations`: `id`, `runtime_generation` (FK),
+`worker_started_at`, `registered_at`. One row per browser worker process.
+
+`browser_dispatches`: `id`, `action_id` (FK), `attempt_id` (FK, nullable,
+**unique**), `worker_generation` (FK), `operation`, `site`, `effect`, `status`,
+`submitted`, `observation_id`, `error_code`, `duration_ms`, `result` (JSONB),
+`started_at`, `finished_at`. A CHECK requires an `attempt_id` for any
+`CONSEQUENTIAL` dispatch. See
+[Browser execution](#browser-execution-milestone-3).
 
 There is no separate action event table. Action lifecycle changes are recorded
 on the existing per-task timeline (`action.proposed`, `action.approved`,
@@ -247,9 +275,320 @@ An inconclusive reconciliation is recorded honestly and may be repeated. It is
 never downgraded to `FAILED` just because looking did not settle the question.
 
 Reconciliation **looks; it never acts**. It does not start a second attempt.
-Later browser adapters will answer the question by reading authoritative state
-(`lookup_booking()`, `lookup_submission()`). In this milestone the result is
-supplied synthetically by tests.
+Milestone 3 supplies the first real implementation: `lookup_booking` navigates
+the site read-only and reports `FOUND`, `NOT_FOUND` or `UNKNOWN`. See
+[Browser execution](#browser-execution-milestone-3), and in particular
+[when absence means absence](#when-absence-means-absence) -- `NOT_FOUND` becomes
+`FAILED` only where a site guarantees it can.
+
+## Browser execution (Milestone 3)
+
+### Why the worker is a separate process
+
+The browser is the component that reads untrusted input. Everything a web page
+says arrives through it, and a page is free to lie, to change underneath it, or
+to contain text designed to be mistaken for an instruction. Running it inside
+the runtime would mean the process holding `DATABASE_URL`, the action ledger and
+the approval API is also the process parsing whatever a website sent.
+
+So the worker is its own process, and least privilege is a fact about what it
+was given rather than a promise about how it behaves:
+
+| The worker has | The worker does not have |
+| --- | --- |
+| A credential and a list of allowed origins | Any database connection or URL |
+| One typed operation and its typed input | The task, its history, or any other task |
+| A fresh browser context per dispatch | Any approval surface, read or write |
+| A place to record "I submitted" | Any way to alter a proposal |
+| | Provider keys, the Electron `.env`, a shell, or the filesystem |
+
+It cannot approve anything because there is no code path to an approval, not
+because it is trusted not to try.
+
+### The trust boundary
+
+Loopback stopped being sufficient the moment real side effects became possible:
+any process on the machine can reach loopback, and a consequential booking is
+not something to hand to whoever connects first. Every request to the worker,
+including health, carries a credential in the `x-lumi-worker-token` header,
+compared with `hmac.compare_digest`.
+
+The credential is minted by trusted bootstrap code (`generate_worker_token`, 32
+bytes), passed to the worker through its environment, and held as a `SecretStr`.
+It is never in a URL (URLs reach access logs, history and referrers), never
+logged, never stored in the database, and never reaches the Electron renderer. A
+URL without a token produces no browser capability at all, rather than an
+unauthenticated one.
+
+The worker allowlists **origins by name**. A proposal names a site
+(`appointment_fixture`); the worker resolves that against its own configuration.
+A proposal carrying a URL would let whoever wrote the proposal choose where the
+browser goes.
+
+### The closed tool registry
+
+`app/browser/registry.py` holds a fixed tuple of reviewed operations. A dispatch
+names one; the name resolves there or the dispatch is refused. There is no
+selector parameter, no URL parameter, no script parameter, and no
+`POST /browser/evaluate`. The worker serves exactly two routes, `GET /health`
+and `POST /v1/dispatch`, and a test asserts that nothing else exists.
+
+| Operation | Effect | Retry | Reconciliation |
+| --- | --- | --- | --- |
+| `search_appointments` | `READ_ONLY` | safe | not required |
+| `read_available_slots` | `READ_ONLY` | safe | not required |
+| `prepare_booking` | `PREPARE` | safe | not required |
+| `commit_booking` | `CONSEQUENTIAL` | **reconcile before retry** | `lookup_booking` |
+| `lookup_booking` | `READ_ONLY` | safe | not required |
+
+Each operation declares a typed input and output model, an effect class,
+preconditions, postconditions, a timeout, **and what that timeout means**. The
+registry refuses to construct itself if a consequential operation is marked
+retryable or declares no reconciliation path: such an operation would have no way
+out of `OUTCOME_UNKNOWN` except a guess.
+
+### `commit_booking` versus `lookup_booking`
+
+These are the two halves of the design, and they are deliberately asymmetric.
+
+`commit_booking` is the only thing in Lumi that can change the outside world. It
+requires a claimed approval and a persisted attempt; the worker refuses it
+outright without an `attempt_id`. Its order is not negotiable:
+
+1. Navigate fresh. Never book from a page left over from preparation.
+2. Refuse if the slot is gone.
+3. Read doctor, time, price and currency; compare against the **persisted**
+   proposal; refuse on any difference.
+4. Fill the reference Lumi derived from the action.
+5. Re-read from newly resolved locators and compare **again**, because the page
+   may have changed since step 3.
+6. Only now set `submitted`, then click.
+7. Prove a booking exists by reading a receipt id off a confirmation page.
+
+`lookup_booking` is a GET. It navigates, reads, and returns `FOUND`, `NOT_FOUND`
+or `UNKNOWN`. It has no click, no form submission and no access to the
+`submitted` flag; a test asserts its source contains neither. That is what makes
+it safe to run against an action whose outcome is unknown: **running it cannot
+create the thing it is looking for.** Reconciliation that could act would be a
+retry wearing a different name.
+
+### When absence means absence
+
+`NOT_FOUND` is recorded as `FAILED` only where the site's own trust declaration
+in `app/domain/sites.py` says absence is authoritative, alongside the reason:
+
+> The fixture's booking store is the single writer, in one process, with no
+> queue, no settlement step and no expiry. A booking is visible to the very next
+> lookup by construction, and a booking that was never created can never appear
+> later.
+
+For every other site the default is `lookup_absence_is_authoritative = False`,
+and `NOT_FOUND` leaves the action `OUTCOME_UNKNOWN`. That is the correct answer
+for essentially any real booking site: a booking can be pending, queued, held
+behind an unsettled payment, visible only to a logged-in session, or merely
+eventually consistent. On such a site an empty lookup is evidence about the
+lookup, not about the world.
+
+A lookup that *failed* (unreachable worker, timeout, unreadable page) resolves
+nothing either. Failing to look is not evidence of absence.
+
+### Changed values invalidate an approval
+
+An approval authorises specific values, and a website may change them at any
+time. `changed_facts` compares the page against the persisted proposal field by
+field. Times are compared as instants, so the same moment written in another
+offset is not a change; everything else is compared exactly.
+
+On any difference the worker returns `CHANGED_RESOURCE`, **nothing is
+submitted**, and the action becomes `FAILED` with the differences recorded
+structurally (`{"field": "price", "approved": "800", "observed": "950"}`). The
+approval was already consumed by the attempt, so the new values have no
+authorisation and cannot acquire any: proceeding needs a new proposal and a new
+approval. The changed value is never silently accepted, and never renegotiated
+by the worker, which has no way to do either.
+
+### Classification: what each failure may claim
+
+| What happened | Outcome | Why |
+| --- | --- | --- |
+| Postcondition verified | `SUCCEEDED` | A receipt id on a confirmation page carrying our reference |
+| Approved values changed | `FAILED` | Never submitted |
+| Slot withdrawn | `FAILED` | Never submitted |
+| Site returned its own refusal page | `FAILED` | A definitive negative acknowledgement after the click |
+| Error before the click | `FAILED` | The worker can show no submission went out |
+| Connection to the worker refused | `FAILED` | The dispatch was never delivered |
+| Worker refused (auth, unknown op, stale generation) | `FAILED` | Refusal happens before any browser work |
+| **Timeout after the click** | `OUTCOME_UNKNOWN` | A statement about how long we waited |
+| Dropped connection mid-request | `OUTCOME_UNKNOWN` | Delivered; the answer was lost |
+| Confirmation page unrecognised | `OUTCOME_UNKNOWN` | Submitted, and nothing proved |
+| Runtime killed mid-flight | `OUTCOME_UNKNOWN` | Milestone 2 startup recovery |
+| Duplicate dispatch already in flight | `OUTCOME_UNKNOWN` | It may well be succeeding right now |
+
+`submitted` is set immediately **before** the click, never after. It is the bit
+that separates the top half of that table from the bottom.
+
+### Generations and stale results
+
+`runtime_generations` (Milestone 2) is joined by `browser_worker_generations`:
+one row per worker process, owned by the runtime generation that registered it.
+
+The runtime handshakes before claiming an approval, learns the worker's
+generation, and addresses every dispatch to it. A worker that has restarted has a
+new generation and refuses with `stale_worker_generation`; the runtime discards
+any reply naming a different runtime generation, worker generation, dispatch or
+operation. Doing the handshake *before* the approval is claimed means a missing
+or replaced worker is discovered while nothing is at stake: no attempt started,
+no approval spent, nothing to reconcile.
+
+This is deliberately **not** a lease. There is no heartbeat, no expiry and no
+renewal, none of which would change a decision while one worker runs at a time.
+It becomes a lease by adding `expires_at` and `heartbeat_at` to
+`browser_worker_generations` and making "is this generation current" a query
+instead of an equality check. Every caller already asks that question in one
+place, so no call site moves.
+
+### `browser_dispatches`
+
+One row per piece of browser work: `action_id`, a nullable `attempt_id`,
+`worker_generation`, `operation`, `site`, `effect`, `status`, `submitted`,
+`observation_id`, `error_code`, `duration_ms`, timestamps, and a bounded result.
+
+Two constraints carry the weight:
+
+- **`attempt_id` is UNIQUE.** One execution attempt dispatches browser work
+  exactly once. With Milestone 2's "one unfinished attempt per action" and "one
+  approval funds one attempt", a second real submission for one approved action
+  cannot be written down: the insert fails in PostgreSQL before any request
+  leaves the process.
+- **`effect <> 'CONSEQUENTIAL' OR attempt_id IS NOT NULL`.** Consequential work
+  is only ever done on behalf of a persisted attempt. A reconciliation lookup
+  carries no `attempt_id`, so it can never be counted as an execution.
+
+Startup recovery closes dispatches a dead runtime left open as
+`OUTCOME_UNKNOWN` / `runtime_restart`. `submitted` stays false there, not as a
+claim that nothing was submitted, but because nothing observed one. The
+uncertainty lives on the action.
+
+### Ordering: commit, then browse
+
+```text
+persist proposal -> request approval -> approve exact digest
+        |
+handshake with the worker            (nothing at stake yet)
+        |
+start_attempt: approval consumed, action EXECUTING, attempt persisted
+insert browser_dispatches row
+        |
+COMMIT ----------------------------------------------------
+        |
+dispatch to the worker               (no transaction open)
+        |
+browser drives the site, verifies the postcondition
+        |
+finish_dispatch + finish_attempt
+```
+
+No database transaction is open while a browser is being driven. A transaction
+held across a page load would pin a row lock for a network round trip and, far
+worse, a crash would roll back the record that Lumi decided to act while the
+click had already happened.
+
+### Locator policy
+
+Controls are located by role and accessible name (`Confirm booking`) or by label
+(`Booking reference`): things a site cannot change without changing what a human
+sees, so a broken locator is a signal rather than noise. Values an approval is
+bound to are read from stable semantic attributes (`data-testid`, plus
+`data-iso`, `data-amount`, `data-currency`); re-deriving a price by parsing
+rendered prose is how a currency symbol becomes a wrong number.
+
+Locators are re-resolved after every navigation, and nothing is carried across a
+page transition: no element handles, and no value observed on an earlier page.
+
+Playwright's actionability checks are used as a precondition and never as
+authority:
+
+> Playwright saying a button is clickable is not authorization. Approval lives in
+> Lumi's action ledger and nowhere else.
+
+### Observations
+
+The worker returns bounded structured observations: `observation_id`, `origin`,
+a page identity, the slot facts, validation state, and a receipt id. The runtime
+persists a curated subset, never the observation wholesale and never HTML. A
+test asserts that no markup reaches the ledger.
+
+Page text is data. There is no code path by which page content can change what
+operation runs, what is approved, what is submitted, or what Lumi records. A
+fixture fault renders a prompt-injection block instructing Lumi to book a
+different slot at a different price without asking; a test asserts the approved
+booking happens unchanged and that the injected text appears nowhere in the
+ledger.
+
+### The fixture site
+
+`services/agent/evals/sites/appointments/` is evaluation infrastructure, clearly
+separated from `app/` and never imported by it. It has a fixed catalogue (Dr A,
+Dermatology, Rs 800, Saturday 18:30; Dr B, Rs 950, 19:15; Dr C, Dentistry,
+Rs 600), an authoritative in-process booking store, and fault injection under
+`/__eval__/*`.
+
+The browser worker drives it through Playwright like any site; it never calls the
+backend directly. `/__eval__/*` is the *test* control plane: it configures faults
+and reads counters, and is never used to perform or observe a booking on Lumi's
+behalf.
+
+Two properties make it a usable measuring instrument:
+
+- **It counts every submission**, including rejected ones and ones whose response
+  was dropped. "Did the browser press the button" is a different question from
+  "does a booking exist".
+- **It does not deduplicate.** Posting the same reference twice creates two
+  bookings. A site that absorbed duplicates would hide exactly the bug this
+  milestone exists to catch, and "exactly one booking exists" would stop being
+  evidence about Lumi.
+
+Faults: drop the response after creating the booking (`hang` or `abort`), drop it
+*before* creating it, refuse the submission on a page that says so, withdraw a
+slot, change a price, change the page between two views, render hostile text, and
+make lookup unable to answer.
+
+### Internal API
+
+`POST /actions/{id}/browser-execution`,
+`POST /actions/{id}/browser-reconciliation` and
+`GET /actions/{id}/browser-dispatches`. The execution routes take an action id
+and **nothing else**: what happens in the browser is decided by the persisted
+proposal and the reviewed registry, never by the caller. They are loopback-only
+internal scaffolding, like the attempt and reconciliation routes.
+
+There is deliberately no route that accepts a URL, a selector, a script or an
+operation name. Such a route would be a generic browser-automation API, and a
+generic browser-automation API behind an agent is a remote code execution
+primitive.
+
+### Observability
+
+One structured log line per browser operation and per dispatch, carrying
+`action_id`, `attempt_id`, `runtime_generation`, `worker_generation`,
+`browser_session_id`, `dispatch_id`, `operation`, `effect`, `observation_id`,
+`duration_ms`, `status`, `submitted`, `outcome_is_known` and `error_code`. No
+secrets, no proposal bodies, no page content. There is no OpenTelemetry pipeline
+and this milestone does not need one.
+
+### Limitations
+
+- Nothing here says anything about arbitrary public websites. The locator policy,
+  the postcondition and the reconciliation semantics are the reusable parts; the
+  fixture is not a stand-in for the web.
+- `NOT_FOUND` as a known failure is a property of the fixture alone.
+- There are no sessions, logins, credentials, OTP or CAPTCHA, so nothing is known
+  about how any of those interact with this model.
+- One worker, one browser, no leases, no concurrency across workers.
+- A crash between the click and the `submitted` flag reaching anyone is
+  indistinguishable from a crash before the click. Both are `OUTCOME_UNKNOWN`,
+  which is correct but means the fast, known-failure path is not always available.
+- The fixture holds its state in memory; it is a test instrument, not a database.
 
 ## Transactional invariants
 
@@ -304,8 +643,16 @@ These hold now and constrain later milestones:
 - The execution and reconciliation routes are internal scaffolding for tests and
   for the future trusted Electron/browser integration. They are not a public API
   and must not be exposed beyond loopback.
-- The runtime has no shell, desktop, file or network-automation capability.
-- PostgreSQL binds to `127.0.0.1` only. Credentials live in ignored `.env` files.
+- The runtime has no shell, desktop or generic network-automation capability.
+  Its only reach outside PostgreSQL is a typed dispatch to the browser worker,
+  which can perform exactly the operations in the reviewed registry.
+- The browser worker is a separate, least-privilege process with no database,
+  no approval surface, no secrets and no generic scripting. Web page content is
+  untrusted data with no authority over policy, approval or execution. See
+  [Browser execution](#browser-execution-milestone-3).
+- PostgreSQL binds to `127.0.0.1` only, and so do the runtime, the browser worker
+  and the fixture site. Credentials live in ignored `.env` files and in the
+  worker process's own environment; the worker token is never written down.
 
 ## Not in this milestone
 
@@ -315,8 +662,20 @@ competing implementation inside Electron would be worse than none. There is no
 Electron-to-runtime bridge or process management yet, and `LocalStore` is
 unchanged.
 
-What remains synthetic: nothing executes. `start_attempt` persists intent and
-stops, attempt results are supplied by the caller, and reconciliation results
-are supplied by tests. There is no Playwright, Chromium, browser automation,
-external network action, real appointment website, LLM planning, long-term
-memory, embeddings, pgvector, Redis, voice change or evaluation harness.
+Milestone 3 removed the largest piece of what used to be synthetic here:
+`commit_booking` really runs, in Chromium, against a real site, and both its
+result and its reconciliation come from what a browser observed rather than from
+a test fixture handing an answer in. What is still deliberately absent:
+
+- Any public website. The only reviewed site is the local deterministic fixture,
+  and no claim is made about anything else.
+- Google, Practo, hospital portals, payments, OTP, CAPTCHA and stored user
+  credentials.
+- Sessions and logins. The worker uses a fresh browser context per dispatch and
+  persists no storage state.
+- LLM planning: proposals are still written by callers and tests, not generated.
+- Long-term memory, embeddings, pgvector, Redis, Celery, Kafka, LangChain,
+  LangGraph.
+- Voice changes, the Electron-to-FastAPI bridge, and native desktop control.
+- Worker leases and multi-worker concurrency. One worker at a time, identified by
+  generation.

@@ -26,6 +26,35 @@ class Settings(BaseSettings):
     # unusable the moment it expires even if nothing has swept it.
     approval_ttl_seconds: int = Field(default=300, ge=5, le=86_400)
 
+    # --- browser worker ---------------------------------------------------
+    #
+    # All three are optional. With no worker configured the runtime behaves
+    # exactly as it did in Milestone 2 and the browser routes answer 503, so a
+    # deployment that has no business driving a browser cannot accidentally
+    # acquire one by forgetting a flag.
+    #
+    # The token is minted by trusted bootstrap code and shared out of band with
+    # the worker process. It is a SecretStr so it never reaches a log line, a
+    # traceback or an error response, and it is sent as a request header --
+    # never in a URL, which would put it in access logs and browser history.
+    browser_worker_url: str | None = None
+    browser_worker_token: SecretStr | None = None
+    #: How long the runtime waits for one dispatch. Generous on purpose: cutting
+    #: a consequential operation short does not undo it, it only converts a
+    #: knowable outcome into an unknown one.
+    browser_worker_timeout_seconds: float = Field(default=120.0, gt=0, le=3_600)
+
+    @field_validator("browser_worker_url")
+    @classmethod
+    def _loopback_worker_only(cls, value: str | None) -> str | None:
+        """The worker is a local process. There is no remote browser API."""
+        if value is None:
+            return None
+        url = value.rstrip("/")
+        if not url.startswith(("http://127.0.0.1:", "http://localhost:")):
+            raise ValueError("BROWSER_WORKER_URL must address a loopback address")
+        return url
+
     @field_validator("database_url")
     @classmethod
     def _require_asyncpg_url(cls, value: SecretStr) -> SecretStr:

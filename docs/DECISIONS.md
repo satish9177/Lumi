@@ -70,6 +70,68 @@ No caller may approve an arbitrary proposal payload: the server reconstructs app
 
 The Electron `PendingActionStore` is deliberately left in memory and unchanged. The durable execution model is established once, in the runtime, rather than built twice.
 
+## Browser work runs in an isolated worker process
+
+The browser is where untrusted input enters Lumi. A web page can lie, change underneath the agent, or carry text written to be mistaken for an instruction. Running Chromium inside the runtime would put the process that holds `DATABASE_URL`, the action ledger and the approval API in the same address space as whatever a website sent.
+
+So the browser worker (`services/agent/app/browser/`) is a separate process. It is given a credential, a list of allowed origins, one typed operation and its typed input, and nothing else: no database connection or URL, no approval surface, no provider keys, no Electron `.env`, no shell, no filesystem, no other task's data. It cannot approve anything because there is no code path to an approval, not because it is trusted not to. It reports what it observed; only the runtime decides what an action's status becomes.
+
+Loopback alone is not the trust boundary any more. Any process on the machine can reach loopback, and once real side effects are possible that is not good enough. Every request to the worker, health included, carries a bootstrap-minted credential in a header, compared in constant time. It is never in a URL, never logged, never stored, and never reaches the renderer. A worker URL configured without a token yields no browser capability rather than an unauthenticated one.
+
+## A closed registry instead of browser scripting
+
+The worker exposes exactly two routes, `GET /health` and `POST /v1/dispatch`. A dispatch names an operation from a fixed tuple of reviewed functions; there is no selector parameter, no URL parameter, no script parameter, and no `POST /browser/evaluate`. Origins are resolved worker-side from a name in the proposal, so a proposal can never choose where the browser goes.
+
+This is the difference between a tool and a capability. A generic browser-automation endpoint behind an agent is a remote code execution primitive: anything that can write a proposal, including a future model, could then run arbitrary JavaScript on any origin. A closed registry means the set of things that can happen in a browser is a list a human reviewed, and adding to it is a code change.
+
+Every operation declares a typed input and output, an effect class (`READ_ONLY`, `PREPARE`, `CONSEQUENTIAL`), preconditions, postconditions, a timeout and what that timeout *means*, a retry classification and a reconciliation path. The registry refuses to build if a consequential operation is retryable or has no reconciliation path, because such an operation would have no exit from `OUTCOME_UNKNOWN` but a guess.
+
+## `commit_booking` acts; `lookup_booking` only looks
+
+Reconciliation must be able to run against an action that may already have had its effect. That is only safe if looking cannot cause the thing it is looking for. `lookup_booking` is therefore a GET with no click, no form submission and no access to the flag that records a submission; a test asserts its source contains none of them. Reconciliation that could act would be a retry wearing a different name.
+
+`commit_booking` requires a claimed approval and a persisted execution attempt — the worker refuses it outright without an `attempt_id` — and proves its postcondition by reading a receipt identifier off a confirmation page carrying the reference it submitted. A click that returned is not a booking.
+
+## An absent booking is only a failure where a site guarantees it
+
+`NOT_FOUND` from a lookup is recorded as `FAILED` only where that site's trust declaration in `app/domain/sites.py` says absence is authoritative, stored next to the reason it is. The deterministic fixture earns it: single writer, one process, no queue, no settlement step, no expiry, so a booking is visible to the very next lookup and one that was never created can never appear later.
+
+Every other site defaults to not earning it. On a real booking site a booking can be pending, queued, held behind an unsettled payment, visible only to a logged-in session, or eventually consistent, and an empty lookup is evidence about the lookup rather than about the world. Those actions stay `OUTCOME_UNKNOWN`. A lookup that failed outright resolves nothing either: failing to look is not evidence of absence.
+
+## Approved values are re-observed immediately before the irreversible click
+
+An approval authorises specific values, and a website may change them afterwards. Before clicking, the worker re-reads doctor, time, price and currency from freshly resolved locators and compares them against the *persisted* proposal — not against anything the page or the worker has said since. Times are compared as instants so an equivalent time in another offset is not a change; everything else is exact.
+
+On any difference nothing is submitted, the action becomes `FAILED`, and the differences are recorded structurally. The approval was already consumed by the attempt, so the changed values have no authorisation and cannot acquire any; proceeding needs a new proposal and a new approval. The worker has no mechanism to accept or renegotiate a change, only to report one.
+
+For the same reason nothing survives a page transition: no element handles, and no value observed on an earlier page. A value cached during preparation is exactly what a changed page would slip past.
+
+## A submission flag, set before the click, decides what a failure may claim
+
+The single bit that separates a known failure from an unknown outcome is whether a consequential request may already have gone out. The worker sets `submitted` immediately before the click and never after, and every failure is classified against it: an error before a submission is a failure Lumi can stand behind, and an error at or after one is `OUTCOME_UNKNOWN`. A timeout after the click is a statement about how long we waited, never about whether a booking exists.
+
+The same discipline applies at the RPC layer. A refused connection means the dispatch was never delivered, so nothing happened. A dropped connection or a timeout means it was delivered and the answer was lost, which for a consequential operation is `OUTCOME_UNKNOWN`. Collapsing the two into "the worker call failed" is how an agent retries a booking it already made.
+
+## The database, not the code, enforces one browser submission per approval
+
+`browser_dispatches.attempt_id` is UNIQUE. Combined with Milestone 2's one-unfinished-attempt-per-action and one-approval-per-attempt, a second real submission for one approved action cannot be written down: the insert fails in PostgreSQL before any request leaves the process. A CHECK additionally requires an `attempt_id` for any `CONSEQUENTIAL` dispatch, so a read-only reconciliation lookup can never be counted as an execution.
+
+The worker keeps its own in-memory defence rather than relying on the runtime being careful: a repeated dispatch id that is still running is refused, and one that finished replays the stored answer without touching a browser.
+
+## Worker identity is a generation, not a lease
+
+`browser_worker_generations` mirrors `runtime_generations`: one row per worker process. The runtime handshakes *before* claiming an approval, learns the worker's generation and addresses every dispatch to it; a restarted worker refuses with `stale_worker_generation`, and the runtime discards any reply naming a different runtime generation, worker generation, dispatch or operation. Handshaking first means a missing or replaced worker is discovered while nothing is at stake — no attempt started, no approval spent, nothing to reconcile.
+
+There is no heartbeat, expiry or renewal, because none of them would change a decision while one worker runs at a time. It becomes a lease by adding `expires_at` and `heartbeat_at` to that table and turning "is this generation current" into a query instead of an equality check; every caller already asks that question in one place.
+
+## Deterministic fixture sites, kept out of application code
+
+`services/agent/evals/` is evaluation infrastructure and is never imported by `app/`. The appointment fixture exists so browser execution can be measured against a site whose state is completely known, with authoritative counters and deterministic fault injection — including creating a booking and then losing the response.
+
+Two properties are deliberate. It counts every submission, including rejected ones and ones whose response was dropped, so "the browser pressed the button" is observable rather than inferred. And it does **not** deduplicate: posting the same reference twice creates two bookings. A site that absorbed duplicates would hide the exact bug this work exists to catch, and "exactly one booking exists" would stop being evidence about Lumi rather than a courtesy from the site.
+
+The worker drives the fixture through Playwright like any site and never calls its backend directly; `/__eval__/*` is the test control plane only. None of this establishes reliability on arbitrary public websites — it establishes execution and reconciliation semantics against sites Lumi controls.
+
 ## Shared contracts
 
 `src/shared/contracts.ts` is the source of truth for the following:

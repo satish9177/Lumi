@@ -4,6 +4,11 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
 
 from app.api.schemas import ErrorDetail, ErrorResponse
+from app.browser.errors import (
+    BrowserExecutionNotSupportedError,
+    BrowserWorkerNotConfiguredError,
+)
+from app.domain.booking import BookingProposalError
 from app.domain.errors import (
     ActionConcurrencyError,
     ActionNotFoundError,
@@ -97,6 +102,22 @@ def register_error_handlers(app: FastAPI) -> None:
     )
     app.add_exception_handler(
         ActionConcurrencyError, _simple(status.HTTP_409_CONFLICT, "concurrent_modification")
+    )
+    # A runtime with no browser worker configured simply has no browser
+    # capability. 503 rather than 500: nothing is broken, the capability is
+    # absent, and no side effect was attempted.
+    app.add_exception_handler(
+        BrowserWorkerNotConfiguredError,
+        _simple(status.HTTP_503_SERVICE_UNAVAILABLE, "browser_worker_not_configured"),
+    )
+    app.add_exception_handler(
+        BrowserExecutionNotSupportedError,
+        _simple(status.HTTP_409_CONFLICT, "browser_execution_not_supported"),
+    )
+    # A stored proposal the booking tool cannot parse is never executed on a
+    # best-effort reading of the parts that did parse.
+    app.add_exception_handler(
+        BookingProposalError, _simple(status.HTTP_409_CONFLICT, "invalid_booking_proposal")
     )
     app.add_exception_handler(StaleTaskRevisionError, _stale_task_revision)
     app.add_exception_handler(StaleActionRevisionError, _stale_action_revision)

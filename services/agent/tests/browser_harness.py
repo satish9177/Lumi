@@ -1,0 +1,314 @@
+"""Process harness for browser tests.
+
+Milestone 3 has three processes that must be started, killed and restarted
+independently: the fixture site (which holds the authoritative booking state and
+must *survive* a crash), the browser worker (which owns Chromium), and the Lumi
+runtime. Everything here is about starting them on free ports with the right
+credential, and killing them without a graceful shutdown.
+
+The worker token is minted per test run and passed to the worker through its
+environment. It never appears in a URL or on a command line, which is what makes
+it reasonable for the runtime and the worker to trust each other on a machine
+where any process can reach loopback.
+"""
+
+import os
+import socket
+import subprocess
+import sys
+import time
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from typing import IO, Any
+
+import httpx
+import pytest
+from pydantic import SecretStr
+
+from app.browser.session import generate_worker_token
+from app.config import AGENT_ROOT
+
+STARTUP_TIMEOUT_SECONDS = 90.0
+
+
+def free_port() -> int:
+    with closing(socket.socket()) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port: int = sock.getsockname()[1]
+        return port
+
+
+def kill(process: subprocess.Popen[bytes]) -> None:
+    """A hard kill. No signal handler, no lifespan shutdown, no cleanup hook."""
+    if process.poll() is None:
+        process.kill()
+        process.wait(timeout=30)
+
+
+@dataclass(frozen=True, slots=True)
+class Process:
+    process: subprocess.Popen[bytes]
+    base_url: str
+    log_path: Path
+
+    def logs(self) -> str:
+        return self.log_path.read_text(errors="replace")
+
+    def kill(self) -> None:
+        kill(self.process)
+
+
+def _wait_until_ready(
+    process: subprocess.Popen[bytes],
+    probe: str,
+    log_path: Path,
+    headers: dict[str, str] | None = None,
+) -> None:
+    deadline = time.monotonic() + STARTUP_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            pytest.fail(f"process exited early:\n{log_path.read_text(errors='replace')}")
+        try:
+            if httpx.get(probe, timeout=2, headers=headers or {}).status_code == 200:
+                return
+        except httpx.TransportError:
+            pass
+        time.sleep(0.2)
+    pytest.fail(f"process never became ready:\n{log_path.read_text(errors='replace')}")
+
+
+def _spawn(arguments: list[str], environment: dict[str, str], log: IO[bytes]) -> subprocess.Popen[bytes]:
+    return subprocess.Popen(
+        [sys.executable, *arguments],
+        cwd=AGENT_ROOT,
+        env=environment,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+    )
+
+
+# ---- the fixture site -------------------------------------------------------
+
+
+@contextmanager
+def fixture_site(log_path: Path, port: int | None = None) -> Iterator[Process]:
+    chosen = port if port is not None else free_port()
+    base_url = f"http://127.0.0.1:{chosen}"
+    with log_path.open("wb") as log:
+        process = _spawn(
+            [
+                "-m", "evals.sites.appointments.server",
+                "--port", str(chosen), "--log-level", "warning",
+            ],
+            {**os.environ},
+            log,
+        )
+        try:
+            _wait_until_ready(process, f"{base_url}/", log_path)
+            yield Process(process, base_url, log_path)
+        finally:
+            kill(process)
+
+
+class SiteControl:
+    """The test control plane. Never used to book or to observe on Lumi's behalf."""
+
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url
+
+    def reset(self) -> None:
+        httpx.post(f"{self.base_url}/__eval__/reset", timeout=10).raise_for_status()
+
+    def set_faults(self, **faults: Any) -> None:
+        httpx.post(f"{self.base_url}/__eval__/faults", json=faults, timeout=10).raise_for_status()
+
+    def state(self) -> dict[str, Any]:
+        response = httpx.get(f"{self.base_url}/__eval__/state", timeout=10)
+        response.raise_for_status()
+        body: dict[str, Any] = response.json()
+        return body
+
+    def wait_for_bookings(self, count: int, timeout: float = 60.0) -> dict[str, Any]:
+        """Block until the site has authoritatively created `count` bookings.
+
+        This is what makes the lost-response test deterministic rather than a
+        race: the kill happens only once the booking provably exists.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            state = self.state()
+            if state["booking_count"] >= count:
+                return state
+            time.sleep(0.1)
+        pytest.fail(f"the fixture never reached {count} booking(s): {self.state()}")
+
+
+# ---- the browser worker -----------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerProcess:
+    process: Process
+    token: SecretStr
+
+    @property
+    def base_url(self) -> str:
+        return self.process.base_url
+
+    def identity(self) -> dict[str, Any]:
+        from app.browser.protocol import WORKER_TOKEN_HEADER
+
+        response = httpx.get(
+            f"{self.base_url}/health",
+            headers={WORKER_TOKEN_HEADER: self.token.get_secret_value()},
+            timeout=10,
+        )
+        response.raise_for_status()
+        body: dict[str, Any] = response.json()
+        return body
+
+    def kill(self) -> None:
+        self.process.kill()
+
+
+@contextmanager
+def browser_worker(
+    log_path: Path,
+    *,
+    site_origin: str,
+    token: SecretStr | None = None,
+    port: int | None = None,
+    operation_timeout_seconds: float = 0.0,
+) -> Iterator[WorkerProcess]:
+    from app.browser.protocol import WORKER_TOKEN_HEADER
+
+    credential = token if token is not None else generate_worker_token()
+    chosen = port if port is not None else free_port()
+    base_url = f"http://127.0.0.1:{chosen}"
+    environment = {
+        **os.environ,
+        # The credential reaches the worker through its environment, not through
+        # an argument vector that every other process on the machine can read.
+        "LUMI_BROWSER_TOKEN": credential.get_secret_value(),
+        "LUMI_BROWSER_ALLOWED_ORIGINS": f"appointment_fixture={site_origin}",
+        "LUMI_BROWSER_HEADLESS": "true",
+        "LUMI_BROWSER_OPERATION_TIMEOUT_SECONDS": str(operation_timeout_seconds),
+    }
+    with log_path.open("wb") as log:
+        process = _spawn(
+            [
+                "-m", "app.browser.main",
+                "--port", str(chosen), "--log-level", "warning",
+            ],
+            environment,
+            log,
+        )
+        try:
+            _wait_until_ready(
+                process,
+                f"{base_url}/health",
+                log_path,
+                headers={WORKER_TOKEN_HEADER: credential.get_secret_value()},
+            )
+            yield WorkerProcess(Process(process, base_url, log_path), credential)
+        finally:
+            kill(process)
+
+
+# ---- the Lumi runtime -------------------------------------------------------
+
+
+@contextmanager
+def runtime(
+    log_path: Path,
+    *,
+    database_url: str,
+    port: int | None = None,
+    worker_url: str | None = None,
+    worker_token: SecretStr | None = None,
+    worker_timeout_seconds: float = 120.0,
+) -> Iterator[Process]:
+    chosen = port if port is not None else free_port()
+    base_url = f"http://127.0.0.1:{chosen}"
+    environment = {**os.environ, "DATABASE_URL": database_url}
+    if worker_url is not None and worker_token is not None:
+        environment["BROWSER_WORKER_URL"] = worker_url
+        environment["BROWSER_WORKER_TOKEN"] = worker_token.get_secret_value()
+        environment["BROWSER_WORKER_TIMEOUT_SECONDS"] = str(worker_timeout_seconds)
+    with log_path.open("wb") as log:
+        process = _spawn(
+            [
+                "-m", "uvicorn", "--factory", "app.main:create_app",
+                "--host", "127.0.0.1", "--port", str(chosen), "--log-level", "warning",
+            ],
+            environment,
+            log,
+        )
+        try:
+            _wait_until_ready(process, f"{base_url}/health", log_path)
+            yield Process(process, base_url, log_path)
+        finally:
+            kill(process)
+
+
+# ---- driving the ledger over HTTP -------------------------------------------
+
+
+def ok(response: httpx.Response) -> dict[str, Any]:
+    assert response.status_code in (200, 201), f"{response.status_code}: {response.text}"
+    body: dict[str, Any] = response.json()
+    return body
+
+
+def booking_proposal(slot_id: str, doctor: str, time_iso: str, price: int) -> dict[str, Any]:
+    return {
+        "site": "appointment_fixture",
+        "slot_id": slot_id,
+        "doctor": doctor,
+        "time": time_iso,
+        "price": price,
+        "currency": "INR",
+    }
+
+
+def drive_to_approved(
+    base_url: str, proposal: dict[str, Any], *, idempotency_key: str = "booking-001"
+) -> dict[str, Any]:
+    """Task -> proposal -> approval request -> approval. Stops short of executing."""
+    task = ok(
+        httpx.post(
+            f"{base_url}/tasks",
+            json={"request": {"type": "appointment_booking", "text": "Book Saturday evening"}},
+            timeout=30,
+        )
+    )
+    action = ok(
+        httpx.post(
+            f"{base_url}/tasks/{task['id']}/actions",
+            json={
+                "idempotency_key": idempotency_key,
+                "tool_name": "commit_booking",
+                "risk_tier": "R2",
+                "proposal": proposal,
+            },
+            timeout=30,
+        )
+    )
+    action = ok(
+        httpx.post(
+            f"{base_url}/actions/{action['id']}/approval-request",
+            json={"expected_revision": action["revision"]},
+            timeout=30,
+        )
+    )
+    action = ok(
+        httpx.post(
+            f"{base_url}/actions/{action['id']}/approve",
+            json={"expected_revision": action["revision"]},
+            timeout=30,
+        )
+    )
+    assert action["status"] == "APPROVED"
+    return action

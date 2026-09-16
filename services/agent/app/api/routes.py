@@ -8,6 +8,8 @@ from fastapi.responses import JSONResponse
 from app.api.schemas import (
     ActionListResponse,
     ActionResponse,
+    BrowserDispatchListResponse,
+    BrowserDispatchResponse,
     CancelTaskBody,
     CreateTaskBody,
     ErrorResponse,
@@ -23,6 +25,7 @@ from app.api.schemas import (
 )
 from app.db.engine import ping_database
 from app.services.actions import ActionService
+from app.services.browser_execution import BrowserExecutionService
 from app.services.tasks import TaskService
 
 logger = logging.getLogger(__name__)
@@ -281,3 +284,76 @@ async def finish_action_reconciliation(
         expected_revision=body.expected_revision,
     )
     return ActionResponse.from_view(view)
+
+
+# --- Browser execution (internal) ------------------------------------------
+#
+# These routes are how the trusted runtime asks the isolated worker to act. They
+# take an action id and nothing else: what happens in the browser is decided by
+# the persisted proposal and the reviewed registry, never by the caller. There is
+# deliberately no route that accepts a URL, a selector, a script or an operation
+# name, because such a route would be a generic browser-automation API, and a
+# generic browser-automation API behind an agent is a remote code execution
+# primitive wearing a cardigan.
+#
+# Like the attempt and reconciliation routes, they are loopback-only internal
+# scaffolding for tests and for the future trusted Electron broker.
+
+
+def get_browser_execution_service(request: Request) -> BrowserExecutionService:
+    service: BrowserExecutionService = request.app.state.browser_execution_service
+    return service
+
+
+BrowserServiceDep = Annotated[BrowserExecutionService, Depends(get_browser_execution_service)]
+
+_UNAVAILABLE: dict[int | str, dict[str, Any]] = {
+    status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ErrorResponse}
+}
+
+
+@router.post(
+    "/actions/{action_id}/browser-execution",
+    response_model=ActionResponse,
+    responses={**_NOT_FOUND, **_CONFLICT, **_UNAVAILABLE},
+    summary="Execute an approved booking in the browser (internal)",
+)
+async def execute_action_in_browser(
+    action_id: uuid.UUID, service: BrowserServiceDep
+) -> ActionResponse:
+    """Claims the approval, dispatches to the worker, records what came back.
+
+    The body is empty on purpose. Everything that governs the side effect --
+    which slot, which doctor, which price, which site -- comes from the
+    immutable proposal the approval was bound to.
+    """
+    return ActionResponse.from_view(await service.execute_booking(action_id))
+
+
+@router.post(
+    "/actions/{action_id}/browser-reconciliation",
+    response_model=ActionResponse,
+    responses={**_NOT_FOUND, **_CONFLICT, **_UNAVAILABLE},
+    summary="Establish what actually happened, by reading the site (internal)",
+)
+async def reconcile_action_in_browser(
+    action_id: uuid.UUID, service: BrowserServiceDep
+) -> ActionResponse:
+    """Runs the read-only lookup. It cannot book anything, and never retries."""
+    return ActionResponse.from_view(await service.reconcile_booking(action_id))
+
+
+@router.get(
+    "/actions/{action_id}/browser-dispatches",
+    response_model=BrowserDispatchListResponse,
+    responses=_NOT_FOUND,
+    summary="The browser work recorded for this action (internal)",
+)
+async def list_browser_dispatches(
+    action_id: uuid.UUID, service: BrowserServiceDep
+) -> BrowserDispatchListResponse:
+    dispatches = await service.describe_dispatches(action_id)
+    return BrowserDispatchListResponse(
+        action_id=action_id,
+        dispatches=[BrowserDispatchResponse.model_validate(row) for row in dispatches],
+    )

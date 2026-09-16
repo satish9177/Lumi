@@ -13,6 +13,7 @@ from app.db.engine import create_database_engine
 from app.db.migrations import SchemaNotCurrentError
 from app.db.tables import metadata
 from app.domain.action_status import ActionStatus, ApprovalStatus, AttemptOutcome, RiskTier
+from app.domain.browser_dispatch import DispatchStatus
 from app.domain.task_status import TaskStatus
 from app.main import create_app
 from tests.conftest import downgrade, migrate
@@ -53,6 +54,7 @@ async def _constraint(settings: Settings, name: str) -> str:
         ("ck_actions_risk_tier", RiskTier),
         ("ck_approvals_status", ApprovalStatus),
         ("ck_action_attempts_outcome", AttemptOutcome),
+        ("ck_browser_dispatches_status", DispatchStatus),
     ],
 )
 async def test_check_constraints_admit_exactly_the_domain_states(

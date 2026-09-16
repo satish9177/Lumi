@@ -1,5 +1,6 @@
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     Column,
     DateTime,
@@ -12,6 +13,7 @@ from sqlalchemy import (
     Table,
     UniqueConstraint,
     Uuid,
+    false,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -23,6 +25,7 @@ from app.domain.action_status import (
     AttemptOutcome,
     RiskTier,
 )
+from app.domain.browser_dispatch import BrowserEffect, DispatchStatus
 from app.domain.task_status import TaskStatus
 
 metadata = MetaData(
@@ -38,7 +41,15 @@ metadata = MetaData(
 _HEX_DIGEST_FORMAT = "proposal_digest ~ '^[0-9a-f]{64}$'"
 
 
-def _values(members: type[TaskStatus] | type[ActionStatus] | type[ApprovalStatus] | type[AttemptOutcome] | type[RiskTier]) -> str:
+def _values(
+    members: type[TaskStatus]
+    | type[ActionStatus]
+    | type[ApprovalStatus]
+    | type[AttemptOutcome]
+    | type[RiskTier]
+    | type[DispatchStatus]
+    | type[BrowserEffect],
+) -> str:
     return ", ".join(f"'{member.value}'" for member in members)
 
 
@@ -193,4 +204,76 @@ Index(
     action_attempts.c.action_id,
     unique=True,
     postgresql_where=action_attempts.c.finished_at.is_(None),
+)
+
+
+#: One row per browser worker process, owned by the runtime generation that
+#: registered it. The worker's counterpart to `runtime_generations`, and for the
+#: same reason: a result from a process that no longer exists must be
+#: recognisable as such rather than written into the ledger. Deliberately not a
+#: lease -- adding `expires_at` and `heartbeat_at` here is how it becomes one.
+browser_worker_generations = Table(
+    "browser_worker_generations",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column(
+        "runtime_generation",
+        Uuid(),
+        ForeignKey("runtime_generations.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    Column("worker_started_at", DateTime(timezone=True), nullable=False),
+    Column("registered_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+#: The browser work done for one execution attempt. `attempt_id` is UNIQUE, so
+#: with Milestone 2's "one unfinished attempt per action" and "one approval funds
+#: one attempt", a second real browser submission for one approved action cannot
+#: be written down at all.
+browser_dispatches = Table(
+    "browser_dispatches",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("action_id", Uuid(), ForeignKey("actions.id", ondelete="RESTRICT"), nullable=False),
+    # Null for a read-only reconciliation lookup, which is not an execution
+    # attempt and must never be recorded as one.
+    Column(
+        "attempt_id",
+        Uuid(),
+        ForeignKey("action_attempts.id", ondelete="RESTRICT"),
+        nullable=True,
+    ),
+    Column(
+        "worker_generation",
+        Uuid(),
+        ForeignKey("browser_worker_generations.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    Column("operation", String(64), nullable=False),
+    Column("site", String(64), nullable=False),
+    Column("effect", String(16), nullable=False),
+    Column("status", String(32), nullable=False),
+    Column("submitted", Boolean(), nullable=False, server_default=false()),
+    Column("observation_id", Uuid(), nullable=True),
+    Column("error_code", String(64), nullable=True),
+    Column("duration_ms", Integer(), nullable=True),
+    Column("result", JSONB(), nullable=True),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    UniqueConstraint("attempt_id"),
+    CheckConstraint(f"status IN ({_values(DispatchStatus)})", name="status"),
+    CheckConstraint("result IS NULL OR jsonb_typeof(result) = 'object'", name="result_is_object"),
+    CheckConstraint(
+        "(finished_at IS NULL) = (status = 'DISPATCHED')", name="finished_with_status"
+    ),
+    CheckConstraint(
+        "effect <> 'CONSEQUENTIAL' OR attempt_id IS NOT NULL",
+        name="consequential_needs_attempt",
+    ),
+)
+
+Index(
+    "ix_browser_dispatches_action_id_started_at",
+    browser_dispatches.c.action_id,
+    browser_dispatches.c.started_at,
 )

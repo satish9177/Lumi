@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.domain.action_status import ActionStatus, AttemptOutcome, task_status_for
 from app.domain.task_status import TaskEventType
 from app.repositories.actions import ActionRepository
+from app.repositories.browser import BrowserRepository
 from app.repositories.tasks import TaskRepository
 
 logger = logging.getLogger(__name__)
@@ -97,6 +98,10 @@ class RecoveryService:
                 error_code="runtime_restart",
             )
             assert finished is not None
+            # Browser work the dead runtime dispatched for this attempt is
+            # closed in the same transaction, so the audit trail never shows a
+            # dispatch still in flight on a process that no longer exists.
+            dispatch = await BrowserRepository(connection).close_orphaned_dispatch(attempt.id)
             moved = await actions_repository.update_action_status(
                 action_id=action.id,
                 expected_revision=action.revision,
@@ -125,6 +130,7 @@ class RecoveryService:
                     "error_code": "runtime_restart",
                     "reason": "runtime_restart",
                     "recovered_from_generation": str(finished.runtime_generation),
+                    "browser_dispatch_id": str(dispatch.id) if dispatch is not None else None,
                 },
             )
             return RecoveredAction(

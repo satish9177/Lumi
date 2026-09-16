@@ -7,6 +7,10 @@ dependencies = [
     "alembic>=1.20.0",
     "asyncpg>=0.31.0",
     "fastapi>=0.141.1",
+    # The runtime calls the isolated browser worker over loopback HTTP, so httpx
+    # is application code now, not only a test dependency.
+    "httpx>=0.28.1",
+    "playwright>=1.49.0",
     "pydantic>=2.13.5",
     "pydantic-settings>=2.15.0",
     "sqlalchemy[asyncio]>=2.0.53",
@@ -15,7 +19,6 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28.1",
     "mypy>=2.3.1",
     "pytest>=9.1.1",
     "pytest-asyncio>=1.4.0",
@@ -30,11 +33,15 @@ pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 asyncio_default_test_loop_scope = "function"
+markers = [
+    "browser: needs a real Chromium via Playwright and the deterministic fixture site",
+    "hardkill: starts and hard-kills runtime/worker subprocesses",
+]
 
 [tool.mypy]
 strict = true
 python_version = "3.12"
-files = ["app", "tests", "alembic"]
+files = ["app", "tests", "alembic", "evals"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]

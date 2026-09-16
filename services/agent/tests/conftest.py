@@ -30,8 +30,8 @@ class _TestEnvironment(BaseSettings):
 
 
 TRUNCATE_ALL = (
-    "TRUNCATE action_attempts, approvals, actions, runtime_generations, "
-    "task_events, tasks RESTART IDENTITY"
+    "TRUNCATE browser_dispatches, browser_worker_generations, action_attempts, approvals, "
+    "actions, runtime_generations, task_events, tasks RESTART IDENTITY"
 )
 
 

@@ -6,6 +6,7 @@ from typing import Any, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.action_status import ActionStatus, ApprovalStatus, AttemptOutcome, RiskTier
+from app.domain.browser_dispatch import BrowserEffect, DispatchStatus
 from app.domain.digest import canonical_json
 from app.domain.task_status import TaskStatus
 from app.repositories.actions import ApprovalRecord, AttemptRecord
@@ -257,6 +258,34 @@ class ActionResponse(BaseModel):
 class ActionListResponse(BaseModel):
     task_id: uuid.UUID
     actions: list[ActionResponse]
+
+
+class BrowserDispatchResponse(BaseModel):
+    """One piece of browser work recorded for an action.
+
+    `effect` and `submitted` are the fields worth reading: together they answer
+    "was a browser sent to change the world for this action, and did it press
+    the button", which is the question a duplicate-execution bug would fail.
+    """
+
+    id: uuid.UUID
+    attempt_id: uuid.UUID | None
+    worker_generation: uuid.UUID
+    operation: str
+    site: str
+    effect: BrowserEffect
+    status: DispatchStatus
+    submitted: bool
+    observation_id: uuid.UUID | None
+    error_code: str | None
+    duration_ms: int | None
+    started_at: datetime
+    finished_at: datetime | None
+
+
+class BrowserDispatchListResponse(BaseModel):
+    action_id: uuid.UUID
+    dispatches: list[BrowserDispatchResponse]
 
 
 class HealthResponse(BaseModel):
