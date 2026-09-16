@@ -44,3 +44,16 @@ Preserve proposal immutability, revision/digest-bound single-use approvals,
 persist-before-dispatch ordering, worker isolation, authoritative reconciliation,
 and the distinction between FAILED and OUTCOME_UNKNOWN. All mutations/external
 operations require explicit renderer confirmation. No automatic mutation retries.
+
+## Baseline verification (2026-09-16)
+
+- TypeScript typecheck and desktop build passed.
+- Python: 319 tests passed in 301.90 seconds, including browser/hard-kill tests;
+  mypy passed for 72 source files.
+- Vitest: 75 files passed, 3 skipped, 3 failed; 1511 tests passed, 17 skipped,
+  1 assertion failed and 2 suites failed during collection.
+- Existing failures: `real-inference.test.ts:89` needs missing local `vocab.json`;
+  `tokenizer-pack.test.ts` fails loading the local tokenizer assets;
+  `accessibility.test.tsx:73` compares LF CSS text against a CRLF checkout.
+- Initial sandbox-only launch failures were resolved by running authorized checks
+  outside the restrictive filesystem sandbox; they were not code failures.
