@@ -82,7 +82,7 @@ const ALLOWED_ROUTES: ReadonlyArray<{ method: RuntimeMethod; pattern: RegExp }> 
   { method: 'GET', pattern: new RegExp(`^/tasks/${UUID_PART}$`) },
   { method: 'GET', pattern: new RegExp(`^/tasks/${UUID_PART}/events[?]after_sequence=[0-9]{1,15}&limit=[0-9]{1,3}$`) },
   { method: 'GET', pattern: new RegExp(`^/tasks/${UUID_PART}/actions[?]limit=[0-9]{1,3}$`) },
-  { method: 'POST', pattern: new RegExp(`^/tasks/${UUID_PART}/booking/(search|prepare)$`) },
+  { method: 'POST', pattern: new RegExp(`^/tasks/${UUID_PART}/booking/(search|prepare|criteria|cancel)$`) },
   { method: 'GET', pattern: new RegExp(`^/actions/${UUID_PART}$`) },
   {
     method: 'POST',

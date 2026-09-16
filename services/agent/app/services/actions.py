@@ -69,6 +69,10 @@ class ActionService:
         self._runtime_generation = runtime_generation
         self._approval_ttl = timedelta(seconds=approval_ttl_seconds)
 
+    @property
+    def engine(self) -> AsyncEngine:
+        return self._engine
+
     # ---- helpers ------------------------------------------------------------
 
     async def _lock_task(self, repository: TaskRepository, task_id: uuid.UUID) -> TaskRecord:
@@ -379,26 +383,56 @@ class ActionService:
     ) -> ActionView:
         """Refuse the action. A rejected action can never execute."""
         async with self._engine.begin() as connection:
-            repository = ActionRepository(connection)
             task, action = await self._lock_task_for_action(connection, action_id)
             self._check_revision(action, expected_revision)
-            self._check_transition(action, ActionStatus.REJECTED)
-
-            approval = await repository.get_open_approval(action_id)
-            moved = await self._transition(
-                connection,
-                task=task,
-                action=action,
-                target=ActionStatus.REJECTED,
-                event_type=TaskEventType.ACTION_REJECTED,
-                payload={
-                    "approval_id": str(approval.id) if approval is not None else None,
-                    "reason": reason,
-                },
-            )
-            if approval is not None:
-                await repository.reject_approval(approval.id)
+            moved = await self._reject_locked(connection, task=task, action=action, reason=reason)
             return await self._view(connection, moved)
+
+    async def _reject_locked(
+        self,
+        connection: AsyncConnection,
+        *,
+        task: TaskRecord,
+        action: ActionRecord,
+        reason: str | None,
+    ) -> ActionRecord:
+        repository = ActionRepository(connection)
+        self._check_transition(action, ActionStatus.REJECTED)
+        approval = await repository.get_open_approval(action.id)
+        moved = await self._transition(
+            connection,
+            task=task,
+            action=action,
+            target=ActionStatus.REJECTED,
+            event_type=TaskEventType.ACTION_REJECTED,
+            payload={
+                "approval_id": str(approval.id) if approval is not None else None,
+                "reason": reason,
+            },
+        )
+        if approval is not None:
+            await repository.reject_approval(approval.id)
+        return moved
+
+    async def reject_in_transaction(
+        self,
+        connection: AsyncConnection,
+        *,
+        task: TaskRecord,
+        action: ActionRecord,
+        reason: str,
+    ) -> TaskRecord:
+        """Reject inside a caller's transaction that already holds the task lock.
+
+        For task-level changes (criteria revision, cancellation) that must
+        invalidate a not-yet-executed booking atomically with the change itself.
+        Returns the task as it stands afterwards, for the caller's next write.
+        """
+        await self._reject_locked(connection, task=task, action=action, reason=reason)
+        current = await TaskRepository(connection).get_task(task.id)
+        if current is None:  # pragma: no cover - tasks are never deleted.
+            raise TaskNotFoundError(task.id)
+        return current
 
     # ---- execution ----------------------------------------------------------
 

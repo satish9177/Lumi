@@ -110,3 +110,26 @@ describe('Realtime reasoning effort', () => {
     expect(info).toHaveBeenCalledWith('Realtime reasoning effort: low')
   })
 })
+
+describe('scripted realtime gate', () => {
+  it('issues the scripted test voice only for an unpackaged build with the explicit flag', async () => {
+    const { scriptedRealtimeRequested, createRealtimeSessionCredential } = await import('./realtime')
+    expect(scriptedRealtimeRequested(true, { LUMI_REALTIME_SCRIPTED: '1' })).toBe(true)
+    expect(scriptedRealtimeRequested(false, { LUMI_REALTIME_SCRIPTED: '1' })).toBe(false)
+    expect(scriptedRealtimeRequested(true, { LUMI_REALTIME_SCRIPTED: 'true' })).toBe(false)
+    expect(scriptedRealtimeRequested(true, {})).toBe(false)
+    // No key: the non-scripted path must stay offline in this test.
+    vi.stubEnv('OPENAI_API_KEY', '')
+    const previous = process.env.LUMI_REALTIME_SCRIPTED
+    process.env.LUMI_REALTIME_SCRIPTED = '1'
+    try {
+      const packaged = await createRealtimeSessionCredential('seed', { allowScripted: false })
+      expect(packaged.mode).not.toBe('scripted')
+      const scripted = await createRealtimeSessionCredential('seed', { allowScripted: true })
+      expect(scripted).toEqual({ mode: 'scripted', model: 'scripted-test-voice' })
+    } finally {
+      if (previous === undefined) delete process.env.LUMI_REALTIME_SCRIPTED
+      else process.env.LUMI_REALTIME_SCRIPTED = previous
+    }
+  })
+})

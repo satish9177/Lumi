@@ -9,6 +9,7 @@ import {
 } from '../shared/contracts'
 import type { GuardedTool } from '../shared/intent'
 import { AGENT_IPC_CHANNELS, type AgentApi, type AgentBookingCriteria, type AgentRuntimeView } from '../shared/agent-contracts'
+import type { VoiceTaskCommand } from '../shared/voice-task-contracts'
 
 // Fixed channels and positional primitives only. Main validates everything;
 // nothing here can name a runtime route, a URL, or a booked value.
@@ -35,7 +36,9 @@ const agentApi: AgentApi = {
   executeAction: (actionId: string, expectedRevision: number) =>
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.executeAction, actionId, expectedRevision),
   reconcileAction: (actionId: string, expectedRevision: number) =>
-    ipcRenderer.invoke(AGENT_IPC_CHANNELS.reconcileAction, actionId, expectedRevision)
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.reconcileAction, actionId, expectedRevision),
+  // A structured-clone copy of one closed command; main re-validates it.
+  voiceCommand: (command: VoiceTaskCommand) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.voiceCommand, command)
 }
 
 const lifeLensApi: LifeLensApi = {

@@ -15,6 +15,8 @@
  * PendingActionStore can reach the ledger.
  */
 
+import type { VoiceTaskCommand, VoiceTaskOutcome } from './voice-task-contracts'
+
 export const TASK_STATUSES = [
   'CREATED', 'PLANNING', 'READY', 'WAITING_APPROVAL', 'EXECUTING', 'VERIFYING',
   'OUTCOME_UNKNOWN', 'RECONCILING', 'SUCCEEDED', 'FAILED', 'CANCELLED', 'PAUSED'
@@ -48,7 +50,7 @@ export const CHANGED_FACT_FIELDS = ['slot_id', 'doctor', 'time', 'price', 'curre
 export type AgentChangedFactField = typeof CHANGED_FACT_FIELDS[number]
 
 export const TASK_EVENT_TYPES = [
-  'task.created', 'task.cancelled', 'action.proposed', 'action.approval_requested',
+  'task.created', 'task.cancelled', 'task.criteria_updated', 'task.search_completed', 'action.proposed', 'action.approval_requested',
   'action.approved', 'action.rejected', 'action.execution_started', 'action.succeeded',
   'action.failed', 'action.outcome_unknown', 'action.reconciliation_started', 'action.reconciled'
 ] as const
@@ -68,6 +70,12 @@ export interface AgentRuntimeView {
 export interface AgentBookingCriteria {
   specialty: string
   day: AgentBookingDay | ''
+  /** Clinic-local 24-hour HH:MM bounds, inclusive. */
+  earliestTime?: string
+  latestTime?: string
+  /** Integer price ceiling; always paired with its currency. */
+  maxPrice?: number
+  maxPriceCurrency?: string
 }
 
 export interface AgentTaskView {
@@ -76,6 +84,8 @@ export interface AgentTaskView {
   revision: number
   lastEventSequence: number
   criteria: AgentBookingCriteria
+  /** The completed voice turn that created this task, if any. */
+  voiceTurnId?: string
   createdAt: string
   updatedAt: string
 }
@@ -189,6 +199,12 @@ export interface AgentEventView {
   errorCode?: string
   reason?: string
   reconciliation?: AgentReconciliationView
+  /** `task.criteria_updated` / `task.search_completed`: the constraints applied. */
+  criteria?: AgentBookingCriteria
+  /** `task.search_completed`: the admitted, browser-observed slots, in order. */
+  searchResults?: AgentSlotView[]
+  /** `task.criteria_updated`: prepared bookings the new constraints excluded. */
+  invalidatedActionIds?: string[]
 }
 
 export interface AgentTaskSnapshot {
@@ -213,6 +229,9 @@ export const AGENT_ERROR_CODES = [
   'invalid_transition',
   'action_already_open',
   'slot_unavailable',
+  'criteria_mismatch',
+  'invalid_criteria',
+  'already_booked',
   'browser_unavailable',
   'not_accepting_actions',
   'request_failed'
@@ -247,6 +266,11 @@ export interface AgentApi {
   rejectAction: (actionId: string, expectedRevision: number) => Promise<AgentResult<AgentActionView>>
   executeAction: (actionId: string, expectedRevision: number) => Promise<AgentResult<AgentActionView>>
   reconcileAction: (actionId: string, expectedRevision: number) => Promise<AgentResult<AgentActionView>>
+  /**
+   * One closed voice command bound to a completed user turn. Main validates
+   * it against durable state; no command can approve or execute a booking.
+   */
+  voiceCommand: (command: VoiceTaskCommand) => Promise<AgentResult<VoiceTaskOutcome>>
 }
 
 export const AGENT_IPC_CHANNELS = {
@@ -262,8 +286,14 @@ export const AGENT_IPC_CHANNELS = {
   approveAction: 'lifelens:agent:approve-action',
   rejectAction: 'lifelens:agent:reject-action',
   executeAction: 'lifelens:agent:execute-action',
-  reconcileAction: 'lifelens:agent:reconcile-action'
+  reconcileAction: 'lifelens:agent:reconcile-action',
+  voiceCommand: 'lifelens:agent:voice-command'
 } as const
 
 /** Actions whose side effect is unresolved or in flight. */
 export const UNRESOLVED_ACTION_STATUSES: readonly AgentActionStatus[] = ['EXECUTING', 'OUTCOME_UNKNOWN', 'RECONCILING']
+
+/** Prepared, possibly approved, never executed: still safe to reject. */
+export const OPEN_ACTION_STATUSES: readonly AgentActionStatus[] = ['PROPOSED', 'WAITING_APPROVAL', 'APPROVED']
+
+export const TERMINAL_TASK_STATUSES: readonly AgentTaskStatus[] = ['SUCCEEDED', 'FAILED', 'CANCELLED']

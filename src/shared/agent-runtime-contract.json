@@ -51,6 +51,8 @@
     "TaskEventType": [
       "task.created",
       "task.cancelled",
+      "task.criteria_updated",
+      "task.search_completed",
       "action.proposed",
       "action.approval_requested",
       "action.approved",
@@ -83,6 +85,7 @@
     "action_proposal_conflict",
     "approval_not_usable",
     "authentication_required",
+    "booking_criteria_mismatch",
     "booking_slot_unavailable",
     "browser_execution_not_supported",
     "browser_observation_failed",
@@ -90,6 +93,7 @@
     "browser_worker_unavailable",
     "concurrent_modification",
     "invalid_action_transition",
+    "invalid_booking_criteria",
     "invalid_booking_proposal",
     "invalid_host",
     "invalid_request",
@@ -97,6 +101,8 @@
     "origin_not_allowed",
     "stale_action_revision",
     "stale_revision",
+    "task_already_booked",
+    "task_has_unresolved_action",
     "task_kind_mismatch",
     "task_not_accepting_actions",
     "task_not_cancellable",
@@ -281,6 +287,31 @@
       "tool_name": "commit_booking",
       "updated_at": "2026-09-16T10:00:02Z"
     },
+    "criteria_revised": {
+      "invalidated_action_ids": [
+        "00000000-0000-4000-8000-000000000002"
+      ],
+      "task": {
+        "created_at": "2026-09-16T10:00:00Z",
+        "id": "00000000-0000-4000-8000-000000000001",
+        "last_event_sequence": 5,
+        "request": {
+          "day": "Saturday",
+          "earliest_time": "17:00",
+          "latest_time": "21:00",
+          "max_price": 1000,
+          "max_price_currency": "INR",
+          "source": "voice",
+          "specialty": "Dermatology",
+          "text": "Find me a dermatologist Saturday evening under 1000",
+          "type": "appointment_booking",
+          "voice_turn_id": "item_example01"
+        },
+        "revision": 5,
+        "status": "CREATED",
+        "updated_at": "2026-09-16T10:00:05Z"
+      }
+    },
     "error_stale": {
       "error": {
         "code": "stale_action_revision",
@@ -452,6 +483,114 @@
       ],
       "task_id": "00000000-0000-4000-8000-000000000001"
     },
+    "events_refinement": {
+      "events": [
+        {
+          "created_at": "2026-09-16T10:00:01Z",
+          "event_type": "task.created",
+          "id": 1,
+          "payload": {
+            "status": "CREATED"
+          },
+          "sequence": 1,
+          "task_id": "00000000-0000-4000-8000-000000000001",
+          "task_revision": 1
+        },
+        {
+          "created_at": "2026-09-16T10:00:02Z",
+          "event_type": "task.search_completed",
+          "id": 2,
+          "payload": {
+            "criteria": {
+              "day": "Saturday",
+              "earliest_time": "17:00",
+              "latest_time": "21:00",
+              "max_price": 1000,
+              "max_price_currency": "INR",
+              "specialty": "Dermatology"
+            },
+            "excluded_count": 0,
+            "observed_count": 2,
+            "slots": [
+              {
+                "currency": "INR",
+                "doctor": "Dr A",
+                "price": 800,
+                "slot_id": "slot-a-1830",
+                "specialty": "Dermatology",
+                "time": "2026-09-19T18:30:00+05:30"
+              },
+              {
+                "currency": "INR",
+                "doctor": "Dr B",
+                "price": 950,
+                "slot_id": "slot-b-1915",
+                "specialty": "Dermatology",
+                "time": "2026-09-19T19:15:00+05:30"
+              }
+            ]
+          },
+          "sequence": 2,
+          "task_id": "00000000-0000-4000-8000-000000000001",
+          "task_revision": 2
+        },
+        {
+          "created_at": "2026-09-16T10:00:03Z",
+          "event_type": "task.criteria_updated",
+          "id": 3,
+          "payload": {
+            "criteria": {
+              "day": "Saturday",
+              "earliest_time": "17:00",
+              "latest_time": "21:00",
+              "max_price": 900,
+              "max_price_currency": "INR",
+              "specialty": "Dermatology"
+            },
+            "invalidated_action_ids": [
+              "00000000-0000-4000-8000-000000000002"
+            ],
+            "reason": "criteria_changed"
+          },
+          "sequence": 3,
+          "task_id": "00000000-0000-4000-8000-000000000001",
+          "task_revision": 3
+        },
+        {
+          "created_at": "2026-09-16T10:00:04Z",
+          "event_type": "action.rejected",
+          "id": 4,
+          "payload": {
+            "action_id": "00000000-0000-4000-8000-000000000002",
+            "action_revision": 3,
+            "action_status": "REJECTED",
+            "approval_id": "00000000-0000-4000-8000-000000000003",
+            "proposal_digest": "5d155ac026fd93c03399a584cdcd3eac6b27658006ceea9b93e2b39b7887c220",
+            "reason": "criteria_changed",
+            "risk_tier": "R2",
+            "tool_name": "commit_booking"
+          },
+          "sequence": 4,
+          "task_id": "00000000-0000-4000-8000-000000000001",
+          "task_revision": 4
+        },
+        {
+          "created_at": "2026-09-16T10:00:05Z",
+          "event_type": "task.cancelled",
+          "id": 5,
+          "payload": {
+            "from_status": "READY",
+            "reason": "user_cancelled",
+            "rejected_action_ids": [],
+            "to_status": "CANCELLED"
+          },
+          "sequence": 5,
+          "task_id": "00000000-0000-4000-8000-000000000001",
+          "task_revision": 5
+        }
+      ],
+      "task_id": "00000000-0000-4000-8000-000000000001"
+    },
     "health": {
       "database": "ok",
       "runtime_generation": "00000000-0000-4000-8000-000000000005",
@@ -483,6 +622,49 @@
       "revision": 3,
       "status": "WAITING_APPROVAL",
       "updated_at": "2026-09-16T10:00:03Z"
+    },
+    "task_cancelled": {
+      "rejected_action_ids": [],
+      "task": {
+        "created_at": "2026-09-16T10:00:00Z",
+        "id": "00000000-0000-4000-8000-000000000001",
+        "last_event_sequence": 6,
+        "request": {
+          "day": "Saturday",
+          "earliest_time": "17:00",
+          "latest_time": "21:00",
+          "max_price": 1000,
+          "max_price_currency": "INR",
+          "source": "voice",
+          "specialty": "Dermatology",
+          "text": "Find me a dermatologist Saturday evening under 1000",
+          "type": "appointment_booking",
+          "voice_turn_id": "item_example01"
+        },
+        "revision": 6,
+        "status": "CANCELLED",
+        "updated_at": "2026-09-16T10:00:06Z"
+      }
+    },
+    "task_voice": {
+      "created_at": "2026-09-16T10:00:00Z",
+      "id": "00000000-0000-4000-8000-000000000001",
+      "last_event_sequence": 1,
+      "request": {
+        "day": "Saturday",
+        "earliest_time": "17:00",
+        "latest_time": "21:00",
+        "max_price": 1000,
+        "max_price_currency": "INR",
+        "source": "voice",
+        "specialty": "Dermatology",
+        "text": "Find me a dermatologist Saturday evening under 1000",
+        "type": "appointment_booking",
+        "voice_turn_id": "item_example01"
+      },
+      "revision": 1,
+      "status": "CREATED",
+      "updated_at": "2026-09-16T10:00:01Z"
     }
   },
   "schemas": {
@@ -1128,6 +1310,78 @@
       "title": "ActionResponse",
       "type": "object"
     },
+    "BookingCriteria": {
+      "additionalProperties": false,
+      "properties": {
+        "day": {
+          "default": "",
+          "maxLength": 9,
+          "title": "Day",
+          "type": "string"
+        },
+        "earliest_time": {
+          "anyOf": [
+            {
+              "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Earliest Time"
+        },
+        "latest_time": {
+          "anyOf": [
+            {
+              "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Latest Time"
+        },
+        "max_price": {
+          "anyOf": [
+            {
+              "maximum": 10000000,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Price"
+        },
+        "max_price_currency": {
+          "anyOf": [
+            {
+              "pattern": "^[A-Z]{3}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Price Currency"
+        },
+        "specialty": {
+          "default": "",
+          "maxLength": 60,
+          "title": "Specialty",
+          "type": "string"
+        }
+      },
+      "title": "BookingCriteria",
+      "type": "object"
+    },
     "BookingProposal": {
       "additionalProperties": false,
       "description": "The exact booking an approval is bound to.\n\n`extra=\"forbid\"`: an unrecognised field in a stored proposal means the\nproposal was written by something this code does not understand, and\nexecuting the part it does understand would be a guess.",
@@ -1244,6 +1498,94 @@
       "title": "BookingSearchResponse",
       "type": "object"
     },
+    "CancelBookingTaskResponse": {
+      "$defs": {
+        "TaskResponse": {
+          "properties": {
+            "created_at": {
+              "format": "date-time",
+              "title": "Created At",
+              "type": "string"
+            },
+            "id": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            },
+            "last_event_sequence": {
+              "title": "Last Event Sequence",
+              "type": "integer"
+            },
+            "request": {
+              "additionalProperties": true,
+              "title": "Request",
+              "type": "object"
+            },
+            "revision": {
+              "title": "Revision",
+              "type": "integer"
+            },
+            "status": {
+              "$ref": "#/$defs/TaskStatus"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "status",
+            "revision",
+            "last_event_sequence",
+            "request",
+            "created_at",
+            "updated_at"
+          ],
+          "title": "TaskResponse",
+          "type": "object"
+        },
+        "TaskStatus": {
+          "description": "Persisted task states.\n\nStored as text guarded by a CHECK constraint rather than a native PostgreSQL\nenum, so a later migration can add states (WAITING_CONTEXT, WAITING_INPUT,\nWAITING_USER_AUTH, RECOVERING, ...) by replacing the constraint inside an\nordinary transaction. Adding a member here therefore always requires a\nmigration, and a test fails if the two drift apart.",
+          "enum": [
+            "CREATED",
+            "PLANNING",
+            "READY",
+            "WAITING_APPROVAL",
+            "EXECUTING",
+            "VERIFYING",
+            "OUTCOME_UNKNOWN",
+            "RECONCILING",
+            "SUCCEEDED",
+            "FAILED",
+            "CANCELLED",
+            "PAUSED"
+          ],
+          "title": "TaskStatus",
+          "type": "string"
+        }
+      },
+      "properties": {
+        "rejected_action_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Rejected Action Ids",
+          "type": "array"
+        },
+        "task": {
+          "$ref": "#/$defs/TaskResponse"
+        }
+      },
+      "required": [
+        "task",
+        "rejected_action_ids"
+      ],
+      "title": "CancelBookingTaskResponse",
+      "type": "object"
+    },
     "ErrorResponse": {
       "$defs": {
         "ErrorDetail": {
@@ -1338,6 +1680,188 @@
         "slot_id"
       ],
       "title": "PrepareBookingBody",
+      "type": "object"
+    },
+    "ReviseBookingCriteriaBody": {
+      "$defs": {
+        "BookingCriteria": {
+          "additionalProperties": false,
+          "properties": {
+            "day": {
+              "default": "",
+              "maxLength": 9,
+              "title": "Day",
+              "type": "string"
+            },
+            "earliest_time": {
+              "anyOf": [
+                {
+                  "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Earliest Time"
+            },
+            "latest_time": {
+              "anyOf": [
+                {
+                  "pattern": "^(?:[01]\\d|2[0-3]):[0-5]\\d$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Latest Time"
+            },
+            "max_price": {
+              "anyOf": [
+                {
+                  "maximum": 10000000,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Price"
+            },
+            "max_price_currency": {
+              "anyOf": [
+                {
+                  "pattern": "^[A-Z]{3}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Max Price Currency"
+            },
+            "specialty": {
+              "default": "",
+              "maxLength": 60,
+              "title": "Specialty",
+              "type": "string"
+            }
+          },
+          "title": "BookingCriteria",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "description": "The complete new constraints and the task revision they were derived from.\n\nThe whole criteria set is sent, not a patch: the caller read the current\nconstraints at `expected_revision` and says exactly what they become.",
+      "properties": {
+        "criteria": {
+          "$ref": "#/$defs/BookingCriteria"
+        },
+        "expected_revision": {
+          "minimum": 1,
+          "title": "Expected Revision",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "expected_revision",
+        "criteria"
+      ],
+      "title": "ReviseBookingCriteriaBody",
+      "type": "object"
+    },
+    "ReviseBookingCriteriaResponse": {
+      "$defs": {
+        "TaskResponse": {
+          "properties": {
+            "created_at": {
+              "format": "date-time",
+              "title": "Created At",
+              "type": "string"
+            },
+            "id": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            },
+            "last_event_sequence": {
+              "title": "Last Event Sequence",
+              "type": "integer"
+            },
+            "request": {
+              "additionalProperties": true,
+              "title": "Request",
+              "type": "object"
+            },
+            "revision": {
+              "title": "Revision",
+              "type": "integer"
+            },
+            "status": {
+              "$ref": "#/$defs/TaskStatus"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "status",
+            "revision",
+            "last_event_sequence",
+            "request",
+            "created_at",
+            "updated_at"
+          ],
+          "title": "TaskResponse",
+          "type": "object"
+        },
+        "TaskStatus": {
+          "description": "Persisted task states.\n\nStored as text guarded by a CHECK constraint rather than a native PostgreSQL\nenum, so a later migration can add states (WAITING_CONTEXT, WAITING_INPUT,\nWAITING_USER_AUTH, RECOVERING, ...) by replacing the constraint inside an\nordinary transaction. Adding a member here therefore always requires a\nmigration, and a test fails if the two drift apart.",
+          "enum": [
+            "CREATED",
+            "PLANNING",
+            "READY",
+            "WAITING_APPROVAL",
+            "EXECUTING",
+            "VERIFYING",
+            "OUTCOME_UNKNOWN",
+            "RECONCILING",
+            "SUCCEEDED",
+            "FAILED",
+            "CANCELLED",
+            "PAUSED"
+          ],
+          "title": "TaskStatus",
+          "type": "string"
+        }
+      },
+      "properties": {
+        "invalidated_action_ids": {
+          "items": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "title": "Invalidated Action Ids",
+          "type": "array"
+        },
+        "task": {
+          "$ref": "#/$defs/TaskResponse"
+        }
+      },
+      "required": [
+        "task",
+        "invalidated_action_ids"
+      ],
+      "title": "ReviseBookingCriteriaResponse",
       "type": "object"
     },
     "TaskEventListResponse": {

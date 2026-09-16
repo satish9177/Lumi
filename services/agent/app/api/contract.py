@@ -31,10 +31,13 @@ from app.api.schemas import (
     AttemptResponse,
     BookingSearchResponse,
     BookingSlotResponse,
+    CancelBookingTaskResponse,
     ErrorDetail,
     ErrorResponse,
     HealthResponse,
     PrepareBookingBody,
+    ReviseBookingCriteriaBody,
+    ReviseBookingCriteriaResponse,
     TaskEventListResponse,
     TaskEventResponse,
     TaskResponse,
@@ -42,6 +45,7 @@ from app.api.schemas import (
 from app.config import AGENT_ROOT
 from app.domain.action_status import ActionStatus, ApprovalStatus, AttemptOutcome, RiskTier
 from app.domain.booking import CHANGED_FACT_FIELDS, BookingProposal
+from app.domain.booking_criteria import BookingCriteria
 from app.domain.browser_dispatch import DispatchStatus, LookupStatus
 from app.domain.digest import proposal_digest
 from app.domain.task_status import TaskEventType, TaskStatus
@@ -56,6 +60,7 @@ ERROR_CODES = (
     "action_proposal_conflict",
     "approval_not_usable",
     "authentication_required",
+    "booking_criteria_mismatch",
     "booking_slot_unavailable",
     "browser_execution_not_supported",
     "browser_observation_failed",
@@ -63,6 +68,7 @@ ERROR_CODES = (
     "browser_worker_unavailable",
     "concurrent_modification",
     "invalid_action_transition",
+    "invalid_booking_criteria",
     "invalid_booking_proposal",
     "invalid_host",
     "invalid_request",
@@ -70,6 +76,8 @@ ERROR_CODES = (
     "origin_not_allowed",
     "stale_action_revision",
     "stale_revision",
+    "task_already_booked",
+    "task_has_unresolved_action",
     "task_kind_mismatch",
     "task_not_accepting_actions",
     "task_not_cancellable",
@@ -79,11 +87,15 @@ ERROR_CODES = (
 _MODELS: tuple[type[BaseModel], ...] = (
     ActionListResponse,
     ActionResponse,
+    BookingCriteria,
     BookingProposal,
     BookingSearchResponse,
+    CancelBookingTaskResponse,
     ErrorResponse,
     HealthResponse,
     PrepareBookingBody,
+    ReviseBookingCriteriaBody,
+    ReviseBookingCriteriaResponse,
     TaskEventListResponse,
     TaskResponse,
 )
@@ -196,6 +208,48 @@ def _action_payload(status: ActionStatus, revision: int, **extra: Any) -> dict[s
         "action_revision": revision,
         **extra,
     }
+
+
+def _voice_criteria(max_price: int = 1000) -> BookingCriteria:
+    return BookingCriteria(
+        specialty="Dermatology",
+        day="Saturday",
+        earliest_time="17:00",
+        latest_time="21:00",
+        max_price=max_price,
+        max_price_currency="INR",
+    )
+
+
+def _voice_task(
+    *, revision: int = 1, sequence: int = 1, status: TaskStatus = TaskStatus.CREATED
+) -> TaskResponse:
+    return TaskResponse(
+        id=_TASK,
+        status=status,
+        revision=revision,
+        last_event_sequence=sequence,
+        request={
+            "type": "appointment_booking",
+            "text": "Find me a dermatologist Saturday evening under 1000",
+            "source": "voice",
+            "voice_turn_id": "item_example01",
+            **_voice_criteria().request_fields(),
+        },
+        created_at=_at(0),
+        updated_at=_at(revision),
+    )
+
+
+def _slot(slot_id: str, doctor: str, time: str, price: int) -> dict[str, Any]:
+    return BookingSlotResponse(
+        slot_id=slot_id,
+        doctor=doctor,
+        specialty="Dermatology",
+        time=datetime.fromisoformat(time),
+        price=price,
+        currency="INR",
+    ).model_dump(mode="json")
 
 
 def examples() -> dict[str, Any]:
@@ -375,6 +429,60 @@ def examples() -> dict[str, Any]:
                         evidence=evidence_found,
                         reason="reconciliation",
                     ),
+                ),
+            ],
+        ).model_dump(mode="json"),
+        "task_voice": _voice_task().model_dump(mode="json"),
+        "criteria_revised": ReviseBookingCriteriaResponse(
+            task=_voice_task(revision=5, sequence=5),
+            invalidated_action_ids=[_ACTION],
+        ).model_dump(mode="json"),
+        "task_cancelled": CancelBookingTaskResponse(
+            task=_voice_task(revision=6, sequence=6, status=TaskStatus.CANCELLED),
+            rejected_action_ids=[],
+        ).model_dump(mode="json"),
+        "events_refinement": TaskEventListResponse(
+            task_id=_TASK,
+            events=[
+                _event(1, TaskEventType.TASK_CREATED, {"status": "CREATED"}),
+                _event(
+                    2,
+                    TaskEventType.TASK_SEARCH_COMPLETED,
+                    {
+                        "criteria": _voice_criteria().model_dump(mode="json"),
+                        "slots": [
+                            _slot("slot-a-1830", "Dr A", "2026-09-19T18:30:00+05:30", 800),
+                            _slot("slot-b-1915", "Dr B", "2026-09-19T19:15:00+05:30", 950),
+                        ],
+                        "observed_count": 2,
+                        "excluded_count": 0,
+                    },
+                ),
+                _event(
+                    3,
+                    TaskEventType.TASK_CRITERIA_UPDATED,
+                    {
+                        "criteria": _voice_criteria(max_price=900).model_dump(mode="json"),
+                        "invalidated_action_ids": [str(_ACTION)],
+                        "reason": "criteria_changed",
+                    },
+                ),
+                _event(
+                    4,
+                    TaskEventType.ACTION_REJECTED,
+                    _action_payload(
+                        ActionStatus.REJECTED, 3, approval_id=str(_APPROVAL), reason="criteria_changed"
+                    ),
+                ),
+                _event(
+                    5,
+                    TaskEventType.TASK_CANCELLED,
+                    {
+                        "from_status": "READY",
+                        "to_status": "CANCELLED",
+                        "rejected_action_ids": [],
+                        "reason": "user_cancelled",
+                    },
                 ),
             ],
         ).model_dump(mode="json"),

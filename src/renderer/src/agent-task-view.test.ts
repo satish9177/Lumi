@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentActionView, AgentEventView } from '../../shared/agent-contracts'
-import { describeBooking, describeEvent, mergeEvents } from './agent-task-view'
+import { describeBooking, describeCriteria, describeEvent, latestSearchResults, mergeEvents } from './agent-task-view'
 
 const NOW = Date.parse('2026-09-16T10:01:00Z')
 
@@ -130,5 +130,26 @@ describe('timeline helpers', () => {
     expect(describeEvent(event(2, 'action.outcome_unknown', { reason: 'runtime_restart' }))).toContain('restarted')
     expect(describeEvent(reconciled('SUCCEEDED'))).toContain('existing booking found')
     expect(describeEvent(reconciled('OUTCOME_UNKNOWN'))).toContain('still uncertain')
+  })
+})
+
+describe('voice-era task timeline', () => {
+  const slot = { slotId: 'slot-a-1830', doctor: 'Dr A', specialty: 'Dermatology', time: '2026-09-19T18:30:00+05:30', price: 800, currency: 'INR' }
+  const at = (sequence: number, type: AgentEventView['type'], extra: Partial<AgentEventView> = {}): AgentEventView =>
+    ({ sequence, type, taskRevision: sequence, createdAt: '2026-09-16T10:00:00+00:00', ...extra })
+
+  it('describes searches, refinements and withdrawn bookings', () => {
+    expect(describeEvent(at(2, 'task.search_completed', { searchResults: [slot] }))).toBe('Searched the clinic site (read-only): 1 matching appointment')
+    expect(describeEvent(at(3, 'task.criteria_updated', { invalidatedActionIds: ['x'] }))).toContain('withdrawn')
+    expect(describeEvent(at(4, 'action.rejected', { reason: 'criteria_changed' }))).toBe('Booking withdrawn: the search changed')
+    expect(describeEvent(at(5, 'action.rejected'))).toBe('Booking rejected')
+  })
+
+  it('shows recorded results only until the constraints change', () => {
+    const searched = [at(1, 'task.created'), at(2, 'task.search_completed', { searchResults: [slot] })]
+    expect(latestSearchResults(searched)).toEqual([slot])
+    expect(latestSearchResults([...searched, at(3, 'task.criteria_updated')])).toBeUndefined()
+    expect(describeCriteria({ specialty: 'Dermatology', day: 'Saturday', earliestTime: '17:00', latestTime: '22:00', maxPrice: 1000, maxPriceCurrency: 'INR' }))
+      .toBe('Dermatology · Saturday · 17:00–22:00 · up to ₹1,000')
   })
 })

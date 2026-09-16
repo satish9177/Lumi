@@ -3,6 +3,7 @@ import uuid
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, Depends, Query, Request, Response, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api.schemas import (
@@ -12,6 +13,7 @@ from app.api.schemas import (
     BookingSlotResponse,
     BrowserDispatchListResponse,
     BrowserDispatchResponse,
+    CancelBookingTaskResponse,
     CancelTaskBody,
     CreateTaskBody,
     ErrorResponse,
@@ -22,13 +24,17 @@ from app.api.schemas import (
     PrepareBookingBody,
     ProposeActionBody,
     RejectActionBody,
+    ReviseBookingCriteriaBody,
+    ReviseBookingCriteriaResponse,
     TaskEventListResponse,
     TaskEventResponse,
     TaskResponse,
 )
 from app.db.engine import ping_database
+from app.domain.booking_criteria import BookingCriteria, InvalidBookingCriteriaError
 from app.services.actions import ActionService
 from app.services.booking_preparation import BookingPreparationService
+from app.services.booking_tasks import BOOKING_TASK_TYPE, BookingTaskService
 from app.services.browser_execution import BrowserExecutionService
 from app.services.tasks import TaskService
 
@@ -87,7 +93,14 @@ async def shutdown(request: Request) -> Response:
 
 @router.post("/tasks", status_code=status.HTTP_201_CREATED, response_model=TaskResponse)
 async def create_task(body: CreateTaskBody, service: TaskServiceDep) -> TaskResponse:
-    task = await service.create_task(body.request.model_dump(mode="json", exclude_none=True))
+    request = body.request.model_dump(mode="json", exclude_none=True)
+    if request.get("type") == BOOKING_TASK_TYPE:
+        # A booking task is never stored with constraints search would refuse.
+        try:
+            BookingCriteria.from_request(request)
+        except InvalidBookingCriteriaError:
+            raise RequestValidationError([]) from None
+    task = await service.create_task(request)
     return TaskResponse.from_record(task)
 
 
@@ -432,3 +445,54 @@ async def prepare_booking_action(
     task_id: uuid.UUID, body: PrepareBookingBody, service: BookingServiceDep
 ) -> ActionResponse:
     return ActionResponse.from_view(await service.prepare(task_id, body.slot_id))
+
+
+# --- Booking task changes ---------------------------------------------------
+#
+# Task-level changes a conversation can ask for. Both run under the task lock
+# and refuse while a booking may already exist at the site; neither can approve
+# or execute anything.
+
+
+def get_booking_task_service(request: Request) -> BookingTaskService:
+    service: BookingTaskService = request.app.state.booking_task_service
+    return service
+
+
+BookingTaskServiceDep = Annotated[BookingTaskService, Depends(get_booking_task_service)]
+
+
+@router.post(
+    "/tasks/{task_id}/booking/criteria",
+    response_model=ReviseBookingCriteriaResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Revise the booking constraints; invalidate bookings they now exclude",
+)
+async def revise_booking_criteria(
+    task_id: uuid.UUID, body: ReviseBookingCriteriaBody, service: BookingTaskServiceDep
+) -> ReviseBookingCriteriaResponse:
+    task, invalidated = await service.revise_criteria(
+        task_id, expected_revision=body.expected_revision, criteria=body.criteria
+    )
+    return ReviseBookingCriteriaResponse(
+        task=TaskResponse.from_record(task), invalidated_action_ids=invalidated
+    )
+
+
+@router.post(
+    "/tasks/{task_id}/booking/cancel",
+    response_model=CancelBookingTaskResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Cancel a booking task unless a booking may already exist",
+)
+async def cancel_booking_task(
+    task_id: uuid.UUID,
+    service: BookingTaskServiceDep,
+    body: Annotated[CancelTaskBody | None, Body()] = None,
+) -> CancelBookingTaskResponse:
+    task, rejected = await service.cancel(
+        task_id, expected_revision=body.expected_revision if body is not None else None
+    )
+    return CancelBookingTaskResponse(
+        task=TaskResponse.from_record(task), rejected_action_ids=rejected
+    )

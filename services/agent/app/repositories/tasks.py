@@ -116,6 +116,28 @@ class TaskRepository:
         row = result.one_or_none()
         return _task(row) if row is not None else None
 
+    async def revise_request(
+        self, *, task_id: uuid.UUID, expected_revision: int, request: dict[str, Any]
+    ) -> TaskRecord | None:
+        """Compare-and-swap the task request one revision forward.
+
+        The caller holds the task lock and appends the event that explains the
+        change in the same transaction.
+        """
+        result = await self._connection.execute(
+            update(tasks)
+            .where(tasks.c.id == task_id, tasks.c.revision == expected_revision)
+            .values(
+                request=request,
+                revision=tasks.c.revision + 1,
+                last_event_sequence=tasks.c.last_event_sequence + 1,
+                updated_at=func.now(),
+            )
+            .returning(*tasks.c)
+        )
+        row = result.one_or_none()
+        return _task(row) if row is not None else None
+
     async def update_status(
         self, *, task_id: uuid.UUID, expected_revision: int, status: TaskStatus
     ) -> TaskRecord | None:

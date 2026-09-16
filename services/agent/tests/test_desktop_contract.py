@@ -4,7 +4,15 @@ import re
 from pathlib import Path
 
 from app.api import contract
-from app.api.schemas import ActionResponse, BookingSearchResponse, ErrorResponse, TaskEventListResponse, TaskResponse
+from app.api.schemas import (
+    ActionResponse,
+    BookingSearchResponse,
+    CancelBookingTaskResponse,
+    ErrorResponse,
+    ReviseBookingCriteriaResponse,
+    TaskEventListResponse,
+    TaskResponse,
+)
 from app.domain.booking import CHANGED_FACT_FIELDS, BookingProposal, ObservedSlot, changed_facts
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "app"
@@ -22,6 +30,10 @@ def test_examples_are_valid_runtime_payloads() -> None:
     examples = contract.examples()
     TaskResponse.model_validate(examples["task"])
     TaskEventListResponse.model_validate(examples["events"])
+    TaskEventListResponse.model_validate(examples["events_refinement"])
+    TaskResponse.model_validate(examples["task_voice"])
+    ReviseBookingCriteriaResponse.model_validate(examples["criteria_revised"])
+    CancelBookingTaskResponse.model_validate(examples["task_cancelled"])
     BookingSearchResponse.model_validate(examples["search"])
     ErrorResponse.model_validate(examples["error_stale"])
     for name in ("action_waiting_approval", "action_succeeded", "action_changed_price", "action_outcome_unknown"):

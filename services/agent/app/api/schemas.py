@@ -6,6 +6,7 @@ from typing import Any, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.domain.action_status import ActionStatus, ApprovalStatus, AttemptOutcome, RiskTier
+from app.domain.booking_criteria import BookingCriteria
 from app.domain.browser_dispatch import BrowserEffect, DispatchStatus
 from app.domain.digest import canonical_json
 from app.domain.task_status import TaskStatus
@@ -313,6 +314,31 @@ class BookingSlotResponse(BaseModel):
 class BookingSearchResponse(BaseModel):
     task_id: uuid.UUID
     slots: list[BookingSlotResponse]
+
+
+class ReviseBookingCriteriaBody(BaseModel):
+    """The complete new constraints and the task revision they were derived from.
+
+    The whole criteria set is sent, not a patch: the caller read the current
+    constraints at `expected_revision` and says exactly what they become.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=1)
+    criteria: BookingCriteria
+
+
+class ReviseBookingCriteriaResponse(BaseModel):
+    task: TaskResponse
+    #: Prepared bookings rejected because the new constraints exclude them.
+    invalidated_action_ids: list[uuid.UUID]
+
+
+class CancelBookingTaskResponse(BaseModel):
+    task: TaskResponse
+    #: Prepared, never-executed bookings rejected by the cancellation.
+    rejected_action_ids: list[uuid.UUID]
 
 
 class HealthResponse(BaseModel):

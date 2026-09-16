@@ -144,3 +144,47 @@ class BrowserObservationError(Exception):
     def __init__(self, code: str) -> None:
         super().__init__("The appointment site could not be read.")
         self.code = code
+
+
+class TaskHasUnresolvedActionError(Exception):
+    """A booking of this task may already have reached the outside world.
+
+    Revising or cancelling the task now would let the timeline say something
+    Lumi does not know. Resolve the action (it finishes, or reconciliation
+    establishes what happened) first.
+    """
+
+    def __init__(self, task_id: uuid.UUID, action_id: uuid.UUID, status: ActionStatus) -> None:
+        super().__init__(
+            f"Task {task_id} has booking {action_id} in {status}; resolve it before changing the task."
+        )
+        self.task_id = task_id
+        self.action_id = action_id
+        self.status = status
+
+
+class TaskAlreadyBookedError(Exception):
+    """The task's booking already succeeded; its constraints are history now."""
+
+    def __init__(self, task_id: uuid.UUID, action_id: uuid.UUID) -> None:
+        super().__init__(f"Task {task_id} already has a confirmed booking ({action_id}).")
+        self.task_id = task_id
+        self.action_id = action_id
+
+
+class BookingCriteriaError(Exception):
+    """Booking constraints that cannot be applied, or a slot they exclude."""
+
+    def __init__(self, task_id: uuid.UUID, reason: str) -> None:
+        super().__init__(f"Task {task_id}: {reason}")
+        self.task_id = task_id
+        self.reason = reason
+
+
+class BookingCriteriaMismatchError(Exception):
+    """The slot as observed now is outside the task's constraints."""
+
+    def __init__(self, task_id: uuid.UUID, slot_id: str) -> None:
+        super().__init__(f"Slot {slot_id} no longer matches the constraints of task {task_id}.")
+        self.task_id = task_id
+        self.slot_id = slot_id

@@ -61,7 +61,7 @@ export function statusAnnouncement(status: StatusDescriptor, photo?: Pick<PhotoS
 }
 
 export function deriveStatus(inputs: StatusInputs): StatusDescriptor {
-  const suffix = inputs.mode === 'mock' ? 'Demo mode' : undefined
+  const suffix = inputs.mode === 'mock' ? 'Demo mode' : inputs.mode === 'scripted' ? 'Test voice' : undefined
   const describe = (tone: StatusTone, label: string): StatusDescriptor => ({ tone, label, suffix })
 
   // Needs attention outranks everything: it is the only state the user must act on.

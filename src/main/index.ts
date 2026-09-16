@@ -50,6 +50,7 @@ import {
 } from './services/agent-runtime-supervisor'
 import { ActiveTaskStore, AgentTaskController } from './services/agent-tasks'
 import { registerAgentIpc, type IpcMainLike } from './services/agent-ipc'
+import { VoiceTaskController } from './services/voice-task-controller'
 import { isTrustedRendererUrl, isTrustedSenderFrame, type RendererLocation } from './services/ipc-sender'
 import { developmentContentSecurityPolicy } from './services/content-security-policy'
 import { AGENT_IPC_CHANNELS, type AgentRuntimeView } from '../shared/agent-contracts'
@@ -372,7 +373,7 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.createRealtimeSession, async (event) => {
     requireMainWindow(event)
-    return createRealtimeSessionCredential(app.getPath('userData'))
+    return createRealtimeSessionCredential(app.getPath('userData'), { allowScripted: !app.isPackaged })
   })
 
   ipcMain.handle(IPC_CHANNELS.noteUserRequest, (event, request: unknown) => {
@@ -929,17 +930,20 @@ app.whenReady().then(async () => {
   })
   registerIpcHandlers()
   const runtimeForClient = agentRuntime
+  const agentTasks = new AgentTaskController(
+    {
+      request: (method, path, body, timeoutMs) => runtimeForClient
+        ? runtimeForClient.request(method, path, body, timeoutMs)
+        : Promise.reject(new RuntimeUnavailableError())
+    },
+    new ActiveTaskStore(app.getPath('userData'))
+  )
   registerAgentIpc({
     ipcMain: ipcMain as unknown as IpcMainLike,
     assertTrustedSender: (event) => requireMainWindow(event as Electron.IpcMainInvokeEvent),
-    controller: new AgentTaskController(
-      {
-        request: (method, path, body, timeoutMs) => runtimeForClient
-          ? runtimeForClient.request(method, path, body, timeoutMs)
-          : Promise.reject(new RuntimeUnavailableError())
-      },
-      new ActiveTaskStore(app.getPath('userData'))
-    ),
+    controller: agentTasks,
+    // Voice reaches the same durable controller, never a second one.
+    voice: new VoiceTaskController(agentTasks),
     runtimeStatus: () => agentRuntimeView(),
     restartRuntime: async () => {
       if (!agentRuntime) throw new Error('The Lumi agent runtime is not installed.')

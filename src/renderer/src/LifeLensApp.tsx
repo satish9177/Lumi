@@ -57,6 +57,9 @@ import {
   type RealtimeServerCall,
   type TelegramAttachmentCoordinationRequest
 } from './realtime'
+import { ScriptedRealtimeServer, installRealtimeHarness } from './realtime-scripted'
+import type { AgentResult } from '../../shared/agent-contracts'
+import type { VoiceTaskCommand, VoiceTaskFocus, VoiceTaskOutcome } from '../../shared/voice-task-contracts'
 
 const VOICE_PAUSED_NOTICE = 'Voice paused to save cost — ask a question to reconnect.'
 
@@ -106,6 +109,8 @@ export default function LifeLensApp() {
   const [windowNotice, setWindowNotice] = useState<string>()
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [agentTasksOpen, setAgentTasksOpen] = useState(false)
+  /** A voice outcome asking the trusted task UI to draw attention somewhere. */
+  const [agentFocus, setAgentFocus] = useState<{ target: VoiceTaskFocus; serial: number }>()
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest>()
   const [droppedFile, setDroppedFile] = useState<DroppedFileDescriptor>()
   const [dragFileCount, setDragFileCount] = useState(0)
@@ -466,6 +471,12 @@ export default function LifeLensApp() {
           onTelegramRecipientSearch: requestTelegramRecipientSearch,
           onTelegramAttachmentRequest: requestTelegramAttachment,
           onToolProposal: (proposal, serverCall) => { void preparePendingAction(proposal, serverCall) },
+          onVoiceTaskCommand: (command, serverCall) => { void runVoiceTaskCommand(command, serverCall) },
+          createScriptedChannel: () => {
+            const server = new ScriptedRealtimeServer()
+            installRealtimeHarness(server, () => connectVoice())
+            return server
+          },
           onError: setError,
           onSessionEnded: (reason, generation) => {
             void window.lifeLens.setRealtimeActive(false)
@@ -523,6 +534,28 @@ export default function LifeLensApp() {
     }
     void connection.then(clearConnection, clearConnection)
     return connection
+  }
+
+  /**
+   * Runs one voice appointment command through main's durable controller.
+   * The outcome opens the same task panel the user can click through; the
+   * booking card is focused as a region, never its Approve button.
+   */
+  const runVoiceTaskCommand = async (command: VoiceTaskCommand, serverCall: RealtimeServerCall): Promise<void> => {
+    let result: AgentResult<VoiceTaskOutcome>
+    try {
+      result = await window.lifeLens.agent.voiceCommand(command)
+    } catch {
+      result = { ok: false, error: { code: 'request_failed', message: 'Lumi could not reach its appointment task.' } }
+    }
+    const focus = result.ok ? result.value.focus : 'none'
+    if (focus !== 'none') {
+      setAgentTasksOpen(true)
+      setAgentFocus((current) => ({ target: focus, serial: (current?.serial ?? 0) + 1 }))
+    }
+    // Spoken only while this voice session is current. The durable result is
+    // already in the task panel either way.
+    clientRef.current?.completeVoiceTask(serverCall, result)
   }
 
   const ensureConnected = async (): Promise<void> => {
@@ -1731,7 +1764,7 @@ export default function LifeLensApp() {
 
           {agentTasksOpen && (
             <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Appointment booking">
-              <AgentTaskPanel agent={window.lifeLens.agent} onClose={() => setAgentTasksOpen(false)} />
+              <AgentTaskPanel agent={window.lifeLens.agent} focusRequest={agentFocus} onClose={() => setAgentTasksOpen(false)} />
             </div>
           )}
 

@@ -1,6 +1,7 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import {
   BOOKING_DAYS,
+  TERMINAL_TASK_STATUSES,
   type AgentActionView,
   type AgentApi,
   type AgentBookingCriteria,
@@ -11,12 +12,15 @@ import {
   type AgentSlotView,
   type AgentTaskView
 } from '../../../shared/agent-contracts'
+import type { VoiceTaskFocus } from '../../../shared/voice-task-contracts'
 import {
   currentBooking,
   describeBooking,
+  describeCriteria,
   describeEvent,
   formatAppointmentTime,
   formatPrice,
+  latestSearchResults,
   mergeEvents,
   type BookingControl
 } from '../agent-task-view'
@@ -25,6 +29,8 @@ import './components.css'
 export interface AgentTaskPanelProps {
   agent: AgentApi
   onClose: () => void
+  /** A voice step asked the panel to re-read durable state and draw attention. */
+  focusRequest?: { target: VoiceTaskFocus; serial: number }
   /** Injectable for tests. */
   pollIntervalMs?: number
 }
@@ -54,7 +60,7 @@ const RUNTIME_LABELS: Record<AgentRuntimeView['state'], string> = {
  * only reads. Every mutation is a button the user pressed, and approval sends
  * only the action id and the revision that was on screen.
  */
-export function AgentTaskPanel({ agent, onClose, pollIntervalMs = 2_000 }: AgentTaskPanelProps) {
+export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 2_000 }: AgentTaskPanelProps) {
   const [runtime, setRuntime] = useState<AgentRuntimeView>({ state: 'starting' })
   const [state, setState] = useState<TaskState | null>(null)
   const [loaded, setLoaded] = useState(false)
@@ -68,6 +74,9 @@ export function AgentTaskPanel({ agent, onClose, pollIntervalMs = 2_000 }: Agent
   const mounted = useRef(true)
   // Synchronous guard: two clicks in one frame must not start two mutations.
   const busyRef = useRef<string | undefined>(undefined)
+  const bookingRegion = useRef<HTMLDivElement>(null)
+  const [focusedSerial, setFocusedSerial] = useState<number>()
+  const [pendingCardFocus, setPendingCardFocus] = useState<number>()
 
   stateRef.current = state
 
@@ -132,6 +141,28 @@ export function AgentTaskPanel({ agent, onClose, pollIntervalMs = 2_000 }: Agent
     }, pollIntervalMs)
     return () => clearInterval(timer)
   }, [runtime.state, refresh, pollIntervalMs])
+
+  useEffect(() => {
+    if (!focusRequest) return
+    let cancelled = false
+    // Voice changed durable state elsewhere: re-read it, then point at the
+    // card as a region. Focus never lands on a button, so a stray key press
+    // cannot approve anything.
+    void refresh(true).then(() => {
+      if (cancelled || !mounted.current) return
+      setFocusedSerial(focusRequest.serial)
+      if (focusRequest.target === 'approval_card') setPendingCardFocus(focusRequest.serial)
+    })
+    return () => { cancelled = true }
+  }, [focusRequest, refresh])
+
+  // Runs after the refreshed card has rendered.
+  useEffect(() => {
+    if (pendingCardFocus === undefined || !bookingRegion.current) return
+    bookingRegion.current.focus({ preventScroll: true })
+    bookingRegion.current.scrollIntoView?.({ block: 'nearest' })
+    setPendingCardFocus(undefined)
+  }, [pendingCardFocus, state])
 
   async function run<T>(label: string, work: () => Promise<AgentResult<T>>): Promise<AgentResult<T> | undefined> {
     if (busyRef.current) return undefined
@@ -221,6 +252,11 @@ export function AgentTaskPanel({ agent, onClose, pollIntervalMs = 2_000 }: Agent
   const booking = state ? currentBooking(state.actions) : undefined
   const runtimeReady = runtime.state === 'running'
   const canCreate = runtimeReady && !busy
+  const taskClosed = state ? TERMINAL_TASK_STATUSES.includes(state.task.status) : false
+  const bookingOpen = booking !== undefined && booking.status !== 'REJECTED' && booking.status !== 'FAILED'
+  // Durable results from the task timeline, unless a fresher local search is
+  // on screen. Hidden while a booking is open or once the task is closed.
+  const shownSlots = taskClosed || bookingOpen ? slots : slots ?? (state ? latestSearchResults(state.events) : undefined)
 
   return (
     <div className="agent-task-panel" data-testid="agent-task-panel">
@@ -271,11 +307,11 @@ export function AgentTaskPanel({ agent, onClose, pollIntervalMs = 2_000 }: Agent
           <>
             <section className="agent-section" aria-label="Booking task">
               <p className="eyebrow">TASK · {state.task.status.replaceAll('_', ' ')}</p>
-              <p className="workspace-note">
-                {state.task.criteria.specialty || 'Any specialty'} · {state.task.criteria.day || 'any day'}
+              <p className="workspace-note" data-testid="agent-task-criteria">
+                {describeCriteria(state.task.criteria)}
               </p>
               <div className="actions">
-                {!booking || booking.status === 'REJECTED' || booking.status === 'FAILED' ? (
+                {!taskClosed && !bookingOpen ? (
                   <button className="secondary-button" type="button" disabled={!runtimeReady || Boolean(busy)} onClick={() => void search()}>
                     Search appointments
                   </button>
@@ -286,11 +322,11 @@ export function AgentTaskPanel({ agent, onClose, pollIntervalMs = 2_000 }: Agent
               </div>
             </section>
 
-            {slots && (
-              <section className="agent-section" aria-label="Available appointments">
-                {slots.length === 0 ? <p className="notice">No appointments matched.</p> : (
+            {shownSlots && (
+              <section className="agent-section" aria-label="Available appointments" data-testid="agent-slots">
+                {shownSlots.length === 0 ? <p className="notice">No appointments matched.</p> : (
                   <ul className="agent-slots">
-                    {slots.map((slot) => (
+                    {shownSlots.map((slot) => (
                       <li key={slot.slotId} data-slot-id={slot.slotId}>
                         <div>
                           <strong>{slot.doctor}</strong>
@@ -309,14 +345,18 @@ export function AgentTaskPanel({ agent, onClose, pollIntervalMs = 2_000 }: Agent
             )}
 
             {booking && (
-              <BookingCard
-                action={booking}
-                events={state.events}
-                now={now}
-                disabled={!runtimeReady || Boolean(busy)}
-                busy={busy}
-                onControl={(control) => void onControl(control, booking)}
-              />
+              <div ref={bookingRegion} tabIndex={-1} className="agent-booking-region"
+                data-testid="agent-booking-region" data-voice-focus={focusedSerial}>
+                <BookingCard
+                  action={booking}
+                  events={state.events}
+                  now={now}
+                  disabled={!runtimeReady || Boolean(busy)}
+                  busy={busy}
+                  taskClosed={taskClosed}
+                  onControl={(control) => void onControl(control, booking)}
+                />
+              </div>
             )}
 
             <Timeline events={state.events} />
@@ -345,15 +385,21 @@ export function AgentTaskPanel({ agent, onClose, pollIntervalMs = 2_000 }: Agent
   )
 }
 
-function BookingCard({ action, events, now, disabled, busy, onControl }: {
+function BookingCard({ action, events, now, disabled, busy, taskClosed, onControl }: {
   action: AgentActionView
   events: AgentEventView[]
   now: number
   disabled: boolean
   busy?: string
+  taskClosed: boolean
   onControl: (control: BookingControl) => void
 }) {
-  const model = describeBooking(action, events, now)
+  const described = describeBooking(action, events, now)
+  // A closed task accepts no new booking work; checking an unknown outcome
+  // stays available because it only reads the site.
+  const model = taskClosed
+    ? { ...described, controls: described.controls.filter((control) => control === 'check_booking') }
+    : described
   const { booking } = action
   return (
     <article className={`agent-booking-card tone-${model.tone}`} role="group" aria-label={model.title}

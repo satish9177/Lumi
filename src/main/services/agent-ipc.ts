@@ -1,5 +1,6 @@
 import { AGENT_IPC_CHANNELS, type AgentResult, type AgentRuntimeView } from '../../shared/agent-contracts'
 import type { AgentTaskController } from './agent-tasks'
+import type { VoiceTaskController } from './voice-task-controller'
 
 /**
  * Fixed agent IPC channels. Each handler takes positional primitives, checks
@@ -15,11 +16,12 @@ export interface AgentIpcDependencies {
   ipcMain: IpcMainLike
   assertTrustedSender: (event: never) => void
   controller: AgentTaskController
+  voice: Pick<VoiceTaskController, 'handle'>
   runtimeStatus: () => AgentRuntimeView
   restartRuntime: () => Promise<AgentRuntimeView>
 }
 
-export function registerAgentIpc({ ipcMain, assertTrustedSender, controller, runtimeStatus, restartRuntime }: AgentIpcDependencies): void {
+export function registerAgentIpc({ ipcMain, assertTrustedSender, controller, voice, runtimeStatus, restartRuntime }: AgentIpcDependencies): void {
   const handle = (channel: string, listener: (...args: unknown[]) => unknown): void => {
     ipcMain.handle(channel, (event, ...args) => {
       assertTrustedSender(event)
@@ -45,4 +47,7 @@ export function registerAgentIpc({ ipcMain, assertTrustedSender, controller, run
   handle(AGENT_IPC_CHANNELS.rejectAction, (actionId, revision) => controller.rejectAction(actionId, revision))
   handle(AGENT_IPC_CHANNELS.executeAction, (actionId, revision) => controller.executeAction(actionId, revision))
   handle(AGENT_IPC_CHANNELS.reconcileAction, (actionId, revision) => controller.reconcileAction(actionId, revision))
+  // One closed command object, parsed field by field in main. It has no
+  // approve or execute variant; see voice-task-controller.ts.
+  handle(AGENT_IPC_CHANNELS.voiceCommand, (command) => voice.handle(command))
 }

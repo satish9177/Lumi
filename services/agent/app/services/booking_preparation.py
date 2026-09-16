@@ -14,7 +14,6 @@ recorded in the per-action dispatch ledger; they are logged instead.
 """
 
 import logging
-import re
 import uuid
 from datetime import datetime
 from typing import Any
@@ -26,7 +25,10 @@ from app.browser.config import DEFAULT_SITE
 from app.browser.protocol import DispatchRequest, OperationStatus
 from app.domain.action_status import RiskTier
 from app.domain.booking import BookingProposal
+from app.domain.booking_criteria import BookingCriteria, InvalidBookingCriteriaError
 from app.domain.errors import (
+    BookingCriteriaError,
+    BookingCriteriaMismatchError,
     BookingSlotUnavailableError,
     BrowserObservationError,
     TaskKindMismatchError,
@@ -34,20 +36,16 @@ from app.domain.errors import (
 )
 from app.domain.task_status import accepts_actions
 from app.services.actions import ActionService, ActionView
+from app.services.booking_tasks import BOOKING_TASK_TYPE, BookingTaskService
 from app.services.browser_execution import COMMIT_BOOKING, WorkerSource, open_worker_client
 from app.services.tasks import TaskService
 
 logger = logging.getLogger("lumi.booking.preparation")
 
-BOOKING_TASK_TYPE = "appointment_booking"
 SEARCH_OPERATION = "search_appointments"
 READ_SLOT_OPERATION = "read_available_slots"
 MAX_SLOTS = 50
 SLOT_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
-_SPECIALTY_PATTERN = re.compile(r"^[A-Za-z][A-Za-z .'-]{0,59}$")
-_DAYS = frozenset(
-    {"Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"}
-)
 
 
 class ObservedSlotSummary(BaseModel):
@@ -70,15 +68,12 @@ class ObservedSlotSummary(BaseModel):
         return value
 
 
-def search_criteria(request: dict[str, Any]) -> dict[str, str]:
-    """The persisted task request, reduced to the two search fields it may hold."""
-    specialty = request.get("specialty", "")
-    day = request.get("day", "")
-    if not isinstance(specialty, str) or (specialty and not _SPECIALTY_PATTERN.match(specialty)):
-        specialty = ""
-    if not isinstance(day, str) or (day and day not in _DAYS):
-        day = ""
-    return {"specialty": specialty, "day": day}
+def task_criteria(task_id: uuid.UUID, request: dict[str, Any]) -> BookingCriteria:
+    """The persisted task constraints, or a refusal if they cannot be applied."""
+    try:
+        return BookingCriteria.from_request(request)
+    except InvalidBookingCriteriaError:
+        raise BookingCriteriaError(task_id, "stored criteria are unreadable") from None
 
 
 class BookingPreparationService:
@@ -94,6 +89,7 @@ class BookingPreparationService:
         self._actions = actions
         self._runtime_generation = runtime_generation
         self._worker = worker
+        self._booking_tasks = BookingTaskService(actions)
 
     async def _booking_task(self, task_id: uuid.UUID) -> dict[str, Any]:
         task = await self._tasks.get_task(task_id)
@@ -140,9 +136,16 @@ class BookingPreparationService:
         return response.status, response.observation
 
     async def search(self, task_id: uuid.UUID) -> list[ObservedSlotSummary]:
+        """Read the site, keep the slots the task's constraints admit, record them.
+
+        The time window and price ceiling are applied to what the worker
+        observed. The admitted slots are appended to the task timeline, which is
+        the only list a later selection (by voice or otherwise) may refer to.
+        """
         request = await self._booking_task(task_id)
+        criteria = task_criteria(task_id, request)
         status, observation = await self._observe(
-            SEARCH_OPERATION, search_criteria(request), task_id
+            SEARCH_OPERATION, criteria.site_search(), task_id
         )
         if status is not OperationStatus.OK:
             raise BrowserObservationError("search_failed")
@@ -150,12 +153,25 @@ class BookingPreparationService:
         if not isinstance(raw, list) or len(raw) > MAX_SLOTS:
             raise BrowserObservationError("unreadable_search_results")
         try:
-            return [ObservedSlotSummary.model_validate(item) for item in raw]
+            observed = [ObservedSlotSummary.model_validate(item) for item in raw]
         except ValidationError:
             raise BrowserObservationError("unreadable_search_results") from None
+        admitted = [
+            slot
+            for slot in observed
+            if criteria.admits(time=slot.time, price=slot.price, currency=slot.currency)
+        ]
+        await self._booking_tasks.record_search(
+            task_id,
+            criteria=criteria,
+            slots=[slot.model_dump(mode="json") for slot in admitted],
+            observed_count=len(observed),
+        )
+        return admitted
 
     async def prepare(self, task_id: uuid.UUID, slot_id: str) -> ActionView:
-        await self._booking_task(task_id)
+        request = await self._booking_task(task_id)
+        criteria = task_criteria(task_id, request)
         status, observation = await self._observe(
             READ_SLOT_OPERATION, {"slot_id": slot_id}, task_id
         )
@@ -177,6 +193,10 @@ class BookingPreparationService:
             price=slot.price,
             currency=slot.currency,
         )
+        # The slot as it is *now* must still satisfy what the user asked for: a
+        # price that rose past their ceiling is not silently offered for review.
+        if not criteria.admits_proposal(proposal):
+            raise BookingCriteriaMismatchError(task_id, slot_id)
         view = await self._actions.propose_exclusive_action(
             task_id,
             tool_name=COMMIT_BOOKING,

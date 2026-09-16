@@ -413,6 +413,8 @@ approval-request, approve, reject, `browser-execution`,
 | --- | --- | --- |
 | `POST` | `/tasks/{id}/booking/search` | Read-only `search_appointments` using the criteria stored in the task request |
 | `POST` | `/tasks/{id}/booking/prepare` | Body `{"slot_id": "..."}` only. Read-only `read_available_slots`; the proposal is built from what the worker observed, then an approval is requested |
+| `POST` | `/tasks/{id}/booking/criteria` | Body `{"expected_revision": n, "criteria": {...}}`. Replaces the booking constraints under the task lock, records `task.criteria_updated`, and rejects (`reason=criteria_changed`) any not-yet-executed booking the new constraints exclude. `409 task_has_unresolved_action` / `task_already_booked` while a booking may exist or is confirmed |
+| `POST` | `/tasks/{id}/booking/cancel` | Optional `{"expected_revision": n}`. Refused while a booking is unresolved or confirmed; otherwise rejects open bookings and cancels the task in one transaction |
 
 `browser-execution` and `browser-reconciliation` accept an optional
 `{"expected_revision": N}`. For execution it is enforced by the transaction
@@ -480,3 +482,16 @@ tasks, actions, attempts and dispatches in PostgreSQL and submissions and
 bookings on the fixture. The lost-response test hard-kills Electron after the
 fixture has created the booking, checks that the runtime and worker died with
 it, restarts the same profile, and reconciles read-only.
+
+### Booking constraints (Milestone 5)
+
+A booking task request may carry `specialty`, `day`, `earliest_time` /
+`latest_time` (clinic-local `HH:MM`, inclusive) and `max_price` with
+`max_price_currency`. Search sends only specialty/day to the site, then keeps
+the observed slots inside the time window and price ceiling and appends them to
+the timeline as `task.search_completed`. Prepare refuses (`409
+booking_criteria_mismatch`) a slot whose *current* observation falls outside
+the constraints. Unreadable bounds make the task unsearchable
+(`invalid_booking_criteria`); `POST /tasks` rejects them up front.
+Voice-created tasks also carry `source: "voice"`, `voice_turn_id` and the
+utterance in `text`, for traceability and duplicate-turn detection.

@@ -508,6 +508,16 @@
   gap: 2px;
 }
 
+.agent-booking-region {
+  border-radius: 16px;
+  outline: none;
+}
+
+.agent-booking-region:focus-visible,
+.agent-booking-region[data-voice-focus]:focus {
+  box-shadow: 0 0 0 2px rgba(130, 239, 255, 0.55);
+}
+
 .agent-booking-card {
   padding: 13px;
   border: 1px solid rgba(130, 239, 255, 0.32);

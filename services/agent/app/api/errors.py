@@ -12,6 +12,10 @@ from app.browser.errors import (
 )
 from app.domain.booking import BookingProposalError
 from app.domain.errors import (
+    BookingCriteriaError,
+    BookingCriteriaMismatchError,
+    TaskAlreadyBookedError,
+    TaskHasUnresolvedActionError,
     ActionAlreadyOpenError,
     ActionConcurrencyError,
     BookingSlotUnavailableError,
@@ -170,6 +174,34 @@ def register_error_handlers(app: FastAPI) -> None:
             status.HTTP_503_SERVICE_UNAVAILABLE,
             "browser_worker_unavailable",
             "The browser worker is unavailable.",
+        ),
+    )
+    app.add_exception_handler(
+        TaskHasUnresolvedActionError,
+        _fixed(
+            status.HTTP_409_CONFLICT,
+            "task_has_unresolved_action",
+            "A booking for this task may already exist; resolve it first.",
+        ),
+    )
+    app.add_exception_handler(
+        TaskAlreadyBookedError,
+        _fixed(status.HTTP_409_CONFLICT, "task_already_booked", "The booking for this task is confirmed."),
+    )
+    app.add_exception_handler(
+        BookingCriteriaError,
+        _fixed(
+            status.HTTP_409_CONFLICT,
+            "invalid_booking_criteria",
+            "The booking constraints could not be applied.",
+        ),
+    )
+    app.add_exception_handler(
+        BookingCriteriaMismatchError,
+        _fixed(
+            status.HTTP_409_CONFLICT,
+            "booking_criteria_mismatch",
+            "That appointment no longer matches the requested constraints.",
         ),
     )
     app.add_exception_handler(StaleTaskRevisionError, _stale_task_revision)

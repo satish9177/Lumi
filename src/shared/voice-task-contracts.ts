@@ -1,0 +1,171 @@
+import type { AgentBookingDay, AgentErrorCode, AgentTaskStatus } from './agent-contracts'
+
+/**
+ * Voice → durable task controller contract.
+ *
+ * A realtime model turns what the user said (in any language it supports)
+ * into one of these closed, language-neutral commands. Electron main decides
+ * whether the command is legal in the current durable state and runs it
+ * through the same M4 task controller the booking panel uses.
+ *
+ * What is deliberately absent: approving, executing, retrying, choosing a URL,
+ * a selector, a price, or any other booked value. "Book it" / "yes" is
+ * `proceed_with_booking`, which can only surface the trusted approval card.
+ *
+ * Every value that describes a booking in an outcome comes from durable,
+ * browser-observed task state, never from the model or the renderer.
+ */
+
+/** Canonical specialties the voice layer may ask for. The model maps
+ * "dermatologist", "skin doctor", "చర్మ వైద్యుడు", ... onto these. */
+export const VOICE_SPECIALTIES = [
+  'Dermatology', 'Dentistry', 'Cardiology', 'Pediatrics', 'General Medicine',
+  'Orthopedics', 'Gynecology', 'Ophthalmology', 'ENT', 'Psychiatry'
+] as const
+export type VoiceSpecialty = typeof VOICE_SPECIALTIES[number]
+
+export const VOICE_PARTS_OF_DAY = ['morning', 'afternoon', 'evening', 'any'] as const
+export type VoicePartOfDay = typeof VOICE_PARTS_OF_DAY[number]
+
+/** Clinic-local wall-clock windows for a spoken part of day. */
+export const PART_OF_DAY_WINDOWS: Record<Exclude<VoicePartOfDay, 'any'>, { earliest: string; latest: string }> = {
+  morning: { earliest: '06:00', latest: '11:59' },
+  afternoon: { earliest: '12:00', latest: '16:59' },
+  evening: { earliest: '17:00', latest: '22:00' }
+}
+
+/** A voice price ceiling is always in rupees; the fixture and model speak INR. */
+export const VOICE_PRICE_CURRENCY = 'INR'
+export const MAX_VOICE_PRICE = 1_000_000
+export const MAX_VOICE_ORDINAL = 10
+
+export const VOICE_COMMAND_KINDS = [
+  'start_search', 'refine_search', 'select_result', 'proceed_with_booking',
+  'task_status', 'check_booking', 'cancel_task'
+] as const
+export type VoiceCommandKind = typeof VOICE_COMMAND_KINDS[number]
+
+/** Commands that change durable state or start browser work. One per turn. */
+export const PROGRESSING_VOICE_COMMANDS: readonly VoiceCommandKind[] = [
+  'start_search', 'refine_search', 'select_result', 'check_booking', 'cancel_task'
+]
+
+/** The completed user utterance a command is bound to. */
+export interface VoiceTurn {
+  /** Realtime conversation item id of the completed user turn. */
+  turnId: string
+  /** The completed transcript (or typed text), kept for traceability only. */
+  utterance: string
+}
+
+export interface VoiceSearchConstraints {
+  specialty?: VoiceSpecialty
+  day?: AgentBookingDay
+  partOfDay?: VoicePartOfDay
+  /** 24-hour HH:MM, clinic-local. Overrides the part-of-day bound. */
+  earliestTime?: string
+  latestTime?: string
+  maxPriceInr?: number
+}
+
+export const VOICE_CLEARABLE_FIELDS = ['specialty', 'day', 'time', 'price'] as const
+export type VoiceClearableField = typeof VOICE_CLEARABLE_FIELDS[number]
+
+export interface VoiceRefinement extends VoiceSearchConstraints {
+  /** Constraints the user dropped ("any price", "any day"). */
+  clear?: VoiceClearableField[]
+}
+
+/** How the user pointed at a result. Resolved only against recorded results. */
+export interface VoiceSelection {
+  /** 1-based position in the most recently presented results. */
+  ordinal?: number
+  /** 24-hour HH:MM clinic-local time the user said. */
+  time?: string
+  doctor?: string
+}
+
+export type VoiceTaskCommand =
+  | { kind: 'start_search'; turn: VoiceTurn; constraints: VoiceSearchConstraints }
+  | { kind: 'refine_search'; turn: VoiceTurn; changes: VoiceRefinement }
+  | { kind: 'select_result'; turn: VoiceTurn; selection: VoiceSelection }
+  | { kind: 'proceed_with_booking'; turn: VoiceTurn }
+  | { kind: 'task_status'; turn: VoiceTurn }
+  | { kind: 'check_booking'; turn: VoiceTurn }
+  | { kind: 'cancel_task'; turn: VoiceTurn }
+
+/** Where the trusted UI should draw the user's attention. */
+export type VoiceTaskFocus = 'none' | 'task' | 'approval_card'
+
+export interface VoiceSlotFact {
+  ordinal: number
+  doctor: string
+  day: AgentBookingDay
+  /** HH:MM in the clinic's own offset. */
+  time: string
+  price: number
+  currency: string
+}
+
+export interface VoiceBookingFact {
+  doctor: string
+  day: AgentBookingDay
+  time: string
+  price: number
+  currency: string
+}
+
+export interface VoiceConstraintFact {
+  specialty?: string
+  day?: AgentBookingDay
+  earliestTime?: string
+  latestTime?: string
+  maxPrice?: number
+  currency?: string
+}
+
+export const VOICE_CLARIFICATIONS = [
+  'no_task',
+  'task_closed',
+  'no_results_yet',
+  'no_matching_result',
+  'ambiguous_selection',
+  'nothing_prepared',
+  'open_booking_exists',
+  'unresolved_booking',
+  'already_booked',
+  'one_step_per_request',
+  'slot_unavailable',
+  'criteria_mismatch',
+  'approval_expired',
+  'busy'
+] as const
+export type VoiceClarification = typeof VOICE_CLARIFICATIONS[number]
+
+export type VoiceNarration =
+  | { kind: 'results'; constraints: VoiceConstraintFact; slots: VoiceSlotFact[]; totalCount: number; invalidatedBooking: boolean }
+  /** A booking is prepared from observed facts and waits for the trusted click. */
+  | { kind: 'approval_ready'; booking: VoiceBookingFact }
+  /** The user tried to approve by voice. Nothing was approved. */
+  | { kind: 'approval_required'; booking: VoiceBookingFact }
+  | { kind: 'approved_not_booked'; booking: VoiceBookingFact }
+  | { kind: 'booking_in_progress'; booking: VoiceBookingFact }
+  | { kind: 'booking_confirmed'; booking: VoiceBookingFact; bookingId?: string; confirmedByLookup: boolean }
+  | { kind: 'booking_not_made'; booking: VoiceBookingFact; reason: 'changed' | 'unavailable' | 'failed' | 'lookup_found_none' | 'rejected' }
+  /** Lumi does not know whether the booking exists. Never success, never failure. */
+  | { kind: 'outcome_unknown'; booking: VoiceBookingFact; lastCheckInconclusive: boolean }
+  | { kind: 'checking'; booking: VoiceBookingFact }
+  | { kind: 'task_open'; constraints: VoiceConstraintFact; taskStatus: AgentTaskStatus }
+  | { kind: 'task_cancelled'; rejectedBooking: boolean }
+  | { kind: 'needs_clarification'; reason: VoiceClarification; booking?: VoiceBookingFact; candidates?: VoiceSlotFact[] }
+  | { kind: 'refused'; code: AgentErrorCode }
+
+export interface VoiceTaskOutcome {
+  kind: VoiceCommandKind
+  taskId?: string
+  taskStatus?: AgentTaskStatus
+  focus: VoiceTaskFocus
+  narration: VoiceNarration
+  /** True when this turn was already handled and nothing ran again. */
+  replayed: boolean
+}

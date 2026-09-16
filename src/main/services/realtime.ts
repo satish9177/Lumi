@@ -41,7 +41,23 @@ export function getRealtimeReasoningEffort(value = process.env.LIFELENS_REALTIME
   )
 }
 
-export async function createRealtimeSessionCredential(safetySeed: string): Promise<RealtimeSessionCredential> {
+export const SCRIPTED_REALTIME_MODEL = 'scripted-test-voice'
+
+/**
+ * The deterministic scripted voice is for acceptance tests only: it needs an
+ * explicit environment flag *and* an unpackaged build. It carries no token.
+ */
+export function scriptedRealtimeRequested(allowScripted: boolean, environment: NodeJS.ProcessEnv = process.env): boolean {
+  return allowScripted && environment.LUMI_REALTIME_SCRIPTED === '1'
+}
+
+export async function createRealtimeSessionCredential(
+  safetySeed: string,
+  options: { allowScripted?: boolean } = {}
+): Promise<RealtimeSessionCredential> {
+  if (scriptedRealtimeRequested(options.allowScripted === true)) {
+    return { mode: 'scripted', model: SCRIPTED_REALTIME_MODEL }
+  }
   const apiKey = process.env.OPENAI_API_KEY?.trim()
   if (!apiKey) {
     return { mode: 'mock', model: REALTIME_MODEL, configurationStatus: 'openai_api_key_missing' }

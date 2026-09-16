@@ -30,6 +30,11 @@ class TaskStatus(StrEnum):
 class TaskEventType(StrEnum):
     TASK_CREATED = "task.created"
     TASK_CANCELLED = "task.cancelled"
+    #: The task's booking constraints were revised (voice or UI refinement).
+    TASK_CRITERIA_UPDATED = "task.criteria_updated"
+    #: A read-only search finished; the payload holds the typed, filtered slots
+    #: the user may now choose from.
+    TASK_SEARCH_COMPLETED = "task.search_completed"
     ACTION_PROPOSED = "action.proposed"
     ACTION_APPROVAL_REQUESTED = "action.approval_requested"
     ACTION_APPROVED = "action.approved"

@@ -1,8 +1,10 @@
 import type {
   AgentActionView,
+  AgentBookingCriteria,
   AgentChangedFact,
   AgentEventView,
-  AgentReconciliationView
+  AgentReconciliationView,
+  AgentSlotView
 } from '../../shared/agent-contracts'
 
 /**
@@ -203,10 +205,23 @@ export function describeEvent(event: AgentEventView): string {
   switch (event.type) {
     case 'task.created': return 'Task created'
     case 'task.cancelled': return 'Task cancelled'
+    case 'task.criteria_updated':
+      return event.invalidatedActionIds?.length
+        ? 'Search changed — the prepared booking was withdrawn'
+        : 'Search changed'
+    case 'task.search_completed': {
+      const count = event.searchResults?.length
+      return count === undefined
+        ? 'Searched the clinic site (read-only)'
+        : `Searched the clinic site (read-only): ${count} matching appointment${count === 1 ? '' : 's'}`
+    }
     case 'action.proposed': return 'Booking prepared from the clinic site'
     case 'action.approval_requested': return 'Waiting for your approval'
     case 'action.approved': return 'You approved the booking'
-    case 'action.rejected': return 'Booking rejected'
+    case 'action.rejected':
+      if (event.reason === 'criteria_changed') return 'Booking withdrawn: the search changed'
+      if (event.reason === 'task_cancelled') return 'Booking withdrawn: task cancelled'
+      return 'Booking rejected'
     case 'action.execution_started': return `Booking submitted (attempt ${event.attemptNumber ?? 1})`
     case 'action.succeeded': return 'Booking confirmed by the clinic site'
     case 'action.failed': return 'Booking not made'
@@ -233,4 +248,28 @@ export function mergeEvents(current: readonly AgentEventView[], incoming: readon
 /** The booking the card focuses on: the newest one. */
 export function currentBooking(actions: readonly AgentActionView[]): AgentActionView | undefined {
   return actions.length > 0 ? actions[actions.length - 1] : undefined
+}
+
+/**
+ * The newest recorded search results, unless the constraints changed after
+ * them. The same rule main uses to resolve a spoken selection.
+ */
+export function latestSearchResults(events: readonly AgentEventView[]): AgentSlotView[] | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event.type === 'task.criteria_updated') return undefined
+    if (event.type === 'task.search_completed') return event.searchResults
+  }
+  return undefined
+}
+
+export function describeCriteria(criteria: AgentBookingCriteria): string {
+  const parts = [criteria.specialty || 'Any specialty', criteria.day || 'any day']
+  if (criteria.earliestTime && criteria.latestTime) parts.push(`${criteria.earliestTime}–${criteria.latestTime}`)
+  else if (criteria.earliestTime) parts.push(`from ${criteria.earliestTime}`)
+  else if (criteria.latestTime) parts.push(`until ${criteria.latestTime}`)
+  if (criteria.maxPrice !== undefined && criteria.maxPriceCurrency) {
+    parts.push(`up to ${formatPrice(criteria.maxPrice, criteria.maxPriceCurrency)}`)
+  }
+  return parts.join(' · ')
 }

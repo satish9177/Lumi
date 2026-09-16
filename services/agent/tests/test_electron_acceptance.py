@@ -243,7 +243,13 @@ class Desktop:
 
 @contextmanager
 def desktop(
-    playwright: Any, *, profile: Path, database_url: str, site_origin: str, log_path: Path
+    playwright: Any,
+    *,
+    profile: Path,
+    database_url: str,
+    site_origin: str,
+    log_path: Path,
+    extra_environment: dict[str, str] | None = None,
 ) -> Iterator[Desktop]:
     port = _free_port()
     environment = {
@@ -257,6 +263,7 @@ def desktop(
         LUMI_AGENT_DATABASE_URL=database_url,
         LUMI_APPOINTMENT_FIXTURE_ORIGIN=site_origin,
     )
+    environment.update(extra_environment or {})
     with log_path.open("ab") as log:
         process = subprocess.Popen(
             [_electron_executable(), str(REPO_ROOT), f"--remote-debugging-port={port}"],

@@ -17,7 +17,12 @@ function sources(directory: string): string[] {
 
 describe('renderer and preload trust boundary', () => {
   it('renderer and preload code never address local services or credentials', () => {
-    const files = [...sources(join(ROOT, 'renderer')), ...sources(join(ROOT, 'preload')), join(ROOT, 'shared', 'agent-contracts.ts')]
+    const files = [
+      ...sources(join(ROOT, 'renderer')),
+      ...sources(join(ROOT, 'preload')),
+      join(ROOT, 'shared', 'agent-contracts.ts'),
+      join(ROOT, 'shared', 'voice-task-contracts.ts')
+    ]
     for (const file of files) {
       const text = readFileSync(file, 'utf8')
       const name = relative(ROOT, file)
@@ -44,10 +49,12 @@ describe('renderer and preload trust boundary', () => {
     const assertTrustedSender = vi.fn((event: never) => {
       if ((event as { trusted?: boolean }).trusted !== true) throw new Error('Rejected IPC request from an unexpected frame.')
     })
+    const voice = { handle: vi.fn(async () => ({ ok: true, value: 'voiceCommand' })) }
     registerAgentIpc({
       ipcMain: { handle: (channel, listener) => { handlers.set(channel, listener) } },
       assertTrustedSender,
       controller,
+      voice: voice as never,
       runtimeStatus: () => ({ state: 'running' }),
       restartRuntime: async () => ({ state: 'running' })
     })
@@ -57,6 +64,7 @@ describe('renderer and preload trust boundary', () => {
       expect(() => handler({ trusted: false } as never, 'x', 1), channel).toThrow('unexpected frame')
     }
     expect(Object.values(controller).length).toBe(0)
+    expect(voice.handle).not.toHaveBeenCalled()
     expect(await handlers.get(AGENT_IPC_CHANNELS.approveAction)!({ trusted: true } as never, 'id', 2)).toEqual({ ok: true, value: 'approveAction' })
   })
 })

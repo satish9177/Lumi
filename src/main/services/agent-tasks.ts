@@ -23,10 +23,14 @@ import {
   isRecord,
   parseAction,
   parseActionList,
+  parseCancellation,
+  parseCriteriaRevision,
   parseEventPage,
   parseSearch,
   parseTask,
-  projectRuntimeError
+  projectRuntimeError,
+  type CriteriaRevision,
+  type TaskCancellation
 } from './agent-wire'
 
 /**
@@ -49,6 +53,11 @@ export interface RuntimeRequester {
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const SLOT_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
 const SPECIALTY = /^[A-Za-z][A-Za-z .'-]{0,59}$/
+const CLOCK = /^(?:[01]\d|2[0-3]):[0-5]\d$/
+const CURRENCY = /^[A-Z]{3}$/
+const TURN_ID = /^[A-Za-z0-9_-]{1,64}$/
+const CRITERIA_KEYS = new Set(['specialty', 'day', 'earliestTime', 'latestTime', 'maxPrice', 'maxPriceCurrency'])
+const MAX_UTTERANCE = 500
 const EVENT_PAGE = 200
 const MAX_EVENT_PAGES = 50
 // Matches the 15-digit cursor the runtime route allowlist accepts.
@@ -100,7 +109,7 @@ export function parseAfterSequence(value: unknown): number {
 }
 
 export function parseBookingCriteria(value: unknown): AgentBookingCriteria {
-  if (!isRecord(value) || Object.keys(value).some((key) => key !== 'specialty' && key !== 'day')) {
+  if (!isRecord(value) || Object.keys(value).some((key) => !CRITERIA_KEYS.has(key))) {
     fail('invalid_request', 'Booking search criteria are invalid.')
   }
   const specialty = typeof value.specialty === 'string' ? value.specialty.trim() : undefined
@@ -111,7 +120,61 @@ export function parseBookingCriteria(value: unknown): AgentBookingCriteria {
   if (day !== '' && !(typeof day === 'string' && (BOOKING_DAYS as readonly string[]).includes(day))) {
     fail('invalid_request', 'Choose a valid day.')
   }
-  return { specialty, day: day as AgentBookingCriteria['day'] }
+  const criteria: AgentBookingCriteria = { specialty, day: day as AgentBookingCriteria['day'] }
+  for (const key of ['earliestTime', 'latestTime'] as const) {
+    const bound = value[key]
+    if (bound === undefined) continue
+    if (typeof bound !== 'string' || !CLOCK.test(bound)) fail('invalid_request', 'Times must be 24-hour HH:MM.')
+    criteria[key] = bound
+  }
+  if (criteria.earliestTime && criteria.latestTime && criteria.earliestTime > criteria.latestTime) {
+    fail('invalid_request', 'The earliest time must not be after the latest time.')
+  }
+  const { maxPrice, maxPriceCurrency } = value
+  if ((maxPrice === undefined) !== (maxPriceCurrency === undefined)) {
+    fail('invalid_request', 'A price limit needs its currency.')
+  }
+  if (maxPrice !== undefined) {
+    if (typeof maxPrice !== 'number' || !Number.isSafeInteger(maxPrice) || maxPrice < 0 || maxPrice > 10_000_000) {
+      fail('invalid_request', 'The price limit is invalid.')
+    }
+    if (typeof maxPriceCurrency !== 'string' || !CURRENCY.test(maxPriceCurrency)) {
+      fail('invalid_request', 'The price currency is invalid.')
+    }
+    criteria.maxPrice = maxPrice
+    criteria.maxPriceCurrency = maxPriceCurrency
+  }
+  return criteria
+}
+
+/** The runtime's snake_case constraint fields. Unset bounds are omitted. */
+export function criteriaFields(criteria: AgentBookingCriteria): Record<string, string | number> {
+  return {
+    ...(criteria.specialty ? { specialty: criteria.specialty } : {}),
+    ...(criteria.day ? { day: criteria.day } : {}),
+    ...(criteria.earliestTime ? { earliest_time: criteria.earliestTime } : {}),
+    ...(criteria.latestTime ? { latest_time: criteria.latestTime } : {}),
+    ...(criteria.maxPrice !== undefined && criteria.maxPriceCurrency
+      ? { max_price: criteria.maxPrice, max_price_currency: criteria.maxPriceCurrency }
+      : {})
+  }
+}
+
+/**
+ * Where a task came from. Only main constructs this (the voice controller);
+ * the renderer's create-task IPC passes criteria and nothing else.
+ */
+export interface TaskOrigin {
+  source: 'voice'
+  turnId: string
+  utterance: string
+}
+
+function originFields(origin: TaskOrigin | undefined): Record<string, string> {
+  if (!origin) return { text: 'Book a clinic appointment' }
+  if (!TURN_ID.test(origin.turnId)) fail('invalid_request', 'That voice turn is invalid.')
+  const utterance = origin.utterance.trim().slice(0, MAX_UTTERANCE)
+  return { text: utterance || 'Book a clinic appointment', source: origin.source, voice_turn_id: origin.turnId }
 }
 
 /** Remembers which durable task is on screen. Never the task's contents. */
@@ -317,25 +380,66 @@ export class AgentTaskController {
 
   // ---- task lifecycle ------------------------------------------------------
 
-  async createBookingTask(criteriaValue: unknown): Promise<AgentResult<AgentTaskSnapshot>> {
+  async createBookingTask(criteriaValue: unknown, origin?: TaskOrigin): Promise<AgentResult<AgentTaskSnapshot>> {
     let criteria: AgentBookingCriteria
+    let provenance: Record<string, string>
     try {
       criteria = parseBookingCriteria(criteriaValue)
+      provenance = originFields(origin)
     } catch (error) {
       return { ok: false, error: toAgentError(error) }
     }
     return this.exclusive('task', async () => {
       await this.assertNoUnresolvedAction()
-      const request = {
-        type: 'appointment_booking',
-        text: 'Book a clinic appointment',
-        ...(criteria.specialty ? { specialty: criteria.specialty } : {}),
-        ...(criteria.day ? { day: criteria.day } : {})
-      }
+      const request = { type: 'appointment_booking', ...provenance, ...criteriaFields(criteria) }
       const reply = await this.call('POST', '/tasks', { request }, TIMEOUTS.write)
       const task = parseTask(reply.body)
       await this.store.write(task.taskId)
       return await this.snapshot(task.taskId, 0)
+    })
+  }
+
+  /**
+   * Replace the active task's constraints, bound to the task revision the
+   * caller derived them from. The runtime rejects, in the same transaction,
+   * any prepared booking the new constraints exclude.
+   */
+  async reviseCriteria(criteriaValue: unknown, revisionValue: unknown): Promise<AgentResult<CriteriaRevision>> {
+    let criteria: AgentBookingCriteria
+    let expectedRevision: number
+    try {
+      criteria = parseBookingCriteria(criteriaValue)
+      expectedRevision = parseExpectedRevision(revisionValue)
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    return this.exclusive('task', async () => {
+      const taskId = await this.activeTaskId()
+      const body = {
+        expected_revision: expectedRevision,
+        criteria: { specialty: criteria.specialty, day: criteria.day, ...criteriaFields(criteria) }
+      }
+      const reply = await this.call('POST', `/tasks/${taskId}/booking/criteria`, body, TIMEOUTS.write)
+      return parseCriteriaRevision(reply.body, taskId)
+    })
+  }
+
+  /**
+   * Cancel the active task. The runtime refuses while a booking may exist and
+   * otherwise rejects open bookings with the cancellation. The pointer stays,
+   * so the cancelled task and its timeline remain visible until closed.
+   */
+  async cancelActiveTask(revisionValue: unknown): Promise<AgentResult<TaskCancellation>> {
+    let expectedRevision: number
+    try {
+      expectedRevision = parseExpectedRevision(revisionValue)
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    return this.exclusive('task', async () => {
+      const taskId = await this.activeTaskId()
+      const reply = await this.call('POST', `/tasks/${taskId}/booking/cancel`, { expected_revision: expectedRevision }, TIMEOUTS.write)
+      return parseCancellation(reply.body, taskId)
     })
   }
 

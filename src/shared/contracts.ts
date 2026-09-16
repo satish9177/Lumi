@@ -87,7 +87,11 @@ export const IPC_CHANNELS = {
 export const COMPANION_STATES = ['idle', 'listening', 'thinking', 'speaking', 'success', 'error'] as const
 export type CompanionState = (typeof COMPANION_STATES)[number]
 
-export type RealtimeMode = 'live' | 'mock'
+/**
+ * `scripted` is a deterministic in-process Realtime stand-in for acceptance
+ * tests. Main issues it only in unpackaged builds with LUMI_REALTIME_SCRIPTED=1.
+ */
+export type RealtimeMode = 'live' | 'mock' | 'scripted'
 
 /** A non-secret reason the main process selected the deterministic demo path. */
 export type RealtimeConfigurationStatus = 'openai_api_key_missing'

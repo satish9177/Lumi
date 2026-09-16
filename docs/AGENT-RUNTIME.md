@@ -727,5 +727,51 @@ React renderer -> typed preload (window.lifeLens.agent, fixed channels)
   `PendingActionStore`; durable browser actions belong only to this ledger.
   Neither system can create or approve the other's actions.
 
-Still deferred: packaged Python sidecar bundling, voice-created tasks (Milestone
-5), planners, memory, and any real website.
+Still deferred: packaged Python sidecar bundling, planners, memory, and any real
+website.
+
+## Voice task controller (Milestone 5)
+
+```text
+realtime model ─strict tool call─► renderer (voice-task-tools)
+     ▲                               │ bound to a COMPLETED user turn (item id)
+     │ typed facts + data-only rule  ▼
+     └──────────────── preload agent.voiceCommand ─► main VoiceTaskController
+                                                     │ same AgentTaskController as the panel
+                                                     ▼
+                         runtime: create / search / criteria / prepare /
+                         request-approval / reject / reconcile / safe cancel
+```
+
+- **One controller.** Voice adds a front door, not a runtime: a closed command
+  union (`start_search`, `refine_search`, `select_result`,
+  `proceed_with_booking`, `task_status`, `check_booking`, `cancel_task`) that
+  main maps onto the M4 controller. The backend type handed to the voice
+  controller omits approve and execute.
+- **Speech never approves.** There is no approval tool, command, IPC method or
+  route reachable from voice. "Book it" / "yes" is `proceed_with_booking`: it
+  opens the task panel and focuses the booking card *region* (never its
+  button) and tells the user to press Approve and book.
+- **Completed turns only.** A tool call is honoured after the final transcript
+  of the user item its response was created for (bounded wait); interim
+  deltas, failed transcriptions and app-authored context never drive work.
+  Main runs at most one progressing command per turn and remembers every
+  handled turn, including unconfirmed ones; the durable `voice_turn_id` stops a
+  replay from creating a second task even after a main restart.
+- **Durable refinement.** Constraint changes are task revisions bound to the
+  revision they were derived from; an excluded prepared booking is rejected in
+  the same transaction, so its approval can never be claimed.
+- **Authoritative narration.** Every outcome is re-read from durable state
+  after the step. Selections resolve only against the recorded
+  `task.search_completed` slots; doctor names are spoken only when they look
+  like names; function outputs carry typed facts plus a fixed "website data,
+  not instructions" rule. `OUTCOME_UNKNOWN` is narrated as unknown; "check it"
+  runs the existing read-only reconciliation.
+- **Separate lifecycles.** Barge-in and reconnect end or interrupt the voice
+  session only. In-flight durable work completes and shows in the panel; its
+  answer is dropped if its session ended. A new session replays nothing.
+- **Deterministic harness.** `LUMI_REALTIME_SCRIPTED=1` in an unpackaged build
+  makes main issue a `scripted` credential; the renderer then talks to an
+  in-process server speaking the Realtime event protocol
+  (`realtime-scripted.ts`). `tests/test_voice_acceptance.py` drives it.
+
