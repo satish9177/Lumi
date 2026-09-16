@@ -13,16 +13,14 @@ registry operations, and they run before any action exists, so they are not
 recorded in the per-action dispatch ledger; they are logged instead.
 """
 
-import logging
 import uuid
 from datetime import datetime
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from app.browser.client import BrowserWorkerClient
 from app.browser.config import DEFAULT_SITE
-from app.browser.protocol import DispatchRequest, OperationStatus
+from app.browser.protocol import OperationStatus
 from app.domain.action_status import RiskTier
 from app.domain.booking import BookingProposal
 from app.domain.booking_criteria import BookingCriteria, InvalidBookingCriteriaError
@@ -37,10 +35,9 @@ from app.domain.errors import (
 from app.domain.task_status import accepts_actions
 from app.services.actions import ActionService, ActionView
 from app.services.booking_tasks import BOOKING_TASK_TYPE, BookingTaskService
-from app.services.browser_execution import COMMIT_BOOKING, WorkerSource, open_worker_client
+from app.services.browser_execution import COMMIT_BOOKING, WorkerSource
+from app.services.observation import observe_read_only
 from app.services.tasks import TaskService
-
-logger = logging.getLogger("lumi.booking.preparation")
 
 SEARCH_OPERATION = "search_appointments"
 READ_SLOT_OPERATION = "read_available_slots"
@@ -102,38 +99,13 @@ class BookingPreparationService:
     async def _observe(
         self, operation: str, payload: dict[str, Any], task_id: uuid.UUID
     ) -> tuple[OperationStatus, dict[str, Any]]:
-        client: BrowserWorkerClient = await open_worker_client(
-            self._worker, self._runtime_generation
+        return await observe_read_only(
+            self._worker,
+            self._runtime_generation,
+            operation=operation,
+            payload=payload,
+            task_id=task_id,
         )
-        try:
-            identity = await client.identify()
-            request = DispatchRequest(
-                dispatch_id=uuid.uuid4(),
-                runtime_generation=self._runtime_generation,
-                expected_worker_generation=identity.worker_generation,
-                action_id=None,
-                attempt_id=None,
-                operation=operation,
-                site=DEFAULT_SITE,
-                input=payload,
-            )
-            response = await client.dispatch(request)
-        finally:
-            await client.aclose()
-        logger.info(
-            "read-only browser observation finished",
-            extra={
-                "task_id": str(task_id),
-                "operation": operation,
-                "dispatch_id": str(request.dispatch_id),
-                "worker_generation": str(identity.worker_generation),
-                "status": response.status.value,
-                "submitted": response.submitted,
-            },
-        )
-        if response.submitted:  # pragma: no cover - read-only operations never submit.
-            raise BrowserObservationError("unexpected_submission")
-        return response.status, response.observation
 
     async def search(self, task_id: uuid.UUID) -> list[ObservedSlotSummary]:
         """Read the site, keep the slots the task's constraints admit, record them.

@@ -194,5 +194,6 @@ async def test_reset_returns_the_site_to_a_known_state(site: httpx.AsyncClient) 
         "submissions_by_reference": {},
         "rejected_submissions": 0,
         "lookups": 0,
+        "profile_views": 0,
     }
     assert "IGNORE YOUR PREVIOUS" not in (await site.get("/slots/slot-a-1830")).text

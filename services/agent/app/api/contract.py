@@ -32,6 +32,8 @@ from app.api.schemas import (
     BookingSearchResponse,
     BookingSlotResponse,
     CancelBookingTaskResponse,
+    ClinicInfoResponse,
+    DoctorProfileResponse,
     ErrorDetail,
     ErrorResponse,
     HealthResponse,
@@ -91,6 +93,7 @@ _MODELS: tuple[type[BaseModel], ...] = (
     BookingProposal,
     BookingSearchResponse,
     CancelBookingTaskResponse,
+    ClinicInfoResponse,
     ErrorResponse,
     HealthResponse,
     PrepareBookingBody,
@@ -250,6 +253,21 @@ def _slot(slot_id: str, doctor: str, time: str, price: int) -> dict[str, Any]:
         price=price,
         currency="INR",
     ).model_dump(mode="json")
+
+
+def _profile() -> DoctorProfileResponse:
+    return DoctorProfileResponse(
+        doctor_id="dr-a",
+        doctor="Dr A",
+        specialty="Dermatology",
+        clinic="Lakeview Skin Clinic",
+        address="12 Lake Road, Hyderabad",
+        hours="Mon-Sat 10:00-20:00",
+        consultation_fee=800,
+        currency="INR",
+        languages=["English", "Telugu", "Hindi"],
+        walk_ins=False,
+    )
 
 
 def examples() -> dict[str, Any]:
@@ -482,6 +500,57 @@ def examples() -> dict[str, Any]:
                         "to_status": "CANCELLED",
                         "rejected_action_ids": [],
                         "reason": "user_cancelled",
+                    },
+                ),
+            ],
+        ).model_dump(mode="json"),
+        "task_dated": TaskResponse(
+            id=_TASK,
+            status=TaskStatus.READY,
+            revision=2,
+            last_event_sequence=2,
+            request={
+                "type": "appointment_booking",
+                "text": "Find a dermatologist this weekend",
+                "source": "text",
+                "request_id": "req_example01",
+                **BookingCriteria(
+                    specialty="Dermatology", date_from="2026-09-19", date_to="2026-09-20"
+                ).request_fields(),
+            },
+            created_at=_at(0),
+            updated_at=_at(2),
+        ).model_dump(mode="json"),
+        "clinic_info": ClinicInfoResponse(
+            task=TaskResponse(
+                id=_TASK,
+                status=TaskStatus.CREATED,
+                revision=2,
+                last_event_sequence=2,
+                request={
+                    "type": "clinic_info",
+                    "text": "Which languages does Dr A speak?",
+                    "doctor": "Dr A",
+                    "topic": "languages",
+                    "source": "voice",
+                    "voice_turn_id": "item_example02",
+                },
+                created_at=_at(0),
+                updated_at=_at(2),
+            ),
+            profiles=[_profile()],
+        ).model_dump(mode="json"),
+        "events_info": TaskEventListResponse(
+            task_id=_TASK,
+            events=[
+                _event(1, TaskEventType.TASK_CREATED, {"status": "CREATED"}),
+                _event(
+                    2,
+                    TaskEventType.TASK_INFO_LOOKUP_COMPLETED,
+                    {
+                        "query": {"specialty": "", "doctor": "Dr A", "topic": "languages"},
+                        "profiles": [_profile().model_dump(mode="json")],
+                        "observed_count": 1,
                     },
                 ),
             ],

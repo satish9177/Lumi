@@ -14,7 +14,7 @@ kind of brittleness that turns into a wrong booking.
 
 from html import escape
 
-from evals.sites.appointments.state import HOSTILE_TEXT, Booking, Slot
+from evals.sites.appointments.state import HOSTILE_TEXT, Booking, DoctorProfile, Slot
 
 _STYLE = """
 body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 46rem; }
@@ -225,3 +225,43 @@ def lookup_found(reference: str, bookings: tuple[Booking, ...]) -> str:
 {listed}
 """
     return _document("Booking found", body)
+
+
+def doctor_profiles(profiles: list[tuple[DoctorProfile, int]], *, hostile_text: bool) -> str:
+    if not profiles:
+        items = '<p data-testid="no-profiles">No doctors match that search.</p>'
+    else:
+        items = "\n".join(_profile_card(profile, fee) for profile, fee in profiles)
+    body = f"""
+<h1>Our doctors</h1>
+{_hostile_block(hostile_text)}
+{items}
+<p><a href="/">Find an appointment</a></p>
+"""
+    return _document("Our doctors", body)
+
+
+def _profile_card(profile: DoctorProfile, fee: int) -> str:
+    languages = ", ".join(profile.languages)
+    walk_ins = "yes" if profile.walk_ins else "no"
+    walk_in_text = "Walk-ins welcome" if profile.walk_ins else "By appointment only"
+    return f"""
+<article data-testid="doctor-profile" data-doctor-id="{escape(profile.doctor_id)}">
+  <h2 data-testid="profile-doctor">{escape(profile.doctor)}</h2>
+  <dl>
+    <dt>Specialty</dt><dd data-testid="profile-specialty">{escape(profile.specialty)}</dd>
+    <dt>Clinic</dt><dd data-testid="profile-clinic">{escape(profile.clinic)}</dd>
+    <dt>Address</dt><dd data-testid="profile-address">{escape(profile.address)}</dd>
+    <dt>Hours</dt><dd data-testid="profile-hours">{escape(profile.hours)}</dd>
+    <dt>Consultation fee</dt>
+    <dd data-testid="profile-fee" data-amount="{fee}" data-currency="{escape(profile.currency)}">
+      &#8377;{fee}
+    </dd>
+    <dt>Languages</dt>
+    <dd data-testid="profile-languages" data-languages="{escape(",".join(profile.languages))}">
+      {escape(languages)}
+    </dd>
+    <dt>Walk-ins</dt>
+    <dd data-testid="profile-walk-ins" data-walk-ins="{walk_ins}">{walk_in_text}</dd>
+  </dl>
+</article>"""

@@ -495,3 +495,23 @@ the constraints. Unreadable bounds make the task unsearchable
 (`invalid_booking_criteria`); `POST /tasks` rejects them up front.
 Voice-created tasks also carry `source: "voice"`, `voice_turn_id` and the
 utterance in `text`, for traceability and duplicate-turn detection.
+
+## Milestone 6 additions
+
+| Method | Path | Result |
+| --- | --- | --- |
+| `POST` | `/tasks/{id}/info/lookup` | `200` `{task, profiles}` for a `clinic_info` task; read-only, safe to repeat; `409 task_kind_mismatch` for other tasks; `503` without a worker |
+
+- `POST /tasks` accepts `{"type": "clinic_info", "doctor" | "specialty", "topic"}`
+  (topics: `overview`, `hours`, `fee`, `languages`, `address`, `walk_ins`);
+  unknown fields are refused with `422`.
+- Booking criteria accept `date_from` and `date_to` (`YYYY-MM-DD`, both or
+  neither, ≤ 14 days) on task creation and on `POST /tasks/{id}/booking/criteria`.
+- New event type: `task.info_lookup_completed`.
+- `uv run python -m app.migrate` upgrades the schema non-interactively (used by
+  the packaged app).
+- The fixture site serves `/doctors` and accepts `fee_overrides` in
+  `/__eval__/faults`; `--demo-dates` and `--parent-pid` are for the packaged
+  demo only.
+- `greenlet` is constrained below 3.5 (Windows Application Control, see
+  [docs/PACKAGING.md](../../docs/PACKAGING.md)).

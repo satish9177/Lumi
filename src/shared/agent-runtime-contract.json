@@ -53,6 +53,7 @@
       "task.cancelled",
       "task.criteria_updated",
       "task.search_completed",
+      "task.info_lookup_completed",
       "action.proposed",
       "action.approval_requested",
       "action.approved",
@@ -287,6 +288,42 @@
       "tool_name": "commit_booking",
       "updated_at": "2026-09-16T10:00:02Z"
     },
+    "clinic_info": {
+      "profiles": [
+        {
+          "address": "12 Lake Road, Hyderabad",
+          "clinic": "Lakeview Skin Clinic",
+          "consultation_fee": 800,
+          "currency": "INR",
+          "doctor": "Dr A",
+          "doctor_id": "dr-a",
+          "hours": "Mon-Sat 10:00-20:00",
+          "languages": [
+            "English",
+            "Telugu",
+            "Hindi"
+          ],
+          "specialty": "Dermatology",
+          "walk_ins": false
+        }
+      ],
+      "task": {
+        "created_at": "2026-09-16T10:00:00Z",
+        "id": "00000000-0000-4000-8000-000000000001",
+        "last_event_sequence": 2,
+        "request": {
+          "doctor": "Dr A",
+          "source": "voice",
+          "text": "Which languages does Dr A speak?",
+          "topic": "languages",
+          "type": "clinic_info",
+          "voice_turn_id": "item_example02"
+        },
+        "revision": 2,
+        "status": "CREATED",
+        "updated_at": "2026-09-16T10:00:02Z"
+      }
+    },
     "criteria_revised": {
       "invalidated_action_ids": [
         "00000000-0000-4000-8000-000000000002"
@@ -483,6 +520,56 @@
       ],
       "task_id": "00000000-0000-4000-8000-000000000001"
     },
+    "events_info": {
+      "events": [
+        {
+          "created_at": "2026-09-16T10:00:01Z",
+          "event_type": "task.created",
+          "id": 1,
+          "payload": {
+            "status": "CREATED"
+          },
+          "sequence": 1,
+          "task_id": "00000000-0000-4000-8000-000000000001",
+          "task_revision": 1
+        },
+        {
+          "created_at": "2026-09-16T10:00:02Z",
+          "event_type": "task.info_lookup_completed",
+          "id": 2,
+          "payload": {
+            "observed_count": 1,
+            "profiles": [
+              {
+                "address": "12 Lake Road, Hyderabad",
+                "clinic": "Lakeview Skin Clinic",
+                "consultation_fee": 800,
+                "currency": "INR",
+                "doctor": "Dr A",
+                "doctor_id": "dr-a",
+                "hours": "Mon-Sat 10:00-20:00",
+                "languages": [
+                  "English",
+                  "Telugu",
+                  "Hindi"
+                ],
+                "specialty": "Dermatology",
+                "walk_ins": false
+              }
+            ],
+            "query": {
+              "doctor": "Dr A",
+              "specialty": "",
+              "topic": "languages"
+            }
+          },
+          "sequence": 2,
+          "task_id": "00000000-0000-4000-8000-000000000001",
+          "task_revision": 2
+        }
+      ],
+      "task_id": "00000000-0000-4000-8000-000000000001"
+    },
     "events_refinement": {
       "events": [
         {
@@ -502,6 +589,8 @@
           "id": 2,
           "payload": {
             "criteria": {
+              "date_from": null,
+              "date_to": null,
               "day": "Saturday",
               "earliest_time": "17:00",
               "latest_time": "21:00",
@@ -540,6 +629,8 @@
           "id": 3,
           "payload": {
             "criteria": {
+              "date_from": null,
+              "date_to": null,
               "day": "Saturday",
               "earliest_time": "17:00",
               "latest_time": "21:00",
@@ -645,6 +736,23 @@
         "status": "CANCELLED",
         "updated_at": "2026-09-16T10:00:06Z"
       }
+    },
+    "task_dated": {
+      "created_at": "2026-09-16T10:00:00Z",
+      "id": "00000000-0000-4000-8000-000000000001",
+      "last_event_sequence": 2,
+      "request": {
+        "date_from": "2026-09-19",
+        "date_to": "2026-09-20",
+        "request_id": "req_example01",
+        "source": "text",
+        "specialty": "Dermatology",
+        "text": "Find a dermatologist this weekend",
+        "type": "appointment_booking"
+      },
+      "revision": 2,
+      "status": "READY",
+      "updated_at": "2026-09-16T10:00:02Z"
     },
     "task_voice": {
       "created_at": "2026-09-16T10:00:00Z",
@@ -1313,6 +1421,32 @@
     "BookingCriteria": {
       "additionalProperties": false,
       "properties": {
+        "date_from": {
+          "anyOf": [
+            {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Date From"
+        },
+        "date_to": {
+          "anyOf": [
+            {
+              "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Date To"
+        },
         "day": {
           "default": "",
           "maxLength": 9,
@@ -1586,6 +1720,154 @@
       "title": "CancelBookingTaskResponse",
       "type": "object"
     },
+    "ClinicInfoResponse": {
+      "$defs": {
+        "DoctorProfileResponse": {
+          "properties": {
+            "address": {
+              "title": "Address",
+              "type": "string"
+            },
+            "clinic": {
+              "title": "Clinic",
+              "type": "string"
+            },
+            "consultation_fee": {
+              "title": "Consultation Fee",
+              "type": "integer"
+            },
+            "currency": {
+              "title": "Currency",
+              "type": "string"
+            },
+            "doctor": {
+              "title": "Doctor",
+              "type": "string"
+            },
+            "doctor_id": {
+              "title": "Doctor Id",
+              "type": "string"
+            },
+            "hours": {
+              "title": "Hours",
+              "type": "string"
+            },
+            "languages": {
+              "items": {
+                "type": "string"
+              },
+              "title": "Languages",
+              "type": "array"
+            },
+            "specialty": {
+              "title": "Specialty",
+              "type": "string"
+            },
+            "walk_ins": {
+              "title": "Walk Ins",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "doctor_id",
+            "doctor",
+            "specialty",
+            "clinic",
+            "address",
+            "hours",
+            "consultation_fee",
+            "currency",
+            "languages",
+            "walk_ins"
+          ],
+          "title": "DoctorProfileResponse",
+          "type": "object"
+        },
+        "TaskResponse": {
+          "properties": {
+            "created_at": {
+              "format": "date-time",
+              "title": "Created At",
+              "type": "string"
+            },
+            "id": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            },
+            "last_event_sequence": {
+              "title": "Last Event Sequence",
+              "type": "integer"
+            },
+            "request": {
+              "additionalProperties": true,
+              "title": "Request",
+              "type": "object"
+            },
+            "revision": {
+              "title": "Revision",
+              "type": "integer"
+            },
+            "status": {
+              "$ref": "#/$defs/TaskStatus"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "status",
+            "revision",
+            "last_event_sequence",
+            "request",
+            "created_at",
+            "updated_at"
+          ],
+          "title": "TaskResponse",
+          "type": "object"
+        },
+        "TaskStatus": {
+          "description": "Persisted task states.\n\nStored as text guarded by a CHECK constraint rather than a native PostgreSQL\nenum, so a later migration can add states (WAITING_CONTEXT, WAITING_INPUT,\nWAITING_USER_AUTH, RECOVERING, ...) by replacing the constraint inside an\nordinary transaction. Adding a member here therefore always requires a\nmigration, and a test fails if the two drift apart.",
+          "enum": [
+            "CREATED",
+            "PLANNING",
+            "READY",
+            "WAITING_APPROVAL",
+            "EXECUTING",
+            "VERIFYING",
+            "OUTCOME_UNKNOWN",
+            "RECONCILING",
+            "SUCCEEDED",
+            "FAILED",
+            "CANCELLED",
+            "PAUSED"
+          ],
+          "title": "TaskStatus",
+          "type": "string"
+        }
+      },
+      "properties": {
+        "profiles": {
+          "items": {
+            "$ref": "#/$defs/DoctorProfileResponse"
+          },
+          "title": "Profiles",
+          "type": "array"
+        },
+        "task": {
+          "$ref": "#/$defs/TaskResponse"
+        }
+      },
+      "required": [
+        "task",
+        "profiles"
+      ],
+      "title": "ClinicInfoResponse",
+      "type": "object"
+    },
     "ErrorResponse": {
       "$defs": {
         "ErrorDetail": {
@@ -1687,6 +1969,32 @@
         "BookingCriteria": {
           "additionalProperties": false,
           "properties": {
+            "date_from": {
+              "anyOf": [
+                {
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Date From"
+            },
+            "date_to": {
+              "anyOf": [
+                {
+                  "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Date To"
+            },
             "day": {
               "default": "",
               "maxLength": 9,

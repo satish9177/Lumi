@@ -1,5 +1,21 @@
 # Delivery status
 
+## Milestone 6 — final hardening: complete (17 September 2026)
+
+Lumi is complete for the current project scope. Milestone 6 added realtime and
+text provider abstractions (OpenAI Realtime, Gemini Live on Vertex AI; OpenAI,
+Gemini and DeepSeek text), task-class routing with failover, bounded context
+assembly, memory with provenance, deterministic relative dates, bounded
+compound plans, a second read-only workflow (clinic information), a packaged
+Python runtime with bundled Chromium, redacted diagnostics, a 43-case
+deterministic eval suite, and final documentation. Verification results:
+[reviews/milestone-6.md](reviews/milestone-6.md). Plan:
+[plans/milestone-6.md](plans/milestone-6.md).
+
+The Build Week delivery notes below are kept as a historical record.
+
+## Build Week record
+
 Last documentation-readiness verification: 22 July 2026 (Asia/Kolkata).
 `npm.cmd run typecheck`, the full `npm.cmd test` suite, and `npm.cmd run build`
 passed on the documentation-only working tree. Packaging was not rerun because

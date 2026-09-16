@@ -1,0 +1,250 @@
+{
+  "ranAt": "2026-09-16T21:59:48.677Z",
+  "gemini_connect_transcript_tool": {
+    "toolName": "appointment_plan",
+    "toolArguments": {
+      "prepare": true,
+      "choose": {
+        "strategy": "cheapest"
+      },
+      "search": {
+        "part_of_day": "evening",
+        "max_price_inr": 1000,
+        "when": {
+          "weekday": "Saturday",
+          "kind": "weekday"
+        },
+        "specialty": "Dermatology"
+      }
+    },
+    "criteria": {
+      "specialty": "Dermatology",
+      "evening": true,
+      "maxPriceInr": 1000,
+      "saturday": true
+    },
+    "transcript": "Find me a dermatologist on Saturday evening under Rs 1000 and prepare the cheapest one.",
+    "transcriptSeenBeforeToolCall": true,
+    "secondsToToolCall": 8.357
+  },
+  "gemini_audio_interruption": {
+    "audioChunksBeforeInterrupt": 7,
+    "interrupted": true,
+    "localPlaybackStopped": true,
+    "outputTranscriptSeen": true
+  },
+  "gemini_reconnect": {
+    "ready": true,
+    "failuresAfterReconnect": 0
+  },
+  "gemini_diagnostics": [
+    {
+      "at": "2026-09-16T21:59:51.216Z",
+      "kind": "voice_session",
+      "result": "opened",
+      "provider": "gemini",
+      "model": "gemini-live-2.5-flash-native-audio"
+    },
+    {
+      "at": "2026-09-16T22:00:00.129Z",
+      "kind": "voice_session",
+      "result": "usage",
+      "provider": "gemini",
+      "model": "gemini-live-2.5-flash-native-audio",
+      "inputTokens": 598
+    },
+    {
+      "at": "2026-09-16T22:00:02.580Z",
+      "kind": "voice_session",
+      "result": "usage",
+      "provider": "gemini",
+      "model": "gemini-live-2.5-flash-native-audio",
+      "inputTokens": 728
+    },
+    {
+      "at": "2026-09-16T22:00:04.744Z",
+      "kind": "voice_session",
+      "result": "opened",
+      "provider": "gemini",
+      "model": "gemini-live-2.5-flash-native-audio"
+    }
+  ],
+  "gemini_multilingual": {
+    "en_in": {
+      "toolName": "appointment_search",
+      "criteria": {
+        "specialty": "Dermatology",
+        "evening": true,
+        "maxPriceInr": 1000,
+        "saturday": true
+      },
+      "transcript": "Find me a dermatologist Saturday evening under Rs 1000."
+    },
+    "te_mixed": {
+      "toolName": "appointment_search",
+      "criteria": {
+        "specialty": "Dermatology",
+        "evening": true,
+        "maxPriceInr": 1000,
+        "saturday": true
+      },
+      "transcript": "Saturday evening Dermatologist appointment chudu Rs 1000 lopala."
+    },
+    "te_pure": {
+      "toolName": "appointment_search",
+      "criteria": {
+        "specialty": "Dermatology",
+        "evening": true,
+        "maxPriceInr": 1000,
+        "saturday": true
+      },
+      "transcript": "శనివారం సాయంత్రం చర్మవైద్యుని అపాయింట్మెంట్ చూడండి ₹1000 లోపల."
+    }
+  },
+  "gemini_multilingual_equivalent": {
+    "en_in": true,
+    "te_mixed": true,
+    "te_pure": true
+  },
+  "text_gemini": {
+    "results": {
+      "english": {
+        "command": {
+          "kind": "run_plan",
+          "turn": {
+            "turnId": "live_turn",
+            "utterance": "Find me a dermatologist Saturday evening under 1000 and prepare the cheapest one."
+          },
+          "plan": {
+            "search": {
+              "specialty": "Dermatology",
+              "partOfDay": "evening",
+              "maxPriceInr": 1000,
+              "when": {
+                "kind": "weekday",
+                "weekday": "Saturday"
+              }
+            },
+            "choose": {
+              "strategy": "cheapest"
+            },
+            "prepare": true
+          }
+        }
+      },
+      "code_switched": {
+        "command": {
+          "kind": "run_plan",
+          "turn": {
+            "turnId": "live_turn",
+            "utterance": "Saturday evening dermatologist appointment choodu, 1000 lopala, cheapest di prepare cheyyi."
+          },
+          "plan": {
+            "search": {
+              "specialty": "Dermatology",
+              "partOfDay": "evening",
+              "maxPriceInr": 1000,
+              "when": {
+                "kind": "weekday",
+                "weekday": "Saturday"
+              }
+            },
+            "choose": {
+              "strategy": "cheapest"
+            },
+            "prepare": true
+          }
+        }
+      },
+      "telugu": {
+        "command": {
+          "kind": "run_plan",
+          "turn": {
+            "turnId": "live_turn",
+            "utterance": "శనివారం సాయంత్రం చర్మ వైద్యుడిని 1000 రూపాయల లోపల చూడు, చౌకైనది సిద్ధం చెయ్యి."
+          },
+          "plan": {
+            "search": {
+              "specialty": "Dermatology",
+              "partOfDay": "evening",
+              "maxPriceInr": 1000,
+              "when": {
+                "kind": "weekday",
+                "weekday": "Saturday"
+              }
+            },
+            "choose": {
+              "strategy": "cheapest"
+            },
+            "prepare": true
+          }
+        }
+      },
+      "hostile": {
+        "command": {
+          "kind": "conversation"
+        }
+      }
+    },
+    "diagnostics": [
+      {
+        "at": "2026-09-16T22:00:37.570Z",
+        "kind": "model_call",
+        "result": "ok",
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "taskClass": "intent_extraction",
+        "latencyMs": 2885,
+        "inputTokens": 582,
+        "outputTokens": 77,
+        "contextTokens": 573,
+        "attempt": 1
+      },
+      {
+        "at": "2026-09-16T22:00:38.684Z",
+        "kind": "model_call",
+        "result": "ok",
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "taskClass": "intent_extraction",
+        "latencyMs": 1113,
+        "inputTokens": 587,
+        "outputTokens": 77,
+        "contextTokens": 575,
+        "attempt": 1
+      },
+      {
+        "at": "2026-09-16T22:00:39.859Z",
+        "kind": "model_call",
+        "result": "ok",
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "taskClass": "intent_extraction",
+        "latencyMs": 1175,
+        "inputTokens": 601,
+        "outputTokens": 118,
+        "contextTokens": 572,
+        "attempt": 1
+      },
+      {
+        "at": "2026-09-16T22:00:40.681Z",
+        "kind": "model_call",
+        "result": "ok",
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "taskClass": "intent_extraction",
+        "latencyMs": 822,
+        "inputTokens": 590,
+        "outputTokens": 6,
+        "contextTokens": 578,
+        "attempt": 1
+      }
+    ]
+  },
+  "text_openai": {
+    "skipped": "no credentials configured"
+  },
+  "text_deepseek": {
+    "skipped": "no credentials configured"
+  }
+}

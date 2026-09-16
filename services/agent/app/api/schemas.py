@@ -316,6 +316,24 @@ class BookingSearchResponse(BaseModel):
     slots: list[BookingSlotResponse]
 
 
+class DoctorProfileResponse(BaseModel):
+    doctor_id: str
+    doctor: str
+    specialty: str
+    clinic: str
+    address: str
+    hours: str
+    consultation_fee: int
+    currency: str
+    languages: list[str]
+    walk_ins: bool
+
+
+class ClinicInfoResponse(BaseModel):
+    task: TaskResponse
+    profiles: list[DoctorProfileResponse]
+
+
 class ReviseBookingCriteriaBody(BaseModel):
     """The complete new constraints and the task revision they were derived from.
 

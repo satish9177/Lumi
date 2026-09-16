@@ -4,6 +4,7 @@ import {
   TERMINAL_TASK_STATUSES,
   type AgentActionView,
   type AgentApi,
+  type AgentDoctorProfileView,
   type AgentBookingCriteria,
   type AgentError,
   type AgentEventView,
@@ -12,16 +13,19 @@ import {
   type AgentSlotView,
   type AgentTaskView
 } from '../../../shared/agent-contracts'
-import type { VoiceTaskFocus } from '../../../shared/voice-task-contracts'
+import type { VoiceTaskFocus, VoiceTaskOutcome } from '../../../shared/voice-task-contracts'
+import type { AgentPreferenceView, ModelDiagnosticView } from '../../../shared/model-contracts'
 import {
   currentBooking,
   describeBooking,
   describeCriteria,
   describeEvent,
+  describeOutcome,
   formatAppointmentTime,
   formatPrice,
   latestSearchResults,
   mergeEvents,
+  topicLabel,
   type BookingControl
 } from '../agent-task-view'
 import './components.css'
@@ -49,7 +53,8 @@ const RUNTIME_LABELS: Record<AgentRuntimeView['state'], string> = {
   stopped: 'Agent runtime stopped',
   unavailable: 'Agent runtime unavailable — restarting…',
   failed: 'Agent runtime is not running',
-  not_installed: 'Agent runtime is not available in this build'
+  not_installed: 'Agent runtime is not available in this build',
+  not_configured: 'Agent runtime needs setup: add agent-runtime.json to the Lumi profile folder (see docs/PACKAGING.md)'
 }
 
 /**
@@ -77,6 +82,10 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 
   const bookingRegion = useRef<HTMLDivElement>(null)
   const [focusedSerial, setFocusedSerial] = useState<number>()
   const [pendingCardFocus, setPendingCardFocus] = useState<number>()
+  const [request, setRequest] = useState('')
+  const [requestOutcome, setRequestOutcome] = useState<VoiceTaskOutcome>()
+  const [preferences, setPreferences] = useState<AgentPreferenceView[]>([])
+  const [diagnostics, setDiagnostics] = useState<ModelDiagnosticView[]>()
 
   stateRef.current = state
 
@@ -182,6 +191,42 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 
     }
   }
 
+  const loadPreferences = useCallback(async (): Promise<void> => {
+    const result = await agent.listPreferences()
+    if (result.ok && mounted.current) setPreferences(result.value)
+  }, [agent])
+
+  useEffect(() => {
+    if (runtime.state === 'running') void loadPreferences()
+  }, [runtime.state, loadPreferences])
+
+  /**
+   * A typed request. Main interprets it into the same bounded plan voice
+   * uses; the result can prepare a booking but never approve one.
+   */
+  async function submitRequest(): Promise<void> {
+    const text = request.trim()
+    if (!text) return
+    const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`
+    const result = await run('request', () => agent.submitTextRequest(requestId, text))
+    if (!result?.ok || !mounted.current) return
+    setRequest('')
+    setRequestOutcome(result.value)
+    setSlots(undefined)
+    await refresh(true)
+    await loadPreferences()
+    if (result.value.focus === 'approval_card') setPendingCardFocus(Date.now())
+  }
+
+  async function lookupInfo(): Promise<void> {
+    await run('lookup', () => agent.lookupClinicInfo())
+  }
+
+  async function forget(key: AgentPreferenceView['key']): Promise<void> {
+    const result = await run('forget', () => agent.forgetPreference(key))
+    if (result?.ok) setPreferences(result.value)
+  }
+
   async function createTask(): Promise<void> {
     const result = await run('create', () => agent.createBookingTask(criteria))
     if (result?.ok) {
@@ -256,7 +301,9 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 
   const bookingOpen = booking !== undefined && booking.status !== 'REJECTED' && booking.status !== 'FAILED'
   // Durable results from the task timeline, unless a fresher local search is
   // on screen. Hidden while a booking is open or once the task is closed.
-  const shownSlots = taskClosed || bookingOpen ? slots : slots ?? (state ? latestSearchResults(state.events) : undefined)
+  const isInfoTask = state?.task.kind === 'clinic_info'
+  const shownSlots = isInfoTask ? undefined : taskClosed || bookingOpen ? slots : slots ?? (state ? latestSearchResults(state.events) : undefined)
+  const profiles = state && isInfoTask ? latestProfiles(state.events) : undefined
 
   return (
     <div className="agent-task-panel" data-testid="agent-task-panel">
@@ -280,6 +327,35 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 
         )}
         {error && <p className="notice error-notice" role="alert" data-testid="agent-error">{error}</p>}
         {busy && <p className="notice" aria-live="polite">{busyText(busy)}</p>}
+
+        {runtimeReady && (
+          <form className="agent-section" aria-label="Ask Lumi" data-testid="agent-request-form"
+            onSubmit={(event) => { event.preventDefault(); void submitRequest() }}>
+            <label className="agent-field">
+              Ask Lumi
+              <input value={request} maxLength={1_000} data-testid="agent-request-input"
+                placeholder="Find a dermatologist tomorrow evening under ₹1000"
+                onChange={(event) => setRequest(event.target.value)} />
+            </label>
+            <button className="primary-button" type="submit" disabled={!canCreate || !request.trim()}>
+              Send request
+            </button>
+            {requestOutcome && (
+              <div className="notice" role="status" data-testid="agent-request-outcome" data-narration={requestOutcome.narration.kind}>
+                <p>{describeOutcome(requestOutcome)}</p>
+                {requestOutcome.plan && (
+                  <ol className="agent-plan" data-testid="agent-plan">
+                    {requestOutcome.plan.map((step) => (
+                      <li key={step.step} data-step={step.step} data-status={step.status}>
+                        {step.step.replaceAll('_', ' ')} · {step.status.replaceAll('_', ' ')}
+                      </li>
+                    ))}
+                  </ol>
+                )}
+              </div>
+            )}
+          </form>
+        )}
 
         {runtimeReady && loaded && !state && (
           <section className="agent-section" aria-label="Start a booking task">
@@ -305,13 +381,21 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 
 
         {state && (
           <>
-            <section className="agent-section" aria-label="Booking task">
-              <p className="eyebrow">TASK · {state.task.status.replaceAll('_', ' ')}</p>
+            <section className="agent-section" aria-label={isInfoTask ? 'Clinic information task' : 'Booking task'}
+              data-testid="agent-task" data-task-kind={state.task.kind}>
+              <p className="eyebrow">{isInfoTask ? 'CLINIC INFO' : 'TASK'} · {state.task.status.replaceAll('_', ' ')}</p>
               <p className="workspace-note" data-testid="agent-task-criteria">
-                {describeCriteria(state.task.criteria)}
+                {isInfoTask && state.task.infoQuery
+                  ? `${state.task.infoQuery.doctor || state.task.infoQuery.specialty} · ${topicLabel(state.task.infoQuery.topic)}`
+                  : describeCriteria(state.task.criteria)}
               </p>
               <div className="actions">
-                {!taskClosed && !bookingOpen ? (
+                {isInfoTask && !taskClosed ? (
+                  <button className="secondary-button" type="button" disabled={!runtimeReady || Boolean(busy)} onClick={() => void lookupInfo()}>
+                    Look up again
+                  </button>
+                ) : null}
+                {!isInfoTask && !taskClosed && !bookingOpen ? (
                   <button className="secondary-button" type="button" disabled={!runtimeReady || Boolean(busy)} onClick={() => void search()}>
                     Search appointments
                   </button>
@@ -344,6 +428,8 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 
               </section>
             )}
 
+            {profiles && <ClinicProfiles profiles={profiles} />}
+
             {booking && (
               <div ref={bookingRegion} tabIndex={-1} className="agent-booking-region"
                 data-testid="agent-booking-region" data-voice-focus={focusedSerial}>
@@ -361,7 +447,12 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 
 
             <Timeline events={state.events} />
 
-            <details className="agent-technical" data-testid="agent-technical">
+            <details className="agent-technical" data-testid="agent-technical"
+              onToggle={(event) => {
+                if ((event.currentTarget as HTMLDetailsElement).open) {
+                  void agent.getDiagnostics().then((result) => { if (result.ok && mounted.current) setDiagnostics(result.value) })
+                }
+              }}>
               <summary>Technical details</summary>
               <dl>
                 <dt>Task</dt><dd data-testid="agent-task-id">{state.task.taskId}</dd>
@@ -372,6 +463,17 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 
                   <ActionDetails key={action.actionId} action={action} />
                 ))}
               </dl>
+              {diagnostics && diagnostics.length > 0 && (
+                <ol className="agent-event-ids" data-testid="agent-diagnostics">
+                  {diagnostics.slice(-20).map((line, index) => (
+                    <li key={`${line.at}-${index}`}>
+                      {line.kind} · {line.command ?? line.taskClass ?? ''} · {line.provider ?? ''} {line.model ?? ''} · {line.result}
+                      {line.latencyMs !== undefined ? ` · ${line.latencyMs} ms` : ''}
+                      {line.inputTokens !== undefined ? ` · in ${line.inputTokens}` : ''}{line.outputTokens !== undefined ? ` · out ${line.outputTokens}` : ''}
+                    </li>
+                  ))}
+                </ol>
+              )}
               <ol className="agent-event-ids">
                 {state.events.map((event) => (
                   <li key={event.sequence}>#{event.sequence} {event.type} · {event.createdAt}{event.actionRevision ? ` · rev ${event.actionRevision}` : ''}</li>
@@ -380,8 +482,59 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 
             </details>
           </>
         )}
+
+        {runtimeReady && preferences.length > 0 && (
+          <section className="agent-section" aria-label="Saved preferences" data-testid="agent-preferences">
+            <p className="eyebrow">SAVED PREFERENCES</p>
+            <p className="workspace-note">Used only to fill details a new request leaves out. What you ask for now always wins, and the clinic site decides prices and availability.</p>
+            <ul className="agent-slots">
+              {preferences.map((preference) => (
+                <li key={preference.key} data-preference={preference.key}>
+                  <div>
+                    <strong>{preference.key.replaceAll('_', ' ')}</strong>
+                    <span>{String(preference.value)} · said {new Date(preference.provenance.recordedAt).toLocaleDateString()}</span>
+                  </div>
+                  <button className="text-button" type="button" disabled={Boolean(busy)} onClick={() => void forget(preference.key)}>
+                    Forget
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
       </div>
     </div>
+  )
+}
+
+function latestProfiles(events: readonly AgentEventView[]): AgentDoctorProfileView[] | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    if (events[index].type === 'task.info_lookup_completed') return events[index].profiles
+  }
+  return undefined
+}
+
+/** Public clinic facts read by the reviewed adapter. Rendered as text only. */
+function ClinicProfiles({ profiles }: { profiles: AgentDoctorProfileView[] }) {
+  return (
+    <section className="agent-section" aria-label="Clinic information" data-testid="agent-profiles">
+      <p className="eyebrow">FROM THE CLINIC WEBSITE</p>
+      {profiles.length === 0 ? <p className="notice">No doctor matched.</p> : (
+        <ul className="agent-slots">
+          {profiles.map((profile) => (
+            <li key={profile.doctorId} data-doctor-id={profile.doctorId}>
+              <div>
+                <strong>{profile.doctor}</strong>
+                <span>{profile.specialty} · {profile.clinic}</span>
+                <span>{profile.address}</span>
+                <span>{profile.hours} · {formatPrice(profile.consultationFee, profile.currency)}</span>
+                <span>Languages: {profile.languages.join(', ')} · {profile.walkIns ? 'Walk-ins welcome' : 'By appointment only'}</span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   )
 }
 
@@ -507,6 +660,8 @@ function busyText(label: string): string {
     case 'approve':
     case 'execute': return 'Booking — waiting for the clinic site to confirm…'
     case 'reconcile': return 'Checking the existing booking — not booking again…'
+    case 'request': return 'Understanding your request…'
+    case 'lookup': return 'Reading the clinic site (read-only)…'
     default: return 'Working…'
   }
 }

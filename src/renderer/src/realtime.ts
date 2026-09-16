@@ -34,6 +34,19 @@ import {
   voiceTaskFunctionOutput,
   type VoiceTaskToolName
 } from './voice-task-tools'
+import {
+  LAPTOP_MIC_CONSTRAINTS,
+  OpenAIRealtimeProvider,
+  type EventChannel
+} from './voice/openai-realtime-provider'
+import type {
+  ProviderHandlers,
+  ProviderToolCall,
+  RealtimeVoiceProvider,
+  VoiceProviderEvent
+} from './voice/voice-provider'
+
+export { LAPTOP_MIC_CONSTRAINTS }
 
 export interface RealtimeServerCall {
   readonly callId: string
@@ -71,19 +84,15 @@ interface RealtimeCallbacks {
    * issues a `scripted` credential (unpackaged test builds).
    */
   createScriptedChannel?: () => ScriptedRealtimeChannel
+  /**
+   * The Gemini Live transport (main-relayed). Only called when main issues a
+   * credential for the `gemini` provider; the renderer never holds its token.
+   */
+  createGeminiProvider?: (options: { scripted: boolean }) => RealtimeVoiceProvider
 }
 
 /** The data-channel surface a scripted Realtime server implements. */
-export interface ScriptedRealtimeChannel {
-  readonly readyState: RTCDataChannelState
-  onopen: (() => void) | null
-  onmessage: ((event: { data: unknown }) => void) | null
-  onerror: (() => void) | null
-  onclose: (() => void) | null
-  open: () => void
-  send: (data: string) => void
-  close: () => void
-}
+export type ScriptedRealtimeChannel = EventChannel & { open: () => void }
 
 interface UserTurn {
   state: 'pending' | 'completed' | 'failed'
@@ -98,18 +107,6 @@ const SCREEN_CONTEXT_TTL_MS = 10 * 60 * 1_000
 export const COLLAPSE_DISCONNECT_MS = 60_000
 export const IDLE_DISCONNECT_MS = 4 * 60_000
 export const MAX_PENDING_WORK_EXTENSION_MS = 2 * 60_000
-const INPUT_TRANSCRIPTION_MODEL = 'gpt-4o-mini-transcribe'
-// Tuned conservatively for a laptop microphone. These are operational knobs,
-// not universal constants: retain genuine barge-in while rejecting more room
-// noise than the Realtime defaults.
-const SERVER_TURN_DETECTION = {
-  type: 'server_vad',
-  threshold: 0.7,
-  prefix_padding_ms: 300,
-  silence_duration_ms: 650,
-  create_response: true,
-  interrupt_response: true
-} as const
 const RESPONSE_BUDGETS = {
   confirmation: 192,
   searchResults: 512,
@@ -121,13 +118,6 @@ const MAX_NARRATED_FILENAME_LENGTH = 96
 /** How long a task tool call may wait for its turn's transcript to complete. */
 export const VOICE_TURN_WAIT_MS = 10_000
 const MAX_TRACKED_TURNS = 64
-export const LAPTOP_MIC_CONSTRAINTS = {
-  audio: {
-    echoCancellation: true,
-    noiseSuppression: true,
-    autoGainControl: true
-  }
-} as const
 const LONG_FORM_CUE = /\b(?:explain in detail|in detail|detailed|article|story|summari[sz]e (?:this|the) (?:page|article|screen)|walk me through|step by step)\b/i
 let nextRealtimeSessionGeneration = 0
 
@@ -322,10 +312,8 @@ const TOOL_DEFINITIONS = [
 ]
 
 export class RealtimeClient {
-  private dataChannel: RTCDataChannel | undefined
-  private peerConnection: RTCPeerConnection | undefined
-  private localAudio: MediaStream | undefined
-  private remoteAudio: HTMLAudioElement | undefined
+  /** The one realtime transport of the current session, whichever vendor it is. */
+  private provider: RealtimeVoiceProvider | undefined
   private currentCapture: CaptureResult | undefined
   private currentExplanation: Explanation | undefined
   private textBuffer = ''
@@ -346,7 +334,7 @@ export class RealtimeClient {
   private deferredDisconnectReason: 'idle' | 'collapsed' | undefined
   private deferredDisconnectDeadline: number | undefined
   private activeGeneration: number | undefined
-  private dataChannelGeneration: number | undefined
+  private providerGeneration: number | undefined
   private lastSentInstructions: string | undefined
   /** The one photo the user approved for this session, if any. */
   private selectedPhoto: { resultId: string; name: string } | undefined
@@ -384,32 +372,59 @@ export class RealtimeClient {
     }
 
     const generation = ++nextRealtimeSessionGeneration
-    if (credential.mode === 'scripted') {
-      const createChannel = this.callbacks.createScriptedChannel
-      if (!createChannel) {
-        throw new Error('The scripted voice harness is not available in this view.')
-      }
-      this.activeGeneration = generation
-      try {
-        await this.connectScripted(createChannel(), generation)
-      } catch (error) {
-        this.disconnect()
-        throw error
-      }
-      return
-    }
-
-    if (!credential.token) {
-      throw new Error('Lumi received an incomplete Realtime credential.')
-    }
-
+    const provider = this.createProvider(credential)
     this.activeGeneration = generation
     try {
-      await this.connectLive(credential.token, generation)
+      await this.startProvider(provider, generation)
     } catch (error) {
       this.disconnect()
       throw error
     }
+  }
+
+  /** Chooses the transport. The only place a vendor is named. */
+  private createProvider(credential: RealtimeSessionCredential): RealtimeVoiceProvider {
+    const scripted = credential.mode === 'scripted'
+    if (credential.provider === 'gemini') {
+      const create = this.callbacks.createGeminiProvider
+      if (!create) throw new Error('Gemini Live is not available in this view.')
+      return create({ scripted })
+    }
+    if (scripted) {
+      const createChannel = this.callbacks.createScriptedChannel
+      if (!createChannel) throw new Error('The scripted voice harness is not available in this view.')
+      return OpenAIRealtimeProvider.scripted(createChannel())
+    }
+    if (!credential.token) {
+      throw new Error('Lumi received an incomplete Realtime credential.')
+    }
+    return OpenAIRealtimeProvider.live(credential.token)
+  }
+
+  /** Event handlers bound to one session generation and one provider. */
+  private handlersFor(provider: RealtimeVoiceProvider, generation: number): ProviderHandlers {
+    return {
+      onEvent: (event) => {
+        if (this.provider === provider) this.handleProviderEvents([event], generation)
+      },
+      onFailure: () => {
+        if (this.provider === provider) this.failLiveConnection(generation)
+      }
+    }
+  }
+
+  private async startProvider(provider: RealtimeVoiceProvider, generation: number): Promise<void> {
+    this.mode = 'live'
+    this.provider = provider
+    this.providerGeneration = generation
+    await provider.connect(this.handlersFor(provider, generation))
+    if (this.provider !== provider || this.activeGeneration !== generation) {
+      throw new Error('The Realtime session was replaced before its event channel opened.')
+    }
+    this.connected = true
+    this.configureLiveSession()
+    this.touchActivity()
+    this.callbacks.onState('listening')
   }
 
   setApprovedRoots(roots: ApprovedDocumentRoot[]): void {
@@ -432,7 +447,7 @@ export class RealtimeClient {
   isServerCallActive(serverCall: RealtimeServerCall): boolean {
     return this.isServerCallCurrent(serverCall) &&
       this.pendingCallGenerations.get(serverCall.callId) === serverCall.generation &&
-      this.dataChannel?.readyState === 'open'
+      this.provider?.isOpen() === true
   }
 
   /** Starts the one absolute collapse deadline; repeated calls never extend it. */
@@ -464,16 +479,9 @@ export class RealtimeClient {
    */
   setListening(enabled: boolean): void {
     this.listening = enabled
-    this.localAudio?.getAudioTracks().forEach((track) => {
-      track.enabled = enabled
-    })
-
-    if (this.mode === 'live' && this.dataChannel?.readyState === 'open') {
-      this.sendEvent({
-        type: 'session.update',
-        session: { type: 'realtime', audio: { input: { turn_detection: enabled ? SERVER_TURN_DETECTION : null } } }
-      })
-    }
+    // The provider mutes its microphone and stops turn detection; collapsing
+    // must never leave an open microphone behind the orb.
+    this.provider?.setListening(enabled)
   }
 
   isListening(): boolean {
@@ -532,27 +540,17 @@ export class RealtimeClient {
     }
 
     if (this.responseActive) {
-      this.sendEvent({ type: 'response.cancel' })
+      this.transport().cancelResponse()
       this.responseActive = false
     }
 
     this.updateLiveSessionInstructions()
     this.latestUserTurnId = undefined
-    this.sendEvent({
-      type: 'conversation.item.create',
-      item: {
-        type: 'message',
-        role: 'user',
-        content: [
-          { type: 'input_text', text: `${request} The user selected this one photo, named ${image.name}, for you to look at.` },
-          { type: 'input_image', image_url: image.dataUrl, detail: 'low' }
-        ]
-      }
+    this.transport().sendContext({
+      text: `${request} The user selected this one photo, named ${image.name}, for you to look at.`,
+      imageDataUrl: image.dataUrl
     })
-    this.sendEvent({
-      type: 'response.create',
-      response: { output_modalities: ['audio'], max_output_tokens: pickResponseBudget('long-form') }
-    })
+    this.transport().requestResponse({ maxOutputTokens: pickResponseBudget('long-form') })
   }
 
   hasSelectedPhoto(): boolean {
@@ -613,7 +611,7 @@ export class RealtimeClient {
     }
 
     if (this.responseActive) {
-      this.sendEvent({ type: 'response.cancel' })
+      this.transport().cancelResponse()
       this.responseActive = false
     }
     this.callbacks.onState('thinking')
@@ -621,19 +619,8 @@ export class RealtimeClient {
     const itemId = createItemId()
     this.recordPendingTurn(itemId)
     this.recordCompletedTurn(itemId, trimmedRequest)
-    this.sendEvent({
-      type: 'conversation.item.create',
-      item: {
-        id: itemId,
-        type: 'message',
-        role: 'user',
-        content: [{ type: 'input_text', text: trimmedRequest }]
-      }
-    })
-    this.sendEvent({
-      type: 'response.create',
-      response: { output_modalities: ['audio'], max_output_tokens: pickResponseBudget('question', trimmedRequest) }
-    })
+    this.transport().sendUserText(itemId, trimmedRequest)
+    this.transport().requestResponse({ maxOutputTokens: pickResponseBudget('question', trimmedRequest) })
   }
 
   private handleMockUserRequest(request: string): void {
@@ -719,25 +706,14 @@ export class RealtimeClient {
       return
     }
 
-    if (this.responseActive) {
-      this.sendEvent({ type: 'response.cancel' })
-      this.responseActive = false
-    }
-
     try {
+      if (this.responseActive) {
+        this.transport().cancelResponse()
+        this.responseActive = false
+      }
       this.latestUserTurnId = undefined
-      this.sendEvent({
-        type: 'conversation.item.create',
-        item: {
-          type: 'message',
-          role: 'user',
-          content: [{ type: 'input_text', text: screenReviewText(review) }]
-        }
-      })
-      this.sendEvent({
-        type: 'response.create',
-        response: { output_modalities: ['audio'], max_output_tokens: pickResponseBudget('long-form') }
-      })
+      this.transport().sendContext({ text: screenReviewText(review) })
+      this.transport().requestResponse({ maxOutputTokens: pickResponseBudget('long-form') })
       this.responseActive = true
     } catch (error) {
       this.callbacks.onError(error instanceof Error ? error.message : 'Could not share the validated screen review with Realtime.')
@@ -760,25 +736,14 @@ export class RealtimeClient {
     }
 
     this.touchActivity()
-    if (this.responseActive) {
-      this.sendEvent({ type: 'response.cancel' })
-      this.responseActive = false
-    }
-
     try {
+      if (this.responseActive) {
+        this.transport().cancelResponse()
+        this.responseActive = false
+      }
       this.latestUserTurnId = undefined
-      this.sendEvent({
-        type: 'conversation.item.create',
-        item: {
-          type: 'message',
-          role: 'user',
-          content: [{ type: 'input_text', text: scamCheckText(assessment) }]
-        }
-      })
-      this.sendEvent({
-        type: 'response.create',
-        response: { output_modalities: ['audio'], max_output_tokens: pickResponseBudget('question') }
-      })
+      this.transport().sendContext({ text: scamCheckText(assessment) })
+      this.transport().requestResponse({ maxOutputTokens: pickResponseBudget('question') })
       this.responseActive = true
     } catch {
       // A narration failure must never suggest the assessment itself failed;
@@ -841,7 +806,7 @@ export class RealtimeClient {
   disconnect(): number | undefined {
     const endedGeneration = this.activeGeneration
     this.activeGeneration = undefined
-    this.dataChannelGeneration = undefined
+    this.providerGeneration = undefined
     this.clearIdleTimer()
     this.clearCollapseTimer()
     this.clearDeferredDisconnect()
@@ -868,137 +833,15 @@ export class RealtimeClient {
     this.userTurns.clear()
     this.responseTurns.clear()
     this.latestUserTurnId = undefined
-    this.dataChannel?.close()
-    this.peerConnection?.close()
-    this.localAudio?.getTracks().forEach((track) => track.stop())
-    this.remoteAudio?.remove()
+    const provider = this.provider
+    this.provider = undefined
+    provider?.close()
     window.speechSynthesis?.cancel()
-    this.dataChannel = undefined
-    this.peerConnection = undefined
-    this.localAudio = undefined
-    this.remoteAudio = undefined
     return endedGeneration
   }
 
   completeTelegramAttachmentRequest(serverCall: RealtimeServerCall, result: ToolExecutionResult): void {
     this.sendFunctionCallOutput(serverCall, result)
-  }
-
-  private async connectLive(token: string, generation: number): Promise<void> {
-    this.localAudio = await navigator.mediaDevices.getUserMedia(LAPTOP_MIC_CONSTRAINTS)
-    this.peerConnection = new RTCPeerConnection()
-    this.remoteAudio = document.createElement('audio')
-    this.remoteAudio.autoplay = true
-    this.remoteAudio.hidden = true
-    document.body.append(this.remoteAudio)
-    this.peerConnection.ontrack = (event) => {
-      if (this.remoteAudio && event.streams[0]) {
-        this.remoteAudio.srcObject = event.streams[0]
-      }
-    }
-    const peerConnection = this.peerConnection
-    this.peerConnection.onconnectionstatechange = () => {
-      if (this.peerConnection === peerConnection && this.activeGeneration === generation && peerConnection.connectionState === 'failed') {
-        this.failLiveConnection(generation)
-      }
-    }
-
-    const track = this.localAudio.getAudioTracks()[0]
-    if (!track) {
-      throw new Error('Microphone access did not return an audio track.')
-    }
-    track.enabled = this.listening
-    this.peerConnection.addTrack(track, this.localAudio)
-
-    this.dataChannel = this.peerConnection.createDataChannel('oai-events')
-    const dataChannel = this.dataChannel
-    this.dataChannelGeneration = generation
-    dataChannel.onmessage = (event) => {
-      if (this.dataChannel === dataChannel) {
-        this.handleServerEvent(event.data, generation)
-      }
-    }
-    const opened = this.waitForDataChannel(dataChannel, generation)
-    void opened.catch(() => undefined)
-
-    const offer = await this.peerConnection.createOffer()
-    if (!offer.sdp) {
-      throw new Error('Could not create a WebRTC session description.')
-    }
-    await this.peerConnection.setLocalDescription(offer)
-    let response: Response
-    try {
-      response = await fetchWithTimeout('https://api.openai.com/v1/realtime/calls', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/sdp'
-        },
-        body: offer.sdp
-      })
-    } catch (error) {
-      if (isTimeoutError(error)) {
-        throw new Error('Realtime connection timed out while negotiating audio.')
-      }
-      throw error
-    }
-    if (!response.ok) {
-      throw new Error(`Realtime WebRTC connection failed (status ${response.status}).`)
-    }
-
-    await this.peerConnection.setRemoteDescription({ type: 'answer', sdp: await response.text() })
-    await opened
-  }
-
-  /**
-   * Connects to an in-process scripted server that speaks the same event
-   * protocol as the Realtime data channel. There is no audio and no network.
-   */
-  private async connectScripted(channel: ScriptedRealtimeChannel, generation: number): Promise<void> {
-    this.mode = 'live'
-    const dataChannel = channel as unknown as RTCDataChannel
-    this.dataChannel = dataChannel
-    this.dataChannelGeneration = generation
-    channel.onmessage = (event) => {
-      if (this.dataChannel === dataChannel) {
-        this.handleServerEvent(event.data, generation)
-      }
-    }
-    const opened = this.waitForDataChannel(dataChannel, generation)
-    channel.open()
-    await opened
-  }
-
-  private waitForDataChannel(channel: RTCDataChannel, generation: number): Promise<void> {
-    return new Promise<void>((resolve, reject) => {
-      const timeout = window.setTimeout(() => reject(new Error('Timed out while opening the Realtime event channel.')), 15_000)
-      channel.onopen = () => {
-        window.clearTimeout(timeout)
-        try {
-          if (this.dataChannel !== channel || this.activeGeneration !== generation) {
-            reject(new Error('The Realtime session was replaced before its event channel opened.'))
-            return
-          }
-          this.connected = true
-          this.configureLiveSession()
-          this.touchActivity()
-          this.callbacks.onState('listening')
-          resolve()
-        } catch (error) {
-          reject(error)
-        }
-      }
-      channel.onerror = () => {
-        window.clearTimeout(timeout)
-        reject(new Error('The Realtime event channel could not be opened.'))
-      }
-      channel.onclose = () => {
-        window.clearTimeout(timeout)
-        if (!this.connected) {
-          reject(new Error('The Realtime event channel closed before it opened.'))
-        }
-      }
-    })
   }
 
   private configureLiveSession(): void {
@@ -1007,14 +850,19 @@ export class RealtimeClient {
   }
 
   private requestGreeting(): void {
-    this.sendEvent({
-      type: 'response.create',
-      response: {
-        instructions: 'Greet the user briefly, then invite them to capture a screen or ask a question.',
-        output_modalities: ['audio'],
-        max_output_tokens: pickResponseBudget('confirmation')
-      }
+    this.transport().requestResponse({
+      instructions: 'Greet the user briefly, then invite them to capture a screen or ask a question.',
+      maxOutputTokens: pickResponseBudget('confirmation')
     })
+  }
+
+  /** The open transport, or an error when there is none. */
+  private transport(): RealtimeVoiceProvider {
+    const provider = this.provider
+    if (!provider?.isOpen()) {
+      throw new Error('The Realtime event channel is not ready.')
+    }
+    return provider
   }
 
   /**
@@ -1039,15 +887,12 @@ export class RealtimeClient {
   }
 
   private updateLiveSessionInstructions(): void {
-    if (this.mode === 'live' && this.dataChannel?.readyState === 'open') {
+    if (this.mode === 'live' && this.provider?.isOpen()) {
       const instructions = this.sessionInstructions()
       if (instructions === this.lastSentInstructions) {
         return
       }
-      this.sendEvent({
-        type: 'session.update',
-        session: { type: 'realtime', instructions }
-      })
+      this.provider.updateInstructions(instructions)
       this.lastSentInstructions = instructions
     }
   }
@@ -1066,35 +911,15 @@ export class RealtimeClient {
 
   private sendSessionUpdate(): void {
     const instructions = this.sessionInstructions()
-    this.sendEvent({
-      type: 'session.update',
-      session: {
-        type: 'realtime',
-        instructions,
-        tools: TOOL_DEFINITIONS,
-        tool_choice: 'auto',
-        // VAD-created spoken responses have no response.create override, so
-        // this ceiling is intentionally high enough for legitimate long-form audio.
-        max_output_tokens: 1024,
-        audio: {
-          input: {
-            noise_reduction: { type: 'far_field' },
-            // Completed transcripts feed the trusted main-process intent
-            // tracker, so spoken and typed requests get identical policy.
-            transcription: { model: INPUT_TRANSCRIPTION_MODEL },
-            turn_detection: this.listening ? SERVER_TURN_DETECTION : null
-          }
-        }
-      }
+    this.transport().configure({
+      instructions,
+      tools: TOOL_DEFINITIONS,
+      listening: this.listening,
+      // VAD-created spoken responses have no per-response override, so this
+      // ceiling is intentionally high enough for legitimate long-form audio.
+      maxOutputTokens: 1024
     })
     this.lastSentInstructions = instructions
-  }
-
-  private sendEvent(event: unknown): void {
-    if (this.dataChannel?.readyState !== 'open') {
-      throw new Error('The Realtime event channel is not ready.')
-    }
-    this.dataChannel.send(JSON.stringify(event))
   }
 
   private sendFunctionCallOutput(
@@ -1140,22 +965,11 @@ export class RealtimeClient {
     this.pendingCallGenerations.delete(serverCall.callId)
     this.touchActivity()
     try {
-      this.sendEvent({
-        type: 'conversation.item.create',
-        item: {
-          type: 'function_call_output',
-          call_id: serverCall.callId,
-          output
-        }
-      })
+      this.transport().sendToolResult(serverCall.callId, output)
       if (createResponse) {
-        this.sendEvent({
-          type: 'response.create',
-          response: {
-            output_modalities: ['audio'],
-            max_output_tokens: pickResponseBudget(responseKind),
-            ...(instructions ? { instructions } : {})
-          }
+        this.transport().requestResponse({
+          maxOutputTokens: pickResponseBudget(responseKind),
+          ...(instructions ? { instructions } : {})
         })
         this.responseActive = true
       }
@@ -1164,119 +978,79 @@ export class RealtimeClient {
     }
   }
 
-  private handleServerEvent(serializedEvent: unknown, generation: number): void {
-    if (typeof serializedEvent !== 'string' || this.activeGeneration !== generation || this.dataChannelGeneration !== generation) {
-      return
-    }
-
-    let event: Record<string, unknown>
-    try {
-      const parsed: unknown = JSON.parse(serializedEvent)
-      if (!isRecord(parsed)) {
-        return
-      }
-      event = parsed
-    } catch {
-      return
-    }
-
-    const type = typeof event.type === 'string' ? event.type : ''
-    if (type === 'error') {
-      const message = isRecord(event.error) && typeof event.error.message === 'string' ? event.error.message : 'Realtime returned an error.'
-      this.callbacks.onError(message)
-      this.callbacks.onState('error')
-      return
-    }
-
-    if (type === 'session.updated') {
-      if (this.awaitingInitialSessionUpdate) {
-        this.awaitingInitialSessionUpdate = false
-        if (this.greetAfterInitialSessionUpdate && !this.responseActive) {
-          this.requestGreeting()
-        }
-      }
-      return
-    }
-
-    if (type === 'input_audio_buffer.speech_started') {
-      this.responseActive = true
-      this.touchActivity()
-      return
-    }
-
-    if (type === 'input_audio_buffer.committed') {
-      // The user's spoken turn now has an item id; its transcript follows.
-      if (typeof event.item_id === 'string') this.recordPendingTurn(event.item_id)
-      return
-    }
-
-    if (type === 'conversation.item.input_audio_transcription.delta') {
-      // Interim text is unstable and never drives intent or durable work.
-      return
-    }
-
-    if (type === 'conversation.item.input_audio_transcription.failed') {
-      if (typeof event.item_id === 'string') this.failTurn(event.item_id)
-      return
-    }
-
-    if (type === 'conversation.item.input_audio_transcription.completed') {
-      const transcript = typeof event.transcript === 'string' ? event.transcript : ''
-      if (typeof event.item_id === 'string') this.recordCompletedTurn(event.item_id, transcript)
-      this.handleUserTranscript(transcript)
-      return
-    }
-
-    if (type === 'response.created') {
-      this.responseActive = true
-      this.textBuffer = ''
-      const responseId = isRecord(event.response) && typeof event.response.id === 'string' ? event.response.id : undefined
-      if (responseId) {
-        this.responseTurns.set(responseId, this.latestUserTurnId)
-        trimMap(this.responseTurns, MAX_TRACKED_TURNS)
-      }
-      return
-    }
-
-    if (type === 'response.output_text.delta' || type === 'response.text.delta' || type === 'response.output_audio_transcript.delta') {
-      const delta = typeof event.delta === 'string' ? event.delta : ''
-      if (delta) {
-        this.textBuffer += delta
-      }
-      return
-    }
-
-    if (type === 'response.function_call_arguments.done') {
-      this.handleToolCall(event, generation, typeof event.response_id === 'string' ? event.response_id : undefined)
-      return
-    }
-
-    if (type === 'response.done') {
-      this.handleResponseDone(event, generation)
+  /** Lumi events from the current provider, bound to one session generation. */
+  private handleProviderEvents(events: readonly VoiceProviderEvent[], generation: number): void {
+    for (const event of events) {
+      if (this.activeGeneration !== generation || this.providerGeneration !== generation) return
+      this.handleProviderEvent(event, generation)
     }
   }
 
-  private handleResponseDone(event: Record<string, unknown>, generation: number): void {
+  private handleProviderEvent(event: VoiceProviderEvent, generation: number): void {
+    switch (event.type) {
+      case 'error':
+        this.callbacks.onError(event.message)
+        this.callbacks.onState('error')
+        return
+      case 'ready':
+        if (this.awaitingInitialSessionUpdate) {
+          this.awaitingInitialSessionUpdate = false
+          if (this.greetAfterInitialSessionUpdate && !this.responseActive) {
+            this.requestGreeting()
+          }
+        }
+        return
+      case 'speech_started':
+        this.responseActive = true
+        this.touchActivity()
+        return
+      case 'interrupted':
+        // The user talked over Lumi. Only the spoken answer stops; durable
+        // work in flight continues and shows in the task panel.
+        this.responseActive = false
+        this.touchActivity()
+        return
+      case 'turn_committed':
+        // The user's spoken turn now has an id; its transcript follows.
+        this.recordPendingTurn(event.turnId)
+        return
+      case 'transcript_failed':
+        this.failTurn(event.turnId)
+        return
+      case 'transcript_completed':
+        if (event.turnId) this.recordCompletedTurn(event.turnId, event.text)
+        this.handleUserTranscript(event.text)
+        return
+      case 'response_started':
+        this.responseActive = true
+        this.textBuffer = ''
+        if (event.responseId) {
+          this.responseTurns.set(event.responseId, this.latestUserTurnId)
+          trimMap(this.responseTurns, MAX_TRACKED_TURNS)
+        }
+        return
+      case 'response_text':
+        this.textBuffer += event.delta
+        return
+      case 'tool_call':
+        this.handleToolCall(event.call, generation)
+        return
+      case 'response_done':
+        this.handleResponseDone(event, generation)
+    }
+  }
+
+  private handleResponseDone(event: Extract<VoiceProviderEvent, { type: 'response_done' }>, generation: number): void {
     if (this.activeGeneration !== generation) {
       return
     }
     this.responseActive = false
     this.touchActivity()
-    if (!isRecord(event.response)) {
-      return
+    if (event.text) {
+      this.textBuffer = this.textBuffer || event.text
     }
-
-    const response = event.response
-    const responseText = extractResponseText(response)
-    if (responseText) {
-      this.textBuffer = this.textBuffer || responseText
-    }
-    const responseId = typeof response.id === 'string' ? response.id : undefined
-    const output = Array.isArray(response.output) ? response.output : []
-    for (const item of output) {
-      if (isRecord(item) && item.type === 'function_call') {
-        this.handleToolCall(item, generation, responseId)
-      }
+    for (const call of event.toolCalls) {
+      this.handleToolCall(call, generation)
     }
 
     if (this.currentCapture && this.textBuffer.trim()) {
@@ -1318,12 +1092,11 @@ export class RealtimeClient {
       .then(() => undefined)
   }
 
-  private handleToolCall(event: Record<string, unknown>, generation: number, responseId?: string): void {
+  private handleToolCall(call: ProviderToolCall, generation: number): void {
     if (this.activeGeneration !== generation) {
       return
     }
-    const rawName = typeof event.name === 'string' ? event.name : ''
-    const callId = typeof event.call_id === 'string' ? event.call_id : typeof event.callId === 'string' ? event.callId : ''
+    const { name: rawName, callId, responseId } = call
     const serverCall = { callId, generation }
     const callKey = serverCallKey(serverCall)
     if (!rawName || !callId || this.completedCallIds.has(callKey)) {
@@ -1346,13 +1119,13 @@ export class RealtimeClient {
       const turnId = responseId !== undefined && this.responseTurns.has(responseId)
         ? this.responseTurns.get(responseId)
         : this.latestUserTurnId
-      this.requestVoiceTask(serverCall, rawName, typeof event.arguments === 'string' ? event.arguments : '', turnId)
+      this.requestVoiceTask(serverCall, rawName, call.argumentsJson, turnId)
       return
     }
 
     if (rawName === TELEGRAM_RECIPIENT_SEARCH_TOOL) {
       try {
-        const parsed = JSON.parse(typeof event.arguments === 'string' ? event.arguments : '') as unknown
+        const parsed = JSON.parse(call.argumentsJson) as unknown
         if (!isRecord(parsed)) {
           throw new Error('Realtime supplied non-object recipient search details.')
         }
@@ -1371,7 +1144,7 @@ export class RealtimeClient {
 
     if (rawName === TELEGRAM_ATTACHMENT_TOOL) {
       try {
-        const parsed = JSON.parse(typeof event.arguments === 'string' ? event.arguments : '') as unknown
+        const parsed = JSON.parse(call.argumentsJson) as unknown
         if (!isRecord(parsed)) throw new Error('Realtime supplied non-object attachment details.')
         if (!this.callbacks.onTelegramAttachmentRequest) throw new Error('Telegram attachment sending is unavailable in this companion view.')
         const fileResultId = this.resolveAttachmentReference(parsed.attachment)
@@ -1393,9 +1166,8 @@ export class RealtimeClient {
       this.finishDeferredDisconnectIfIdle()
       return
     }
-    const argumentsJson = typeof event.arguments === 'string' ? event.arguments : ''
     try {
-      const parsed = JSON.parse(argumentsJson) as unknown
+      const parsed = JSON.parse(call.argumentsJson) as unknown
       if (!isRecord(parsed)) {
         throw new Error('Realtime supplied non-object function arguments.')
       }
@@ -1736,8 +1508,8 @@ export class RealtimeClient {
   private isServerCallCurrent(serverCall: RealtimeServerCall): boolean {
     return this.mode === 'live' &&
       this.activeGeneration === serverCall.generation &&
-      this.dataChannelGeneration === serverCall.generation &&
-      this.dataChannel?.readyState === 'open'
+      this.providerGeneration === serverCall.generation &&
+      this.provider?.isOpen() === true
   }
 
   private clearIdleTimer(): void {
@@ -2011,34 +1783,6 @@ function tomorrowAtNine(): Date {
   return dueAt
 }
 
-function extractResponseText(response: Record<string, unknown>): string {
-  const output = Array.isArray(response.output) ? response.output : []
-  const parts: string[] = []
-  for (const item of output) {
-    if (!isRecord(item)) {
-      continue
-    }
-    if (typeof item.transcript === 'string') {
-      parts.push(item.transcript)
-    }
-    if (!Array.isArray(item.content)) {
-      continue
-    }
-    for (const content of item.content) {
-      if (!isRecord(content)) {
-        continue
-      }
-      if (typeof content.text === 'string') {
-        parts.push(content.text)
-      }
-      if (typeof content.transcript === 'string') {
-        parts.push(content.transcript)
-      }
-    }
-  }
-  return parts.join(' ').trim()
-}
-
 function explanationFromScreenReview(review: ScreenReasoningSummary): Explanation {
   return {
     summary: review.summary,
@@ -2099,18 +1843,4 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds))
-}
-
-async function fetchWithTimeout(input: RequestInfo | URL, init: RequestInit): Promise<Response> {
-  const controller = new AbortController()
-  const timeout = window.setTimeout(() => controller.abort(), 10_000)
-  try {
-    return await fetch(input, { ...init, signal: controller.signal })
-  } finally {
-    window.clearTimeout(timeout)
-  }
-}
-
-function isTimeoutError(error: unknown): boolean {
-  return typeof error === 'object' && error !== null && 'name' in error && error.name === 'AbortError'
 }

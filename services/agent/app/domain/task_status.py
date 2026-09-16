@@ -35,6 +35,9 @@ class TaskEventType(StrEnum):
     #: A read-only search finished; the payload holds the typed, filtered slots
     #: the user may now choose from.
     TASK_SEARCH_COMPLETED = "task.search_completed"
+    #: A read-only clinic-information lookup finished; the payload holds the
+    #: typed public profile facts that were read.
+    TASK_INFO_LOOKUP_COMPLETED = "task.info_lookup_completed"
     ACTION_PROPOSED = "action.proposed"
     ACTION_APPROVAL_REQUESTED = "action.approval_requested"
     ACTION_APPROVED = "action.approved"

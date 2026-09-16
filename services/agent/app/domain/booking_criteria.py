@@ -17,7 +17,7 @@ unsearchable rather than silently broader.
 """
 
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Self
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
@@ -26,6 +26,10 @@ from app.domain.booking import BookingProposal
 
 SPECIALTY_PATTERN = r"^[A-Za-z][A-Za-z .'-]{0,59}$"
 TIME_PATTERN = r"^(?:[01]\d|2[0-3]):[0-5]\d$"
+DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}$"
+#: A date window is a scheduling phrase ("this weekend"), never a search of the
+#: whole calendar. Longer windows are refused rather than silently widened.
+MAX_DATE_SPAN_DAYS = 14
 DAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 _SPECIALTY = re.compile(SPECIALTY_PATTERN)
 
@@ -38,7 +42,10 @@ CRITERIA_KEYS = (
     "latest_time",
     "max_price",
     "max_price_currency",
+    "date_from",
+    "date_to",
 )
+_BOUND_KEYS = ("earliest_time", "latest_time", "max_price", "max_price_currency", "date_from", "date_to")
 
 
 class InvalidBookingCriteriaError(ValueError):
@@ -54,6 +61,11 @@ class BookingCriteria(BaseModel):
     latest_time: str | None = Field(default=None, pattern=TIME_PATTERN)
     max_price: int | None = Field(default=None, ge=0, le=10_000_000, strict=True)
     max_price_currency: str | None = Field(default=None, pattern=r"^[A-Z]{3}$")
+    #: Inclusive calendar dates in the *site's* own offset, resolved from a
+    #: relative phrase ("tomorrow", "this weekend") by the trusted desktop
+    #: layer. The model never supplies these directly.
+    date_from: str | None = Field(default=None, pattern=DATE_PATTERN)
+    date_to: str | None = Field(default=None, pattern=DATE_PATTERN)
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
@@ -69,6 +81,20 @@ class BookingCriteria(BaseModel):
             and self.earliest_time > self.latest_time
         ):
             raise ValueError("earliest_time must not be after latest_time")
+        if (self.date_from is None) != (self.date_to is None):
+            raise ValueError("a date window needs both ends")
+        if self.date_from is not None and self.date_to is not None:
+            try:
+                start = date.fromisoformat(self.date_from)
+                end = date.fromisoformat(self.date_to)
+            except ValueError:
+                raise ValueError("date bounds must be real calendar dates") from None
+            if start > end:
+                raise ValueError("date_from must not be after date_to")
+            if (end - start).days >= MAX_DATE_SPAN_DAYS:
+                raise ValueError("a date window may span at most two weeks")
+            if self.day and start == end and DAYS[start.weekday()] != self.day:
+                raise ValueError("day does not match the date")
         return self
 
     # ---- persistence ------------------------------------------------------
@@ -82,11 +108,7 @@ class BookingCriteria(BaseModel):
             specialty = ""
         if not isinstance(day, str) or (day and day not in DAYS):
             day = ""
-        bounds = {
-            key: request[key]
-            for key in ("earliest_time", "latest_time", "max_price", "max_price_currency")
-            if key in request
-        }
+        bounds = {key: request[key] for key in _BOUND_KEYS if key in request}
         try:
             return cls.model_validate({"specialty": specialty, "day": day, **bounds})
         except ValidationError:
@@ -99,7 +121,7 @@ class BookingCriteria(BaseModel):
             fields["specialty"] = self.specialty
         if self.day:
             fields["day"] = self.day
-        for key in ("earliest_time", "latest_time", "max_price", "max_price_currency"):
+        for key in _BOUND_KEYS:
             value = getattr(self, key)
             if value is not None:
                 fields[key] = value
@@ -121,6 +143,11 @@ class BookingCriteria(BaseModel):
         """
         if time.tzinfo is None:
             return False
+        if self.date_from is not None and self.date_to is not None:
+            # The date the clinic itself states, in its own offset.
+            local_date = time.date().isoformat()
+            if not self.date_from <= local_date <= self.date_to:
+                return False
         clock = f"{time.hour:02d}:{time.minute:02d}"
         if self.earliest_time is not None and clock < self.earliest_time:
             return False

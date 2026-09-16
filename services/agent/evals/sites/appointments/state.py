@@ -16,8 +16,8 @@ Two deliberate design choices:
 """
 
 from collections import Counter
-from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass, field, replace
+from datetime import UTC, date, datetime, timedelta
 from typing import Any, Literal
 
 #: Fixed instant the fixture counts from, so booking timestamps are reproducible
@@ -77,6 +77,80 @@ SLOTS: tuple[Slot, ...] = (
 
 SLOTS_BY_ID: dict[str, Slot] = {slot.slot_id: slot for slot in SLOTS}
 
+#: The Saturday the pinned catalogue is on.
+CATALOGUE_SATURDAY = date(2026, 9, 19)
+
+
+def anchored_catalogue(today: date) -> tuple[Slot, ...]:
+    """The same catalogue moved to the first Saturday on or after `today`.
+
+    Demo mode only (the packaged app's bundled clinic site): a demo run next
+    month still has "this Saturday" appointments. Tests use the pinned
+    catalogue above and never call this.
+    """
+    saturday = today + timedelta(days=(5 - today.weekday()) % 7)
+    shift = saturday - CATALOGUE_SATURDAY
+    return tuple(
+        replace(slot, time=(datetime.fromisoformat(slot.time) + shift).isoformat())
+        for slot in SLOTS
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class DoctorProfile:
+    """Public clinic information for one doctor: the second, read-only workflow."""
+
+    doctor_id: str
+    doctor: str
+    specialty: str
+    clinic: str
+    address: str
+    hours: str
+    consultation_fee: int
+    currency: str
+    languages: tuple[str, ...]
+    walk_ins: bool
+
+
+PROFILES: tuple[DoctorProfile, ...] = (
+    DoctorProfile(
+        doctor_id="dr-a",
+        doctor="Dr A",
+        specialty="Dermatology",
+        clinic="Lakeview Skin Clinic",
+        address="12 Lake Road, Hyderabad",
+        hours="Mon-Sat 10:00-20:00",
+        consultation_fee=800,
+        currency="INR",
+        languages=("English", "Telugu", "Hindi"),
+        walk_ins=False,
+    ),
+    DoctorProfile(
+        doctor_id="dr-b",
+        doctor="Dr B",
+        specialty="Dermatology",
+        clinic="Banjara Dermatology Centre",
+        address="4 Hill Street, Hyderabad",
+        hours="Tue-Sun 11:00-21:00",
+        consultation_fee=950,
+        currency="INR",
+        languages=("English", "Hindi"),
+        walk_ins=True,
+    ),
+    DoctorProfile(
+        doctor_id="dr-c",
+        doctor="Dr C",
+        specialty="Dentistry",
+        clinic="Smile Dental Care",
+        address="9 Station Road, Secunderabad",
+        hours="Mon-Sat 09:00-17:00",
+        consultation_fee=600,
+        currency="INR",
+        languages=("English", "Telugu"),
+        walk_ins=True,
+    ),
+)
+
 #: Text the fixture can be told to render inside otherwise ordinary page copy.
 #: It is page content, which means it is data. If it ever changes what Lumi does,
 #: the trust boundary is broken.
@@ -129,12 +203,17 @@ class Faults:
     #: Number of further slot-page views that re-render with a changed price, to
     #: exercise re-observation after the page moves under the worker.
     stale_page_reloads: int = 0
+    #: Doctor id -> the consultation fee the profile page now states.
+    fee_overrides: dict[str, int] = field(default_factory=dict)
 
 
 class AppointmentStore:
     """In-memory authoritative state. One process, one store, no persistence."""
 
-    def __init__(self) -> None:
+    def __init__(self, catalogue: tuple[Slot, ...] = SLOTS) -> None:
+        self.catalogue = catalogue
+        self.catalogue_by_id = {slot.slot_id: slot for slot in catalogue}
+        self._profile_views = 0
         self._bookings: list[Booking] = []
         self._submissions = 0
         self._submissions_by_reference: Counter[str] = Counter()
@@ -156,7 +235,13 @@ class AppointmentStore:
         return self._faults.price_overrides.get(slot.slot_id, slot.price)
 
     def slot_is_available(self, slot_id: str) -> bool:
-        return slot_id in SLOTS_BY_ID and slot_id not in self._faults.removed_slots
+        return slot_id in self.catalogue_by_id and slot_id not in self._faults.removed_slots
+
+    def fee_of(self, profile: DoctorProfile) -> int:
+        return self._faults.fee_overrides.get(profile.doctor_id, profile.consultation_fee)
+
+    def record_profile_view(self) -> None:
+        self._profile_views += 1
 
     def record_slot_page_view(self, slot_id: str) -> int:
         """Count views so a fault can change the page between two observations."""
@@ -231,6 +316,7 @@ class AppointmentStore:
         self._rejected_submissions = 0
         self._lookups = 0
         self._slot_page_views.clear()
+        self._profile_views = 0
         self._faults = Faults()
 
     def snapshot(self) -> dict[str, Any]:
@@ -253,4 +339,5 @@ class AppointmentStore:
             "submissions_by_reference": dict(self._submissions_by_reference),
             "rejected_submissions": self._rejected_submissions,
             "lookups": self._lookups,
+            "profile_views": self._profile_views,
         }

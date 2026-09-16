@@ -31,6 +31,8 @@ EXPECTED_OPERATIONS = {
     "prepare_booking",
     "commit_booking",
     "lookup_booking",
+    # Milestone 6: the read-only clinic-information workflow.
+    "read_doctor_profiles",
 }
 
 

@@ -15,6 +15,7 @@ import {
   type TerminalCallResult
 } from './file-search-controller'
 import { RealtimeClient, type RealtimeServerCall } from './realtime'
+import { OpenAIRealtimeProvider, decodeOpenAIEvent } from './voice/openai-realtime-provider'
 
 const SERVER_CALL: RealtimeServerCall = { callId: 'call-1', generation: 1 }
 
@@ -236,17 +237,19 @@ function flushAsyncWork(): Promise<void> {
 }
 
 function injectDataChannel(client: RealtimeClient, events: Array<Record<string, unknown>>): void {
-  ;(client as unknown as { dataChannel: Pick<RTCDataChannel, 'readyState' | 'send'> }).dataChannel = {
+  ;(client as unknown as { provider: OpenAIRealtimeProvider }).provider = OpenAIRealtimeProvider.attached({
     readyState: 'open',
-    send: (value: string) => { events.push(JSON.parse(value) as Record<string, unknown>) }
-  } as unknown as Pick<RTCDataChannel, 'readyState' | 'send'>
+    send: (value: string) => { events.push(JSON.parse(value) as Record<string, unknown>) },
+    close: () => undefined,
+    onopen: null, onmessage: null, onerror: null, onclose: null
+  })
   ;(client as unknown as { mode: 'live' | 'mock' }).mode = 'live'
   ;(client as unknown as { activeGeneration: number }).activeGeneration = 1
-  ;(client as unknown as { dataChannelGeneration: number }).dataChannelGeneration = 1
+  ;(client as unknown as { providerGeneration: number }).providerGeneration = 1
 }
 
 function callHandleServerEvent(client: RealtimeClient, event: unknown): void {
-  ;(client as unknown as { handleServerEvent: (serializedEvent: unknown, generation: number) => void }).handleServerEvent.call(client, event, 1)
+  ;(client as unknown as { handleProviderEvents: (events: unknown[], generation: number) => void }).handleProviderEvents.call(client, decodeOpenAIEvent(event), 1)
 }
 
 function functionCallOutputs(events: Array<Record<string, unknown>>): Array<Record<string, unknown>> {

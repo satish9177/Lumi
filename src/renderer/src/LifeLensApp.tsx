@@ -57,7 +57,9 @@ import {
   type RealtimeServerCall,
   type TelegramAttachmentCoordinationRequest
 } from './realtime'
-import { ScriptedRealtimeServer, installRealtimeHarness } from './realtime-scripted'
+import { ScriptedRealtimeServer, installGeminiHarness, installRealtimeHarness } from './realtime-scripted'
+import { GeminiLiveProvider } from './voice/gemini-live-provider'
+import { BrowserPcmAudio, SilentAudio } from './voice/pcm-audio'
 import type { AgentResult } from '../../shared/agent-contracts'
 import type { VoiceTaskCommand, VoiceTaskFocus, VoiceTaskOutcome } from '../../shared/voice-task-contracts'
 
@@ -476,6 +478,15 @@ export default function LifeLensApp() {
             const server = new ScriptedRealtimeServer()
             installRealtimeHarness(server, () => connectVoice())
             return server
+          },
+          createGeminiProvider: ({ scripted }) => {
+            const provider = new GeminiLiveProvider({
+              relay: window.lifeLens.voiceRelay,
+              audio: scripted ? new SilentAudio() : new BrowserPcmAudio(),
+              scripted
+            })
+            if (scripted) installGeminiHarness(provider, () => connectVoice())
+            return provider
           },
           onError: setError,
           onSessionEnded: (reason, generation) => {

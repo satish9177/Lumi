@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AgentResult } from '../../shared/agent-contracts'
 import type { VoiceTaskCommand, VoiceTaskOutcome } from '../../shared/voice-task-contracts'
 import { RealtimeClient, VOICE_TURN_WAIT_MS, type RealtimeServerCall } from './realtime'
+import { OpenAIRealtimeProvider, decodeOpenAIEvent } from './voice/openai-realtime-provider'
 import { ScriptedRealtimeServer } from './realtime-scripted'
 import {
   VOICE_TASK_TOOLS,
@@ -62,19 +63,22 @@ function liveClient(): Harness {
   })
   clients.push(client)
   const internals = client as unknown as {
-    dataChannel: unknown; mode: string; connected: boolean; activeGeneration: number; dataChannelGeneration: number
-    handleServerEvent: (event: unknown, generation: number) => void
+    provider: unknown; mode: string; connected: boolean; activeGeneration: number; providerGeneration: number
+    handleProviderEvents: (events: unknown[], generation: number) => void
   }
-  internals.dataChannel = { readyState: 'open', send: (value: string) => sent.push(JSON.parse(value)), close: () => undefined }
+  internals.provider = OpenAIRealtimeProvider.attached({
+    readyState: 'open', send: (value: string) => sent.push(JSON.parse(value)), close: () => undefined,
+    onopen: null, onmessage: null, onerror: null, onclose: null
+  })
   internals.mode = 'live'
   internals.connected = true
   internals.activeGeneration = 7
-  internals.dataChannelGeneration = 7
+  internals.providerGeneration = 7
   return {
     client,
     sent,
     commands,
-    emit: (event) => internals.handleServerEvent.call(client, JSON.stringify(event), 7)
+    emit: (event) => internals.handleProviderEvents.call(client, decodeOpenAIEvent(JSON.stringify(event)), 7)
   }
 }
 

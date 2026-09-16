@@ -20,7 +20,12 @@ import type { NormalizedSearchQuery } from '../shared/search-query'
 import { captureScreen, listCaptureSources } from './services/capture'
 import { runDocumentSearch } from './services/document-search'
 import { IntentTracker } from './services/intent-policy'
-import { createRealtimeSessionCredential } from './services/realtime'
+import { createRealtimeSessionCredential, GEMINI_LIVE_MODEL } from './services/realtime'
+import { GeminiLiveRelay } from './voice/gemini-live-relay'
+import { ScriptedGeminiSocket } from './voice/scripted-gemini-socket'
+import { ApplicationDefaultCredentials } from './models/google-auth'
+import { vertexEnabled, vertexLocation } from './models/model-config'
+import { VOICE_RELAY_CHANNELS } from '../shared/voice-relay-contracts'
 import { RetainedCaptureStore } from './services/retained-captures'
 import { createScamCheckAssessment } from './services/scam-check'
 import { createScreenReasoningSummary } from './services/screen-reasoning'
@@ -44,6 +49,7 @@ import { DroppedFileStore } from './services/dropped-files'
 import {
   AgentRuntimeSupervisor,
   developmentAgentRuntimePaths,
+  packagedAgentRuntimePaths,
   RuntimeUnavailableError,
   type AgentRuntimeSettings,
   type AgentRuntimeStatus
@@ -51,6 +57,12 @@ import {
 import { ActiveTaskStore, AgentTaskController } from './services/agent-tasks'
 import { registerAgentIpc, type IpcMainLike } from './services/agent-ipc'
 import { VoiceTaskController } from './services/voice-task-controller'
+import { AgentMemoryStore } from './agent/agent-memory'
+import { DiagnosticsLog } from './agent/diagnostics'
+import { TaskRequestInterpreter } from './agent/task-request-interpreter'
+import { trustedCalendarClock } from './agent/trusted-clock'
+import { DemoClinicSite, readRuntimeConfig } from './agent/packaged-runtime'
+import { createModelRouter } from './models/model-config'
 import { isTrustedRendererUrl, isTrustedSenderFrame, type RendererLocation } from './services/ipc-sender'
 import { developmentContentSecurityPolicy } from './services/content-security-policy'
 import { AGENT_IPC_CHANNELS, type AgentRuntimeView } from '../shared/agent-contracts'
@@ -83,14 +95,39 @@ let windowState: WindowStateStore
 let droppedFiles: DroppedFileStore
 let agentRuntime: AgentRuntimeSupervisor | undefined
 let agentRuntimeShutdownStarted = false
+/** Packaged builds only: why there is no runtime, when there is none. */
+let agentRuntimeUnconfigured = false
+let demoClinicSite: DemoClinicSite | undefined
 let panelOpen = false
 const retainedCapture = new RetainedCaptureStore()
+// The scripted Gemini socket exists only in unpackaged acceptance builds.
+const scriptedGemini = !app.isPackaged && process.env.LUMI_REALTIME_SCRIPTED === 'gemini'
+// Redacted by construction; shown only in development or when explicitly enabled.
+const diagnosticsVisible = !app.isPackaged || process.env.LUMI_DIAGNOSTICS === '1'
+const diagnostics = new DiagnosticsLog({ echo: !app.isPackaged && process.env.LUMI_DIAGNOSTICS === '1' })
+const voiceRelay = new GeminiLiveRelay({
+  tokens: scriptedGemini
+    ? { accessToken: async () => 'scripted-token', projectId: async () => 'scripted-project' }
+    : vertexEnabled(process.env) ? new ApplicationDefaultCredentials() : undefined,
+  location: vertexLocation(process.env),
+  model: GEMINI_LIVE_MODEL,
+  voice: process.env.LUMI_GEMINI_VOICE?.trim() || undefined,
+  ...(scriptedGemini ? { socketFactory: () => new ScriptedGeminiSocket() } : {}),
+  emit: (sessionId, relayEvent) => {
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(VOICE_RELAY_CHANNELS.event, sessionId, relayEvent)
+  },
+  diagnostics
+})
 // Development and acceptance tests may isolate the profile. It must be set
 // before the single-instance lock, which is keyed on the profile directory.
 const userDataOverride = app.isPackaged ? undefined : process.env.LUMI_USER_DATA_DIR
 if (userDataOverride && isAbsolute(userDataOverride)) app.setPath('userData', userDataOverride)
 const ownsSingleInstance = app.requestSingleInstanceLock()
-if (!ownsSingleInstance) app.quit()
+if (!ownsSingleInstance) {
+  // Exit at once: quitting before "ready" can leave a windowless process.
+  console.error('Another Lumi instance owns this profile; exiting.')
+  app.exit(0)
+}
 
 app.on('second-instance', () => {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -273,7 +310,7 @@ function requireMainWindow(event: Electron.IpcMainInvokeEvent | Electron.IpcMain
 }
 
 function agentRuntimeView(status?: AgentRuntimeStatus): AgentRuntimeView {
-  if (!agentRuntime) return { state: 'not_installed' }
+  if (!agentRuntime) return { state: agentRuntimeUnconfigured ? 'not_configured' : 'not_installed' }
   const current = status ?? agentRuntime.status()
   return { state: current.state, ...(current.generation ? { generation: current.generation } : {}) }
 }
@@ -295,6 +332,48 @@ function developmentAgentRuntimeSettings(): AgentRuntimeSettings {
   }
   if (process.env.LUMI_AGENT_DATABASE_URL) settings.databaseUrl = process.env.LUMI_AGENT_DATABASE_URL
   return settings
+}
+
+/**
+ * Packaged builds: the bundled Python runtime under resources/agent-runtime,
+ * configured from the user's agent-runtime.json. No repository checkout,
+ * developer shell or manually started server is involved.
+ */
+async function startPackagedAgentRuntime(): Promise<void> {
+  const config = await readRuntimeConfig(app.getPath('userData'))
+  if (config.kind !== 'ok') {
+    agentRuntimeUnconfigured = true
+    console.error(`Lumi agent runtime is not configured (${config.kind === 'missing' ? 'agent-runtime.json missing' : config.reason}).`)
+    emitAgentRuntimeStatus({ state: 'stopped' })
+    return
+  }
+  const paths = packagedAgentRuntimePaths(process.resourcesPath)
+  const settings: AgentRuntimeSettings = {
+    databaseUrl: config.config.databaseUrl,
+    browserHeadless: config.config.headless,
+    browsersPath: paths.browsersPath,
+    migrate: true
+  }
+  try {
+    if (config.config.clinicSite === 'demo') {
+      demoClinicSite = new DemoClinicSite(paths.pythonPath, paths.agentRoot)
+      settings.browserSiteOrigin = await demoClinicSite.start()
+    } else if (config.config.clinicSite !== 'none') {
+      settings.browserSiteOrigin = config.config.clinicSite.origin
+    }
+    agentRuntime = new AgentRuntimeSupervisor({
+      agentRoot: paths.agentRoot,
+      pythonPath: paths.pythonPath,
+      runtimeSettings: settings,
+      onStatus: emitAgentRuntimeStatus
+    })
+  } catch {
+    console.error('Lumi agent runtime could not be prepared.')
+    agentRuntimeUnconfigured = true
+    emitAgentRuntimeStatus({ state: 'failed' })
+    return
+  }
+  startAgentRuntime()
 }
 
 function startAgentRuntime(): void {
@@ -373,7 +452,30 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle(IPC_CHANNELS.createRealtimeSession, async (event) => {
     requireMainWindow(event)
-    return createRealtimeSessionCredential(app.getPath('userData'), { allowScripted: !app.isPackaged })
+    return createRealtimeSessionCredential(app.getPath('userData'), {
+      allowScripted: !app.isPackaged,
+      geminiConfigured: voiceRelay.configured()
+    })
+  })
+
+  // Gemini Live relay. Main owns the socket and the Google token; the
+  // renderer sends only closed, validated message kinds.
+  ipcMain.handle(VOICE_RELAY_CHANNELS.open, async (event) => {
+    requireMainWindow(event)
+    try {
+      return { ok: true, sessionId: await voiceRelay.open() }
+    } catch {
+      return { ok: false, message: 'Gemini Live could not be reached. Check the Vertex AI configuration.' }
+    }
+  })
+  ipcMain.handle(VOICE_RELAY_CHANNELS.send, (event, sessionId: unknown, message: unknown) => {
+    requireMainWindow(event)
+    if (typeof sessionId !== 'string') return false
+    return voiceRelay.send(sessionId, message, scriptedGemini)
+  })
+  ipcMain.handle(VOICE_RELAY_CHANNELS.close, (event, sessionId: unknown) => {
+    requireMainWindow(event)
+    if (typeof sessionId === 'string') voiceRelay.close(sessionId)
   })
 
   ipcMain.handle(IPC_CHANNELS.noteUserRequest, (event, request: unknown) => {
@@ -825,9 +927,10 @@ app.whenReady().then(async () => {
       callback({ responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [csp] } })
     })
   }
-  if (!app.isPackaged) {
-    // Packaged Python sidecar bundling is deferred; only development builds
-    // supervise the local runtime.
+  if (app.isPackaged) {
+    void startPackagedAgentRuntime()
+  } else {
+    // Development: the checkout's services/agent virtual environment.
     try {
       agentRuntime = new AgentRuntimeSupervisor({
         ...developmentAgentRuntimePaths(app.getAppPath()),
@@ -929,21 +1032,47 @@ app.whenReady().then(async () => {
     emit: emitFileSearchResolution
   })
   registerIpcHandlers()
-  const runtimeForClient = agentRuntime
   const agentTasks = new AgentTaskController(
     {
-      request: (method, path, body, timeoutMs) => runtimeForClient
-        ? runtimeForClient.request(method, path, body, timeoutMs)
+      // Resolved per call: a packaged runtime is created asynchronously.
+      request: (method, path, body, timeoutMs) => agentRuntime
+        ? agentRuntime.request(method, path, body, timeoutMs)
         : Promise.reject(new RuntimeUnavailableError())
     },
     new ActiveTaskStore(app.getPath('userData'))
   )
+  const calendar = trustedCalendarClock({ allowFixedNow: !app.isPackaged })
+  const memory = new AgentMemoryStore(app.getPath('userData'))
+  // Voice and typed requests reach the same durable controller, never a second one.
+  const voiceTasks = new VoiceTaskController(agentTasks, {
+    calendarNow: calendar.now, timeZone: calendar.timeZone, memory, diagnostics
+  })
+  let interpreter: TaskRequestInterpreter | undefined
+  try {
+    const { router } = createModelRouter({ allowScripted: !app.isPackaged, diagnostics })
+    interpreter = new TaskRequestInterpreter({
+      router,
+      controller: voiceTasks,
+      loadTask: async () => {
+        const loaded = await agentTasks.loadActiveTask(0)
+        return loaded.ok ? loaded.value : null
+      },
+      memory,
+      diagnostics,
+      now: calendar.now,
+      timeZone: calendar.timeZone
+    })
+  } catch {
+    console.error('Lumi model routing configuration is invalid; typed requests are disabled.')
+  }
   registerAgentIpc({
     ipcMain: ipcMain as unknown as IpcMainLike,
     assertTrustedSender: (event) => requireMainWindow(event as Electron.IpcMainInvokeEvent),
     controller: agentTasks,
-    // Voice reaches the same durable controller, never a second one.
-    voice: new VoiceTaskController(agentTasks),
+    voice: voiceTasks,
+    ...(interpreter ? { text: interpreter } : {}),
+    memory,
+    diagnostics: () => diagnosticsVisible ? diagnostics.list() : [],
     runtimeStatus: () => agentRuntimeView(),
     restartRuntime: async () => {
       if (!agentRuntime) throw new Error('The Lumi agent runtime is not installed.')
@@ -969,9 +1098,16 @@ app.whenReady().then(async () => {
       mainWindow = createWindow()
     }
   })
+}).catch((error: unknown) => {
+  // A startup failure must not leave a running process with no window.
+  const name = error instanceof Error ? error.name : 'Error'
+  const message = error instanceof Error ? error.message.replace(/[A-Za-z]:[\\/][^\s'"]*/g, '<path>').slice(0, 200) : ''
+  console.error(`Lumi failed to start: ${name}: ${message}`)
+  app.exit(1)
 })
 
 app.on('before-quit', () => retainedCapture.clear())
+app.on('will-quit', () => demoClinicSite?.stop())
 
 app.on('before-quit', (event) => {
   if (agentRuntime === undefined || agentRuntimeShutdownStarted) return

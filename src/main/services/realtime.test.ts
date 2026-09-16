@@ -126,7 +126,12 @@ describe('scripted realtime gate', () => {
       const packaged = await createRealtimeSessionCredential('seed', { allowScripted: false })
       expect(packaged.mode).not.toBe('scripted')
       const scripted = await createRealtimeSessionCredential('seed', { allowScripted: true })
-      expect(scripted).toEqual({ mode: 'scripted', model: 'scripted-test-voice' })
+      expect(scripted).toEqual({ mode: 'scripted', model: 'scripted-test-voice', provider: 'openai' })
+      process.env.LUMI_REALTIME_SCRIPTED = 'gemini'
+      const scriptedGemini = await createRealtimeSessionCredential('seed', { allowScripted: true })
+      expect(scriptedGemini).toEqual({ mode: 'scripted', model: 'scripted-test-voice', provider: 'gemini' })
+      const packagedGemini = await createRealtimeSessionCredential('seed', { allowScripted: false })
+      expect(packagedGemini.mode).not.toBe('scripted')
     } finally {
       if (previous === undefined) delete process.env.LUMI_REALTIME_SCRIPTED
       else process.env.LUMI_REALTIME_SCRIPTED = previous

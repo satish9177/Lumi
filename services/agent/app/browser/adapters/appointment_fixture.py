@@ -26,6 +26,7 @@ approved, or what is submitted.
 
 import re
 import uuid
+from urllib.parse import quote
 from datetime import datetime
 from typing import Any
 
@@ -168,6 +169,39 @@ class LookupOutput(BaseModel):
     booking_count: int = 0
     booking_id: str | None = None
     booking: dict[str, Any] | None = None
+
+
+class ProfileInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    specialty: str = Field(default="", max_length=60)
+    doctor: str = Field(default="", max_length=60)
+
+
+class DoctorProfileSummary(BaseModel):
+    """Typed public facts about one doctor. Nothing else leaves the page."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    doctor_id: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,39}$")
+    doctor: str = Field(min_length=1, max_length=120)
+    specialty: str = Field(max_length=120)
+    clinic: str = Field(max_length=120)
+    address: str = Field(max_length=200)
+    hours: str = Field(max_length=80)
+    consultation_fee: int = Field(ge=0, le=10_000_000)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
+    languages: list[str] = Field(max_length=12)
+    walk_ins: bool
+
+
+class ProfileOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    observation_id: uuid.UUID
+    origin: str
+    page: str
+    profiles: list[DoctorProfileSummary]
 
 
 # ---- page reading -----------------------------------------------------------
@@ -531,6 +565,46 @@ async def lookup_booking(context: OperationContext, payload: LookupInput) -> Ope
     return OperationResult(OperationStatus.OK, output.model_dump(mode="json"))
 
 
+async def read_doctor_profiles(context: OperationContext, payload: ProfileInput) -> OperationResult:
+    """Read public doctor profiles. A GET and a read; nothing is filled or clicked."""
+    page = context.page
+    await page.goto(
+        f"{context.origin}/doctors?specialty={quote(payload.specialty)}&doctor={quote(payload.doctor)}",
+        wait_until="domcontentloaded",
+    )
+    await page.get_by_role("heading", name="Our doctors").wait_for()
+    cards = page.get_by_test_id("doctor-profile")
+    profiles: list[DoctorProfileSummary] = []
+    for index in range(min(await cards.count(), 20)):
+        card = cards.nth(index)
+        fee = card.get_by_test_id("profile-fee")
+        languages = await _required_attribute(card.get_by_test_id("profile-languages"), "data-languages")
+        profiles.append(
+            DoctorProfileSummary(
+                doctor_id=await _required_attribute(card, "data-doctor-id"),
+                doctor=await _text(card.get_by_test_id("profile-doctor")),
+                specialty=await _text(card.get_by_test_id("profile-specialty")),
+                clinic=await _text(card.get_by_test_id("profile-clinic")),
+                address=await _text(card.get_by_test_id("profile-address")),
+                hours=await _text(card.get_by_test_id("profile-hours")),
+                consultation_fee=int(await _required_attribute(fee, "data-amount")),
+                currency=await _required_attribute(fee, "data-currency"),
+                languages=[item for item in languages.split(",") if item][:12],
+                walk_ins=(
+                    await _required_attribute(card.get_by_test_id("profile-walk-ins"), "data-walk-ins")
+                )
+                == "yes",
+            )
+        )
+    output = ProfileOutput(
+        observation_id=context.observation_id,
+        origin=context.origin,
+        page="doctor_profiles",
+        profiles=profiles,
+    )
+    return OperationResult(OperationStatus.OK, output.model_dump(mode="json"))
+
+
 #: A fixture booking is durably visible to the very next lookup, so "not found"
 #: is a fact about the world rather than a fact about our patience. A real
 #: clinic site -- eventual consistency, a queue, a booking that only appears
@@ -631,6 +705,20 @@ OPERATIONS: tuple[BrowserOperation, ...] = (
         ),
         handler=lookup_booking,
     ),
+    BrowserOperation(
+        name="read_doctor_profiles",
+        description="Read public doctor profiles: clinic, hours, fee, languages, walk-ins.",
+        input_model=ProfileInput,
+        output_model=ProfileOutput,
+        effect=Effect.READ_ONLY,
+        retry=RetryPolicy.SAFE_TO_RETRY,
+        reconciliation=Reconciliation.NOT_REQUIRED,
+        timeout_seconds=30.0,
+        timeout_meaning="Nothing was changed. Safe to repeat.",
+        preconditions=("the site's doctor directory is reachable",),
+        postconditions=("the directory heading was rendered before any profile was read",),
+        handler=read_doctor_profiles,
+    ),
 )
 
 __all__ = [
@@ -644,6 +732,8 @@ __all__ = [
     "PlaywrightError",
     "PlaywrightTimeoutError",
     "PrepareInput",
+    "ProfileInput",
+    "ProfileOutput",
     "SearchInput",
     "SlotInput",
 ]

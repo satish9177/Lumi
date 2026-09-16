@@ -16,6 +16,7 @@
  */
 
 import type { VoiceTaskCommand, VoiceTaskOutcome } from './voice-task-contracts'
+import type { AgentPreferenceView, ModelDiagnosticView, PreferenceKey } from './model-contracts'
 
 export const TASK_STATUSES = [
   'CREATED', 'PLANNING', 'READY', 'WAITING_APPROVAL', 'EXECUTING', 'VERIFYING',
@@ -50,7 +51,7 @@ export const CHANGED_FACT_FIELDS = ['slot_id', 'doctor', 'time', 'price', 'curre
 export type AgentChangedFactField = typeof CHANGED_FACT_FIELDS[number]
 
 export const TASK_EVENT_TYPES = [
-  'task.created', 'task.cancelled', 'task.criteria_updated', 'task.search_completed', 'action.proposed', 'action.approval_requested',
+  'task.created', 'task.cancelled', 'task.criteria_updated', 'task.search_completed', 'task.info_lookup_completed', 'action.proposed', 'action.approval_requested',
   'action.approved', 'action.rejected', 'action.execution_started', 'action.succeeded',
   'action.failed', 'action.outcome_unknown', 'action.reconciliation_started', 'action.reconciled'
 ] as const
@@ -59,7 +60,7 @@ export type AgentTaskEventType = typeof TASK_EVENT_TYPES[number]
 export const BOOKING_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'] as const
 export type AgentBookingDay = typeof BOOKING_DAYS[number]
 
-export type AgentRuntimeState = 'stopped' | 'starting' | 'running' | 'unavailable' | 'failed' | 'stopping' | 'not_installed'
+export type AgentRuntimeState = 'stopped' | 'starting' | 'running' | 'unavailable' | 'failed' | 'stopping' | 'not_installed' | 'not_configured'
 
 export interface AgentRuntimeView {
   state: AgentRuntimeState
@@ -76,6 +77,36 @@ export interface AgentBookingCriteria {
   /** Integer price ceiling; always paired with its currency. */
   maxPrice?: number
   maxPriceCurrency?: string
+  /** Inclusive local calendar dates (YYYY-MM-DD), resolved by main from a spoken or typed day. */
+  dateFrom?: string
+  dateTo?: string
+}
+
+export const TASK_KINDS = ['appointment_booking', 'clinic_info'] as const
+export type AgentTaskKind = typeof TASK_KINDS[number]
+
+export const CLINIC_INFO_TOPICS = ['overview', 'hours', 'fee', 'languages', 'address', 'walk_ins'] as const
+export type AgentClinicInfoTopic = typeof CLINIC_INFO_TOPICS[number]
+
+/** What a read-only clinic-information task asks about. */
+export interface AgentClinicInfoQuery {
+  specialty: string
+  doctor: string
+  topic: AgentClinicInfoTopic
+}
+
+/** Public, typed doctor profile facts read by the reviewed adapter. */
+export interface AgentDoctorProfileView {
+  doctorId: string
+  doctor: string
+  specialty: string
+  clinic: string
+  address: string
+  hours: string
+  consultationFee: number
+  currency: string
+  languages: string[]
+  walkIns: boolean
 }
 
 export interface AgentTaskView {
@@ -83,9 +114,15 @@ export interface AgentTaskView {
   status: AgentTaskStatus
   revision: number
   lastEventSequence: number
+  kind: AgentTaskKind
+  /** Booking constraints (empty for a clinic-info task). */
   criteria: AgentBookingCriteria
+  /** Set for `clinic_info` tasks. */
+  infoQuery?: AgentClinicInfoQuery
   /** The completed voice turn that created this task, if any. */
   voiceTurnId?: string
+  /** The typed request that created this task, if any. */
+  requestId?: string
   createdAt: string
   updatedAt: string
 }
@@ -205,6 +242,9 @@ export interface AgentEventView {
   searchResults?: AgentSlotView[]
   /** `task.criteria_updated`: prepared bookings the new constraints excluded. */
   invalidatedActionIds?: string[]
+  /** `task.info_lookup_completed`: the query and the profiles that were read. */
+  infoQuery?: AgentClinicInfoQuery
+  profiles?: AgentDoctorProfileView[]
 }
 
 export interface AgentTaskSnapshot {
@@ -271,6 +311,18 @@ export interface AgentApi {
    * it against durable state; no command can approve or execute a booking.
    */
   voiceCommand: (command: VoiceTaskCommand) => Promise<AgentResult<VoiceTaskOutcome>>
+  /**
+   * A typed request ("find a dermatologist tomorrow evening and prepare the
+   * cheapest"). Main interprets it into the same bounded plan voice uses; it
+   * can never approve or execute.
+   */
+  submitTextRequest: (requestId: string, text: string) => Promise<AgentResult<VoiceTaskOutcome>>
+  /** Read-only lookup for the active clinic-info task. */
+  lookupClinicInfo: () => Promise<AgentResult<AgentDoctorProfileView[]>>
+  listPreferences: () => Promise<AgentResult<AgentPreferenceView[]>>
+  forgetPreference: (key: PreferenceKey) => Promise<AgentResult<AgentPreferenceView[]>>
+  /** Redacted model/controller diagnostics. Empty in packaged builds unless enabled. */
+  getDiagnostics: () => Promise<AgentResult<ModelDiagnosticView[]>>
 }
 
 export const AGENT_IPC_CHANNELS = {
@@ -287,7 +339,12 @@ export const AGENT_IPC_CHANNELS = {
   rejectAction: 'lifelens:agent:reject-action',
   executeAction: 'lifelens:agent:execute-action',
   reconcileAction: 'lifelens:agent:reconcile-action',
-  voiceCommand: 'lifelens:agent:voice-command'
+  voiceCommand: 'lifelens:agent:voice-command',
+  submitTextRequest: 'lifelens:agent:submit-text-request',
+  lookupClinicInfo: 'lifelens:agent:lookup-clinic-info',
+  listPreferences: 'lifelens:agent:list-preferences',
+  forgetPreference: 'lifelens:agent:forget-preference',
+  getDiagnostics: 'lifelens:agent:get-diagnostics'
 } as const
 
 /** Actions whose side effect is unresolved or in flight. */

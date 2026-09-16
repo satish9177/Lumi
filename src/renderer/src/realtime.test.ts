@@ -10,6 +10,7 @@ import {
   RealtimeClient,
   type RealtimeServerCall
 } from './realtime'
+import { OpenAIRealtimeProvider, decodeOpenAIEvent, type EventChannel } from './voice/openai-realtime-provider'
 
 const originalWindow = globalThis.window
 const testClients: RealtimeClient[] = []
@@ -48,12 +49,18 @@ function createClient(overrides: Partial<Callbacks> = {}): RealtimeClient {
   return client
 }
 
-function injectDataChannel(client: RealtimeClient, events: Array<Record<string, unknown>>): void {
-  ;(client as unknown as { dataChannel: Pick<RTCDataChannel, 'readyState' | 'send'> }).dataChannel = {
-    readyState: 'open',
-    send: (value: string) => { events.push(JSON.parse(value) as Record<string, unknown>) },
-    close: () => undefined
-  } as unknown as Pick<RTCDataChannel, 'readyState' | 'send'>
+function fakeChannel(send: (value: string) => void, close: () => void = () => undefined): EventChannel {
+  return { readyState: 'open', send, close, onopen: null, onmessage: null, onerror: null, onclose: null }
+}
+
+function injectProvider(client: RealtimeClient, provider: OpenAIRealtimeProvider): void {
+  ;(client as unknown as { provider: OpenAIRealtimeProvider }).provider = provider
+}
+
+function injectDataChannel(client: RealtimeClient, events: Array<Record<string, unknown>>): OpenAIRealtimeProvider {
+  const provider = OpenAIRealtimeProvider.attached(fakeChannel((value) => { events.push(JSON.parse(value) as Record<string, unknown>) }))
+  injectProvider(client, provider)
+  return provider
 }
 
 function installTimerWindow(): void {
@@ -67,21 +74,21 @@ function setLiveMode(client: RealtimeClient): void {
   const internals = client as unknown as {
     mode: 'live' | 'mock'
     activeGeneration?: number
-    dataChannelGeneration?: number
+    providerGeneration?: number
   }
   internals.mode = 'live'
   internals.activeGeneration ??= 1
-  internals.dataChannelGeneration ??= internals.activeGeneration
+  internals.providerGeneration ??= internals.activeGeneration
 }
 
 function callHandleServerEvent(client: RealtimeClient, event: unknown): void {
-  if (!(client as unknown as { dataChannel?: RTCDataChannel }).dataChannel) {
+  if (!(client as unknown as { provider?: OpenAIRealtimeProvider }).provider) {
     injectDataChannel(client, [])
   }
   setLiveMode(client)
   const generation = (client as unknown as { activeGeneration: number }).activeGeneration
-  const handleServerEvent = (client as unknown as { handleServerEvent: (serializedEvent: unknown, generation: number) => void }).handleServerEvent
-  handleServerEvent.call(client, event, generation)
+  const handle = (client as unknown as { handleProviderEvents: (events: unknown[], generation: number) => void }).handleProviderEvents
+  handle.call(client, decodeOpenAIEvent(event), generation)
 }
 
 function registerServerCall(client: RealtimeClient, callId: string): RealtimeServerCall {
@@ -97,12 +104,12 @@ function activateGeneration(client: RealtimeClient, generation: number): void {
     mode: 'live' | 'mock'
     connected: boolean
     activeGeneration: number
-    dataChannelGeneration: number
+    providerGeneration: number
   }
   internals.mode = 'live'
   internals.connected = true
   internals.activeGeneration = generation
-  internals.dataChannelGeneration = generation
+  internals.providerGeneration = generation
 }
 
 function functionCallOutputs(events: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
@@ -1154,11 +1161,7 @@ describe('RealtimeClient cost-saving lifecycle', () => {
     const events: Array<Record<string, unknown>> = []
     const close = vi.fn()
     const client = createClient(overrides)
-    ;(client as unknown as { dataChannel: RTCDataChannel }).dataChannel = {
-      readyState: 'open',
-      send: (value: string) => { events.push(JSON.parse(value) as Record<string, unknown>) },
-      close
-    } as unknown as RTCDataChannel
+    injectProvider(client, OpenAIRealtimeProvider.attached(fakeChannel((value) => { events.push(JSON.parse(value) as Record<string, unknown>) }, close)))
     setLiveMode(client)
     ;(client as unknown as { connected: boolean }).connected = true
     const touchActivity = (client as unknown as { touchActivity: () => void }).touchActivity
@@ -1399,12 +1402,9 @@ describe('RealtimeClient microphone privacy', () => {
     const events: Array<Record<string, unknown>> = []
     const track = { enabled: true, stop: () => undefined }
     const client = createClient()
-    injectDataChannel(client, events)
+    const provider = injectDataChannel(client, events)
     setLiveMode(client)
-    ;(client as unknown as { localAudio: { getAudioTracks: () => Array<{ enabled: boolean }>; getTracks: () => Array<{ stop: () => void }> } }).localAudio = {
-      getAudioTracks: () => [track],
-      getTracks: () => [track]
-    }
+    provider.attachLocalAudio({ getAudioTracks: () => [track], getTracks: () => [track] } as unknown as MediaStream)
 
     client.setListening(false)
 
@@ -1422,12 +1422,9 @@ describe('RealtimeClient microphone privacy', () => {
     const events: Array<Record<string, unknown>> = []
     const track = { enabled: true, stop: () => undefined }
     const client = createClient()
-    injectDataChannel(client, events)
+    const provider = injectDataChannel(client, events)
     setLiveMode(client)
-    ;(client as unknown as { localAudio: { getAudioTracks: () => Array<{ enabled: boolean }>; getTracks: () => Array<{ stop: () => void }> } }).localAudio = {
-      getAudioTracks: () => [track],
-      getTracks: () => [track]
-    }
+    provider.attachLocalAudio({ getAudioTracks: () => [track], getTracks: () => [track] } as unknown as MediaStream)
 
     client.setListening(false)
     client.setListening(true)

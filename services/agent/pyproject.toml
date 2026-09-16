@@ -26,6 +26,10 @@ dev = [
 
 [tool.uv]
 package = false
+# greenlet 3.5.6 is blocked by Windows Smart App Control when installed as a
+# fresh (non-cache-linked) copy, as in the packaged runtime; 3.4.x loads.
+# See docs/PACKAGING.md.
+constraint-dependencies = ["greenlet<3.5"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -3,9 +3,12 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import {
   BOOKING_DAYS,
+  CLINIC_INFO_TOPICS,
   UNRESOLVED_ACTION_STATUSES,
   type AgentActionView,
   type AgentBookingCriteria,
+  type AgentClinicInfoQuery,
+  type AgentDoctorProfileView,
   type AgentError,
   type AgentEventView,
   type AgentResult,
@@ -24,6 +27,7 @@ import {
   parseAction,
   parseActionList,
   parseCancellation,
+  parseClinicInfo,
   parseCriteriaRevision,
   parseEventPage,
   parseSearch,
@@ -56,7 +60,10 @@ const SPECIALTY = /^[A-Za-z][A-Za-z .'-]{0,59}$/
 const CLOCK = /^(?:[01]\d|2[0-3]):[0-5]\d$/
 const CURRENCY = /^[A-Z]{3}$/
 const TURN_ID = /^[A-Za-z0-9_-]{1,64}$/
-const CRITERIA_KEYS = new Set(['specialty', 'day', 'earliestTime', 'latestTime', 'maxPrice', 'maxPriceCurrency'])
+const CRITERIA_KEYS = new Set(['specialty', 'day', 'earliestTime', 'latestTime', 'maxPrice', 'maxPriceCurrency', 'dateFrom', 'dateTo'])
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/
+const PERSON_NAME = /^[A-Za-z][A-Za-z .'-]{0,59}$/
+const MAX_DATE_SPAN_DAYS = 14
 const MAX_UTTERANCE = 500
 const EVENT_PAGE = 200
 const MAX_EVENT_PAGES = 50
@@ -144,7 +151,42 @@ export function parseBookingCriteria(value: unknown): AgentBookingCriteria {
     criteria.maxPrice = maxPrice
     criteria.maxPriceCurrency = maxPriceCurrency
   }
+  const { dateFrom, dateTo } = value
+  if ((dateFrom === undefined) !== (dateTo === undefined)) fail('invalid_request', 'A date range needs both ends.')
+  if (dateFrom !== undefined) {
+    if (typeof dateFrom !== 'string' || typeof dateTo !== 'string' || !ISO_DATE.test(dateFrom) || !ISO_DATE.test(dateTo)) {
+      fail('invalid_request', 'Dates must be YYYY-MM-DD.')
+    }
+    const from = Date.parse(`${dateFrom}T00:00:00Z`)
+    const to = Date.parse(`${dateTo}T00:00:00Z`)
+    if (Number.isNaN(from) || Number.isNaN(to) || new Date(from).toISOString().slice(0, 10) !== dateFrom ||
+        new Date(to).toISOString().slice(0, 10) !== dateTo) {
+      fail('invalid_request', 'Dates must be real calendar dates.')
+    }
+    if (from > to || (to - from) / 86_400_000 >= MAX_DATE_SPAN_DAYS) fail('invalid_request', 'That date range is not supported.')
+    if (criteria.day && from === to && BOOKING_DAYS[(new Date(from).getUTCDay() + 6) % 7] !== criteria.day) {
+      fail('invalid_request', 'The day does not match the date.')
+    }
+    criteria.dateFrom = dateFrom
+    criteria.dateTo = dateTo
+  }
   return criteria
+}
+
+export function parseClinicInfoQuery(value: unknown): AgentClinicInfoQuery {
+  if (!isRecord(value) || Object.keys(value).some((key) => !['specialty', 'doctor', 'topic'].includes(key))) {
+    fail('invalid_request', 'That clinic question is invalid.')
+  }
+  const specialty = typeof value.specialty === 'string' ? value.specialty.trim() : ''
+  const doctor = typeof value.doctor === 'string' ? value.doctor.normalize('NFKC').trim() : ''
+  if (specialty && !SPECIALTY.test(specialty)) fail('invalid_request', 'That clinic question is invalid.')
+  if (doctor && !PERSON_NAME.test(doctor)) fail('invalid_request', 'That doctor name is invalid.')
+  if (!specialty && !doctor) fail('invalid_request', 'Say which doctor or specialty you mean.')
+  const topic = value.topic ?? 'overview'
+  if (typeof topic !== 'string' || !(CLINIC_INFO_TOPICS as readonly string[]).includes(topic)) {
+    fail('invalid_request', 'That clinic question is invalid.')
+  }
+  return { specialty, doctor, topic: topic as AgentClinicInfoQuery['topic'] }
 }
 
 /** The runtime's snake_case constraint fields. Unset bounds are omitted. */
@@ -156,7 +198,8 @@ export function criteriaFields(criteria: AgentBookingCriteria): Record<string, s
     ...(criteria.latestTime ? { latest_time: criteria.latestTime } : {}),
     ...(criteria.maxPrice !== undefined && criteria.maxPriceCurrency
       ? { max_price: criteria.maxPrice, max_price_currency: criteria.maxPriceCurrency }
-      : {})
+      : {}),
+    ...(criteria.dateFrom && criteria.dateTo ? { date_from: criteria.dateFrom, date_to: criteria.dateTo } : {})
   }
 }
 
@@ -165,16 +208,20 @@ export function criteriaFields(criteria: AgentBookingCriteria): Record<string, s
  * the renderer's create-task IPC passes criteria and nothing else.
  */
 export interface TaskOrigin {
-  source: 'voice'
+  /** A completed voice turn, or a typed request from the task panel. */
+  source: 'voice' | 'text'
   turnId: string
   utterance: string
 }
 
-function originFields(origin: TaskOrigin | undefined): Record<string, string> {
-  if (!origin) return { text: 'Book a clinic appointment' }
-  if (!TURN_ID.test(origin.turnId)) fail('invalid_request', 'That voice turn is invalid.')
+function originFields(origin: TaskOrigin | undefined, fallback = 'Book a clinic appointment'): Record<string, string> {
+  if (!origin) return { text: fallback }
+  if (!TURN_ID.test(origin.turnId)) fail('invalid_request', 'That request reference is invalid.')
   const utterance = origin.utterance.trim().slice(0, MAX_UTTERANCE)
-  return { text: utterance || 'Book a clinic appointment', source: origin.source, voice_turn_id: origin.turnId }
+  // A voice turn and a typed request are both durable de-duplication keys.
+  const fields: Record<string, string> = { text: utterance || fallback, source: origin.source }
+  fields[origin.source === 'voice' ? 'voice_turn_id' : 'request_id'] = origin.turnId
+  return fields
 }
 
 /** Remembers which durable task is on screen. Never the task's contents. */
@@ -440,6 +487,44 @@ export class AgentTaskController {
       const taskId = await this.activeTaskId()
       const reply = await this.call('POST', `/tasks/${taskId}/booking/cancel`, { expected_revision: expectedRevision }, TIMEOUTS.write)
       return parseCancellation(reply.body, taskId)
+    })
+  }
+
+  /**
+   * Start the read-only clinic-information workflow. Same guard as a booking
+   * task: an unresolved booking must be checked before the panel moves on.
+   */
+  async createClinicInfoTask(queryValue: unknown, origin?: TaskOrigin): Promise<AgentResult<AgentTaskSnapshot>> {
+    let query: AgentClinicInfoQuery
+    let provenance: Record<string, string>
+    try {
+      query = parseClinicInfoQuery(queryValue)
+      provenance = originFields(origin, 'Clinic information')
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    return this.exclusive('task', async () => {
+      await this.assertNoUnresolvedAction()
+      const request = {
+        type: 'clinic_info',
+        ...provenance,
+        ...(query.specialty ? { specialty: query.specialty } : {}),
+        ...(query.doctor ? { doctor: query.doctor } : {}),
+        topic: query.topic
+      }
+      const reply = await this.call('POST', '/tasks', { request }, TIMEOUTS.write)
+      const task = parseTask(reply.body)
+      await this.store.write(task.taskId)
+      return await this.snapshot(task.taskId, 0)
+    })
+  }
+
+  /** Read public doctor profiles for the active clinic-info task. Read-only; safe to repeat. */
+  async lookupClinicInfo(): Promise<AgentResult<AgentDoctorProfileView[]>> {
+    return this.exclusive('task', async () => {
+      const taskId = await this.activeTaskId()
+      const reply = await this.call('POST', `/tasks/${taskId}/info/lookup`, undefined, TIMEOUTS.observe)
+      return parseClinicInfo(reply.body, taskId).profiles
     })
   }
 

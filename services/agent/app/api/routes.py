@@ -15,6 +15,8 @@ from app.api.schemas import (
     BrowserDispatchResponse,
     CancelBookingTaskResponse,
     CancelTaskBody,
+    ClinicInfoResponse,
+    DoctorProfileResponse,
     CreateTaskBody,
     ErrorResponse,
     ExpectedRevisionBody,
@@ -36,6 +38,12 @@ from app.services.actions import ActionService
 from app.services.booking_preparation import BookingPreparationService
 from app.services.booking_tasks import BOOKING_TASK_TYPE, BookingTaskService
 from app.services.browser_execution import BrowserExecutionService
+from app.services.clinic_info import (
+    CLINIC_INFO_TASK_TYPE,
+    ClinicInfoService,
+    validate_request as validate_clinic_info_request,
+)
+from app.domain.errors import BrowserObservationError
 from app.services.tasks import TaskService
 
 logger = logging.getLogger(__name__)
@@ -99,6 +107,11 @@ async def create_task(body: CreateTaskBody, service: TaskServiceDep) -> TaskResp
         try:
             BookingCriteria.from_request(request)
         except InvalidBookingCriteriaError:
+            raise RequestValidationError([]) from None
+    if request.get("type") == CLINIC_INFO_TASK_TYPE:
+        try:
+            validate_clinic_info_request(request)
+        except BrowserObservationError:
             raise RequestValidationError([]) from None
     task = await service.create_task(request)
     return TaskResponse.from_record(task)
@@ -495,4 +508,35 @@ async def cancel_booking_task(
     )
     return CancelBookingTaskResponse(
         task=TaskResponse.from_record(task), rejected_action_ids=rejected
+    )
+
+
+# --- Clinic information (read-only workflow) --------------------------------
+#
+# The second workflow on the same controller. It takes a task id and nothing
+# else; the query comes from the persisted task request. There is no action,
+# approval or attempt because nothing it does changes the outside world.
+
+
+def get_clinic_info_service(request: Request) -> ClinicInfoService:
+    service: ClinicInfoService = request.app.state.clinic_info_service
+    return service
+
+
+ClinicInfoServiceDep = Annotated[ClinicInfoService, Depends(get_clinic_info_service)]
+
+
+@router.post(
+    "/tasks/{task_id}/info/lookup",
+    response_model=ClinicInfoResponse,
+    responses={**_NOT_FOUND, **_CONFLICT, **_UNAVAILABLE},
+    summary="Read public doctor profiles for a clinic-info task (read-only)",
+)
+async def lookup_clinic_info(
+    task_id: uuid.UUID, service: ClinicInfoServiceDep
+) -> ClinicInfoResponse:
+    task, profiles = await service.lookup(task_id)
+    return ClinicInfoResponse(
+        task=TaskResponse.from_record(task),
+        profiles=[DoctorProfileResponse(**profile.model_dump()) for profile in profiles],
     )

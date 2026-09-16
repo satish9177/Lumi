@@ -8,6 +8,7 @@ from app.api.schemas import (
     ActionResponse,
     BookingSearchResponse,
     CancelBookingTaskResponse,
+    ClinicInfoResponse,
     ErrorResponse,
     ReviseBookingCriteriaResponse,
     TaskEventListResponse,
@@ -36,6 +37,9 @@ def test_examples_are_valid_runtime_payloads() -> None:
     CancelBookingTaskResponse.model_validate(examples["task_cancelled"])
     BookingSearchResponse.model_validate(examples["search"])
     ErrorResponse.model_validate(examples["error_stale"])
+    TaskResponse.model_validate(examples["task_dated"])
+    ClinicInfoResponse.model_validate(examples["clinic_info"])
+    TaskEventListResponse.model_validate(examples["events_info"])
     for name in ("action_waiting_approval", "action_succeeded", "action_changed_price", "action_outcome_unknown"):
         action = ActionResponse.model_validate(examples[name])
         BookingProposal.model_validate(action.proposal)

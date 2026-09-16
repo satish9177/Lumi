@@ -10,6 +10,8 @@ import {
 import type { GuardedTool } from '../shared/intent'
 import { AGENT_IPC_CHANNELS, type AgentApi, type AgentBookingCriteria, type AgentRuntimeView } from '../shared/agent-contracts'
 import type { VoiceTaskCommand } from '../shared/voice-task-contracts'
+import type { PreferenceKey } from '../shared/model-contracts'
+import { VOICE_RELAY_CHANNELS, type VoiceRelayApi, type VoiceRelayServerEvent } from '../shared/voice-relay-contracts'
 
 // Fixed channels and positional primitives only. Main validates everything;
 // nothing here can name a runtime route, a URL, or a booked value.
@@ -38,11 +40,32 @@ const agentApi: AgentApi = {
   reconcileAction: (actionId: string, expectedRevision: number) =>
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.reconcileAction, actionId, expectedRevision),
   // A structured-clone copy of one closed command; main re-validates it.
-  voiceCommand: (command: VoiceTaskCommand) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.voiceCommand, command)
+  voiceCommand: (command: VoiceTaskCommand) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.voiceCommand, command),
+  // Text only; main interprets it and can never approve or execute from it.
+  submitTextRequest: (requestId: string, text: string) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.submitTextRequest, requestId, text),
+  lookupClinicInfo: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.lookupClinicInfo),
+  listPreferences: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.listPreferences),
+  forgetPreference: (key: PreferenceKey) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.forgetPreference, key),
+  getDiagnostics: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getDiagnostics)
+}
+
+// The Gemini Live relay: fixed channels, closed message kinds, validated in
+// main. No credential, endpoint or model name is ever passed here.
+const voiceRelay: VoiceRelayApi = {
+  open: () => ipcRenderer.invoke(VOICE_RELAY_CHANNELS.open),
+  send: (sessionId, message) => ipcRenderer.invoke(VOICE_RELAY_CHANNELS.send, sessionId, message),
+  close: (sessionId) => ipcRenderer.invoke(VOICE_RELAY_CHANNELS.close, sessionId),
+  onEvent: (listener) => {
+    const handler = (_event: Electron.IpcRendererEvent, sessionId: string, event: VoiceRelayServerEvent) => listener(sessionId, event)
+    ipcRenderer.on(VOICE_RELAY_CHANNELS.event, handler)
+    return () => ipcRenderer.removeListener(VOICE_RELAY_CHANNELS.event, handler)
+  }
 }
 
 const lifeLensApi: LifeLensApi = {
   agent: agentApi,
+  voiceRelay,
   listCaptureSources: () => ipcRenderer.invoke(IPC_CHANNELS.listCaptureSources),
   captureScreen: (sourceId?: string) => ipcRenderer.invoke(IPC_CHANNELS.captureScreen, sourceId),
   analyzeCapture: (captureId: string) => ipcRenderer.invoke(IPC_CHANNELS.analyzeCapture, captureId),

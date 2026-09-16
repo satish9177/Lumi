@@ -48,15 +48,38 @@ export const SCRIPTED_REALTIME_MODEL = 'scripted-test-voice'
  * explicit environment flag *and* an unpackaged build. It carries no token.
  */
 export function scriptedRealtimeRequested(allowScripted: boolean, environment: NodeJS.ProcessEnv = process.env): boolean {
-  return allowScripted && environment.LUMI_REALTIME_SCRIPTED === '1'
+  return allowScripted && (environment.LUMI_REALTIME_SCRIPTED === '1' || environment.LUMI_REALTIME_SCRIPTED === 'gemini')
 }
+
+export type VoiceProviderChoice = 'openai' | 'gemini'
+
+/**
+ * Which realtime transport main offers. `LUMI_VOICE_PROVIDER=gemini` selects
+ * Gemini Live on Vertex AI (relayed through main); anything else is OpenAI.
+ * The scripted harness follows `LUMI_REALTIME_SCRIPTED` (`1` or `gemini`).
+ */
+export function voiceProviderChoice(allowScripted: boolean, environment: NodeJS.ProcessEnv = process.env): VoiceProviderChoice {
+  if (scriptedRealtimeRequested(allowScripted, environment)) {
+    return environment.LUMI_REALTIME_SCRIPTED === 'gemini' ? 'gemini' : 'openai'
+  }
+  return environment.LUMI_VOICE_PROVIDER?.trim().toLowerCase() === 'gemini' ? 'gemini' : 'openai'
+}
+
+export const GEMINI_LIVE_MODEL = process.env.LUMI_GEMINI_LIVE_MODEL?.trim() || 'gemini-live-2.5-flash-native-audio'
 
 export async function createRealtimeSessionCredential(
   safetySeed: string,
-  options: { allowScripted?: boolean } = {}
+  options: { allowScripted?: boolean; geminiConfigured?: boolean } = {}
 ): Promise<RealtimeSessionCredential> {
+  const provider = voiceProviderChoice(options.allowScripted === true)
   if (scriptedRealtimeRequested(options.allowScripted === true)) {
-    return { mode: 'scripted', model: SCRIPTED_REALTIME_MODEL }
+    return { mode: 'scripted', model: SCRIPTED_REALTIME_MODEL, provider }
+  }
+  if (provider === 'gemini') {
+    // No token crosses to the renderer: main relays the Live session.
+    return options.geminiConfigured
+      ? { mode: 'live', model: GEMINI_LIVE_MODEL, provider: 'gemini' }
+      : { mode: 'mock', model: GEMINI_LIVE_MODEL, provider: 'gemini', configurationStatus: 'vertex_not_configured' }
   }
   const apiKey = process.env.OPENAI_API_KEY?.trim()
   if (!apiKey) {

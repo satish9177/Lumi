@@ -6,6 +6,8 @@ import type {
   AgentReconciliationView,
   AgentSlotView
 } from '../../shared/agent-contracts'
+import { formatCalendarDate, formatPrice } from '../../shared/scripted-voice'
+import type { VoiceTaskOutcome } from '../../shared/voice-task-contracts'
 
 /**
  * What the booking card says and which controls it offers, derived only from
@@ -47,13 +49,7 @@ const FIELD_LABELS: Record<AgentChangedFact['field'], string> = {
   currency: 'Currency'
 }
 
-export function formatPrice(amount: number, currency: string): string {
-  try {
-    return new Intl.NumberFormat('en-IN', { style: 'currency', currency, maximumFractionDigits: 0 }).format(amount)
-  } catch {
-    return `${amount} ${currency}`
-  }
-}
+export { formatPrice } from '../../shared/scripted-voice'
 
 export function formatAppointmentTime(iso: string): string {
   const date = new Date(iso)
@@ -215,6 +211,12 @@ export function describeEvent(event: AgentEventView): string {
         ? 'Searched the clinic site (read-only)'
         : `Searched the clinic site (read-only): ${count} matching appointment${count === 1 ? '' : 's'}`
     }
+    case 'task.info_lookup_completed': {
+      const count = event.profiles?.length
+      return count === undefined
+        ? 'Read clinic information (read-only)'
+        : `Read clinic information (read-only): ${count} doctor profile${count === 1 ? '' : 's'}`
+    }
     case 'action.proposed': return 'Booking prepared from the clinic site'
     case 'action.approval_requested': return 'Waiting for your approval'
     case 'action.approved': return 'You approved the booking'
@@ -263,8 +265,15 @@ export function latestSearchResults(events: readonly AgentEventView[]): AgentSlo
   return undefined
 }
 
+export { formatCalendarDate } from '../../shared/scripted-voice'
+
 export function describeCriteria(criteria: AgentBookingCriteria): string {
-  const parts = [criteria.specialty || 'Any specialty', criteria.day || 'any day']
+  const when = criteria.dateFrom && criteria.dateTo
+    ? criteria.dateFrom === criteria.dateTo
+      ? formatCalendarDate(criteria.dateFrom)
+      : `${formatCalendarDate(criteria.dateFrom)} – ${formatCalendarDate(criteria.dateTo)}`
+    : criteria.day || 'any day'
+  const parts = [criteria.specialty || 'Any specialty', when]
   if (criteria.earliestTime && criteria.latestTime) parts.push(`${criteria.earliestTime}–${criteria.latestTime}`)
   else if (criteria.earliestTime) parts.push(`from ${criteria.earliestTime}`)
   else if (criteria.latestTime) parts.push(`until ${criteria.latestTime}`)
@@ -272,4 +281,47 @@ export function describeCriteria(criteria: AgentBookingCriteria): string {
     parts.push(`up to ${formatPrice(criteria.maxPrice, criteria.maxPriceCurrency)}`)
   }
   return parts.join(' · ')
+}
+
+/** One app-authored sentence for a typed request's outcome. Never page text as instructions. */
+export function describeOutcome(outcome: VoiceTaskOutcome): string {
+  const narration = outcome.narration
+  const stopped = outcome.plan?.find((step) => step.status === 'stopped')
+  const suffix = stopped ? ` Stopped at the ${stopped.step.replaceAll('_', ' ')} step.` : ''
+  switch (narration.kind) {
+    case 'results':
+      return `${narration.totalCount === 0 ? 'No appointments matched.' : `Found ${narration.totalCount} matching appointment${narration.totalCount === 1 ? '' : 's'}.`}` +
+        `${narration.appliedPreferences?.length ? ' Used your saved preferences for missing details.' : ''}${suffix}`
+    case 'chosen':
+      return `Picked result ${narration.slot.ordinal} (${narration.strategy}): ${narration.slot.doctor}, ${narration.slot.day} ${narration.slot.time}, ${formatPrice(narration.slot.price, narration.slot.currency)}. Not prepared yet.`
+    case 'approval_ready':
+    case 'approval_required':
+      return `Prepared ${narration.booking.doctor}, ${narration.booking.day} ${narration.booking.time}, ${formatPrice(narration.booking.price, narration.booking.currency)}. Nothing is booked until you press Approve and book.${suffix}`
+    case 'clinic_info':
+      return narration.profiles.length === 0 ? 'No matching doctor profile on the clinic site.' : `Read ${narration.profiles.length} doctor profile${narration.profiles.length === 1 ? '' : 's'} from the clinic site.`
+    case 'preference_saved':
+      return `Saved preference: ${narration.preference.key.replaceAll('_', ' ')} = ${narration.preference.value}.`
+    case 'needs_clarification':
+      if (narration.reason === 'date_ambiguous' && narration.dateOptions) {
+        return `Which day did you mean: ${narration.dateOptions.map((option) => formatCalendarDate(option.dateFrom)).join(' or ')}?`
+      }
+      if (narration.reason === 'not_understood') return 'Lumi handles appointment and clinic questions here. Try "find a dermatologist tomorrow evening".'
+      return `Lumi could not do that yet: ${narration.reason.replaceAll('_', ' ')}.${suffix}`
+    case 'task_cancelled':
+      return 'The task is cancelled. Nothing was booked.'
+    case 'outcome_unknown':
+      return 'Lumi does not know whether the booking went through. It will not book again; check it from the card.'
+    case 'booking_confirmed':
+      return 'The booking is confirmed by the clinic site.'
+    case 'booking_not_made':
+      return 'No booking was made.'
+    case 'refused':
+      return `Lumi could not complete that (${narration.code.replaceAll('_', ' ')}).`
+    default:
+      return 'Done. See the task below.'
+  }
+}
+
+export function topicLabel(topic: string): string {
+  return topic === 'walk_ins' ? 'Walk-ins' : topic[0].toUpperCase() + topic.slice(1)
 }

@@ -14,6 +14,7 @@ from app.browser.managed import ManagedBrowserWorker
 from app.services.actions import ActionService
 from app.services.booking_preparation import BookingPreparationService
 from app.services.booking_tasks import BookingTaskService
+from app.services.clinic_info import ClinicInfoService
 from app.services.browser_execution import (
     BrowserExecutionService,
     BrowserWorkerConfig,
@@ -94,6 +95,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
                 app.state.booking_task_service = BookingTaskService(action_service)
                 app.state.booking_preparation_service = BookingPreparationService(
+                    tasks=task_service,
+                    actions=action_service,
+                    runtime_generation=generation.id,
+                    worker=worker,
+                )
+                app.state.clinic_info_service = ClinicInfoService(
                     tasks=task_service,
                     actions=action_service,
                     runtime_generation=generation.id,

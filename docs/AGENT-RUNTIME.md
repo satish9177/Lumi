@@ -727,8 +727,8 @@ React renderer -> typed preload (window.lifeLens.agent, fixed channels)
   `PendingActionStore`; durable browser actions belong only to this ledger.
   Neither system can create or approve the other's actions.
 
-Still deferred: packaged Python sidecar bundling, planners, memory, and any real
-website.
+Deferred at the time (later delivered in Milestone 6, except real websites):
+packaged Python sidecar bundling, planners, memory, and any real website.
 
 ## Voice task controller (Milestone 5)
 
@@ -775,3 +775,45 @@ realtime model ─strict tool call─► renderer (voice-task-tools)
   in-process server speaking the Realtime event protocol
   (`realtime-scripted.ts`). `tests/test_voice_acceptance.py` drives it.
 
+
+## Milestone 6: providers, plans, dates, memory, second workflow, packaging
+
+The durable controller, approval model, worker and recovery are unchanged in
+authority. Milestone 6 adds front doors and inputs around them; see
+[ARCHITECTURE.md](ARCHITECTURE.md) for the full picture.
+
+- **Date windows.** Booking criteria gain `date_from`/`date_to` (inclusive,
+  site-local, both or neither, at most 14 days, consistent with `day` for a
+  single date). Search admits only observed slots whose *clinic-local* date is
+  in the window; a revision that excludes a prepared booking rejects it in the
+  same transaction, as for times and prices. Main resolves the window from a
+  relative-day kind with the trusted clock and time zone
+  (`src/shared/relative-dates.ts`); the model never supplies a date it did not
+  hear.
+- **Bounded plans.** `run_plan` runs `search|refine → choose → prepare →
+  show_for_approval` (at most four steps, fixed order) through the same
+  controller methods as the single-step commands and reports each step as
+  `done`, `stopped` or `not_run`. Choosing is deterministic (cheapest,
+  earliest, latest, number, time, doctor) over the recorded results; prices in
+  different currencies are never compared. The plan has no approval step.
+- **Typed requests.** `submitTextRequest(requestId, text)` → context builder →
+  model router (`intent_extraction`) → the same strict parser → the same
+  controller, once per request id. `request_id` is stored on the task like
+  `voice_turn_id`, so a replay never creates a second task.
+- **Clinic information** (`clinic_info` tasks). `POST
+  /tasks/{id}/info/lookup` reads public doctor profiles through the reviewed
+  `read_doctor_profiles` operation (READ_ONLY, SAFE_TO_RETRY) and appends
+  `task.info_lookup_completed` with typed facts under the task lock. There is
+  no action, approval, attempt or dispatch row: nothing changes anywhere. The
+  request accepts only `specialty`, `doctor`, `topic` and provenance fields.
+- **Memory.** Preferences and episodic summaries live in main
+  (`agent-memory.json`) with provenance. Task facts stay in PostgreSQL.
+- **Migrations for installed apps.** `python -m app.migrate` upgrades to the
+  Alembic head and prints only a status word. The packaged app runs it before
+  starting the runtime; the runtime still refuses an unmigrated database.
+- **Demo clinic site.** `python -m evals.sites.appointments.server
+  --demo-dates --parent-pid <pid>` moves the pinned catalogue to the coming
+  Saturday and exits with its owner. Tests use the pinned catalogue.
+
+No migration was added: new data lives in the existing `tasks.request` JSONB
+and `task_events`, so the schema head is still `0003`.

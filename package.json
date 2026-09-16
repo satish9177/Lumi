@@ -12,7 +12,10 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "build": "electron-vite build",
-    "package": "npm run build && electron-builder --win --x64"
+    "package": "npm run build && npm run build:agent-runtime && electron-builder --win --x64",
+    "build:agent-runtime": "node scripts/build-agent-runtime.mjs",
+    "package:dir": "npm run build && npm run build:agent-runtime && electron-builder --win --x64 --dir",
+    "eval": "node scripts/run-evals.mjs"
   },
   "build": {
     "appId": "com.lifelens.app",
@@ -47,7 +50,13 @@
       "**/node_modules/tesseract.js/**",
       "**/node_modules/tesseract.js-core/**"
     ],
-    "npmRebuild": false
+    "npmRebuild": false,
+    "extraResources": [
+      {
+        "from": "dist/agent-runtime",
+        "to": "agent-runtime"
+      }
+    ]
   },
   "dependencies": {
     "dotenv": "16.6.1",

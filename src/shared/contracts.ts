@@ -1,3 +1,4 @@
+import type { VoiceRelayApi } from './voice-relay-contracts'
 import type { AgentApi } from './agent-contracts'
 import type { ClassifiedIntent, GuardedTool, ToolPolicyCode, ToolPolicyDecision } from './intent'
 import {
@@ -94,7 +95,7 @@ export type CompanionState = (typeof COMPANION_STATES)[number]
 export type RealtimeMode = 'live' | 'mock' | 'scripted'
 
 /** A non-secret reason the main process selected the deterministic demo path. */
-export type RealtimeConfigurationStatus = 'openai_api_key_missing'
+export type RealtimeConfigurationStatus = 'openai_api_key_missing' | 'vertex_not_configured'
 
 export type CaptureSourceKind = 'screen' | 'window'
 
@@ -120,6 +121,9 @@ export interface CaptureResult {
 export interface RealtimeSessionCredential {
   mode: RealtimeMode
   model: string
+  /** Which realtime transport main configured. Absent means OpenAI. */
+  provider?: 'openai' | 'gemini'
+  /** An OpenAI ephemeral client secret. Gemini never sends one: main relays. */
   token?: string
   expiresAt?: string
   configurationStatus?: RealtimeConfigurationStatus
@@ -624,6 +628,8 @@ export interface LifeLensApi {
   checkCaptureForScam: (captureId: string) => Promise<ScamCheckAssessment>
   discardCapture: () => Promise<void>
   createRealtimeSession: () => Promise<RealtimeSessionCredential>
+  /** Gemini Live relay, owned by main. Only closed message kinds cross it. */
+  voiceRelay: VoiceRelayApi
   noteUserRequest: (request: string) => Promise<ClassifiedIntent>
   evaluateToolRequest: (toolName: GuardedTool) => Promise<ToolPolicyDecision>
   createPendingAction: (proposal: ToolProposal) => Promise<PendingActionPreview>

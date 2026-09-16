@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { createServer } from 'node:net'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { spawn, type SpawnOptions } from 'node:child_process'
 
 export type AgentRuntimeState = 'stopped' | 'starting' | 'running' | 'unavailable' | 'failed' | 'stopping'
@@ -43,8 +43,12 @@ export interface AgentRuntimeSettings {
   /** The one reviewed fixture origin the runtime-owned worker may visit. */
   browserSiteOrigin?: string
   browserHeadless?: boolean
-  /** Development/test override of the runtime's own `.env` database. */
+  /** Development/test override of the runtime's own `.env` database; the packaged app's only database. */
   databaseUrl?: string
+  /** Packaged builds: the bundled Chromium directory. */
+  browsersPath?: string
+  /** Packaged builds: bring the schema to the Alembic head before starting. */
+  migrate?: boolean
 }
 
 export type RuntimeMethod = 'GET' | 'POST'
@@ -83,6 +87,7 @@ const ALLOWED_ROUTES: ReadonlyArray<{ method: RuntimeMethod; pattern: RegExp }> 
   { method: 'GET', pattern: new RegExp(`^/tasks/${UUID_PART}/events[?]after_sequence=[0-9]{1,15}&limit=[0-9]{1,3}$`) },
   { method: 'GET', pattern: new RegExp(`^/tasks/${UUID_PART}/actions[?]limit=[0-9]{1,3}$`) },
   { method: 'POST', pattern: new RegExp(`^/tasks/${UUID_PART}/booking/(search|prepare|criteria|cancel)$`) },
+  { method: 'POST', pattern: new RegExp(`^/tasks/${UUID_PART}/info/lookup$`) },
   { method: 'GET', pattern: new RegExp(`^/actions/${UUID_PART}$`) },
   {
     method: 'POST',
@@ -111,6 +116,12 @@ export function validateRuntimeSettings(settings: AgentRuntimeSettings): Record<
     }
     environment.DATABASE_URL = settings.databaseUrl
   }
+  if (settings.browsersPath !== undefined) {
+    if (!isAbsolute(settings.browsersPath) || /["\r\n]/.test(settings.browsersPath) || settings.browsersPath.length > 500) {
+      throw new Error('The bundled browser path is invalid.')
+    }
+    environment.PLAYWRIGHT_BROWSERS_PATH = settings.browsersPath
+  }
   return environment
 }
 
@@ -134,6 +145,16 @@ const SAFE_ENVIRONMENT_KEYS = [
   'PROGRAMDATA'
 ] as const
 
+/** Where electron-builder places the bundled runtime (see scripts/build-agent-runtime.mjs). */
+export function packagedAgentRuntimePaths(resourcesPath: string): { agentRoot: string; pythonPath: string; browsersPath: string } {
+  const root = join(resolve(resourcesPath), 'agent-runtime')
+  return {
+    agentRoot: join(root, 'agent'),
+    pythonPath: join(root, 'python', 'python.exe'),
+    browsersPath: join(root, 'ms-playwright')
+  }
+}
+
 export function developmentAgentRuntimePaths(appRoot: string): { agentRoot: string; pythonPath: string } {
   const trustedRoot = resolve(appRoot)
   const agentRoot = join(trustedRoot, 'services', 'agent')
@@ -145,6 +166,8 @@ function controlledEnvironment(token: string, parentPid: number, settings: Recor
     ...settings,
     PYTHONUTF8: '1',
     PYTHONUNBUFFERED: '1',
+    // An installed runtime never writes beside its own code.
+    PYTHONDONTWRITEBYTECODE: '1',
     LUMI_RUNTIME_TOKEN: token,
     LUMI_RUNTIME_PARENT_PID: String(parentPid),
     LUMI_RUNTIME_READY_FD: '3'
@@ -199,6 +222,8 @@ export class AgentRuntimeSupervisor {
   private cleanupPromises = new Map<number, Promise<void>>()
   private launchPromise?: Promise<void>
   private readonly settingsEnvironment: Record<string, string>
+  private readonly migrateFirst: boolean
+  private migrated = false
 
   constructor(options: AgentRuntimeSupervisorOptions) {
     this.options = {
@@ -217,6 +242,40 @@ export class AgentRuntimeSupervisor {
       onStatus: options.onStatus ?? (() => undefined)
     }
     this.settingsEnvironment = validateRuntimeSettings(options.runtimeSettings ?? {})
+    this.migrateFirst = options.runtimeSettings?.migrate === true
+  }
+
+  /**
+   * Packaged builds: run the fixed migration entry point once, with the same
+   * constructed environment minus the runtime credential. The runtime itself
+   * still refuses to serve an unmigrated database.
+   */
+  private async migrateOnce(): Promise<void> {
+    if (!this.migrateFirst || this.migrated) return
+    const environment: NodeJS.ProcessEnv = { ...this.settingsEnvironment, PYTHONUTF8: '1', PYTHONDONTWRITEBYTECODE: '1' }
+    for (const key of SAFE_ENVIRONMENT_KEYS) {
+      const value = process.env[key]
+      if (value !== undefined) environment[key] = value
+    }
+    const child = this.options.spawnRuntime(this.options.pythonPath, ['-m', 'app.migrate'], {
+      cwd: this.options.agentRoot, env: environment, shell: false, windowsHide: true, stdio: ['ignore', 'ignore', 'ignore']
+    })
+    const code = await new Promise<number | null>((resolveExit) => {
+      const timer = setTimeout(() => {
+        child.kill('SIGKILL')
+        resolveExit(null)
+      }, 120_000)
+      child.once('exit', (exitCode) => {
+        clearTimeout(timer)
+        resolveExit(typeof exitCode === 'number' ? exitCode : null)
+      })
+      child.once('error', () => {
+        clearTimeout(timer)
+        resolveExit(null)
+      })
+    })
+    if (code !== 0) throw new Error('The Lumi agent database could not be prepared.')
+    this.migrated = true
   }
 
   status(): AgentRuntimeStatus {
@@ -231,6 +290,13 @@ export class AgentRuntimeSupervisor {
     }
     this.wantsRunning = true
     this.restartCount = 0
+    try {
+      await this.migrateOnce()
+    } catch (error) {
+      this.wantsRunning = false
+      this.setState('failed')
+      throw error
+    }
     await this.beginLaunch()
   }
 

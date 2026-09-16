@@ -1,7 +1,7 @@
 import type { ScriptedRealtimeChannel } from './realtime'
-import { VOICE_TASK_TOOLS } from './voice-task-tools'
-import type { VoiceNarration, VoiceSlotFact } from '../../shared/voice-task-contracts'
-import { formatPrice } from './agent-task-view'
+import type { VoiceSlotFact } from '../../shared/voice-task-contracts'
+import type { GeminiLiveProvider } from './voice/gemini-live-provider'
+import { narrateScripted, scriptedToolCall } from '../../shared/scripted-voice'
 
 /**
  * A deterministic stand-in for the OpenAI Realtime server, for acceptance tests.
@@ -50,24 +50,8 @@ declare global {
   }
 }
 
-const WORD_ORDINALS: Record<string, number> = { first: 1, second: 2, third: 3, fourth: 4, fifth: 5, '1st': 1, '2nd': 2, '3rd': 3 }
-const DAYS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday']
-
 function isRecord(value: unknown): value is Json {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function clock(hour: number, minute: number): string {
-  return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`
-}
-
-function hourIn(match: RegExpMatchArray, hourIndex: number, minuteIndex: number, meridiemIndex: number): string {
-  let hour = Number(match[hourIndex])
-  const minute = match[minuteIndex] ? Number(match[minuteIndex]) : 0
-  const meridiem = match[meridiemIndex]
-  if (meridiem === 'pm' && hour < 12) hour += 12
-  if (meridiem === 'am' && hour === 12) hour = 0
-  return clock(hour, minute)
 }
 
 export class ScriptedRealtimeServer implements ScriptedRealtimeChannel {
@@ -80,6 +64,8 @@ export class ScriptedRealtimeServer implements ScriptedRealtimeChannel {
   private readonly spokenLines: string[] = []
   private readonly calls: ToolCall[] = []
   private sequence = 0
+  /** Like the service's own ids, unique across sessions and restarts. */
+  private readonly idPrefix = crypto.randomUUID().replaceAll('-', '').slice(0, 12)
   private lastInput: { kind: 'user'; text: string } | { kind: 'output'; output: Json } | undefined
   private lastResults: VoiceSlotFact[] = []
   private lastToolEvents: string[] = []
@@ -157,7 +143,7 @@ export class ScriptedRealtimeServer implements ScriptedRealtimeChannel {
 
   private id(prefix: string): string {
     this.sequence += 1
-    return `${prefix}_scripted${String(this.sequence).padStart(4, '0')}`
+    return `${prefix}_scripted${this.idPrefix}${String(this.sequence).padStart(4, '0')}`
   }
 
   private emit(event: Json): void {
@@ -243,105 +229,16 @@ export class ScriptedRealtimeServer implements ScriptedRealtimeChannel {
     this.emit({ type: 'response.done', response: { id: responseId, output: [] } })
   }
 
-  // ---- the scripted "model" ----------------------------------------------------
+  // ---- the scripted "model" (shared with the Gemini harness) ------------------
 
   private interpret(raw: string): ToolCall | undefined {
-    const text = raw.toLowerCase()
-    if (/\b(cancel|stop)\b/.test(text) && /\b(task|search|searching|booking|this|it)\b/.test(text)) {
-      return { name: VOICE_TASK_TOOLS.cancel, arguments: {} }
-    }
-    if (/\bcheck\b/.test(text)) return { name: VOICE_TASK_TOOLS.check, arguments: {} }
-    if (/\b(status|what happened|did it go through)\b/.test(text)) return { name: VOICE_TASK_TOOLS.status, arguments: {} }
-    if (/\b(book it|yes|go ahead|confirm|approve|do it)\b/.test(text)) {
-      return { name: VOICE_TASK_TOOLS.showForApproval, arguments: {} }
-    }
-
-    const selection = this.selection(text)
-    if (selection) return { name: VOICE_TASK_TOOLS.select, arguments: selection }
-
-    const fields: Json = {}
-    if (/\b(dermatolog\w*|skin doctor)\b/.test(text)) fields.specialty = 'Dermatology'
-    if (/\b(dentist\w*|dental)\b/.test(text)) fields.specialty = 'Dentistry'
-    const day = DAYS.find((name) => text.includes(name))
-    if (day) fields.day = day[0].toUpperCase() + day.slice(1)
-    const part = /\b(morning|afternoon|evening)\b/.exec(text)
-    if (part) fields.part_of_day = part[1]
-    const after = /\bafter (\d{1,2})(?::(\d{2}))?\s*(am|pm)?/.exec(text)
-    if (after) fields.earliest_time = hourIn(after, 1, 2, 3)
-    const before = /\bbefore (\d{1,2})(?::(\d{2}))?\s*(am|pm)?/.exec(text)
-    if (before) fields.latest_time = hourIn(before, 1, 2, 3)
-    const under = /\b(?:under|below|less than|within|up to)\s*(?:rs\.?|₹|inr)?\s*(\d{2,7})/.exec(text)
-    if (under) fields.max_price_inr = Number(under[1])
-
-    if (fields.specialty && /\b(find|search|look|need|get|book)\b/.test(text)) {
-      return { name: VOICE_TASK_TOOLS.search, arguments: fields }
-    }
-    if (Object.keys(fields).length > 0) return { name: VOICE_TASK_TOOLS.refine, arguments: fields }
-    return undefined
-  }
-
-  private selection(text: string): Json | undefined {
-    if (!/\b(take|choose|pick|select|want|go with|fine|one)\b/.test(text)) return undefined
-    const ordinal = /\b(first|second|third|fourth|fifth|1st|2nd|3rd)\b/.exec(text)
-    if (ordinal) return { result_number: WORD_ORDINALS[ordinal[1]] }
-    const time = /\b(\d{1,2}):(\d{2})\s*(am|pm)?/.exec(text)
-    if (time) {
-      let value = hourIn(time, 1, 2, 3)
-      // Like a model with the conversation in context: "the 6:30 one" after
-      // evening results means 18:30.
-      const hour = Number(value.slice(0, 2))
-      const evening = clock(hour + 12, Number(value.slice(3)))
-      if (!time[3] && hour < 12 && this.lastResults.some((slot) => slot.time === evening)) value = evening
-      return { time: value }
-    }
-    const doctor = /\b(dr\.? [a-z]+)\b/.exec(text)
-    if (doctor) {
-      const name = doctor[1].replace(/^dr\.?/, 'Dr').replace(/ ([a-z])/, (_, letter: string) => ` ${letter.toUpperCase()}`)
-      return { doctor: name }
-    }
-    return undefined
+    return scriptedToolCall(raw, this.lastResults)
   }
 
   private narrate(output: Json): string {
-    const facts = isRecord(output.facts) ? output.facts as unknown as VoiceNarration : undefined
-    if (!facts) return typeof output.message === 'string' ? output.message : 'Something went wrong.'
-    const booking = (fact: { doctor: string; day: string; time: string; price: number; currency: string }): string =>
-      `${fact.doctor} on ${fact.day} at ${fact.time} for ${formatPrice(fact.price, fact.currency)}`
-    switch (facts.kind) {
-      case 'results': {
-        this.lastResults = facts.slots
-        if (facts.totalCount === 0) return 'I could not find any appointments that match.'
-        const list = facts.slots
-          .map((slot) => `${slot.ordinal}. ${slot.doctor}, ${slot.day} ${slot.time}, ${formatPrice(slot.price, slot.currency)}`)
-          .join('; ')
-        const withdrawn = facts.invalidatedBooking ? ' The booking I had prepared no longer fits, so it was withdrawn.' : ''
-        return `I found ${facts.totalCount} appointment${facts.totalCount === 1 ? '' : 's'}: ${list}.${withdrawn} Which one would you like?`
-      }
-      case 'approval_ready':
-        return `${booking(facts.booking)} is ready but not booked. Please review it and press Approve and book.`
-      case 'approval_required':
-        return `I cannot approve bookings by voice. Please review ${booking(facts.booking)} on the booking card and press Approve and book yourself.`
-      case 'approved_not_booked':
-        return 'You approved it, but it is not booked yet. Press Book now on the card.'
-      case 'booking_in_progress':
-        return 'The booking is being submitted. I am waiting for the clinic site to confirm it.'
-      case 'booking_confirmed':
-        return `Your booking${facts.bookingId ? ` ${facts.bookingId}` : ''} is confirmed${facts.confirmedByLookup ? '. I found it on the clinic site and did not book again' : ''}.`
-      case 'booking_not_made':
-        return 'That booking was not made.'
-      case 'outcome_unknown':
-        return 'I do not know yet whether that booking went through, and I will not book again. Say check it, or press Check existing booking.'
-      case 'checking':
-        return 'I am checking the clinic site for the existing booking.'
-      case 'task_open':
-        return 'Your appointment task is open.'
-      case 'task_cancelled':
-        return 'I cancelled the appointment task. Nothing was booked.'
-      case 'needs_clarification':
-        return `I could not do that yet (${facts.reason.replaceAll('_', ' ')}).`
-      case 'refused':
-        return `I could not complete that (${facts.code.replaceAll('_', ' ')}).`
-    }
+    const narration = narrateScripted(output)
+    if (narration.results) this.lastResults = narration.results
+    return narration.text
   }
 }
 
@@ -355,5 +252,21 @@ export function installRealtimeHarness(server: ScriptedRealtimeServer, reconnect
     reconnect,
     spoken: () => server.spoken(),
     toolCalls: () => server.toolCalls()
+  }
+}
+
+/**
+ * The same harness surface over the Gemini Live provider (scripted builds
+ * only): utterances go through main's relay to the scripted Gemini socket.
+ */
+export function installGeminiHarness(provider: GeminiLiveProvider, reconnect: () => Promise<void>): void {
+  window.__lumiRealtimeHarness = {
+    say: (text, options) => provider.harnessSay(text, { transcriptAfterToolCall: options?.transcriptAfterToolCall }),
+    bargeIn: () => undefined,
+    replayLastToolCall: () => undefined,
+    replayLastTranscript: () => undefined,
+    reconnect,
+    spoken: () => [...provider.spokenLines],
+    toolCalls: () => provider.toolCallLog.map((call) => ({ ...call }))
   }
 }

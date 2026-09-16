@@ -1,4 +1,13 @@
-import type { AgentBookingDay, AgentErrorCode, AgentTaskStatus } from './agent-contracts'
+import type {
+  AgentBookingDay,
+  AgentClinicInfoQuery,
+  AgentClinicInfoTopic,
+  AgentErrorCode,
+  AgentTaskKind,
+  AgentTaskStatus
+} from './agent-contracts'
+import type { PreferenceKey, PreferenceValue } from './model-contracts'
+import type { RelativeDayPhrase } from './relative-dates'
 
 /**
  * Voice → durable task controller contract.
@@ -41,18 +50,35 @@ export const MAX_VOICE_ORDINAL = 10
 
 export const VOICE_COMMAND_KINDS = [
   'start_search', 'refine_search', 'select_result', 'proceed_with_booking',
-  'task_status', 'check_booking', 'cancel_task'
+  'task_status', 'check_booking', 'cancel_task',
+  'run_plan', 'clinic_info', 'remember_preference'
 ] as const
 export type VoiceCommandKind = typeof VOICE_COMMAND_KINDS[number]
 
+/** The realtime tool names for the voice task commands. */
+export const VOICE_TASK_TOOLS = {
+  search: 'appointment_search',
+  refine: 'appointment_refine',
+  select: 'appointment_select',
+  status: 'appointment_status',
+  showForApproval: 'appointment_show_booking_for_approval',
+  check: 'appointment_check_booking',
+  cancel: 'appointment_cancel_task',
+  plan: 'appointment_plan',
+  clinicInfo: 'clinic_info_lookup',
+  rememberPreference: 'remember_preference'
+} as const
+export type VoiceTaskToolName = typeof VOICE_TASK_TOOLS[keyof typeof VOICE_TASK_TOOLS]
+
 /** Commands that change durable state or start browser work. One per turn. */
 export const PROGRESSING_VOICE_COMMANDS: readonly VoiceCommandKind[] = [
-  'start_search', 'refine_search', 'select_result', 'check_booking', 'cancel_task'
+  'start_search', 'refine_search', 'select_result', 'check_booking', 'cancel_task',
+  'run_plan', 'clinic_info', 'remember_preference'
 ]
 
 /** The completed user utterance a command is bound to. */
 export interface VoiceTurn {
-  /** Realtime conversation item id of the completed user turn. */
+  /** Realtime conversation item id of the completed user turn, or a typed request id. */
   turnId: string
   /** The completed transcript (or typed text), kept for traceability only. */
   utterance: string
@@ -66,6 +92,11 @@ export interface VoiceSearchConstraints {
   earliestTime?: string
   latestTime?: string
   maxPriceInr?: number
+  /**
+   * The kind of day the user said ("tomorrow", "next Saturday"). Main resolves
+   * it into calendar dates with the trusted clock and time zone.
+   */
+  when?: RelativeDayPhrase
 }
 
 export const VOICE_CLEARABLE_FIELDS = ['specialty', 'day', 'time', 'price'] as const
@@ -85,6 +116,41 @@ export interface VoiceSelection {
   doctor?: string
 }
 
+/** How a compound request picks one of the recorded results. */
+export const PLAN_CHOICE_STRATEGIES = ['cheapest', 'earliest', 'latest', 'number', 'time', 'doctor'] as const
+export type PlanChoiceStrategy = typeof PLAN_CHOICE_STRATEGIES[number]
+
+export interface PlanChoice {
+  strategy: PlanChoiceStrategy
+  ordinal?: number
+  time?: string
+  doctor?: string
+}
+
+/**
+ * A bounded compound request. Steps always run in this order and each is
+ * optional: search *or* refine, then choose, then prepare, then show the
+ * approval card. There is no approve or execute step, and there is no way to
+ * express one: "book it" at the end of a sentence only surfaces the card.
+ */
+export interface TaskPlan {
+  search?: VoiceSearchConstraints
+  refine?: VoiceRefinement
+  choose?: PlanChoice
+  prepare?: boolean
+  showForApproval?: boolean
+}
+
+export const PLAN_STEP_NAMES = ['search', 'refine', 'choose', 'prepare', 'show_for_approval'] as const
+export type PlanStepName = typeof PLAN_STEP_NAMES[number]
+/** The most durable steps one utterance may run. */
+export const MAX_PLAN_STEPS = 4
+
+export interface PlanStepReport {
+  step: PlanStepName
+  status: 'done' | 'stopped' | 'not_run'
+}
+
 export type VoiceTaskCommand =
   | { kind: 'start_search'; turn: VoiceTurn; constraints: VoiceSearchConstraints }
   | { kind: 'refine_search'; turn: VoiceTurn; changes: VoiceRefinement }
@@ -93,6 +159,9 @@ export type VoiceTaskCommand =
   | { kind: 'task_status'; turn: VoiceTurn }
   | { kind: 'check_booking'; turn: VoiceTurn }
   | { kind: 'cancel_task'; turn: VoiceTurn }
+  | { kind: 'run_plan'; turn: VoiceTurn; plan: TaskPlan }
+  | { kind: 'clinic_info'; turn: VoiceTurn; query: AgentClinicInfoQuery }
+  | { kind: 'remember_preference'; turn: VoiceTurn; preference: PreferenceValue }
 
 /** Where the trusted UI should draw the user's attention. */
 export type VoiceTaskFocus = 'none' | 'task' | 'approval_card'
@@ -122,6 +191,27 @@ export interface VoiceConstraintFact {
   latestTime?: string
   maxPrice?: number
   currency?: string
+  dateFrom?: string
+  dateTo?: string
+}
+
+/** Typed public doctor facts a voice answer may speak. */
+export interface VoiceProfileFact {
+  doctor: string
+  specialty: string
+  clinic: string
+  address: string
+  hours: string
+  consultationFee: number
+  currency: string
+  languages: string[]
+  walkIns: boolean
+}
+
+export interface VoiceDateOption {
+  dateFrom: string
+  dateTo: string
+  day?: AgentBookingDay
 }
 
 export const VOICE_CLARIFICATIONS = [
@@ -138,12 +228,27 @@ export const VOICE_CLARIFICATIONS = [
   'slot_unavailable',
   'criteria_mismatch',
   'approval_expired',
-  'busy'
+  'busy',
+  'date_ambiguous',
+  'date_invalid',
+  'too_many_steps',
+  'wrong_task_kind',
+  'not_understood'
 ] as const
 export type VoiceClarification = typeof VOICE_CLARIFICATIONS[number]
 
 export type VoiceNarration =
-  | { kind: 'results'; constraints: VoiceConstraintFact; slots: VoiceSlotFact[]; totalCount: number; invalidatedBooking: boolean }
+  | {
+    kind: 'results'
+    constraints: VoiceConstraintFact
+    slots: VoiceSlotFact[]
+    totalCount: number
+    invalidatedBooking: boolean
+    /** Constraints filled from remembered preferences, not from this request. */
+    appliedPreferences?: PreferenceKey[]
+  }
+  /** One recorded result picked by rule ("the cheapest"); nothing was prepared. */
+  | { kind: 'chosen'; slot: VoiceSlotFact; strategy: PlanChoiceStrategy; totalCount: number }
   /** A booking is prepared from observed facts and waits for the trusted click. */
   | { kind: 'approval_ready'; booking: VoiceBookingFact }
   /** The user tried to approve by voice. Nothing was approved. */
@@ -157,7 +262,15 @@ export type VoiceNarration =
   | { kind: 'checking'; booking: VoiceBookingFact }
   | { kind: 'task_open'; constraints: VoiceConstraintFact; taskStatus: AgentTaskStatus }
   | { kind: 'task_cancelled'; rejectedBooking: boolean }
-  | { kind: 'needs_clarification'; reason: VoiceClarification; booking?: VoiceBookingFact; candidates?: VoiceSlotFact[] }
+  | {
+    kind: 'needs_clarification'
+    reason: VoiceClarification
+    booking?: VoiceBookingFact
+    candidates?: VoiceSlotFact[]
+    dateOptions?: VoiceDateOption[]
+  }
+  | { kind: 'clinic_info'; topic: AgentClinicInfoTopic; profiles: VoiceProfileFact[] }
+  | { kind: 'preference_saved'; preference: PreferenceValue }
   | { kind: 'refused'; code: AgentErrorCode }
 
 export interface VoiceTaskOutcome {
@@ -168,4 +281,7 @@ export interface VoiceTaskOutcome {
   narration: VoiceNarration
   /** True when this turn was already handled and nothing ran again. */
   replayed: boolean
+  taskKind?: AgentTaskKind
+  /** For a compound request: what each step did. */
+  plan?: PlanStepReport[]
 }
