@@ -16,6 +16,7 @@ from app.config import AGENT_ROOT, Settings
 from app.db.engine import create_database_engine
 from app.db.migrations import alembic_config
 from app.main import create_app
+from app.api.security import authorization_header
 from app.services.actions import ActionService
 from app.services.runtime import RuntimeGeneration, register_runtime_generation
 from app.services.tasks import TaskService
@@ -33,6 +34,7 @@ TRUNCATE_ALL = (
     "TRUNCATE browser_dispatches, browser_worker_generations, action_attempts, approvals, "
     "actions, runtime_generations, task_events, tasks RESTART IDENTITY"
 )
+TEST_RUNTIME_TOKEN = SecretStr("test-runtime-token-with-at-least-32-bytes")
 
 
 def truncate_all(database_url: str) -> None:
@@ -81,7 +83,9 @@ def migrated_database_url(test_database_url: str) -> str:
 
 @pytest.fixture
 def settings(migrated_database_url: str) -> Settings:
-    return Settings(database_url=SecretStr(migrated_database_url))
+    return Settings(
+        database_url=SecretStr(migrated_database_url), runtime_token=TEST_RUNTIME_TOKEN
+    )
 
 
 @pytest.fixture
@@ -116,7 +120,11 @@ async def running_app(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
     """Run the app's real lifespan (engine creation, schema check, disposal)."""
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://agent.test") as client:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://127.0.0.1",
+            headers={"Authorization": authorization_header(TEST_RUNTIME_TOKEN)},
+        ) as client:
             yield client
 
 

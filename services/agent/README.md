@@ -30,14 +30,21 @@ uv sync
 # 3. Schema (the runtime never creates tables itself)
 uv run alembic upgrade head
 
-# 4. Run
-uv run uvicorn --factory app.main:create_app --host 127.0.0.1 --port 8765
+# 4. Run manually (Electron normally mints this per process generation)
+$env:LUMI_RUNTIME_TOKEN = uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
+uv run python -m app.server --port 8765
 ```
 
 The runtime refuses to start if `DATABASE_URL` is missing or invalid, the
 database is unreachable, or the schema is not at the Alembic head. On startup it
 also recovers unfinished execution attempts left by a previous process (see
 [Crash recovery](#crash-recovery)) before it accepts any request.
+
+Every endpoint, including health, docs and unknown paths, requires `Authorization:
+Bearer <LUMI_RUNTIME_TOKEN>`. The fixed `app.server` entry binds only to
+`127.0.0.1`, rejects non-loopback Host values and every supplied Origin, and
+does not write access logs. Electron main passes a fresh token through the child
+environment; it never crosses preload or reaches the renderer.
 
 `infra/postgres/init` creates `lumi_agent_test` only when the data volume is
 first initialized. For an existing volume, create it manually.
@@ -47,6 +54,8 @@ first initialized. For an existing volume, create it manually.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `DATABASE_URL` | — | Required. Must use `postgresql+asyncpg://`. |
+| `LUMI_RUNTIME_TOKEN` | — | Required. Per-process credential minted by Electron main; at least 32 characters. |
+| `LUMI_RUNTIME_PARENT_PID` | — | Electron pid. When present, the runtime exits if that exact process handle closes. |
 | `DATABASE_POOL_SIZE` | `5` | Connection pool size. |
 | `DATABASE_CONNECT_TIMEOUT_SECONDS` | `5.0` | Connection timeout. |
 | `APPROVAL_TTL_SECONDS` | `300` | How long a granted approval may be claimed. |
@@ -103,7 +112,7 @@ browser submission, and exactly one booking.
 
 | Method | Path | Result |
 | --- | --- | --- |
-| `GET` | `/health` | `200 {"status":"ok","database":"ok"}`, or `503` when the database is unreachable |
+| `GET` | `/health` | Authenticated `200` with database status and runtime generation, or `503` |
 | `POST` | `/tasks` | `201` task in `CREATED`, revision 1, with a `task.created` event |
 | `GET` | `/tasks/{id}` | `200` task, `404 task_not_found`, `422` malformed UUID |
 | `GET` | `/tasks/{id}/events?after_sequence=0&limit=100` | `200` events ordered by `sequence` |
@@ -250,7 +259,8 @@ uv run python -m app.browser.main --port 8802
 # 4. The runtime, told where the worker is
 $env:BROWSER_WORKER_URL = "http://127.0.0.1:8802"
 $env:BROWSER_WORKER_TOKEN = $token
-uv run uvicorn --factory app.main:create_app --host 127.0.0.1 --port 8765
+$env:LUMI_RUNTIME_TOKEN = uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
+uv run python -m app.server --port 8765
 ```
 
 With `BROWSER_WORKER_URL` or `BROWSER_WORKER_TOKEN` unset the runtime has no

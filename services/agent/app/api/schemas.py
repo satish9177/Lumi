@@ -291,6 +291,7 @@ class BrowserDispatchListResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     database: str
+    runtime_generation: uuid.UUID
 
 
 class ErrorDetail(BaseModel):

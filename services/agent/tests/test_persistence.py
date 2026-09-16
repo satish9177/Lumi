@@ -2,6 +2,7 @@
 
 import os
 import socket
+import secrets
 import subprocess
 import sys
 import time
@@ -40,12 +41,13 @@ def _free_port() -> int:
         return port
 
 
-def _start_runtime(database_url: str, port: int, log: IO[bytes]) -> subprocess.Popen[bytes]:
-    environment = {**os.environ, "DATABASE_URL": database_url}
+def _start_runtime(
+    database_url: str, port: int, log: IO[bytes], token: str
+) -> subprocess.Popen[bytes]:
+    environment = {**os.environ, "DATABASE_URL": database_url, "LUMI_RUNTIME_TOKEN": token}
     return subprocess.Popen(
         [
-            sys.executable, "-m", "uvicorn", "--factory", "app.main:create_app",
-            "--host", "127.0.0.1", "--port", str(port), "--log-level", "warning",
+            sys.executable, "-m", "app.server", "--port", str(port),
         ],
         cwd=AGENT_ROOT,
         env=environment,
@@ -54,13 +56,19 @@ def _start_runtime(database_url: str, port: int, log: IO[bytes]) -> subprocess.P
     )
 
 
-def _wait_healthy(process: subprocess.Popen[bytes], base_url: str, log_path: Path) -> None:
+def _headers(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _wait_healthy(
+    process: subprocess.Popen[bytes], base_url: str, log_path: Path, token: str
+) -> None:
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline:
         if process.poll() is not None:
             pytest.fail(f"runtime exited early:\n{log_path.read_text(errors='replace')}")
         try:
-            if httpx.get(f"{base_url}/health", timeout=1).status_code == 200:
+            if httpx.get(f"{base_url}/health", timeout=1, headers=_headers(token)).status_code == 200:
                 return
         except httpx.TransportError:
             pass
@@ -81,13 +89,20 @@ def test_task_survives_runtime_process_kill_and_restart(
     base_url = f"http://127.0.0.1:{port}"
 
     first_log = tmp_path / "first.log"
+    first_token = secrets.token_urlsafe(32)
     with first_log.open("wb") as log:
-        first = _start_runtime(migrated_database_url, port, log)
+        first = _start_runtime(migrated_database_url, port, log, first_token)
         try:
-            _wait_healthy(first, base_url, first_log)
-            created: dict[str, Any] = httpx.post(f"{base_url}/tasks", json={"request": REQUEST}).json()
-            before_task = httpx.get(f"{base_url}/tasks/{created['id']}").json()
-            before_events = httpx.get(f"{base_url}/tasks/{created['id']}/events").json()
+            _wait_healthy(first, base_url, first_log, first_token)
+            created: dict[str, Any] = httpx.post(
+                f"{base_url}/tasks", json={"request": REQUEST}, headers=_headers(first_token)
+            ).json()
+            before_task = httpx.get(
+                f"{base_url}/tasks/{created['id']}", headers=_headers(first_token)
+            ).json()
+            before_events = httpx.get(
+                f"{base_url}/tasks/{created['id']}/events", headers=_headers(first_token)
+            ).json()
             assert before_task == created
         finally:
             # A hard kill, not a graceful shutdown: nothing may depend on cleanup.
@@ -96,13 +111,21 @@ def test_task_survives_runtime_process_kill_and_restart(
         httpx.get(f"{base_url}/health", timeout=1)
 
     second_log = tmp_path / "second.log"
+    second_token = secrets.token_urlsafe(32)
     with second_log.open("wb") as log:
-        second = _start_runtime(migrated_database_url, port, log)
+        second = _start_runtime(migrated_database_url, port, log, second_token)
         try:
-            _wait_healthy(second, base_url, second_log)
+            _wait_healthy(second, base_url, second_log, second_token)
             assert second.pid != first.pid
-            after_task = httpx.get(f"{base_url}/tasks/{created['id']}")
-            after_events = httpx.get(f"{base_url}/tasks/{created['id']}/events")
+            assert httpx.get(
+                f"{base_url}/tasks/{created['id']}", headers=_headers(first_token)
+            ).status_code == 401
+            after_task = httpx.get(
+                f"{base_url}/tasks/{created['id']}", headers=_headers(second_token)
+            )
+            after_events = httpx.get(
+                f"{base_url}/tasks/{created['id']}/events", headers=_headers(second_token)
+            )
         finally:
             _stop(second)
 

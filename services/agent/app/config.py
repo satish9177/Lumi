@@ -16,9 +16,19 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         extra="ignore",
         hide_input_in_errors=True,
+        populate_by_name=True,
     )
 
     database_url: SecretStr
+    # Minted afresh by Electron main for every process generation. It is
+    # mandatory even in development and tests: there is no unauthenticated
+    # mode whose accidental use could expose the action ledger on loopback.
+    runtime_token: SecretStr = Field(validation_alias="LUMI_RUNTIME_TOKEN")
+    # Electron supplies its own pid so the runtime can fail closed when the
+    # desktop is hard-killed and therefore cannot run normal shutdown hooks.
+    runtime_parent_pid: int | None = Field(
+        default=None, validation_alias="LUMI_RUNTIME_PARENT_PID", ge=1
+    )
     database_pool_size: int = Field(default=5, ge=1, le=50)
     database_connect_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
     # How long a granted approval may be claimed for execution. Checked by the
@@ -43,6 +53,13 @@ class Settings(BaseSettings):
     #: a consequential operation short does not undo it, it only converts a
     #: knowable outcome into an unknown one.
     browser_worker_timeout_seconds: float = Field(default=120.0, gt=0, le=3_600)
+
+    @field_validator("runtime_token")
+    @classmethod
+    def _non_trivial_runtime_token(cls, value: SecretStr) -> SecretStr:
+        if len(value.get_secret_value()) < 32:
+            raise ValueError("LUMI_RUNTIME_TOKEN must be at least 32 characters")
+        return value
 
     @field_validator("browser_worker_url")
     @classmethod

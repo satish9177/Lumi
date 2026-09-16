@@ -1,6 +1,7 @@
 from collections.abc import Awaitable, Callable
 
 from fastapi import FastAPI, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api.schemas import ErrorDetail, ErrorResponse
@@ -73,6 +74,15 @@ async def _approval_not_usable(_: Request, exc: Exception) -> JSONResponse:
 
 
 def register_error_handlers(app: FastAPI) -> None:
+    async def invalid_request(_: Request, __: Exception) -> JSONResponse:
+        return _error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            ErrorDetail(code="invalid_request", message="Request validation failed."),
+        )
+
+    # FastAPI's default includes rejected input values. Runtime callers need a
+    # stable code, never an echo of proposal text or malformed credentials.
+    app.add_exception_handler(RequestValidationError, invalid_request)
     app.add_exception_handler(
         TaskNotFoundError, _simple(status.HTTP_404_NOT_FOUND, "task_not_found")
     )

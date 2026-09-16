@@ -60,9 +60,25 @@ async def health(request: Request) -> HealthResponse | JSONResponse:
         logger.warning("Health check could not reach the database", exc_info=True)
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content=HealthResponse(status="unavailable", database="unreachable").model_dump(),
+            content=HealthResponse(
+                status="unavailable",
+                database="unreachable",
+                runtime_generation=request.app.state.runtime_generation.id,
+            ).model_dump(mode="json"),
         )
-    return HealthResponse(status="ok", database="ok")
+    return HealthResponse(
+        status="ok",
+        database="ok",
+        runtime_generation=request.app.state.runtime_generation.id,
+    )
+
+
+@router.post("/lifecycle/shutdown", status_code=status.HTTP_202_ACCEPTED)
+async def shutdown(request: Request) -> Response:
+    """Ask this authenticated runtime generation to stop gracefully."""
+    callback: Any = request.app.state.request_shutdown
+    callback()
+    return Response(status_code=status.HTTP_202_ACCEPTED)
 
 
 @router.post("/tasks", status_code=status.HTTP_201_CREATED, response_model=TaskResponse)

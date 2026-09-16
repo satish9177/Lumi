@@ -41,6 +41,7 @@ import { restoreReminderTimers } from './services/tools'
 import { TelegramService } from './services/telegram'
 import { PendingActionStore } from './services/pending-actions'
 import { DroppedFileStore } from './services/dropped-files'
+import { AgentRuntimeSupervisor, developmentAgentRuntimePaths } from './services/agent-runtime-supervisor'
 import { PhotoIndexCoordinator } from './vision/coordinator'
 import { letterbox } from './vision/face-image'
 import { PersonEnrollmentService, EnrolmentError } from './vision/person-enrollment'
@@ -68,8 +69,19 @@ let personProfiles: PersonProfileStore
 let personEnrollment: PersonEnrollmentService
 let windowState: WindowStateStore
 let droppedFiles: DroppedFileStore
+let agentRuntime: AgentRuntimeSupervisor | undefined
+let agentRuntimeShutdownStarted = false
 let panelOpen = false
 const retainedCapture = new RetainedCaptureStore()
+const ownsSingleInstance = app.requestSingleInstanceLock()
+if (!ownsSingleInstance) app.quit()
+
+app.on('second-instance', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show()
+    mainWindow.focus()
+  }
+})
 
 const CLOSED_WINDOW_SIZE = { width: 88, height: 88 }
 const OPEN_WINDOW_SIZE = { width: 390, height: 640 }
@@ -725,6 +737,15 @@ app.whenReady().then(async () => {
   // the rename to Lumi stays a visible-branding change and never relocates the
   // user's profile directory — see docs/UI-UX-POLISH.md §6.
   app.setAppUserModelId('com.lifelens.app')
+  if (!app.isPackaged) {
+    const runtimePaths = developmentAgentRuntimePaths(app.getAppPath())
+    agentRuntime = new AgentRuntimeSupervisor(runtimePaths)
+    void agentRuntime.start().catch(() => {
+      // Runtime status will be bridged to the UI in a later slice. Never log
+      // child output or environment because both can contain credentials.
+      console.error('Lumi agent runtime did not start.')
+    })
+  }
   localStore = new LocalStore(app.getPath('userData'))
   windowState = new WindowStateStore(app.getPath('userData'))
   await windowState.load()
@@ -836,6 +857,15 @@ app.whenReady().then(async () => {
 })
 
 app.on('before-quit', () => retainedCapture.clear())
+
+app.on('before-quit', (event) => {
+  if (agentRuntime === undefined || agentRuntimeShutdownStarted) return
+  event.preventDefault()
+  agentRuntimeShutdownStarted = true
+  void agentRuntime.stop().catch(() => {
+    console.error('Lumi agent runtime required forced shutdown.')
+  }).finally(() => app.quit())
+})
 
 // A model search can outrun its own voice transcript, so the trusted intent may
 // register a beat after the request arrives. These bound how long the search
