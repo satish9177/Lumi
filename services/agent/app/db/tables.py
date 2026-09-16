@@ -5,6 +5,8 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Identity,
+    Index,
+    Integer,
     MetaData,
     String,
     Table,
@@ -14,6 +16,13 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 
+from app.domain.action_status import (
+    OPEN_APPROVAL_STATUSES,
+    ActionStatus,
+    ApprovalStatus,
+    AttemptOutcome,
+    RiskTier,
+)
 from app.domain.task_status import TaskStatus
 
 metadata = MetaData(
@@ -26,7 +35,12 @@ metadata = MetaData(
     }
 )
 
-_status_values = ", ".join(f"'{status.value}'" for status in TaskStatus)
+_HEX_DIGEST_FORMAT = "proposal_digest ~ '^[0-9a-f]{64}$'"
+
+
+def _values(members: type[TaskStatus] | type[ActionStatus] | type[ApprovalStatus] | type[AttemptOutcome] | type[RiskTier]) -> str:
+    return ", ".join(f"'{member.value}'" for member in members)
+
 
 tasks = Table(
     "tasks",
@@ -41,7 +55,7 @@ tasks = Table(
     Column("request", JSONB(), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
-    CheckConstraint(f"status IN ({_status_values})", name="status"),
+    CheckConstraint(f"status IN ({_values(TaskStatus)})", name="status"),
     CheckConstraint("revision >= 1", name="revision_positive"),
     CheckConstraint("last_event_sequence >= 1", name="last_event_sequence_positive"),
     CheckConstraint("jsonb_typeof(request) = 'object'", name="request_is_object"),
@@ -61,4 +75,122 @@ task_events = Table(
     UniqueConstraint("task_id", "sequence"),
     CheckConstraint("sequence >= 1", name="sequence_positive"),
     CheckConstraint("jsonb_typeof(payload) = 'object'", name="payload_is_object"),
+)
+
+#: One row per runtime process. An execution attempt records the generation that
+#: started it, so startup can tell "my own in-flight work" from "work a dead
+#: process left behind" without guessing. A future worker-lease design adds
+#: heartbeat/expiry columns here and stops relying on "one process at a time".
+runtime_generations = Table(
+    "runtime_generations",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+actions = Table(
+    "actions",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False),
+    # Deduplicates re-proposals from a retrying planner or a reconnecting client.
+    Column("idempotency_key", String(200), nullable=False),
+    Column("tool_name", String(64), nullable=False),
+    Column("risk_tier", String(8), nullable=False),
+    # The exact proposed action. Immutable after insert, enforced by a trigger.
+    Column("proposal", JSONB(), nullable=False),
+    # SHA-256 over canonical JSON of `proposal`, always computed by the server.
+    Column("proposal_digest", String(64), nullable=False),
+    Column("status", String(32), nullable=False),
+    Column("revision", BigInteger(), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("task_id", "idempotency_key"),
+    CheckConstraint(f"status IN ({_values(ActionStatus)})", name="status"),
+    CheckConstraint(f"risk_tier IN ({_values(RiskTier)})", name="risk_tier"),
+    CheckConstraint("revision >= 1", name="revision_positive"),
+    CheckConstraint("jsonb_typeof(proposal) = 'object'", name="proposal_is_object"),
+    CheckConstraint(_HEX_DIGEST_FORMAT, name="proposal_digest_format"),
+    CheckConstraint("length(idempotency_key) >= 1", name="idempotency_key_present"),
+)
+
+Index("ix_actions_task_id_created_at", actions.c.task_id, actions.c.created_at)
+
+approvals = Table(
+    "approvals",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("action_id", Uuid(), ForeignKey("actions.id", ondelete="RESTRICT"), nullable=False),
+    # The action revision this approval is bound to. Execution refuses to claim
+    # an approval whose bound revision is no longer the action's revision, so any
+    # later mutation of the action invalidates an approval already granted.
+    Column("action_revision", BigInteger(), nullable=False),
+    # Binds the approval to the exact proposal bytes that were approved.
+    Column("proposal_digest", String(64), nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("approved_at", DateTime(timezone=True), nullable=True),
+    Column("rejected_at", DateTime(timezone=True), nullable=True),
+    Column("consumed_at", DateTime(timezone=True), nullable=True),
+    CheckConstraint(f"status IN ({_values(ApprovalStatus)})", name="status"),
+    CheckConstraint(_HEX_DIGEST_FORMAT, name="proposal_digest_format"),
+    CheckConstraint("action_revision >= 1", name="action_revision_positive"),
+    CheckConstraint("expires_at > created_at", name="expires_after_creation"),
+    # One-way: an approved approval always has approved_at, and keeps it if it
+    # is later rejected, so the audit trail survives the status change.
+    CheckConstraint(
+        "status NOT IN ('APPROVED', 'CONSUMED') OR approved_at IS NOT NULL",
+        name="approved_at_set",
+    ),
+    CheckConstraint("(rejected_at IS NOT NULL) = (status = 'REJECTED')", name="rejected_at_set"),
+    CheckConstraint("(consumed_at IS NOT NULL) = (status = 'CONSUMED')", name="consumed_at_set"),
+)
+
+#: At most one live approval per action, which makes "approval is single-use" a
+#: database fact: claiming one flips it to CONSUMED, which leaves this index.
+Index(
+    "uq_approvals_action_id_open",
+    approvals.c.action_id,
+    unique=True,
+    postgresql_where=approvals.c.status.in_(sorted(s.value for s in OPEN_APPROVAL_STATUSES)),
+)
+
+action_attempts = Table(
+    "action_attempts",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("action_id", Uuid(), ForeignKey("actions.id", ondelete="RESTRICT"), nullable=False),
+    Column("attempt_number", Integer(), nullable=False),
+    # The approval this attempt claimed. Unique, so one approval can never fund
+    # two attempts even if application logic slips.
+    Column("approval_id", Uuid(), ForeignKey("approvals.id", ondelete="RESTRICT"), nullable=False),
+    Column(
+        "runtime_generation",
+        Uuid(),
+        ForeignKey("runtime_generations.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("outcome", String(32), nullable=True),
+    Column("result", JSONB(), nullable=True),
+    Column("error_code", String(64), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("action_id", "attempt_number"),
+    UniqueConstraint("approval_id"),
+    CheckConstraint("attempt_number >= 1", name="attempt_number_positive"),
+    CheckConstraint(f"outcome IS NULL OR outcome IN ({_values(AttemptOutcome)})", name="outcome"),
+    # An attempt is unfinished exactly while Lumi does not yet have an outcome.
+    CheckConstraint("(finished_at IS NULL) = (outcome IS NULL)", name="finished_with_outcome"),
+    CheckConstraint("result IS NULL OR jsonb_typeof(result) = 'object'", name="result_is_object"),
+)
+
+#: At most one unfinished attempt per action, so a duplicate execution-start can
+#: never produce a second in-flight side effect.
+Index(
+    "uq_action_attempts_action_id_unfinished",
+    action_attempts.c.action_id,
+    unique=True,
+    postgresql_where=action_attempts.c.finished_at.is_(None),
 )

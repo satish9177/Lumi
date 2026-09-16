@@ -77,23 +77,51 @@ class TaskRepository:
         row = result.one_or_none()
         return _task(row) if row is not None else None
 
-    async def update_status(
-        self, *, task_id: uuid.UUID, expected_revision: int, status: TaskStatus
+    async def lock_task(self, task_id: uuid.UUID) -> TaskRecord | None:
+        """Read the task and hold its row lock for the rest of the transaction.
+
+        Action work takes this lock first, so everything that touches one task
+        serializes in a single order: no deadlocks, and event sequence
+        allocation stays ordered without relying on retries.
+        """
+        result = await self._connection.execute(
+            select(tasks).where(tasks.c.id == task_id).with_for_update()
+        )
+        row = result.one_or_none()
+        return _task(row) if row is not None else None
+
+    async def advance_task(
+        self, *, task_id: uuid.UUID, expected_revision: int, status: TaskStatus | None = None
     ) -> TaskRecord | None:
-        """Compare-and-swap. Returns None when the task is missing or its revision moved."""
+        """Compare-and-swap one revision forward, optionally changing the status.
+
+        `status=None` keeps the current status and only allocates the next event
+        sequence, for changes that belong to the task's timeline without moving
+        the task itself. Returns None when the task is missing or its revision
+        moved.
+        """
+        changes: dict[str, Any] = {
+            "revision": tasks.c.revision + 1,
+            "last_event_sequence": tasks.c.last_event_sequence + 1,
+            "updated_at": func.now(),
+        }
+        if status is not None:
+            changes["status"] = status.value
         result = await self._connection.execute(
             update(tasks)
             .where(tasks.c.id == task_id, tasks.c.revision == expected_revision)
-            .values(
-                status=status.value,
-                revision=tasks.c.revision + 1,
-                last_event_sequence=tasks.c.last_event_sequence + 1,
-                updated_at=func.now(),
-            )
+            .values(**changes)
             .returning(*tasks.c)
         )
         row = result.one_or_none()
         return _task(row) if row is not None else None
+
+    async def update_status(
+        self, *, task_id: uuid.UUID, expected_revision: int, status: TaskStatus
+    ) -> TaskRecord | None:
+        return await self.advance_task(
+            task_id=task_id, expected_revision=expected_revision, status=status
+        )
 
     async def append_event(
         self,

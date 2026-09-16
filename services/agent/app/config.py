@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     database_url: SecretStr
     database_pool_size: int = Field(default=5, ge=1, le=50)
     database_connect_timeout_seconds: float = Field(default=5.0, gt=0, le=60)
+    # How long a granted approval may be claimed for execution. Checked by the
+    # statement that claims it, not by a cleanup job, so an expired approval is
+    # unusable the moment it expires even if nothing has swept it.
+    approval_ttl_seconds: int = Field(default=300, ge=5, le=86_400)
 
     @field_validator("database_url")
     @classmethod

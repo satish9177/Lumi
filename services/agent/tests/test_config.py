@@ -30,3 +30,19 @@ def test_database_url_is_required(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DATABASE_URL", raising=False)
     with pytest.raises(ValidationError, match="database_url"):
         Settings(_env_file=None)
+
+
+def test_approval_ttl_defaults_to_five_minutes() -> None:
+    settings = Settings(database_url=SecretStr(f"postgresql+asyncpg://lumi:{SECRET}@127.0.0.1/lumi_agent"))
+    assert settings.approval_ttl_seconds == 300
+
+
+@pytest.mark.parametrize("ttl", [0, -1, 100_000])
+def test_rejects_an_unusable_approval_ttl(ttl: int) -> None:
+    # A zero or negative TTL would make every approval unusable; a very long one
+    # would make "the user agreed to this" mean very little.
+    with pytest.raises(ValidationError, match="approval_ttl_seconds"):
+        Settings(
+            database_url=SecretStr(f"postgresql+asyncpg://lumi:{SECRET}@127.0.0.1/lumi_agent"),
+            approval_ttl_seconds=ttl,
+        )

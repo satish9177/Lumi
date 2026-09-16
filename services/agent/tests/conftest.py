@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -9,12 +10,15 @@ from pydantic import SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from app.config import AGENT_ROOT, Settings
 from app.db.engine import create_database_engine
 from app.db.migrations import alembic_config
 from app.main import create_app
+from app.services.actions import ActionService
+from app.services.runtime import RuntimeGeneration, register_runtime_generation
+from app.services.tasks import TaskService
 
 
 class _TestEnvironment(BaseSettings):
@@ -23,6 +27,26 @@ class _TestEnvironment(BaseSettings):
     )
 
     test_database_url: SecretStr | None = None
+
+
+TRUNCATE_ALL = (
+    "TRUNCATE action_attempts, approvals, actions, runtime_generations, "
+    "task_events, tasks RESTART IDENTITY"
+)
+
+
+def truncate_all(database_url: str) -> None:
+    """Synchronous reset, for tests that drive the runtime as a subprocess."""
+
+    async def run() -> None:
+        engine = create_async_engine(database_url)
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text(TRUNCATE_ALL))
+        finally:
+            await engine.dispose()
+
+    asyncio.run(run())
 
 
 def migrate(database_url: str, revision: str = "head") -> None:
@@ -64,9 +88,27 @@ def settings(migrated_database_url: str) -> Settings:
 async def engine(settings: Settings) -> AsyncIterator[AsyncEngine]:
     engine = create_database_engine(settings)
     async with engine.begin() as connection:
-        await connection.execute(text("TRUNCATE task_events, tasks RESTART IDENTITY"))
+        await connection.execute(text(TRUNCATE_ALL))
     yield engine
     await engine.dispose()
+
+
+@pytest.fixture
+async def runtime_generation(engine: AsyncEngine) -> RuntimeGeneration:
+    """A generation for service-level tests, which do not run the app lifespan."""
+    return await register_runtime_generation(engine)
+
+
+@pytest.fixture
+def action_service(engine: AsyncEngine, runtime_generation: RuntimeGeneration) -> ActionService:
+    return ActionService(
+        engine, runtime_generation=runtime_generation.id, approval_ttl_seconds=300
+    )
+
+
+@pytest.fixture
+def task_service(engine: AsyncEngine) -> TaskService:
+    return TaskService(engine)
 
 
 @asynccontextmanager

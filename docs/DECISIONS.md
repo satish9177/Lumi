@@ -50,6 +50,26 @@ Use a small JSON store inside Electron's `userData` directory for the MVP. It is
 
 Agent tasks live in a separate Python sidecar (`services/agent`, FastAPI and async SQLAlchemy) backed by PostgreSQL (`infra/docker-compose.yml`), not in the JSON store. Task state must survive restarts and support optimistic concurrency. Each state change is a single transaction that updates the task's `revision` with compare-and-swap and appends one ordered event. The Electron app is not wired to the runtime yet. When it is, only Electron main will talk to it, and the renderer's security boundary stays as described above. See [`AGENT-RUNTIME.md`](AGENT-RUNTIME.md).
 
+## Unknown outcomes are never treated as failures
+
+`FAILED` means the runtime knows an operation did not happen. `OUTCOME_UNKNOWN` means it does not know whether the side effect occurred. Collapsing the two is how an agent double-books an appointment or pays twice: it reads a lost response as a failure and retries. So once a consequential action might have reached the outside world, the runtime never retries it because the process crashed or the response was lost.
+
+Concretely: an execution attempt that a previous runtime process started and never finished becomes `OUTCOME_UNKNOWN` at startup, never `FAILED` and never back to `APPROVED`. No new attempt is created. `OUTCOME_UNKNOWN` has exactly one outgoing transition, to `RECONCILING`, and the only way to resolve it is authoritative reconciliation that *reads* external state rather than acting again. Reconciliation is allowed to conclude that it still does not know; that is recorded honestly rather than downgraded to a failure.
+
+Ownership of in-flight work is decided by a recorded runtime generation, not by a timeout, so a process never mistakes its own healthy work for a dead process's leftovers. That check becomes an expired worker lease when workers are added.
+
+## Durable approvals for consequential actions
+
+The runtime's approval is a durable, expiring, single-use record, not a boolean on the action. A boolean cannot expire, cannot be spent, and cannot say what was approved.
+
+Each approval is bound to one action, to the exact proposal (SHA-256 over canonical JSON, always computed by the server — the API has no digest field), and to an action revision, so any change to the action invalidates an approval already granted. A stored proposal is immutable, enforced by a database trigger rather than by convention, because an approved proposal must be the proposal that executes. Expiry is checked by the statement that claims the approval, not by a cleanup job. Database constraints — a partial unique index for one live approval per action, a unique `approval_id` on attempts, a partial unique index for one unfinished attempt per action — make these facts rather than conventions.
+
+No caller may approve an arbitrary proposal payload: the server reconstructs approval information from persisted state. The FastAPI approve/reject routes currently stand in for the approving UI, and the execution and reconciliation routes are internal scaffolding for tests and the future browser worker. They are loopback-only and not a public API. Electron main becomes the trusted UI and security broker in a later milestone.
+
+`risk_tier` (`R0`–`R3`) is persisted so a later policy engine can auto-approve local reads. Until that engine exists every tier requires an explicit approval, because the fail-safe answer is the only correct one.
+
+The Electron `PendingActionStore` is deliberately left in memory and unchanged. The durable execution model is established once, in the runtime, rather than built twice.
+
 ## Shared contracts
 
 `src/shared/contracts.ts` is the source of truth for the following:
