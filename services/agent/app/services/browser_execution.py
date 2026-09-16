@@ -36,6 +36,7 @@ from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.browser.client import BrowserWorkerClient
+from app.browser.managed import ManagedBrowserWorker
 from app.browser.errors import (
     BrowserExecutionNotSupportedError,
     BrowserWorkerError,
@@ -54,7 +55,11 @@ from app.domain.browser_dispatch import (
     LookupStatus,
     attempt_outcome_for,
 )
-from app.domain.errors import ActionNotFoundError
+from app.domain.errors import (
+    ActionNotFoundError,
+    InvalidActionTransitionError,
+    StaleActionRevisionError,
+)
 from app.domain.sites import site_trust
 from app.repositories.actions import ActionRepository
 from app.repositories.browser import BrowserRepository
@@ -72,6 +77,28 @@ class BrowserWorkerConfig:
     base_url: str
     token: SecretStr
     timeout_seconds: float
+
+
+WorkerSource = BrowserWorkerConfig | ManagedBrowserWorker
+
+
+async def open_worker_client(
+    worker: WorkerSource | None, runtime_generation: uuid.UUID
+) -> BrowserWorkerClient:
+    """A client for the current worker. A managed worker is (re)started here."""
+    if worker is None:
+        raise BrowserWorkerNotConfiguredError()
+    if isinstance(worker, ManagedBrowserWorker):
+        endpoint = await worker.endpoint()
+        base_url, token, timeout = endpoint.base_url, endpoint.token, endpoint.timeout_seconds
+    else:
+        base_url, token, timeout = worker.base_url, worker.token, worker.timeout_seconds
+    return BrowserWorkerClient(
+        base_url=base_url,
+        token=token,
+        runtime_generation=runtime_generation,
+        timeout_seconds=timeout,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,7 +122,7 @@ class BrowserExecutionService:
         *,
         actions: ActionService,
         runtime_generation: uuid.UUID,
-        worker: BrowserWorkerConfig | None,
+        worker: WorkerSource | None,
     ) -> None:
         self._engine = engine
         self._actions = actions
@@ -108,15 +135,8 @@ class BrowserExecutionService:
 
     # ---- worker identity ----------------------------------------------------
 
-    def _client(self) -> BrowserWorkerClient:
-        if self._worker is None:
-            raise BrowserWorkerNotConfiguredError()
-        return BrowserWorkerClient(
-            base_url=self._worker.base_url,
-            token=self._worker.token,
-            runtime_generation=self._runtime_generation,
-            timeout_seconds=self._worker.timeout_seconds,
-        )
+    async def _client(self) -> BrowserWorkerClient:
+        return await open_worker_client(self._worker, self._runtime_generation)
 
     async def _bind_worker(self, client: BrowserWorkerClient) -> uuid.UUID:
         """Handshake, then persist the worker generation we are about to use.
@@ -138,26 +158,39 @@ class BrowserExecutionService:
 
     # ---- execution ----------------------------------------------------------
 
-    async def execute_booking(self, action_id: uuid.UUID) -> ActionView:
-        """Approve -> attempt -> browser -> outcome, for one booking action."""
+    async def execute_booking(
+        self, action_id: uuid.UUID, *, expected_revision: int | None = None
+    ) -> ActionView:
+        """Approve -> attempt -> browser -> outcome, for one booking action.
+
+        `expected_revision` is checked early here for a cheap refusal, and again
+        by `start_attempt` inside the transaction that claims the approval, which
+        is the check that actually binds the execution to the reviewed revision.
+        """
         view = await self._actions.get_action(action_id)
         action = view.action
         if action.tool_name != COMMIT_BOOKING:
             raise BrowserExecutionNotSupportedError(action_id, action.tool_name)
+        if expected_revision is not None and action.revision != expected_revision:
+            raise StaleActionRevisionError(action_id, expected_revision, action.revision)
+        if action.status is not ActionStatus.APPROVED:
+            raise InvalidActionTransitionError(action_id, action.status, ActionStatus.EXECUTING)
         # Parsed from the *persisted* proposal, so the values that execute are
         # the values the approval was bound to, byte for byte. Nothing the
         # worker or the page says later can edit them.
         proposal = parse_booking_proposal(action_id, action.proposal)
         reference = booking_reference(action_id)
 
-        client = self._client()
+        client = await self._client()
         try:
             # Everything that can go wrong harmlessly goes wrong here, before
             # the approval is claimed: no attempt started, nothing to reconcile.
             worker_generation = await self._bind_worker(client)
 
             # --- the last database work before the outside world -------------
-            view = await self._actions.start_attempt(action_id)
+            view = await self._actions.start_attempt(
+                action_id, expected_revision=expected_revision
+            )
             attempt = next(a for a in view.attempts if a.finished_at is None)
             dispatch_id = uuid.uuid4()
             try:
@@ -229,7 +262,9 @@ class BrowserExecutionService:
 
     # ---- reconciliation -----------------------------------------------------
 
-    async def reconcile_booking(self, action_id: uuid.UUID) -> ActionView:
+    async def reconcile_booking(
+        self, action_id: uuid.UUID, *, expected_revision: int | None = None
+    ) -> ActionView:
         """Establish what happened, by reading. It never books anything.
 
         `lookup_booking` is read-only: it navigates to a page and reads it.
@@ -243,11 +278,22 @@ class BrowserExecutionService:
             raise BrowserExecutionNotSupportedError(action_id, action.tool_name)
         proposal = parse_booking_proposal(action_id, action.proposal)
         reference = booking_reference(action_id)
+        if action.status not in (ActionStatus.OUTCOME_UNKNOWN, ActionStatus.RECONCILING):
+            # Only an unknown outcome has anything to reconcile. Refused before
+            # any browser is contacted.
+            raise InvalidActionTransitionError(action_id, action.status, ActionStatus.RECONCILING)
+        if expected_revision is not None and action.revision != expected_revision:
+            raise StaleActionRevisionError(action_id, expected_revision, action.revision)
 
         if action.status is ActionStatus.OUTCOME_UNKNOWN:
-            view = await self._actions.begin_reconciliation(action_id)
+            view = await self._actions.begin_reconciliation(
+                action_id, expected_revision=action.revision
+            )
+        # The verdict is recorded only against the revision this call started
+        # from, so two concurrent checks cannot both write a verdict.
+        reconciling_revision = view.action.revision
 
-        client = self._client()
+        client = await self._client()
         try:
             worker_generation = await self._bind_worker(client)
             dispatch_id = uuid.uuid4()
@@ -299,7 +345,7 @@ class BrowserExecutionService:
             },
         )
         return await self._actions.finish_reconciliation(
-            action_id, result=result, evidence=evidence
+            action_id, result=result, evidence=evidence, expected_revision=reconciling_revision
         )
 
     # ---- dispatching --------------------------------------------------------

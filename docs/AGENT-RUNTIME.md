@@ -679,3 +679,53 @@ a test fixture handing an answer in. What is still deliberately absent:
 - Voice changes, the Electron-to-FastAPI bridge, and native desktop control.
 - Worker leases and multi-worker concurrency. One worker at a time, identified by
   generation.
+
+## Milestone 4: secure desktop bridge
+
+Milestone 4 connects the runtime to the real Lumi desktop app. The trust chain
+is:
+
+```text
+React renderer -> typed preload (window.lifeLens.agent, fixed channels)
+  -> Electron main: exact sender/top-frame/app-URL check, input validation,
+     main-owned domain client, response projection
+  -> authenticated loopback runtime (fresh bearer credential per process)
+  -> PostgreSQL ledger / runtime-owned browser worker -> fixture site
+```
+
+- **Lifecycle.** Electron main launches `app.server` (fixed venv path, no
+  shell, constructed environment) and sends its credential only after the child
+  reports its bound port on a private pipe. The runtime launches and owns its
+  browser worker with an allowlisted environment (no `DATABASE_URL`, no runtime
+  credential); the worker binds port 0 and reports its port the same way. The
+  runtime's Windows kill-on-close job and parent-handle watchdogs take the
+  runtime, worker and Chromium down with Electron, even on a hard kill.
+- **Capability surface.** Main can reach an allowlist of runtime routes only:
+  task create/read, paged events, action list/read, approval request, approve,
+  reject, `browser-execution`, `browser-reconciliation`, and read-only booking
+  search/prepare. Preparation takes a slot id; the proposal is built from what
+  the worker observes. Approve/reject/execute/reconcile take an action id and
+  the revision the user reviewed, and nothing else. Execution's revision is
+  enforced by the transaction that claims the approval.
+- **Projection.** Responses are validated and projected into closed DTOs
+  (`src/shared/agent-contracts.ts`). Stored JSON (results, event payloads,
+  evidence) is copied field by field; credentials, URLs, references, raw errors
+  and page prose never reach the renderer. Errors become app-authored messages.
+- **Contract.** `app/api/contract.py` generates
+  `src/shared/agent-runtime-contract.json`; both test suites check it.
+- **Restoration.** Main stores only the active task id. The renderer replays
+  events after a sequence (paged, gap-checked, de-duplicated) and rebuilds from
+  sequence 0 when the runtime generation changes. Unconfirmed mutations are
+  reported, never retried.
+- **UX semantics.** `OUTCOME_UNKNOWN` and `RECONCILING` offer only "Check
+  existing booking" (read-only). "Booking confirmed" / "No booking was created"
+  appear only from a verified receipt or an authoritative reconciliation. A
+  changed price or missing slot shows the facts, states that nothing was booked
+  and requires a new proposal and approval. A task cannot gain a second booking
+  while one is unresolved.
+- **Ownership boundary.** Local tools keep using main's in-memory
+  `PendingActionStore`; durable browser actions belong only to this ledger.
+  Neither system can create or approve the other's actions.
+
+Still deferred: packaged Python sidecar bundling, voice-created tasks (Milestone
+5), planners, memory, and any real website.

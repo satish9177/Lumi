@@ -32,6 +32,7 @@ import httpx
 import pytest
 
 from tests.browser_harness import (
+    RuntimeHttp,
     SiteControl,
     booking_proposal,
     browser_worker,
@@ -48,12 +49,12 @@ pytestmark = [pytest.mark.browser, pytest.mark.hardkill]
 SLOT_A = booking_proposal("slot-a-1830", "Dr A", "2026-09-19T18:30:00+05:30", 800)
 
 
-def _fire_and_forget(url: str, done: list[Any]) -> threading.Thread:
+def _fire_and_forget(http: RuntimeHttp, url: str, done: list[Any]) -> threading.Thread:
     """Start the execution and do not wait for it. It is never going to answer."""
 
     def call() -> None:
         try:
-            done.append(httpx.post(url, timeout=300))
+            done.append(http.post(url, timeout=300))
         except Exception as error:  # noqa: BLE001 - the process dies underneath it.
             done.append(error)
 
@@ -62,8 +63,8 @@ def _fire_and_forget(url: str, done: list[Any]) -> threading.Thread:
     return thread
 
 
-def _dispatches(base_url: str, action_id: str) -> list[dict[str, Any]]:
-    body = ok(httpx.get(f"{base_url}/actions/{action_id}/browser-dispatches", timeout=30))
+def _dispatches(http: RuntimeHttp, action_id: str) -> list[dict[str, Any]]:
+    body = ok(http.get(f"{http.base_url}/actions/{action_id}/browser-dispatches", timeout=30))
     dispatches: list[dict[str, Any]] = body["dispatches"]
     return dispatches
 
@@ -95,7 +96,7 @@ def test_a_booking_that_succeeded_before_everything_died_is_reconciled_not_repea
                 worker_timeout_seconds=300.0,
             ) as first_runtime:
                 # 4-7. Approve the exact booking.
-                action = drive_to_approved(first_runtime.base_url, SLOT_A)
+                action = drive_to_approved(first_runtime.http, SLOT_A)
                 action_id = action["id"]
                 task_id = action["task_id"]
                 reference = f"lumi-{action_id}"
@@ -109,7 +110,7 @@ def test_a_booking_that_succeeded_before_everything_died_is_reconciled_not_repea
                 # worker, and then hangs forever waiting for the browser.
                 responses: list[Any] = []
                 _fire_and_forget(
-                    f"{first_runtime.base_url}/actions/{action_id}/browser-execution", responses
+                    first_runtime.http, f"{first_runtime.base_url}/actions/{action_id}/browser-execution", responses
                 )
 
                 # 11. Wait for proof that the side effect really happened.
@@ -120,14 +121,14 @@ def test_a_booking_that_succeeded_before_everything_died_is_reconciled_not_repea
                 # The ledger is mid-flight: the attempt is durable, its outcome
                 # is not yet known to anyone.
                 executing = ok(
-                    httpx.get(f"{first_runtime.base_url}/actions/{action_id}", timeout=30)
+                    first_runtime.http.get(f"{first_runtime.base_url}/actions/{action_id}", timeout=30)
                 )
                 assert executing["status"] == "EXECUTING"
                 assert len(executing["attempts"]) == 1
                 original_attempt = executing["attempts"][0]
                 assert original_attempt["finished_at"] is None
                 assert executing["approval"] is None  # Claimed by this attempt.
-                dispatched = _dispatches(first_runtime.base_url, action_id)
+                dispatched = _dispatches(first_runtime.http, action_id)
                 assert len(dispatched) == 1
                 assert dispatched[0]["status"] == "DISPATCHED"
                 assert dispatched[0]["attempt_id"] == original_attempt["id"]
@@ -154,11 +155,12 @@ def test_a_booking_that_succeeded_before_everything_died_is_reconciled_not_repea
                 worker_token=second_worker.token,
             ) as second_runtime:
                 base_url = second_runtime.base_url
+                api = second_runtime.http
 
                 # 14. Startup recovery refuses to guess.
-                recovered = ok(httpx.get(f"{base_url}/actions/{action_id}", timeout=30))
+                recovered = ok(api.get(f"{base_url}/actions/{action_id}", timeout=30))
                 assert recovered["status"] == "OUTCOME_UNKNOWN"
-                assert ok(httpx.get(f"{base_url}/tasks/{task_id}", timeout=30))["status"] == (
+                assert ok(api.get(f"{base_url}/tasks/{task_id}", timeout=30))["status"] == (
                     "OUTCOME_UNKNOWN"
                 )
 
@@ -173,7 +175,7 @@ def test_a_booking_that_succeeded_before_everything_died_is_reconciled_not_repea
                 assert recovered["approval"] is None  # Nothing to retry with.
 
                 # The orphaned browser dispatch was closed as an unknown too.
-                after_recovery = _dispatches(base_url, action_id)
+                after_recovery = _dispatches(api, action_id)
                 assert len(after_recovery) == 1
                 assert after_recovery[0]["id"] == original_dispatch["id"]
                 assert after_recovery[0]["status"] == "OUTCOME_UNKNOWN"
@@ -185,15 +187,15 @@ def test_a_booking_that_succeeded_before_everything_died_is_reconciled_not_repea
 
                 # 16-19. Reconciliation: a read-only lookup through the browser.
                 final = ok(
-                    httpx.post(
+                    api.post(
                         f"{base_url}/actions/{action_id}/browser-reconciliation", timeout=120
                     )
                 )
                 assert final["status"] == "SUCCEEDED"
-                assert ok(httpx.get(f"{base_url}/tasks/{task_id}", timeout=30))["status"] == "READY"
+                assert ok(api.get(f"{base_url}/tasks/{task_id}", timeout=30))["status"] == "READY"
 
-                events = ok(httpx.get(f"{base_url}/tasks/{task_id}/events", timeout=30))["events"]
-                dispatches = _dispatches(base_url, action_id)
+                events = ok(api.get(f"{base_url}/tasks/{task_id}/events", timeout=30))["events"]
+                dispatches = _dispatches(api, action_id)
 
         # 20. The counts this milestone is judged on.
         state = control.state()
@@ -264,14 +266,14 @@ def test_a_recovered_browser_action_cannot_be_executed_again(
                 worker_token=worker_one.token,
                 worker_timeout_seconds=300.0,
             ) as first:
-                action = drive_to_approved(first.base_url, SLOT_A)
+                action = drive_to_approved(first.http, SLOT_A)
                 action_id = action["id"]
                 reference = f"lumi-{action_id}"
                 control.set_faults(
                     drop_response_for_reference=reference, drop_response_mode="hang"
                 )
                 _fire_and_forget(
-                    f"{first.base_url}/actions/{action_id}/browser-execution", []
+                    first.http, f"{first.base_url}/actions/{action_id}/browser-execution", []
                 )
                 control.wait_for_bookings(1)
 
@@ -284,14 +286,15 @@ def test_a_recovered_browser_action_cannot_be_executed_again(
                 worker_token=worker_two.token,
             ) as second:
                 base_url = second.base_url
-                retry_browser = httpx.post(
+                api = second.http
+                retry_browser = api.post(
                     f"{base_url}/actions/{action_id}/browser-execution", timeout=60
                 )
-                retry_attempt = httpx.post(f"{base_url}/actions/{action_id}/attempts", timeout=30)
-                reapprove = httpx.post(
+                retry_attempt = api.post(f"{base_url}/actions/{action_id}/attempts", timeout=30)
+                reapprove = api.post(
                     f"{base_url}/actions/{action_id}/approval-request", timeout=30
                 )
-                current = ok(httpx.get(f"{base_url}/actions/{action_id}", timeout=30))
+                current = ok(api.get(f"{base_url}/actions/{action_id}", timeout=30))
 
         assert retry_browser.status_code == 409
         assert retry_attempt.status_code == 409
@@ -324,7 +327,7 @@ def test_a_worker_killed_after_submitting_leaves_an_unknown_not_a_failure(
                 worker_token=worker_one.token,
                 worker_timeout_seconds=300.0,
             ) as lumi:
-                action = drive_to_approved(lumi.base_url, SLOT_A)
+                action = drive_to_approved(lumi.http, SLOT_A)
                 action_id = action["id"]
                 reference = f"lumi-{action_id}"
                 control.set_faults(
@@ -333,7 +336,7 @@ def test_a_worker_killed_after_submitting_leaves_an_unknown_not_a_failure(
 
                 responses: list[Any] = []
                 thread = _fire_and_forget(
-                    f"{lumi.base_url}/actions/{action_id}/browser-execution", responses
+                    lumi.http, f"{lumi.base_url}/actions/{action_id}/browser-execution", responses
                 )
                 control.wait_for_bookings(1)
 
@@ -342,7 +345,7 @@ def test_a_worker_killed_after_submitting_leaves_an_unknown_not_a_failure(
                 thread.join(timeout=120)
                 assert responses, "the execution call never returned"
 
-                executed = ok(httpx.get(f"{lumi.base_url}/actions/{action_id}", timeout=30))
+                executed = ok(lumi.http.get(f"{lumi.base_url}/actions/{action_id}", timeout=30))
                 assert executed["status"] == "OUTCOME_UNKNOWN"
                 attempt = executed["attempts"][0]
                 assert attempt["outcome"] == "OUTCOME_UNKNOWN"
@@ -357,7 +360,7 @@ def test_a_worker_killed_after_submitting_leaves_an_unknown_not_a_failure(
                     worker_token=worker_two.token,
                 ) as lumi_two:
                     final = ok(
-                        httpx.post(
+                        lumi_two.http.post(
                             f"{lumi_two.base_url}/actions/{action_id}/browser-reconciliation",
                             timeout=120,
                         )
@@ -396,7 +399,7 @@ def test_a_worker_timeout_after_submission_is_not_a_failure(
                 worker_token=worker.token,
                 worker_timeout_seconds=120.0,
             ) as lumi:
-                action = drive_to_approved(lumi.base_url, SLOT_A)
+                action = drive_to_approved(lumi.http, SLOT_A)
                 action_id = action["id"]
                 reference = f"lumi-{action_id}"
                 control.set_faults(
@@ -404,7 +407,7 @@ def test_a_worker_timeout_after_submission_is_not_a_failure(
                 )
 
                 executed = ok(
-                    httpx.post(
+                    lumi.http.post(
                         f"{lumi.base_url}/actions/{action_id}/browser-execution", timeout=180
                     )
                 )
@@ -421,7 +424,7 @@ def test_a_worker_timeout_after_submission_is_not_a_failure(
 
                 control.set_faults()
                 final = ok(
-                    httpx.post(
+                    lumi.http.post(
                         f"{lumi.base_url}/actions/{action_id}/browser-reconciliation", timeout=120
                     )
                 )

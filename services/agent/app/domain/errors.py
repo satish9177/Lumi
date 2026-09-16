@@ -103,3 +103,44 @@ class ActionConcurrencyError(Exception):
     def __init__(self, action_id: uuid.UUID) -> None:
         super().__init__(f"Action {action_id} changed concurrently. Retry the request.")
         self.action_id = action_id
+
+
+class ActionAlreadyOpenError(Exception):
+    """The task already has a booking that is unresolved or already succeeded.
+
+    Preparing a second booking while one is waiting, executing or of unknown
+    outcome would be a way around "never retry an unknown outcome", so it is
+    refused under the task row lock.
+    """
+
+    def __init__(self, task_id: uuid.UUID, action_id: uuid.UUID, status: ActionStatus) -> None:
+        super().__init__(
+            f"Task {task_id} already has action {action_id} in status {status}; "
+            "resolve it before preparing another."
+        )
+        self.task_id = task_id
+        self.action_id = action_id
+        self.status = status
+
+
+class TaskKindMismatchError(Exception):
+    def __init__(self, task_id: uuid.UUID, expected: str) -> None:
+        super().__init__(f"Task {task_id} is not a {expected} task.")
+        self.task_id = task_id
+        self.expected = expected
+
+
+class BookingSlotUnavailableError(Exception):
+    """The site says the requested slot is not offered. Nothing was proposed."""
+
+    def __init__(self, slot_id: str) -> None:
+        super().__init__("That appointment slot is no longer offered.")
+        self.slot_id = slot_id
+
+
+class BrowserObservationError(Exception):
+    """A read-only browser observation did not produce usable facts."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__("The appointment site could not be read.")
+        self.code = code

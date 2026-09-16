@@ -27,6 +27,7 @@ import type {
 import { classifyUserIntent } from '../../shared/intent'
 import { fileKindLabel } from '../../shared/search-query'
 import {
+  AgentTaskPanel,
   BrandMark,
   ConfirmDialog,
   DragGrip,
@@ -104,6 +105,7 @@ export default function LifeLensApp() {
   const [toolResult, setToolResult] = useState<ToolExecutionResult>()
   const [windowNotice, setWindowNotice] = useState<string>()
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [agentTasksOpen, setAgentTasksOpen] = useState(false)
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest>()
   const [droppedFile, setDroppedFile] = useState<DroppedFileDescriptor>()
   const [dragFileCount, setDragFileCount] = useState(0)
@@ -1677,6 +1679,9 @@ export default function LifeLensApp() {
             >
               {COPY.scamCheck.quickAction}
             </button>
+            <button className="chip" type="button" onClick={() => setAgentTasksOpen(true)} data-testid="open-agent-tasks">
+              Book appointment
+            </button>
           </div>
 
           <form className="composer" onSubmit={(event) => { event.preventDefault(); void askQuestion() }}>
@@ -1723,6 +1728,12 @@ export default function LifeLensApp() {
               <span id="composer-send-reason" className="visually-hidden">{sendDisabledReason}</span>
             )}
           </form>
+
+          {agentTasksOpen && (
+            <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Appointment booking">
+              <AgentTaskPanel agent={window.lifeLens.agent} onClose={() => setAgentTasksOpen(false)} />
+            </div>
+          )}
 
           {settingsOpen && (
             <div ref={settingsRef} className="settings-overlay" role="dialog" aria-modal="true" aria-label="Settings">

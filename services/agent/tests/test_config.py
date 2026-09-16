@@ -77,3 +77,20 @@ def test_runtime_token_must_be_high_entropy_length() -> None:
             ),
             runtime_token=SecretStr("too-short"),
         )
+
+
+def test_migrations_do_not_need_a_runtime_credential(migrated_database_url: str) -> None:
+    """`uv run alembic upgrade head` runs outside any runtime generation."""
+    import os
+    import subprocess
+    import sys
+
+    from app.config import AGENT_ROOT
+
+    environment = {key: value for key, value in os.environ.items() if key != "LUMI_RUNTIME_TOKEN"}
+    environment["DATABASE_URL"] = migrated_database_url
+    completed = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=AGENT_ROOT, env=environment, capture_output=True, text=True, timeout=120,
+    )
+    assert completed.returncode == 0, "alembic upgrade head failed without LUMI_RUNTIME_TOKEN"

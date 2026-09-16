@@ -61,9 +61,11 @@ class DispatchRequest(BaseModel):
     dispatch_id: uuid.UUID
     runtime_generation: uuid.UUID
     expected_worker_generation: uuid.UUID
+    #: The action this work serves. Absent only for read-only discovery (search,
+    #: slot observation) that happens before any action exists.
+    action_id: uuid.UUID | None = None
     #: Present for consequential work; absent for a read-only lookup, which is
     #: not an execution attempt and never becomes one.
-    action_id: uuid.UUID
     attempt_id: uuid.UUID | None = None
     operation: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
     #: A reviewed site name, resolved by the worker against its own allowlist.

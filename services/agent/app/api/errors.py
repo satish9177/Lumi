@@ -7,11 +7,15 @@ from fastapi.responses import JSONResponse
 from app.api.schemas import ErrorDetail, ErrorResponse
 from app.browser.errors import (
     BrowserExecutionNotSupportedError,
+    BrowserWorkerError,
     BrowserWorkerNotConfiguredError,
 )
 from app.domain.booking import BookingProposalError
 from app.domain.errors import (
+    ActionAlreadyOpenError,
     ActionConcurrencyError,
+    BookingSlotUnavailableError,
+    BrowserObservationError,
     ActionNotFoundError,
     ActionProposalConflictError,
     ApprovalNotUsableError,
@@ -22,6 +26,7 @@ from app.domain.errors import (
     TaskConcurrencyError,
     TaskNotAcceptingActionsError,
     TaskNotCancellableError,
+    TaskKindMismatchError,
     TaskNotFoundError,
 )
 
@@ -71,6 +76,15 @@ async def _approval_not_usable(_: Request, exc: Exception) -> JSONResponse:
         status.HTTP_409_CONFLICT,
         ErrorDetail(code="approval_not_usable", message=str(exc), reason=exc.reason),
     )
+
+
+def _fixed(status_code: int, code: str, message: str) -> Handler:
+    """For errors whose text may carry internal detail: a fixed safe message."""
+
+    async def handler(_: Request, __: Exception) -> JSONResponse:
+        return _error(status_code, ErrorDetail(code=code, message=message))
+
+    return handler
 
 
 def register_error_handlers(app: FastAPI) -> None:
@@ -128,6 +142,35 @@ def register_error_handlers(app: FastAPI) -> None:
     # best-effort reading of the parts that did parse.
     app.add_exception_handler(
         BookingProposalError, _simple(status.HTTP_409_CONFLICT, "invalid_booking_proposal")
+    )
+    app.add_exception_handler(
+        ActionAlreadyOpenError, _simple(status.HTTP_409_CONFLICT, "action_already_open")
+    )
+    app.add_exception_handler(
+        TaskKindMismatchError, _simple(status.HTTP_409_CONFLICT, "task_kind_mismatch")
+    )
+    app.add_exception_handler(
+        BookingSlotUnavailableError,
+        _simple(status.HTTP_409_CONFLICT, "booking_slot_unavailable"),
+    )
+    app.add_exception_handler(
+        BrowserObservationError,
+        _fixed(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "browser_observation_failed",
+            "The appointment site could not be read.",
+        ),
+    )
+    # Worker reachability failures outside a dispatch (handshake, discovery).
+    # The not-configured subclass keeps its own handler: Starlette resolves
+    # handlers by the exception's MRO, most specific first.
+    app.add_exception_handler(
+        BrowserWorkerError,
+        _fixed(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "browser_worker_unavailable",
+            "The browser worker is unavailable.",
+        ),
     )
     app.add_exception_handler(StaleTaskRevisionError, _stale_task_revision)
     app.add_exception_handler(StaleActionRevisionError, _stale_action_revision)

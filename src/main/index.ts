@@ -2,11 +2,11 @@
 // module evaluation, so development env files have to load before them.
 import './development-env'
 
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, powerMonitor, safeStorage, screen, utilityProcess } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, powerMonitor, safeStorage, screen, session, utilityProcess } from 'electron'
 import { existsSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { constants as osPriority, setPriority } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import {
   IPC_CHANNELS,
@@ -41,7 +41,18 @@ import { restoreReminderTimers } from './services/tools'
 import { TelegramService } from './services/telegram'
 import { PendingActionStore } from './services/pending-actions'
 import { DroppedFileStore } from './services/dropped-files'
-import { AgentRuntimeSupervisor, developmentAgentRuntimePaths } from './services/agent-runtime-supervisor'
+import {
+  AgentRuntimeSupervisor,
+  developmentAgentRuntimePaths,
+  RuntimeUnavailableError,
+  type AgentRuntimeSettings,
+  type AgentRuntimeStatus
+} from './services/agent-runtime-supervisor'
+import { ActiveTaskStore, AgentTaskController } from './services/agent-tasks'
+import { registerAgentIpc, type IpcMainLike } from './services/agent-ipc'
+import { isTrustedRendererUrl, isTrustedSenderFrame, type RendererLocation } from './services/ipc-sender'
+import { developmentContentSecurityPolicy } from './services/content-security-policy'
+import { AGENT_IPC_CHANNELS, type AgentRuntimeView } from '../shared/agent-contracts'
 import { PhotoIndexCoordinator } from './vision/coordinator'
 import { letterbox } from './vision/face-image'
 import { PersonEnrollmentService, EnrolmentError } from './vision/person-enrollment'
@@ -73,6 +84,10 @@ let agentRuntime: AgentRuntimeSupervisor | undefined
 let agentRuntimeShutdownStarted = false
 let panelOpen = false
 const retainedCapture = new RetainedCaptureStore()
+// Development and acceptance tests may isolate the profile. It must be set
+// before the single-instance lock, which is keyed on the profile directory.
+const userDataOverride = app.isPackaged ? undefined : process.env.LUMI_USER_DATA_DIR
+if (userDataOverride && isAbsolute(userDataOverride)) app.setPath('userData', userDataOverride)
 const ownsSingleInstance = app.requestSingleInstanceLock()
 if (!ownsSingleInstance) app.quit()
 
@@ -88,6 +103,17 @@ const OPEN_WINDOW_SIZE = { width: 390, height: 640 }
 
 function currentWindowSize(): Size {
   return panelOpen ? OPEN_WINDOW_SIZE : CLOSED_WINDOW_SIZE
+}
+
+function developmentRendererUrl(): string | undefined {
+  return app.isPackaged ? undefined : process.env.ELECTRON_RENDERER_URL
+}
+
+function rendererLocation(): RendererLocation {
+  return {
+    developmentUrl: developmentRendererUrl(),
+    fileUrl: pathToFileURL(join(__dirname, '../renderer/index.html')).toString()
+  }
 }
 
 function createWindow(): BrowserWindow {
@@ -121,18 +147,23 @@ function createWindow(): BrowserWindow {
   // Debounced inside the store, so a drag never writes on every frame.
   window.on('move', rememberWindowPosition)
 
-  if (process.env.ELECTRON_RENDERER_URL) {
-    void window.loadURL(process.env.ELECTRON_RENDERER_URL)
+  const developmentUrl = developmentRendererUrl()
+  if (developmentUrl) {
+    void window.loadURL(developmentUrl)
   } else {
     void window.loadFile(join(__dirname, '../renderer/index.html'))
   }
 
   window.webContents.on('will-navigate', (event, url) => {
-    const expectedRendererUrl = process.env.ELECTRON_RENDERER_URL ?? pathToFileURL(join(__dirname, '../renderer/index.html')).toString()
-    if (!url.startsWith(expectedRendererUrl)) {
+    if (!isTrustedRendererUrl(url, rendererLocation())) {
       event.preventDefault()
     }
   })
+  window.webContents.on('will-frame-navigate', (event) => {
+    // Lumi renders no frames; no subframe may load anything.
+    if (!event.isMainFrame) event.preventDefault()
+  })
+  window.webContents.on('will-attach-webview', (event) => event.preventDefault())
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   window.on('closed', () => {
     retainedCapture.clear()
@@ -225,9 +256,53 @@ function resetWindowPosition(): void {
 }
 
 function requireMainWindow(event: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): void {
-  if (!mainWindow || BrowserWindow.fromWebContents(event.sender) !== mainWindow) {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents ||
+    BrowserWindow.fromWebContents(event.sender) !== mainWindow) {
     throw new Error('Rejected IPC request from an unexpected window.')
   }
+  // The top frame of Lumi's own renderer document, never a subframe or a
+  // document the window was navigated to.
+  if (!isTrustedSenderFrame({
+    senderFrame: event.senderFrame,
+    mainFrame: mainWindow.webContents.mainFrame,
+    location: rendererLocation()
+  })) {
+    throw new Error('Rejected IPC request from an unexpected frame.')
+  }
+}
+
+function agentRuntimeView(status?: AgentRuntimeStatus): AgentRuntimeView {
+  if (!agentRuntime) return { state: 'not_installed' }
+  const current = status ?? agentRuntime.status()
+  return { state: current.state, ...(current.generation ? { generation: current.generation } : {}) }
+}
+
+function emitAgentRuntimeStatus(status: AgentRuntimeStatus): void {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send(AGENT_IPC_CHANNELS.runtimeStatusChanged, agentRuntimeView(status))
+  }
+}
+
+/**
+ * Development runtime configuration from main's own environment. The fixture
+ * origin, headed mode and database override never reach the renderer.
+ */
+function developmentAgentRuntimeSettings(): AgentRuntimeSettings {
+  const settings: AgentRuntimeSettings = {
+    browserSiteOrigin: process.env.LUMI_APPOINTMENT_FIXTURE_ORIGIN || 'http://127.0.0.1:8801',
+    browserHeadless: process.env.LUMI_BROWSER_HEADED !== '1'
+  }
+  if (process.env.LUMI_AGENT_DATABASE_URL) settings.databaseUrl = process.env.LUMI_AGENT_DATABASE_URL
+  return settings
+}
+
+function startAgentRuntime(): void {
+  if (!agentRuntime) return
+  void agentRuntime.start().catch(() => {
+    // Status reaches the UI through onStatus. Never log child output or
+    // environment because both can contain credentials.
+    console.error('Lumi agent runtime did not start.')
+  })
 }
 
 function registerIpcHandlers(): void {
@@ -733,18 +808,35 @@ function validateCaptureProvenance(proposal: ToolProposal): void {
 }
 
 app.whenReady().then(async () => {
+  // A process that lost the single-instance lock is already quitting; it must
+  // not start a runtime, open a window or register handlers on the way out.
+  if (!ownsSingleInstance) return
   // Must equal the electron-builder appId. Kept as the original identifier so
   // the rename to Lumi stays a visible-branding change and never relocates the
   // user's profile directory — see docs/UI-UX-POLISH.md §6.
   app.setAppUserModelId('com.lifelens.app')
-  if (!app.isPackaged) {
-    const runtimePaths = developmentAgentRuntimePaths(app.getAppPath())
-    agentRuntime = new AgentRuntimeSupervisor(runtimePaths)
-    void agentRuntime.start().catch(() => {
-      // Runtime status will be bridged to the UI in a later slice. Never log
-      // child output or environment because both can contain credentials.
-      console.error('Lumi agent runtime did not start.')
+  const devUrl = developmentRendererUrl()
+  if (devUrl) {
+    // Packaged builds carry the CSP in index.html; the dev server's documents
+    // get an equivalent header scoped to the exact dev origin.
+    const csp = developmentContentSecurityPolicy(devUrl)
+    session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
+      callback({ responseHeaders: { ...details.responseHeaders, 'Content-Security-Policy': [csp] } })
     })
+  }
+  if (!app.isPackaged) {
+    // Packaged Python sidecar bundling is deferred; only development builds
+    // supervise the local runtime.
+    try {
+      agentRuntime = new AgentRuntimeSupervisor({
+        ...developmentAgentRuntimePaths(app.getAppPath()),
+        runtimeSettings: developmentAgentRuntimeSettings(),
+        onStatus: emitAgentRuntimeStatus
+      })
+    } catch {
+      console.error('Lumi agent runtime configuration is invalid.')
+    }
+    startAgentRuntime()
   }
   localStore = new LocalStore(app.getPath('userData'))
   windowState = new WindowStateStore(app.getPath('userData'))
@@ -836,6 +928,25 @@ app.whenReady().then(async () => {
     emit: emitFileSearchResolution
   })
   registerIpcHandlers()
+  const runtimeForClient = agentRuntime
+  registerAgentIpc({
+    ipcMain: ipcMain as unknown as IpcMainLike,
+    assertTrustedSender: (event) => requireMainWindow(event as Electron.IpcMainInvokeEvent),
+    controller: new AgentTaskController(
+      {
+        request: (method, path, body, timeoutMs) => runtimeForClient
+          ? runtimeForClient.request(method, path, body, timeoutMs)
+          : Promise.reject(new RuntimeUnavailableError())
+      },
+      new ActiveTaskStore(app.getPath('userData'))
+    ),
+    runtimeStatus: () => agentRuntimeView(),
+    restartRuntime: async () => {
+      if (!agentRuntime) throw new Error('The Lumi agent runtime is not installed.')
+      await agentRuntime.restart()
+      return agentRuntimeView()
+    }
+  })
   mainWindow = createWindow()
   await restoreReminderTimers(localStore)
   await telegramService.initialize()

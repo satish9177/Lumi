@@ -35,6 +35,83 @@ export interface AgentRuntimeSupervisorOptions {
   hardKillTree?: (child: RuntimeChild) => Promise<void>
   pathExists?: (path: string) => boolean
   onStatus?: (status: AgentRuntimeStatus) => void
+  /** Validated runtime settings from trusted main configuration only. */
+  runtimeSettings?: AgentRuntimeSettings
+}
+
+export interface AgentRuntimeSettings {
+  /** The one reviewed fixture origin the runtime-owned worker may visit. */
+  browserSiteOrigin?: string
+  browserHeadless?: boolean
+  /** Development/test override of the runtime's own `.env` database. */
+  databaseUrl?: string
+}
+
+export type RuntimeMethod = 'GET' | 'POST'
+
+export interface RuntimeReply {
+  status: number
+  body: unknown
+  generation: string
+}
+
+/** The runtime is not running (or not yet authenticated). Nothing was sent. */
+export class RuntimeUnavailableError extends Error {
+  constructor() {
+    super('The Lumi agent runtime is not available.')
+    this.name = 'RuntimeUnavailableError'
+  }
+}
+
+/**
+ * A request was sent but no trustworthy reply arrived: it timed out, the
+ * connection dropped, or the runtime process changed meanwhile. A mutation may
+ * or may not have been applied; callers must re-read durable state, never retry.
+ */
+export class RuntimeRestartedError extends Error {
+  constructor() {
+    super('The Lumi agent runtime did not confirm the request.')
+    this.name = 'RuntimeRestartedError'
+  }
+}
+
+const UUID_PART = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+/** The complete set of runtime routes main may call. Nothing else is reachable. */
+const ALLOWED_ROUTES: ReadonlyArray<{ method: RuntimeMethod; pattern: RegExp }> = [
+  { method: 'POST', pattern: /^\/tasks$/ },
+  { method: 'GET', pattern: new RegExp(`^/tasks/${UUID_PART}$`) },
+  { method: 'GET', pattern: new RegExp(`^/tasks/${UUID_PART}/events[?]after_sequence=[0-9]{1,15}&limit=[0-9]{1,3}$`) },
+  { method: 'GET', pattern: new RegExp(`^/tasks/${UUID_PART}/actions[?]limit=[0-9]{1,3}$`) },
+  { method: 'POST', pattern: new RegExp(`^/tasks/${UUID_PART}/booking/(search|prepare)$`) },
+  { method: 'GET', pattern: new RegExp(`^/actions/${UUID_PART}$`) },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/actions/${UUID_PART}/(approval-request|approve|reject|browser-execution|browser-reconciliation)$`)
+  }
+]
+
+export function isAllowedRuntimeRoute(method: RuntimeMethod, path: string): boolean {
+  return ALLOWED_ROUTES.some((route) => route.method === method && route.pattern.test(path))
+}
+
+const SITE_ORIGIN = /^http:\/\/127\.0\.0\.1:(\d{1,5})$/
+
+export function validateRuntimeSettings(settings: AgentRuntimeSettings): Record<string, string> {
+  const environment: Record<string, string> = {}
+  if (settings.browserSiteOrigin !== undefined) {
+    const match = SITE_ORIGIN.exec(settings.browserSiteOrigin)
+    const port = match ? Number(match[1]) : 0
+    if (!match || port < 1 || port > 65_535) throw new Error('The appointment site origin must be http://127.0.0.1:<port>.')
+    environment.LUMI_BROWSER_SITE_ORIGIN = settings.browserSiteOrigin
+    environment.LUMI_BROWSER_HEADLESS = settings.browserHeadless === false ? 'false' : 'true'
+  }
+  if (settings.databaseUrl !== undefined) {
+    if (!/^postgresql\+asyncpg:\/\/[^\s]+$/.test(settings.databaseUrl) || settings.databaseUrl.length > 1_000) {
+      throw new Error('The agent database URL must use postgresql+asyncpg.')
+    }
+    environment.DATABASE_URL = settings.databaseUrl
+  }
+  return environment
 }
 
 interface RuntimeSession {
@@ -63,8 +140,9 @@ export function developmentAgentRuntimePaths(appRoot: string): { agentRoot: stri
   return { agentRoot, pythonPath: join(agentRoot, '.venv', 'Scripts', 'python.exe') }
 }
 
-function controlledEnvironment(token: string, parentPid: number): NodeJS.ProcessEnv {
+function controlledEnvironment(token: string, parentPid: number, settings: Record<string, string>): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {
+    ...settings,
     PYTHONUTF8: '1',
     PYTHONUNBUFFERED: '1',
     LUMI_RUNTIME_TOKEN: token,
@@ -120,6 +198,7 @@ export class AgentRuntimeSupervisor {
   private exitedChildren = new WeakSet<RuntimeChild>()
   private cleanupPromises = new Map<number, Promise<void>>()
   private launchPromise?: Promise<void>
+  private readonly settingsEnvironment: Record<string, string>
 
   constructor(options: AgentRuntimeSupervisorOptions) {
     this.options = {
@@ -137,6 +216,7 @@ export class AgentRuntimeSupervisor {
       pathExists: options.pathExists ?? existsSync,
       onStatus: options.onStatus ?? (() => undefined)
     }
+    this.settingsEnvironment = validateRuntimeSettings(options.runtimeSettings ?? {})
   }
 
   status(): AgentRuntimeStatus {
@@ -152,6 +232,54 @@ export class AgentRuntimeSupervisor {
     this.wantsRunning = true
     this.restartCount = 0
     await this.beginLaunch()
+  }
+
+  /** A user-requested restart after the bounded automatic restarts gave up. */
+  async restart(): Promise<void> {
+    if (this.state === 'running' || this.state === 'starting' || this.state === 'stopping') return
+    if (this.wantsRunning && this.restartTimer !== undefined) return
+    this.wantsRunning = false
+    await this.start()
+  }
+
+  /**
+   * One authenticated call to an allowlisted route of the current generation.
+   *
+   * The credential never leaves this class. Redirects are refused, no Origin is
+   * sent, and a reply that arrives after the process changed is discarded.
+   */
+  async request(method: RuntimeMethod, path: string, body: unknown, timeoutMs: number): Promise<RuntimeReply> {
+    if (!isAllowedRuntimeRoute(method, path)) throw new Error('Refused an unlisted agent runtime route.')
+    const session = this.session
+    if (this.state !== 'running' || session === undefined || session.generation === undefined) {
+      throw new RuntimeUnavailableError()
+    }
+    const { epoch, generation } = session
+    let response: Response
+    try {
+      response = await this.options.fetch(`${session.baseUrl}${path}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${session.token}`,
+          ...(body === undefined ? {} : { 'Content-Type': 'application/json' })
+        },
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        redirect: 'error',
+        signal: AbortSignal.timeout(timeoutMs)
+      })
+    } catch {
+      // A timeout or dropped connection after sending: the runtime may have
+      // applied it. Reported as indeterminate so callers re-read, never retry.
+      throw new RuntimeRestartedError()
+    }
+    let parsed: unknown = undefined
+    try {
+      parsed = await response.json()
+    } catch {
+      parsed = undefined
+    }
+    if (this.session?.epoch !== epoch || this.session.generation !== generation) throw new RuntimeRestartedError()
+    return { status: response.status, body: parsed, generation }
   }
 
   async stop(): Promise<void> {
@@ -216,7 +344,7 @@ export class AgentRuntimeSupervisor {
         ['-m', 'app.server', '--port', String(port)],
         {
           cwd: this.options.agentRoot,
-          env: controlledEnvironment(token, this.options.parentPid),
+          env: controlledEnvironment(token, this.options.parentPid, this.settingsEnvironment),
           shell: false,
           windowsHide: true,
           stdio: ['ignore', 'ignore', 'ignore', 'pipe']

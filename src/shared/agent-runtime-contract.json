@@ -1,0 +1,1482 @@
+{
+  "enums": {
+    "ActionStatus": [
+      "PROPOSED",
+      "WAITING_APPROVAL",
+      "APPROVED",
+      "REJECTED",
+      "EXECUTING",
+      "SUCCEEDED",
+      "FAILED",
+      "OUTCOME_UNKNOWN",
+      "RECONCILING"
+    ],
+    "ApprovalStatus": [
+      "PENDING",
+      "APPROVED",
+      "REJECTED",
+      "CONSUMED"
+    ],
+    "AttemptOutcome": [
+      "SUCCEEDED",
+      "FAILED",
+      "OUTCOME_UNKNOWN"
+    ],
+    "ChangedFactField": [
+      "slot_id",
+      "doctor",
+      "time",
+      "price",
+      "currency"
+    ],
+    "DispatchStatus": [
+      "DISPATCHED",
+      "OK",
+      "CHANGED_RESOURCE",
+      "RESOURCE_UNAVAILABLE",
+      "FAILED_BEFORE_EFFECT",
+      "OUTCOME_UNKNOWN"
+    ],
+    "LookupStatus": [
+      "FOUND",
+      "NOT_FOUND",
+      "UNKNOWN"
+    ],
+    "RiskTier": [
+      "R0",
+      "R1",
+      "R2",
+      "R3"
+    ],
+    "TaskEventType": [
+      "task.created",
+      "task.cancelled",
+      "action.proposed",
+      "action.approval_requested",
+      "action.approved",
+      "action.rejected",
+      "action.execution_started",
+      "action.succeeded",
+      "action.failed",
+      "action.outcome_unknown",
+      "action.reconciliation_started",
+      "action.reconciled"
+    ],
+    "TaskStatus": [
+      "CREATED",
+      "PLANNING",
+      "READY",
+      "WAITING_APPROVAL",
+      "EXECUTING",
+      "VERIFYING",
+      "OUTCOME_UNKNOWN",
+      "RECONCILING",
+      "SUCCEEDED",
+      "FAILED",
+      "CANCELLED",
+      "PAUSED"
+    ]
+  },
+  "errorCodes": [
+    "action_already_open",
+    "action_not_found",
+    "action_proposal_conflict",
+    "approval_not_usable",
+    "authentication_required",
+    "booking_slot_unavailable",
+    "browser_execution_not_supported",
+    "browser_observation_failed",
+    "browser_worker_not_configured",
+    "browser_worker_unavailable",
+    "concurrent_modification",
+    "invalid_action_transition",
+    "invalid_booking_proposal",
+    "invalid_host",
+    "invalid_request",
+    "no_unfinished_attempt",
+    "origin_not_allowed",
+    "stale_action_revision",
+    "stale_revision",
+    "task_kind_mismatch",
+    "task_not_accepting_actions",
+    "task_not_cancellable",
+    "task_not_found"
+  ],
+  "examples": {
+    "action_changed_price": {
+      "approval": null,
+      "attempts": [
+        {
+          "action_id": "00000000-0000-4000-8000-000000000002",
+          "approval_id": "00000000-0000-4000-8000-000000000003",
+          "attempt_number": 1,
+          "error_code": "approved_values_changed",
+          "finished_at": "2026-09-16T10:00:05Z",
+          "id": "00000000-0000-4000-8000-000000000004",
+          "outcome": "FAILED",
+          "result": {
+            "changed_facts": [
+              {
+                "approved": "800",
+                "field": "price",
+                "observed": "950"
+              }
+            ],
+            "dispatch_id": "00000000-0000-4000-8000-000000000007",
+            "duration_ms": 1234,
+            "observation_id": "00000000-0000-4000-8000-000000000008",
+            "operation": "commit_booking",
+            "page": "slot_detail",
+            "postcondition_verified": false,
+            "reference": "lumi-00000000-0000-4000-8000-000000000002",
+            "replayed": false,
+            "status": "CHANGED_RESOURCE",
+            "submitted": false,
+            "worker_generation": "00000000-0000-4000-8000-000000000006"
+          },
+          "runtime_generation": "00000000-0000-4000-8000-000000000005",
+          "started_at": "2026-09-16T10:00:04Z"
+        }
+      ],
+      "created_at": "2026-09-16T10:00:01Z",
+      "id": "00000000-0000-4000-8000-000000000002",
+      "idempotency_key": "commit_booking-1",
+      "proposal": {
+        "currency": "INR",
+        "doctor": "Dr A",
+        "price": 800,
+        "site": "appointment_fixture",
+        "slot_id": "slot-a-1830",
+        "time": "2026-09-19T18:30:00+05:30"
+      },
+      "proposal_digest": "5d155ac026fd93c03399a584cdcd3eac6b27658006ceea9b93e2b39b7887c220",
+      "revision": 5,
+      "risk_tier": "R2",
+      "status": "FAILED",
+      "task_id": "00000000-0000-4000-8000-000000000001",
+      "tool_name": "commit_booking",
+      "updated_at": "2026-09-16T10:00:05Z"
+    },
+    "action_outcome_unknown": {
+      "approval": null,
+      "attempts": [
+        {
+          "action_id": "00000000-0000-4000-8000-000000000002",
+          "approval_id": "00000000-0000-4000-8000-000000000003",
+          "attempt_number": 1,
+          "error_code": "runtime_restart",
+          "finished_at": "2026-09-16T10:00:05Z",
+          "id": "00000000-0000-4000-8000-000000000004",
+          "outcome": "OUTCOME_UNKNOWN",
+          "result": null,
+          "runtime_generation": "00000000-0000-4000-8000-000000000005",
+          "started_at": "2026-09-16T10:00:04Z"
+        }
+      ],
+      "created_at": "2026-09-16T10:00:01Z",
+      "id": "00000000-0000-4000-8000-000000000002",
+      "idempotency_key": "commit_booking-1",
+      "proposal": {
+        "currency": "INR",
+        "doctor": "Dr A",
+        "price": 800,
+        "site": "appointment_fixture",
+        "slot_id": "slot-a-1830",
+        "time": "2026-09-19T18:30:00+05:30"
+      },
+      "proposal_digest": "5d155ac026fd93c03399a584cdcd3eac6b27658006ceea9b93e2b39b7887c220",
+      "revision": 5,
+      "risk_tier": "R2",
+      "status": "OUTCOME_UNKNOWN",
+      "task_id": "00000000-0000-4000-8000-000000000001",
+      "tool_name": "commit_booking",
+      "updated_at": "2026-09-16T10:00:05Z"
+    },
+    "action_succeeded": {
+      "approval": null,
+      "attempts": [
+        {
+          "action_id": "00000000-0000-4000-8000-000000000002",
+          "approval_id": "00000000-0000-4000-8000-000000000003",
+          "attempt_number": 1,
+          "error_code": null,
+          "finished_at": "2026-09-16T10:00:05Z",
+          "id": "00000000-0000-4000-8000-000000000004",
+          "outcome": "SUCCEEDED",
+          "result": {
+            "booking_id": "BK-0001",
+            "changed_facts": [],
+            "dispatch_id": "00000000-0000-4000-8000-000000000007",
+            "duration_ms": 1234,
+            "observation_id": "00000000-0000-4000-8000-000000000008",
+            "operation": "commit_booking",
+            "page": "confirmation",
+            "postcondition_verified": true,
+            "receipt": {
+              "booking_id": "BK-0001",
+              "currency": "INR",
+              "doctor": "Dr A",
+              "price": 800,
+              "reference": "lumi-00000000-0000-4000-8000-000000000002"
+            },
+            "reference": "lumi-00000000-0000-4000-8000-000000000002",
+            "replayed": false,
+            "status": "OK",
+            "submitted": true,
+            "worker_generation": "00000000-0000-4000-8000-000000000006"
+          },
+          "runtime_generation": "00000000-0000-4000-8000-000000000005",
+          "started_at": "2026-09-16T10:00:04Z"
+        }
+      ],
+      "created_at": "2026-09-16T10:00:01Z",
+      "id": "00000000-0000-4000-8000-000000000002",
+      "idempotency_key": "commit_booking-1",
+      "proposal": {
+        "currency": "INR",
+        "doctor": "Dr A",
+        "price": 800,
+        "site": "appointment_fixture",
+        "slot_id": "slot-a-1830",
+        "time": "2026-09-19T18:30:00+05:30"
+      },
+      "proposal_digest": "5d155ac026fd93c03399a584cdcd3eac6b27658006ceea9b93e2b39b7887c220",
+      "revision": 5,
+      "risk_tier": "R2",
+      "status": "SUCCEEDED",
+      "task_id": "00000000-0000-4000-8000-000000000001",
+      "tool_name": "commit_booking",
+      "updated_at": "2026-09-16T10:00:05Z"
+    },
+    "action_waiting_approval": {
+      "approval": {
+        "action_id": "00000000-0000-4000-8000-000000000002",
+        "action_revision": 2,
+        "approved_at": null,
+        "consumed_at": null,
+        "created_at": "2026-09-16T10:00:02Z",
+        "expires_at": "2026-09-16T10:05:02Z",
+        "id": "00000000-0000-4000-8000-000000000003",
+        "proposal_digest": "5d155ac026fd93c03399a584cdcd3eac6b27658006ceea9b93e2b39b7887c220",
+        "rejected_at": null,
+        "status": "PENDING"
+      },
+      "attempts": [],
+      "created_at": "2026-09-16T10:00:01Z",
+      "id": "00000000-0000-4000-8000-000000000002",
+      "idempotency_key": "commit_booking-1",
+      "proposal": {
+        "currency": "INR",
+        "doctor": "Dr A",
+        "price": 800,
+        "site": "appointment_fixture",
+        "slot_id": "slot-a-1830",
+        "time": "2026-09-19T18:30:00+05:30"
+      },
+      "proposal_digest": "5d155ac026fd93c03399a584cdcd3eac6b27658006ceea9b93e2b39b7887c220",
+      "revision": 2,
+      "risk_tier": "R2",
+      "status": "WAITING_APPROVAL",
+      "task_id": "00000000-0000-4000-8000-000000000001",
+      "tool_name": "commit_booking",
+      "updated_at": "2026-09-16T10:00:02Z"
+    },
+    "error_stale": {
+      "error": {
+        "code": "stale_action_revision",
+        "current_revision": 3,
+        "message": "Action is at revision 3, not 2."
+      }
+    },
+    "events": {
+      "events": [
+        {
+          "created_at": "2026-09-16T10:00:01Z",
+          "event_type": "task.created",
+          "id": 1,
+          "payload": {
+            "status": "CREATED"
+          },
+          "sequence": 1,
+          "task_id": "00000000-0000-4000-8000-000000000001",
+          "task_revision": 1
+        },
+        {
+          "created_at": "2026-09-16T10:00:02Z",
+          "event_type": "action.proposed",
+          "id": 2,
+          "payload": {
+            "action_id": "00000000-0000-4000-8000-000000000002",
+            "action_revision": 1,
+            "action_status": "PROPOSED",
+            "idempotency_key": "commit_booking-1",
+            "proposal_digest": "5d155ac026fd93c03399a584cdcd3eac6b27658006ceea9b93e2b39b7887c220",
+            "requires_approval": true,
+            "risk_tier": "R2",
+            "tool_name": "commit_booking"
+          },
+          "sequence": 2,
+          "task_id": "00000000-0000-4000-8000-000000000001",
+          "task_revision": 2
+        },
+        {
+          "created_at": "2026-09-16T10:00:03Z",
+          "event_type": "action.approval_requested",
+          "id": 3,
+          "payload": {
+            "action_id": "00000000-0000-4000-8000-000000000002",
+            "action_revision": 2,
+            "action_status": "WAITING_APPROVAL",
+            "approval_ttl_seconds": 300,
+            "proposal_digest": "5d155ac026fd93c03399a584cdcd3eac6b27658006ceea9b93e2b39b7887c220",
+            "risk_tier": "R2",
+            "tool_name": "commit_booking"
+          },
+          "sequence": 3,
+          "task_id": "00000000-0000-4000-8000-000000000001",
+          "task_revision": 3
+        },
+        {
+          "created_at": "2026-09-16T10:00:04Z",
+          "event_type": "action.approved",
+          "id": 4,
+          "payload": {
+            "action_id": "00000000-0000-4000-8000-000000000002",
+            "action_revision": 3,
+            "action_status": "APPROVED",
+            "approval_id": "00000000-0000-4000-8000-000000000003",
+            "proposal_digest": "5d155ac026fd93c03399a584cdcd3eac6b27658006ceea9b93e2b39b7887c220",
+            "risk_tier": "R2",
+            "tool_name": "commit_booking"
+          },
+          "sequence": 4,
+          "task_id": "00000000-0000-4000-8000-000000000001",
+          "task_revision": 4
+        },
+        {
+          "created_at": "2026-09-16T10:00:05Z",
+          "event_type": "action.execution_started",
+          "id": 5,
+          "payload": {
+            "action_id": "00000000-0000-4000-8000-000000000002",
+            "action_revision": 4,
+            "action_status": "EXECUTING",
+            "approval_id": "00000000-0000-4000-8000-000000000003",
+            "attempt_id": "00000000-0000-4000-8000-000000000004",
+            "attempt_number": 1,
+            "proposal_digest": "5d155ac026fd93c03399a584cdcd3eac6b27658006ceea9b93e2b39b7887c220",
+            "risk_tier": "R2",
+            "runtime_generation": "00000000-0000-4000-8000-000000000005",
+            "tool_name": "commit_booking"
+          },
+          "sequence": 5,
+          "task_id": "00000000-0000-4000-8000-000000000001",
+          "task_revision": 5
+        },
+        {
+          "created_at": "2026-09-16T10:00:06Z",
+          "event_type": "action.outcome_unknown",
+          "id": 6,
+          "payload": {
+            "action_id": "00000000-0000-4000-8000-000000000002",
+            "action_revision": 5,
+            "action_status": "OUTCOME_UNKNOWN",
+            "attempt_id": "00000000-0000-4000-8000-000000000004",
+            "attempt_number": 1,
+            "browser_dispatch_id": "00000000-0000-4000-8000-000000000007",
+            "error_code": "runtime_restart",
+            "outcome": "OUTCOME_UNKNOWN",
+            "proposal_digest": "5d155ac026fd93c03399a584cdcd3eac6b27658006ceea9b93e2b39b7887c220",
+            "reason": "runtime_restart",
+            "recovered_from_generation": "00000000-0000-4000-8000-000000000005",
+            "risk_tier": "R2",
+            "tool_name": "commit_booking"
+          },
+          "sequence": 6,
+          "task_id": "00000000-0000-4000-8000-000000000001",
+          "task_revision": 6
+        },
+        {
+          "created_at": "2026-09-16T10:00:07Z",
+          "event_type": "action.reconciliation_started",
+          "id": 7,
+          "payload": {
+            "action_id": "00000000-0000-4000-8000-000000000002",
+            "action_revision": 6,
+            "action_status": "RECONCILING",
+            "proposal_digest": "5d155ac026fd93c03399a584cdcd3eac6b27658006ceea9b93e2b39b7887c220",
+            "risk_tier": "R2",
+            "tool_name": "commit_booking"
+          },
+          "sequence": 7,
+          "task_id": "00000000-0000-4000-8000-000000000001",
+          "task_revision": 7
+        },
+        {
+          "created_at": "2026-09-16T10:00:08Z",
+          "event_type": "action.reconciled",
+          "id": 8,
+          "payload": {
+            "action_id": "00000000-0000-4000-8000-000000000002",
+            "action_revision": 7,
+            "action_status": "SUCCEEDED",
+            "evidence": {
+              "booking": {
+                "booking_id": "BK-0001",
+                "currency": "INR",
+                "doctor": "Dr A",
+                "price": 800,
+                "reference": "lumi-00000000-0000-4000-8000-000000000002",
+                "slot_id": "slot-a-1830",
+                "time": "2026-09-19T18:30:00+05:30"
+              },
+              "booking_count": 1,
+              "booking_id": "BK-0001",
+              "lookup": "FOUND",
+              "observation_id": "00000000-0000-4000-8000-000000000008",
+              "operation": "lookup_booking",
+              "reference": "lumi-00000000-0000-4000-8000-000000000002",
+              "site": "appointment_fixture",
+              "source": "browser_lookup"
+            },
+            "proposal_digest": "5d155ac026fd93c03399a584cdcd3eac6b27658006ceea9b93e2b39b7887c220",
+            "reason": "reconciliation",
+            "result": "SUCCEEDED",
+            "risk_tier": "R2",
+            "tool_name": "commit_booking"
+          },
+          "sequence": 8,
+          "task_id": "00000000-0000-4000-8000-000000000001",
+          "task_revision": 8
+        }
+      ],
+      "task_id": "00000000-0000-4000-8000-000000000001"
+    },
+    "health": {
+      "database": "ok",
+      "runtime_generation": "00000000-0000-4000-8000-000000000005",
+      "status": "ok"
+    },
+    "search": {
+      "slots": [
+        {
+          "currency": "INR",
+          "doctor": "Dr A",
+          "price": 800,
+          "slot_id": "slot-a-1830",
+          "specialty": "Dermatology",
+          "time": "2026-09-19T18:30:00+05:30"
+        }
+      ],
+      "task_id": "00000000-0000-4000-8000-000000000001"
+    },
+    "task": {
+      "created_at": "2026-09-16T10:00:00Z",
+      "id": "00000000-0000-4000-8000-000000000001",
+      "last_event_sequence": 3,
+      "request": {
+        "day": "Saturday",
+        "specialty": "Dermatology",
+        "text": "Book an appointment",
+        "type": "appointment_booking"
+      },
+      "revision": 3,
+      "status": "WAITING_APPROVAL",
+      "updated_at": "2026-09-16T10:00:03Z"
+    }
+  },
+  "schemas": {
+    "ActionListResponse": {
+      "$defs": {
+        "ActionResponse": {
+          "properties": {
+            "approval": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ApprovalResponse"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "attempts": {
+              "items": {
+                "$ref": "#/$defs/AttemptResponse"
+              },
+              "title": "Attempts",
+              "type": "array"
+            },
+            "created_at": {
+              "format": "date-time",
+              "title": "Created At",
+              "type": "string"
+            },
+            "id": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            },
+            "idempotency_key": {
+              "title": "Idempotency Key",
+              "type": "string"
+            },
+            "proposal": {
+              "additionalProperties": true,
+              "title": "Proposal",
+              "type": "object"
+            },
+            "proposal_digest": {
+              "title": "Proposal Digest",
+              "type": "string"
+            },
+            "revision": {
+              "title": "Revision",
+              "type": "integer"
+            },
+            "risk_tier": {
+              "$ref": "#/$defs/RiskTier"
+            },
+            "status": {
+              "$ref": "#/$defs/ActionStatus"
+            },
+            "task_id": {
+              "format": "uuid",
+              "title": "Task Id",
+              "type": "string"
+            },
+            "tool_name": {
+              "title": "Tool Name",
+              "type": "string"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "task_id",
+            "idempotency_key",
+            "tool_name",
+            "risk_tier",
+            "proposal",
+            "proposal_digest",
+            "status",
+            "revision",
+            "created_at",
+            "updated_at",
+            "approval",
+            "attempts"
+          ],
+          "title": "ActionResponse",
+          "type": "object"
+        },
+        "ActionStatus": {
+          "description": "Persisted action states, text plus a CHECK constraint like TaskStatus.",
+          "enum": [
+            "PROPOSED",
+            "WAITING_APPROVAL",
+            "APPROVED",
+            "REJECTED",
+            "EXECUTING",
+            "SUCCEEDED",
+            "FAILED",
+            "OUTCOME_UNKNOWN",
+            "RECONCILING"
+          ],
+          "title": "ActionStatus",
+          "type": "string"
+        },
+        "ApprovalResponse": {
+          "properties": {
+            "action_id": {
+              "format": "uuid",
+              "title": "Action Id",
+              "type": "string"
+            },
+            "action_revision": {
+              "title": "Action Revision",
+              "type": "integer"
+            },
+            "approved_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Approved At"
+            },
+            "consumed_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Consumed At"
+            },
+            "created_at": {
+              "format": "date-time",
+              "title": "Created At",
+              "type": "string"
+            },
+            "expires_at": {
+              "format": "date-time",
+              "title": "Expires At",
+              "type": "string"
+            },
+            "id": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            },
+            "proposal_digest": {
+              "title": "Proposal Digest",
+              "type": "string"
+            },
+            "rejected_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Rejected At"
+            },
+            "status": {
+              "$ref": "#/$defs/ApprovalStatus"
+            }
+          },
+          "required": [
+            "id",
+            "action_id",
+            "action_revision",
+            "proposal_digest",
+            "status",
+            "created_at",
+            "expires_at",
+            "approved_at",
+            "rejected_at",
+            "consumed_at"
+          ],
+          "title": "ApprovalResponse",
+          "type": "object"
+        },
+        "ApprovalStatus": {
+          "enum": [
+            "PENDING",
+            "APPROVED",
+            "REJECTED",
+            "CONSUMED"
+          ],
+          "title": "ApprovalStatus",
+          "type": "string"
+        },
+        "AttemptOutcome": {
+          "enum": [
+            "SUCCEEDED",
+            "FAILED",
+            "OUTCOME_UNKNOWN"
+          ],
+          "title": "AttemptOutcome",
+          "type": "string"
+        },
+        "AttemptResponse": {
+          "properties": {
+            "action_id": {
+              "format": "uuid",
+              "title": "Action Id",
+              "type": "string"
+            },
+            "approval_id": {
+              "format": "uuid",
+              "title": "Approval Id",
+              "type": "string"
+            },
+            "attempt_number": {
+              "title": "Attempt Number",
+              "type": "integer"
+            },
+            "error_code": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Error Code"
+            },
+            "finished_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Finished At"
+            },
+            "id": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            },
+            "outcome": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AttemptOutcome"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "result": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Result"
+            },
+            "runtime_generation": {
+              "format": "uuid",
+              "title": "Runtime Generation",
+              "type": "string"
+            },
+            "started_at": {
+              "format": "date-time",
+              "title": "Started At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "action_id",
+            "attempt_number",
+            "approval_id",
+            "runtime_generation",
+            "started_at",
+            "finished_at",
+            "outcome",
+            "result",
+            "error_code"
+          ],
+          "title": "AttemptResponse",
+          "type": "object"
+        },
+        "RiskTier": {
+          "description": "How consequential an action is. The policy engine is a later milestone.\n\nR0 local read; R1 scoped read or preparation; R2 disclosure or an otherwise\nconsequential effect; R3 financial, destructive or security-sensitive.",
+          "enum": [
+            "R0",
+            "R1",
+            "R2",
+            "R3"
+          ],
+          "title": "RiskTier",
+          "type": "string"
+        }
+      },
+      "properties": {
+        "actions": {
+          "items": {
+            "$ref": "#/$defs/ActionResponse"
+          },
+          "title": "Actions",
+          "type": "array"
+        },
+        "task_id": {
+          "format": "uuid",
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "actions"
+      ],
+      "title": "ActionListResponse",
+      "type": "object"
+    },
+    "ActionResponse": {
+      "$defs": {
+        "ActionStatus": {
+          "description": "Persisted action states, text plus a CHECK constraint like TaskStatus.",
+          "enum": [
+            "PROPOSED",
+            "WAITING_APPROVAL",
+            "APPROVED",
+            "REJECTED",
+            "EXECUTING",
+            "SUCCEEDED",
+            "FAILED",
+            "OUTCOME_UNKNOWN",
+            "RECONCILING"
+          ],
+          "title": "ActionStatus",
+          "type": "string"
+        },
+        "ApprovalResponse": {
+          "properties": {
+            "action_id": {
+              "format": "uuid",
+              "title": "Action Id",
+              "type": "string"
+            },
+            "action_revision": {
+              "title": "Action Revision",
+              "type": "integer"
+            },
+            "approved_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Approved At"
+            },
+            "consumed_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Consumed At"
+            },
+            "created_at": {
+              "format": "date-time",
+              "title": "Created At",
+              "type": "string"
+            },
+            "expires_at": {
+              "format": "date-time",
+              "title": "Expires At",
+              "type": "string"
+            },
+            "id": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            },
+            "proposal_digest": {
+              "title": "Proposal Digest",
+              "type": "string"
+            },
+            "rejected_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Rejected At"
+            },
+            "status": {
+              "$ref": "#/$defs/ApprovalStatus"
+            }
+          },
+          "required": [
+            "id",
+            "action_id",
+            "action_revision",
+            "proposal_digest",
+            "status",
+            "created_at",
+            "expires_at",
+            "approved_at",
+            "rejected_at",
+            "consumed_at"
+          ],
+          "title": "ApprovalResponse",
+          "type": "object"
+        },
+        "ApprovalStatus": {
+          "enum": [
+            "PENDING",
+            "APPROVED",
+            "REJECTED",
+            "CONSUMED"
+          ],
+          "title": "ApprovalStatus",
+          "type": "string"
+        },
+        "AttemptOutcome": {
+          "enum": [
+            "SUCCEEDED",
+            "FAILED",
+            "OUTCOME_UNKNOWN"
+          ],
+          "title": "AttemptOutcome",
+          "type": "string"
+        },
+        "AttemptResponse": {
+          "properties": {
+            "action_id": {
+              "format": "uuid",
+              "title": "Action Id",
+              "type": "string"
+            },
+            "approval_id": {
+              "format": "uuid",
+              "title": "Approval Id",
+              "type": "string"
+            },
+            "attempt_number": {
+              "title": "Attempt Number",
+              "type": "integer"
+            },
+            "error_code": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Error Code"
+            },
+            "finished_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Finished At"
+            },
+            "id": {
+              "format": "uuid",
+              "title": "Id",
+              "type": "string"
+            },
+            "outcome": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/AttemptOutcome"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "result": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Result"
+            },
+            "runtime_generation": {
+              "format": "uuid",
+              "title": "Runtime Generation",
+              "type": "string"
+            },
+            "started_at": {
+              "format": "date-time",
+              "title": "Started At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "action_id",
+            "attempt_number",
+            "approval_id",
+            "runtime_generation",
+            "started_at",
+            "finished_at",
+            "outcome",
+            "result",
+            "error_code"
+          ],
+          "title": "AttemptResponse",
+          "type": "object"
+        },
+        "RiskTier": {
+          "description": "How consequential an action is. The policy engine is a later milestone.\n\nR0 local read; R1 scoped read or preparation; R2 disclosure or an otherwise\nconsequential effect; R3 financial, destructive or security-sensitive.",
+          "enum": [
+            "R0",
+            "R1",
+            "R2",
+            "R3"
+          ],
+          "title": "RiskTier",
+          "type": "string"
+        }
+      },
+      "properties": {
+        "approval": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ApprovalResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "attempts": {
+          "items": {
+            "$ref": "#/$defs/AttemptResponse"
+          },
+          "title": "Attempts",
+          "type": "array"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "idempotency_key": {
+          "title": "Idempotency Key",
+          "type": "string"
+        },
+        "proposal": {
+          "additionalProperties": true,
+          "title": "Proposal",
+          "type": "object"
+        },
+        "proposal_digest": {
+          "title": "Proposal Digest",
+          "type": "string"
+        },
+        "revision": {
+          "title": "Revision",
+          "type": "integer"
+        },
+        "risk_tier": {
+          "$ref": "#/$defs/RiskTier"
+        },
+        "status": {
+          "$ref": "#/$defs/ActionStatus"
+        },
+        "task_id": {
+          "format": "uuid",
+          "title": "Task Id",
+          "type": "string"
+        },
+        "tool_name": {
+          "title": "Tool Name",
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "task_id",
+        "idempotency_key",
+        "tool_name",
+        "risk_tier",
+        "proposal",
+        "proposal_digest",
+        "status",
+        "revision",
+        "created_at",
+        "updated_at",
+        "approval",
+        "attempts"
+      ],
+      "title": "ActionResponse",
+      "type": "object"
+    },
+    "BookingProposal": {
+      "additionalProperties": false,
+      "description": "The exact booking an approval is bound to.\n\n`extra=\"forbid\"`: an unrecognised field in a stored proposal means the\nproposal was written by something this code does not understand, and\nexecuting the part it does understand would be a guess.",
+      "properties": {
+        "currency": {
+          "maxLength": 3,
+          "minLength": 3,
+          "pattern": "^[A-Z]{3}$",
+          "title": "Currency",
+          "type": "string"
+        },
+        "doctor": {
+          "maxLength": 120,
+          "minLength": 1,
+          "title": "Doctor",
+          "type": "string"
+        },
+        "price": {
+          "maximum": 10000000,
+          "minimum": 0,
+          "title": "Price",
+          "type": "integer"
+        },
+        "site": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "title": "Site",
+          "type": "string"
+        },
+        "slot_id": {
+          "maxLength": 64,
+          "minLength": 1,
+          "title": "Slot Id",
+          "type": "string"
+        },
+        "time": {
+          "format": "date-time",
+          "title": "Time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "site",
+        "slot_id",
+        "doctor",
+        "time",
+        "price",
+        "currency"
+      ],
+      "title": "BookingProposal",
+      "type": "object"
+    },
+    "BookingSearchResponse": {
+      "$defs": {
+        "BookingSlotResponse": {
+          "properties": {
+            "currency": {
+              "title": "Currency",
+              "type": "string"
+            },
+            "doctor": {
+              "title": "Doctor",
+              "type": "string"
+            },
+            "price": {
+              "title": "Price",
+              "type": "integer"
+            },
+            "slot_id": {
+              "title": "Slot Id",
+              "type": "string"
+            },
+            "specialty": {
+              "title": "Specialty",
+              "type": "string"
+            },
+            "time": {
+              "format": "date-time",
+              "title": "Time",
+              "type": "string"
+            }
+          },
+          "required": [
+            "slot_id",
+            "doctor",
+            "specialty",
+            "time",
+            "price",
+            "currency"
+          ],
+          "title": "BookingSlotResponse",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "slots": {
+          "items": {
+            "$ref": "#/$defs/BookingSlotResponse"
+          },
+          "title": "Slots",
+          "type": "array"
+        },
+        "task_id": {
+          "format": "uuid",
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "slots"
+      ],
+      "title": "BookingSearchResponse",
+      "type": "object"
+    },
+    "ErrorResponse": {
+      "$defs": {
+        "ErrorDetail": {
+          "properties": {
+            "code": {
+              "title": "Code",
+              "type": "string"
+            },
+            "current_revision": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Current Revision"
+            },
+            "message": {
+              "title": "Message",
+              "type": "string"
+            },
+            "reason": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Reason"
+            }
+          },
+          "required": [
+            "code",
+            "message"
+          ],
+          "title": "ErrorDetail",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/ErrorDetail"
+        }
+      },
+      "required": [
+        "error"
+      ],
+      "title": "ErrorResponse",
+      "type": "object"
+    },
+    "HealthResponse": {
+      "properties": {
+        "database": {
+          "title": "Database",
+          "type": "string"
+        },
+        "runtime_generation": {
+          "format": "uuid",
+          "title": "Runtime Generation",
+          "type": "string"
+        },
+        "status": {
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "database",
+        "runtime_generation"
+      ],
+      "title": "HealthResponse",
+      "type": "object"
+    },
+    "PrepareBookingBody": {
+      "additionalProperties": false,
+      "description": "Only which slot to observe. Every booked value is read by the worker.",
+      "properties": {
+        "slot_id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+          "title": "Slot Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "slot_id"
+      ],
+      "title": "PrepareBookingBody",
+      "type": "object"
+    },
+    "TaskEventListResponse": {
+      "$defs": {
+        "TaskEventResponse": {
+          "properties": {
+            "created_at": {
+              "format": "date-time",
+              "title": "Created At",
+              "type": "string"
+            },
+            "event_type": {
+              "title": "Event Type",
+              "type": "string"
+            },
+            "id": {
+              "title": "Id",
+              "type": "integer"
+            },
+            "payload": {
+              "additionalProperties": true,
+              "title": "Payload",
+              "type": "object"
+            },
+            "sequence": {
+              "title": "Sequence",
+              "type": "integer"
+            },
+            "task_id": {
+              "format": "uuid",
+              "title": "Task Id",
+              "type": "string"
+            },
+            "task_revision": {
+              "title": "Task Revision",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "id",
+            "task_id",
+            "sequence",
+            "task_revision",
+            "event_type",
+            "payload",
+            "created_at"
+          ],
+          "title": "TaskEventResponse",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "events": {
+          "items": {
+            "$ref": "#/$defs/TaskEventResponse"
+          },
+          "title": "Events",
+          "type": "array"
+        },
+        "task_id": {
+          "format": "uuid",
+          "title": "Task Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "events"
+      ],
+      "title": "TaskEventListResponse",
+      "type": "object"
+    },
+    "TaskResponse": {
+      "$defs": {
+        "TaskStatus": {
+          "description": "Persisted task states.\n\nStored as text guarded by a CHECK constraint rather than a native PostgreSQL\nenum, so a later migration can add states (WAITING_CONTEXT, WAITING_INPUT,\nWAITING_USER_AUTH, RECOVERING, ...) by replacing the constraint inside an\nordinary transaction. Adding a member here therefore always requires a\nmigration, and a test fails if the two drift apart.",
+          "enum": [
+            "CREATED",
+            "PLANNING",
+            "READY",
+            "WAITING_APPROVAL",
+            "EXECUTING",
+            "VERIFYING",
+            "OUTCOME_UNKNOWN",
+            "RECONCILING",
+            "SUCCEEDED",
+            "FAILED",
+            "CANCELLED",
+            "PAUSED"
+          ],
+          "title": "TaskStatus",
+          "type": "string"
+        }
+      },
+      "properties": {
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "id": {
+          "format": "uuid",
+          "title": "Id",
+          "type": "string"
+        },
+        "last_event_sequence": {
+          "title": "Last Event Sequence",
+          "type": "integer"
+        },
+        "request": {
+          "additionalProperties": true,
+          "title": "Request",
+          "type": "object"
+        },
+        "revision": {
+          "title": "Revision",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/TaskStatus"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "revision",
+        "last_event_sequence",
+        "request",
+        "created_at",
+        "updated_at"
+      ],
+      "title": "TaskResponse",
+      "type": "object"
+    }
+  },
+  "version": 1
+}

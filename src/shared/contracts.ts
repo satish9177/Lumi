@@ -1,3 +1,4 @@
+import type { AgentApi } from './agent-contracts'
 import type { ClassifiedIntent, GuardedTool, ToolPolicyCode, ToolPolicyDecision } from './intent'
 import {
   isSearchKind,
@@ -604,6 +605,8 @@ export type PendingActionPreview =
   })
 
 export interface LifeLensApi {
+  /** Durable agent tasks. Narrow, typed, and brokered entirely by main. */
+  agent: AgentApi
   listCaptureSources: () => Promise<CaptureSource[]>
   captureScreen: (sourceId?: string) => Promise<CaptureResult>
   analyzeCapture: (captureId: string) => Promise<ScreenReasoningSummary>

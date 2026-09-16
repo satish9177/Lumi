@@ -13,6 +13,7 @@ where any process can reach loopback.
 """
 
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -220,6 +221,67 @@ def browser_worker(
 # ---- the Lumi runtime -------------------------------------------------------
 
 
+class RuntimeHttp:
+    """Authenticated calls to exactly one runtime origin.
+
+    The bearer credential is attached per call and only after checking that the
+    URL belongs to this runtime, so it can never leak to the worker or fixture.
+    There is deliberately no global httpx patching and no bypass mode.
+    """
+
+    def __init__(self, base_url: str, token: str) -> None:
+        self.base_url = base_url
+        self._token = token
+
+    def _checked(self, url: str) -> str:
+        if not url.startswith(self.base_url + "/"):
+            raise AssertionError(f"refusing to send the runtime credential to {url!r}")
+        return url
+
+    def _headers(self, extra: dict[str, str] | None) -> dict[str, str]:
+        return {**(extra or {}), "Authorization": f"Bearer {self._token}"}
+
+    def get(self, url: str, *, headers: dict[str, str] | None = None, **kwargs: Any) -> httpx.Response:
+        return httpx.get(self._checked(url), headers=self._headers(headers), **kwargs)
+
+    def post(self, url: str, *, headers: dict[str, str] | None = None, **kwargs: Any) -> httpx.Response:
+        return httpx.post(self._checked(url), headers=self._headers(headers), **kwargs)
+
+
+def mint_runtime_token() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def runtime_environment(database_url: str, token: str) -> dict[str, str]:
+    environment = {**os.environ, "DATABASE_URL": database_url, "LUMI_RUNTIME_TOKEN": token}
+    # Never inherit a desktop's managed-worker or parent configuration.
+    for key in ("LUMI_BROWSER_SITE_ORIGIN", "LUMI_RUNTIME_PARENT_PID", "LUMI_RUNTIME_READY_FD"):
+        environment.pop(key, None)
+    return environment
+
+
+def runtime_arguments(port: int) -> list[str]:
+    # The fixed entry point Electron uses, so tests exercise the same process
+    # lock and Windows job, not a bare uvicorn launch that omits them.
+    return ["-m", "app.server", "--port", str(port)]
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeProcess:
+    process: Process
+    http: RuntimeHttp
+
+    @property
+    def base_url(self) -> str:
+        return self.process.base_url
+
+    def logs(self) -> str:
+        return self.process.logs()
+
+    def kill(self) -> None:
+        self.process.kill()
+
+
 @contextmanager
 def runtime(
     log_path: Path,
@@ -229,26 +291,24 @@ def runtime(
     worker_url: str | None = None,
     worker_token: SecretStr | None = None,
     worker_timeout_seconds: float = 120.0,
-) -> Iterator[Process]:
+    token: str | None = None,
+) -> Iterator[RuntimeProcess]:
     chosen = port if port is not None else free_port()
     base_url = f"http://127.0.0.1:{chosen}"
-    environment = {**os.environ, "DATABASE_URL": database_url}
+    credential = token if token is not None else mint_runtime_token()
+    environment = runtime_environment(database_url, credential)
     if worker_url is not None and worker_token is not None:
         environment["BROWSER_WORKER_URL"] = worker_url
         environment["BROWSER_WORKER_TOKEN"] = worker_token.get_secret_value()
         environment["BROWSER_WORKER_TIMEOUT_SECONDS"] = str(worker_timeout_seconds)
     with log_path.open("wb") as log:
-        process = _spawn(
-            [
-                "-m", "uvicorn", "--factory", "app.main:create_app",
-                "--host", "127.0.0.1", "--port", str(chosen), "--log-level", "warning",
-            ],
-            environment,
-            log,
-        )
+        process = _spawn(runtime_arguments(chosen), environment, log)
+        http = RuntimeHttp(base_url, credential)
         try:
-            _wait_until_ready(process, f"{base_url}/health", log_path)
-            yield Process(process, base_url, log_path)
+            _wait_until_ready(
+                process, f"{base_url}/health", log_path, headers=http._headers(None)
+            )
+            yield RuntimeProcess(Process(process, base_url, log_path), http)
         finally:
             kill(process)
 
@@ -274,18 +334,19 @@ def booking_proposal(slot_id: str, doctor: str, time_iso: str, price: int) -> di
 
 
 def drive_to_approved(
-    base_url: str, proposal: dict[str, Any], *, idempotency_key: str = "booking-001"
+    http: RuntimeHttp, proposal: dict[str, Any], *, idempotency_key: str = "booking-001"
 ) -> dict[str, Any]:
     """Task -> proposal -> approval request -> approval. Stops short of executing."""
+    base_url = http.base_url
     task = ok(
-        httpx.post(
+        http.post(
             f"{base_url}/tasks",
             json={"request": {"type": "appointment_booking", "text": "Book Saturday evening"}},
             timeout=30,
         )
     )
     action = ok(
-        httpx.post(
+        http.post(
             f"{base_url}/tasks/{task['id']}/actions",
             json={
                 "idempotency_key": idempotency_key,
@@ -297,14 +358,14 @@ def drive_to_approved(
         )
     )
     action = ok(
-        httpx.post(
+        http.post(
             f"{base_url}/actions/{action['id']}/approval-request",
             json={"expected_revision": action["revision"]},
             timeout=30,
         )
     )
     action = ok(
-        httpx.post(
+        http.post(
             f"{base_url}/actions/{action['id']}/approve",
             json={"expected_revision": action["revision"]},
             timeout=30,

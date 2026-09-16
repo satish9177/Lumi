@@ -1,6 +1,7 @@
 import { resolve } from 'node:path'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
+import { PRODUCTION_CONTENT_SECURITY_POLICY } from './src/main/services/content-security-policy'
 
 export default defineConfig({
   main: {
@@ -39,6 +40,21 @@ export default defineConfig({
         '@renderer': resolve('src/renderer/src')
       }
     },
-    plugins: [react()]
+    plugins: [
+      react(),
+      {
+        // Production documents carry their CSP in a meta tag (file:// pages
+        // have no response headers). The dev server gets a header from main.
+        name: 'lumi-renderer-csp',
+        apply: 'build',
+        transformIndexHtml: () => [
+          {
+            tag: 'meta',
+            attrs: { 'http-equiv': 'Content-Security-Policy', content: PRODUCTION_CONTENT_SECURITY_POLICY },
+            injectTo: 'head-prepend'
+          }
+        ]
+      }
+    ]
   }
 })

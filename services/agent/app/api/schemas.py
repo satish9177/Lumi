@@ -12,6 +12,7 @@ from app.domain.task_status import TaskStatus
 from app.repositories.actions import ApprovalRecord, AttemptRecord
 from app.repositories.tasks import TaskEventRecord, TaskRecord
 from app.services.actions import ActionView
+from app.services.booking_preparation import SLOT_ID_PATTERN
 
 MAX_REQUEST_BYTES = 64_000
 
@@ -48,6 +49,9 @@ class TaskResponse(BaseModel):
     id: uuid.UUID
     status: TaskStatus
     revision: int
+    #: The highest event sequence written for this task, so a client replaying
+    #: `/events` knows when it has caught up.
+    last_event_sequence: int
     request: dict[str, Any]
     created_at: datetime
     updated_at: datetime
@@ -58,6 +62,7 @@ class TaskResponse(BaseModel):
             id=task.id,
             status=task.status,
             revision=task.revision,
+            last_event_sequence=task.last_event_sequence,
             request=task.request,
             created_at=task.created_at,
             updated_at=task.updated_at,
@@ -286,6 +291,28 @@ class BrowserDispatchResponse(BaseModel):
 class BrowserDispatchListResponse(BaseModel):
     action_id: uuid.UUID
     dispatches: list[BrowserDispatchResponse]
+
+
+class PrepareBookingBody(BaseModel):
+    """Only which slot to observe. Every booked value is read by the worker."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    slot_id: str = Field(pattern=SLOT_ID_PATTERN)
+
+
+class BookingSlotResponse(BaseModel):
+    slot_id: str
+    doctor: str
+    specialty: str
+    time: datetime
+    price: int
+    currency: str
+
+
+class BookingSearchResponse(BaseModel):
+    task_id: uuid.UUID
+    slots: list[BookingSlotResponse]
 
 
 class HealthResponse(BaseModel):
