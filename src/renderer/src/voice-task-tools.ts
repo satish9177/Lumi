@@ -285,6 +285,8 @@ function guidance(narration: VoiceNarration): string {
       return 'Answer the user\'s question from these public profile facts only. Say that the details are from the clinic website.'
     case 'preference_saved':
       return 'Confirm briefly that Lumi will remember this preference. Say the user can remove it in the task panel.'
+    case 'inspection':
+      return 'This is a web page inspection. You cannot approve it or open the page by voice, and you do not have the page text. Point the user to the inspection card: approval, the answer and its source are shown there.'
   }
 }
 

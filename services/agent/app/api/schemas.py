@@ -1,7 +1,7 @@
 import json
 import uuid
 from datetime import datetime
-from typing import Any, Self
+from typing import Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -9,8 +9,16 @@ from app.domain.action_status import ActionStatus, ApprovalStatus, AttemptOutcom
 from app.domain.booking_criteria import BookingCriteria
 from app.domain.browser_dispatch import BrowserEffect, DispatchStatus
 from app.domain.digest import canonical_json
+from app.domain.page_observation import (
+    DisclosureSpec,
+    EvidenceQuote,
+    PageAnswer,
+    PageLink,
+    TextBlock,
+)
 from app.domain.task_status import TaskStatus
 from app.repositories.actions import ApprovalRecord, AttemptRecord
+from app.repositories.observations import ObservationRecord
 from app.repositories.tasks import TaskEventRecord, TaskRecord
 from app.services.actions import ActionView
 from app.services.booking_preparation import SLOT_ID_PATTERN
@@ -357,6 +365,119 @@ class CancelBookingTaskResponse(BaseModel):
     task: TaskResponse
     #: Prepared, never-executed bookings rejected by the cancellation.
     rejected_action_ids: list[uuid.UUID]
+
+
+# ---- Milestone 7a: public page inspection -----------------------------------------
+
+
+class PrepareInspectionBody(BaseModel):
+    """Only who may receive page text. The URL and question come from the task."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    disclosure: DisclosureSpec
+
+
+class PageObservationResponse(BaseModel):
+    """The stored observation. Page text here is untrusted environment data."""
+
+    id: uuid.UUID
+    task_id: uuid.UUID
+    action_id: uuid.UUID
+    attempt_id: uuid.UUID
+    dispatch_id: uuid.UUID
+    worker_generation: uuid.UUID
+    schema_version: int
+    provenance: Literal["untrusted_environment"]
+    requested_url: str
+    final_url: str
+    redirects: list[str]
+    title: str
+    document_epoch: int
+    settled: bool
+    truncated: bool
+    observed_at: datetime
+    content_hash: str
+    blocks: list[TextBlock]
+    links: list[PageLink]
+    total_text_chars: int
+    total_link_count: int
+
+    @classmethod
+    def from_record(cls, record: ObservationRecord) -> "PageObservationResponse":
+        observation = record.observation
+        return cls(
+            id=observation.observation_id,
+            task_id=record.task_id,
+            action_id=record.action_id,
+            attempt_id=record.attempt_id,
+            dispatch_id=record.dispatch_id,
+            worker_generation=record.worker_generation,
+            schema_version=observation.schema_version,
+            provenance=observation.provenance,
+            requested_url=observation.requested_url,
+            final_url=observation.final_url,
+            redirects=observation.redirects,
+            title=observation.title,
+            document_epoch=observation.document_epoch,
+            settled=observation.settled,
+            truncated=observation.truncated,
+            observed_at=observation.observed_at,
+            content_hash=observation.content_hash,
+            blocks=observation.blocks,
+            links=observation.links,
+            total_text_chars=observation.total_text_chars,
+            total_link_count=observation.total_link_count,
+        )
+
+
+class PageAnswerResponse(BaseModel):
+    observation_id: uuid.UUID
+    content_hash: str
+    status: str
+    answer: str
+    evidence: list[EvidenceQuote]
+    provider: str
+    model: str
+    answered_at: datetime
+
+
+class InspectionResponse(BaseModel):
+    action: ActionResponse
+    observation: PageObservationResponse | None
+    answer: PageAnswerResponse | None
+
+    @classmethod
+    def build(cls, action: ActionView, record: ObservationRecord | None) -> "InspectionResponse":
+        answer = None
+        if record is not None and record.answer is not None:
+            answer = PageAnswerResponse(
+                observation_id=record.id,
+                content_hash=record.observation.content_hash,
+                status=record.answer.answer.status,
+                answer=record.answer.answer.answer,
+                evidence=record.answer.answer.evidence,
+                provider=record.answer.provider,
+                model=record.answer.model,
+                answered_at=record.answer.answered_at,
+            )
+        return cls(
+            action=ActionResponse.from_view(action),
+            observation=PageObservationResponse.from_record(record) if record is not None else None,
+            answer=answer,
+        )
+
+
+class RecordPageAnswerBody(BaseModel):
+    """A grounded answer, bound to the exact observation it was built from."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    observation_id: uuid.UUID
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    answer: PageAnswer
+    provider: Literal["openai", "gemini", "deepseek", "scripted"]
+    model: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 
 class HealthResponse(BaseModel):

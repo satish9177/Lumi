@@ -2,7 +2,9 @@ import type {
   AgentActionView,
   AgentBookingCriteria,
   AgentChangedFact,
+  AgentDisclosureRecipient,
   AgentEventView,
+  AgentInspectionView,
   AgentReconciliationView,
   AgentSlotView
 } from '../../shared/agent-contracts'
@@ -211,6 +213,10 @@ export function describeEvent(event: AgentEventView): string {
         ? 'Searched the clinic site (read-only)'
         : `Searched the clinic site (read-only): ${count} matching appointment${count === 1 ? '' : 's'}`
     }
+    case 'task.page_answer_recorded':
+      return event.answerStatus === 'answered'
+        ? 'Answer recorded from the inspected page'
+        : 'Recorded: could not verify an answer from the inspected page'
     case 'task.info_lookup_completed': {
       const count = event.profiles?.length
       return count === undefined
@@ -309,6 +315,12 @@ export function describeOutcome(outcome: VoiceTaskOutcome): string {
       return `Lumi could not do that yet: ${narration.reason.replaceAll('_', ' ')}.${suffix}`
     case 'task_cancelled':
       return 'The task is cancelled. Nothing was booked.'
+    case 'inspection':
+      return narration.state === 'approval_required'
+        ? `Nothing was approved. Review the card for ${narration.host} and press Approve and inspect yourself.`
+        : narration.state === 'awaiting_approval'
+          ? `Prepared an inspection of ${narration.host}. Nothing is opened until you press Approve and inspect.`
+          : `See the inspection card for ${narration.host}.`
     case 'outcome_unknown':
       return 'Lumi does not know whether the booking went through. It will not book again; check it from the card.'
     case 'booking_confirmed':
@@ -324,4 +336,153 @@ export function describeOutcome(outcome: VoiceTaskOutcome): string {
 
 export function topicLabel(topic: string): string {
   return topic === 'walk_ins' ? 'Walk-ins' : topic[0].toUpperCase() + topic.slice(1)
+}
+
+// ---- Milestone 7a: page inspection card ---------------------------------------------
+
+/**
+ * The inspection card is built from the persisted proposal and runtime state
+ * only. Page-controlled text (verified answer quotes, page title, final URL)
+ * is rendered only as plain text in labelled fields. Page text never supplies a
+ * label, a button, or a line of instructions on this card.
+ */
+
+export type InspectionControl =
+  | 'approve_and_inspect'
+  | 'inspect_now'
+  | 'reject'
+  | 'answer_from_observation'
+  | 'inspect_again'
+
+export interface InspectionCardModel {
+  tone: BookingTone
+  eyebrow: string
+  title: string
+  lines: string[]
+  showProposal: boolean
+  controls: InspectionControl[]
+}
+
+export const RECIPIENT_LABELS: Record<AgentDisclosureRecipient, string> = {
+  openai: 'OpenAI',
+  gemini: 'Google Gemini',
+  deepseek: 'DeepSeek',
+  scripted: 'Lumi offline test model'
+}
+
+export function describeRecipients(recipients: readonly AgentDisclosureRecipient[]): string {
+  return recipients.map((recipient) => RECIPIENT_LABELS[recipient]).join(', ')
+}
+
+const FAILURE_REASONS: Record<string, string> = {
+  redirect_blocked: 'The page redirected to an address Lumi may not open. That address was not contacted.',
+  too_many_redirects: 'The page redirected too many times.',
+  navigation_blocked: 'The page tried to move itself to an address Lumi may not open. That address was not contacted.',
+  final_destination_not_allowed: 'The page ended up at an address Lumi may not read.',
+  download_blocked: 'The address is a file download. Lumi does not download files.',
+  unsupported_content_type: 'The address is not a web page Lumi can read.',
+  document_unstable: 'The page kept changing while Lumi was reading it.',
+  observation_invalid: 'What the browser returned could not be used as evidence.',
+  non_public_address: 'The site resolved to a private or local network address.',
+  dns_failed: 'The site could not be found.',
+  destination_not_allowed: 'The site is no longer on the list of sites Lumi may inspect.',
+  timeout_before_submission: 'The page did not load in time.',
+  browser_error_before_submission: 'The browser could not load the page.',
+  browser_closed_before_submission: 'The browser closed before the page loaded.',
+  connection_refused_before_submission: 'The site refused the connection.',
+  browser_worker_unavailable: 'The isolated browser was not available.',
+  browser_worker_rejected: 'The isolated browser refused the request.',
+  dispatch_not_recorded: 'Lumi could not record the read before starting it, so it did not start it.'
+}
+
+export function describeInspectionFailure(errorCode: string | undefined, httpStatus?: number): string {
+  if (errorCode === 'page_http_error') return `The site answered with an error${httpStatus ? ` (HTTP ${httpStatus})` : ''}.`
+  return (errorCode && FAILURE_REASONS[errorCode]) || 'The page could not be read.'
+}
+
+const NOT_ANSWERED_REASONS: Record<string, string> = {
+  not_found: 'The inspected page did not show it.',
+  ambiguous: 'The inspected page showed conflicting or unclear values.',
+  not_verified: 'A text model replied, but its answer could not be matched to the page, so it is not shown.'
+}
+
+export function describeInspection(inspection: AgentInspectionView, now: number): InspectionCardModel {
+  const attempt = inspection.attempts.length > 0 ? inspection.attempts[inspection.attempts.length - 1] : undefined
+  const base = { showProposal: true }
+  switch (inspection.status) {
+    case 'PROPOSED':
+      return {
+        ...base, tone: 'approval', eyebrow: 'PREPARED', title: 'Inspection prepared',
+        lines: ['Lumi has not asked for approval yet. Nothing has been opened.'], controls: ['inspect_again', 'reject']
+      }
+    case 'WAITING_APPROVAL':
+      if (!inspection.approval || inspection.approval.status !== 'PENDING' || isExpired(inspection.approval.expiresAt, now)) {
+        return {
+          ...base, tone: 'neutral', eyebrow: 'APPROVAL EXPIRED', title: 'This approval request expired',
+          lines: ['Nothing was opened.'], controls: ['inspect_again']
+        }
+      }
+      return {
+        ...base, tone: 'approval', eyebrow: 'NEEDS YOUR APPROVAL', title: 'Open and read this page?',
+        lines: ['Lumi will open exactly this address once, in an isolated browser, only if you approve.'],
+        controls: ['reject', 'approve_and_inspect']
+      }
+    case 'APPROVED':
+      if (!inspection.approval || inspection.approval.status !== 'APPROVED' || isExpired(inspection.approval.expiresAt, now)) {
+        return {
+          ...base, tone: 'neutral', eyebrow: 'APPROVAL EXPIRED', title: 'Your approval expired before the page was opened',
+          lines: ['Nothing was opened.'], controls: ['inspect_again']
+        }
+      }
+      return {
+        ...base, tone: 'approval', eyebrow: 'APPROVED', title: 'Approved, not opened yet',
+        lines: ['Your approval covers exactly this address and can be used once.'], controls: ['inspect_now', 'reject']
+      }
+    case 'REJECTED':
+      return {
+        ...base, tone: 'neutral', eyebrow: 'REJECTED', title: 'You rejected this inspection',
+        lines: ['Nothing was opened.'], controls: ['inspect_again']
+      }
+    case 'EXECUTING':
+      return {
+        ...base, tone: 'progress', eyebrow: 'READING', title: 'Reading the page',
+        lines: ['Lumi is reading this page once in an isolated browser. It will not click, type or sign in.'], controls: []
+      }
+    case 'OUTCOME_UNKNOWN':
+    case 'RECONCILING':
+      return {
+        ...base, tone: 'uncertain', eyebrow: 'RESULT UNKNOWN', title: 'Lumi does not know what was read',
+        lines: [
+          'The page may have been opened, but Lumi did not receive or save what it read. Nothing was answered.',
+          'Reading a public page changes nothing Lumi needs to check, and Lumi will not retry by itself. A new inspection needs a new approval.'
+        ],
+        controls: ['inspect_again']
+      }
+    case 'FAILED':
+      return {
+        ...base, tone: 'failure', eyebrow: 'NOT READ', title: 'The page was not read',
+        lines: [describeInspectionFailure(attempt?.errorCode, attempt?.httpStatus), 'Nothing was answered.'],
+        controls: ['inspect_again']
+      }
+    case 'SUCCEEDED': {
+      const answer = inspection.answer
+      if (!answer) {
+        return {
+          ...base, tone: 'neutral', eyebrow: 'PAGE READ', title: 'Page read — no answer yet',
+          lines: ['Lumi saved what it read. Answering uses that saved copy and does not open the page again.'],
+          controls: ['answer_from_observation', 'inspect_again']
+        }
+      }
+      if (answer.status === 'answered') {
+        return {
+          ...base, tone: 'success', eyebrow: 'ANSWER FROM THE PAGE', title: 'Answer from the inspected page',
+          lines: [], controls: ['inspect_again']
+        }
+      }
+      return {
+        ...base, tone: 'neutral', eyebrow: 'NOT VERIFIED', title: 'Could not verify this from the inspected page.',
+        lines: [NOT_ANSWERED_REASONS[answer.status] ?? 'Lumi could not verify an answer.'], controls: ['inspect_again']
+      }
+    }
+  }
 }

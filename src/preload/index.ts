@@ -45,6 +45,18 @@ const agentApi: AgentApi = {
   submitTextRequest: (requestId: string, text: string) =>
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.submitTextRequest, requestId, text),
   lookupClinicInfo: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.lookupClinicInfo),
+  // Two strings the user typed; main validates the URL against its destination
+  // policy and the runtime validates it again. Nothing here can approve.
+  createPageInspection: (url: string, question: string) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.createPageInspection, url, question),
+  approveInspection: (actionId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.approveInspection, actionId, expectedRevision),
+  rejectInspection: (actionId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.rejectInspection, actionId, expectedRevision),
+  executeInspection: (actionId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.executeInspection, actionId, expectedRevision),
+  answerInspection: (actionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.answerInspection, actionId),
+  inspectPageAgain: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.inspectPageAgain),
   listPreferences: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.listPreferences),
   forgetPreference: (key: PreferenceKey) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.forgetPreference, key),
   getDiagnostics: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getDiagnostics)

@@ -23,7 +23,10 @@ from app.api.schemas import (
     FinishAttemptBody,
     FinishReconciliationBody,
     HealthResponse,
+    InspectionResponse,
     PrepareBookingBody,
+    PrepareInspectionBody,
+    RecordPageAnswerBody,
     ProposeActionBody,
     RejectActionBody,
     ReviseBookingCriteriaBody,
@@ -43,7 +46,11 @@ from app.services.clinic_info import (
     ClinicInfoService,
     validate_request as validate_clinic_info_request,
 )
-from app.domain.errors import BrowserObservationError
+from app.domain.errors import BrowserObservationError, DestinationNotAllowedError
+from app.domain.page_observation import PAGE_INSPECTION_TASK_TYPE
+from app.domain.public_url import UrlPolicyError
+from app.services.page_inspection import PageInspectionService
+from app.services.page_inspection import validate_request as validate_inspection_request
 from app.services.tasks import TaskService
 
 logger = logging.getLogger(__name__)
@@ -100,7 +107,9 @@ async def shutdown(request: Request) -> Response:
 
 
 @router.post("/tasks", status_code=status.HTTP_201_CREATED, response_model=TaskResponse)
-async def create_task(body: CreateTaskBody, service: TaskServiceDep) -> TaskResponse:
+async def create_task(
+    body: CreateTaskBody, service: TaskServiceDep, http_request: Request
+) -> TaskResponse:
     request = body.request.model_dump(mode="json", exclude_none=True)
     if request.get("type") == BOOKING_TASK_TYPE:
         # A booking task is never stored with constraints search would refuse.
@@ -112,6 +121,14 @@ async def create_task(body: CreateTaskBody, service: TaskServiceDep) -> TaskResp
         try:
             validate_clinic_info_request(request)
         except BrowserObservationError:
+            raise RequestValidationError([]) from None
+    if request.get("type") == PAGE_INSPECTION_TASK_TYPE:
+        inspection: PageInspectionService = http_request.app.state.page_inspection_service
+        try:
+            validate_inspection_request(request, inspection.policy)
+        except UrlPolicyError as error:
+            raise DestinationNotAllowedError(error.code) from None
+        except ValueError:
             raise RequestValidationError([]) from None
     task = await service.create_task(request)
     return TaskResponse.from_record(task)
@@ -372,12 +389,13 @@ async def execute_action_in_browser(
     """Claims the approval, dispatches to the worker, records what came back.
 
     The body is empty on purpose. Everything that governs the side effect --
-    which slot, which doctor, which price, which site -- comes from the
-    immutable proposal the approval was bound to. The only optional input is
-    the action revision the user reviewed, which the approval claim enforces.
+    which slot, which doctor, which price, which site, or which public page --
+    comes from the immutable proposal the approval was bound to. The executor
+    is chosen by the persisted tool name. The only optional input is the action
+    revision the user reviewed, which the approval claim enforces.
     """
     return ActionResponse.from_view(
-        await service.execute_booking(action_id, expected_revision=_expected_revision(body))
+        await service.execute(action_id, expected_revision=_expected_revision(body))
     )
 
 
@@ -540,3 +558,65 @@ async def lookup_clinic_info(
         task=TaskResponse.from_record(task),
         profiles=[DoctorProfileResponse(**profile.model_dump()) for profile in profiles],
     )
+
+
+# --- Public page inspection (Milestone 7a) -----------------------------------
+#
+# Prepare takes a task id and the provider disclosure main will honour; the URL
+# and question come from the persisted task. Execution is the shared
+# `/actions/{id}/browser-execution` route. The answer route accepts a grounded
+# answer bound to an observation id and content hash, and re-verifies it.
+
+
+def get_page_inspection_service(request: Request) -> PageInspectionService:
+    service: PageInspectionService = request.app.state.page_inspection_service
+    return service
+
+
+InspectionServiceDep = Annotated[PageInspectionService, Depends(get_page_inspection_service)]
+
+
+@router.post(
+    "/tasks/{task_id}/inspection/prepare",
+    status_code=status.HTTP_201_CREATED,
+    response_model=ActionResponse,
+    responses={**_NOT_FOUND, **_CONFLICT, **_UNAVAILABLE},
+    summary="Propose inspecting the task's page and ask for exact approval",
+)
+async def prepare_page_inspection(
+    task_id: uuid.UUID, body: PrepareInspectionBody, service: InspectionServiceDep
+) -> ActionResponse:
+    return ActionResponse.from_view(await service.prepare(task_id, body.disclosure))
+
+
+@router.get(
+    "/actions/{action_id}/inspection",
+    response_model=InspectionResponse,
+    responses=_NOT_FOUND,
+    summary="The inspection action, its stored observation and recorded answer",
+)
+async def get_page_inspection(
+    action_id: uuid.UUID, service: InspectionServiceDep
+) -> InspectionResponse:
+    view = await service.describe(action_id)
+    return InspectionResponse.build(view.action, view.observation)
+
+
+@router.post(
+    "/actions/{action_id}/inspection/answer",
+    response_model=InspectionResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Record a grounded answer for the current observation (once)",
+)
+async def record_page_answer(
+    action_id: uuid.UUID, body: RecordPageAnswerBody, service: InspectionServiceDep
+) -> InspectionResponse:
+    view = await service.record_answer(
+        action_id,
+        observation_id=body.observation_id,
+        content_hash=body.content_hash,
+        answer=body.answer,
+        provider=body.provider,
+        model=body.model,
+    )
+    return InspectionResponse.build(view.action, view.observation)

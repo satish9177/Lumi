@@ -8,9 +8,11 @@ import {
   type AgentActionView,
   type AgentBookingCriteria,
   type AgentClinicInfoQuery,
+  type AgentDisclosureRecipient,
   type AgentDoctorProfileView,
   type AgentError,
   type AgentEventView,
+  type AgentInspectionView,
   type AgentResult,
   type AgentSlotView,
   type AgentTaskSnapshot
@@ -21,11 +23,16 @@ import {
   type RuntimeMethod,
   type RuntimeReply
 } from './agent-runtime-supervisor'
+import type { AnswerOutcome, PageObservationDetail } from '../agent/page-answer'
+import { PublicUrlPolicy, UrlPolicyError, describeRefusal } from '../agent/public-url-policy'
 import {
   WireError,
   isRecord,
+  latestInspectionActionId,
   parseAction,
   parseActionList,
+  parseInspection,
+  parseInspectionAction,
   parseCancellation,
   parseClinicInfo,
   parseCriteriaRevision,
@@ -34,13 +41,15 @@ import {
   parseTask,
   projectRuntimeError,
   type CriteriaRevision,
+  type InspectionDetail,
   type TaskCancellation
 } from './agent-wire'
 
 /**
  * The trusted domain client for durable agent tasks, owned by Electron main.
  *
- * It exposes booking-task operations and nothing else: there is no generic
+ * It exposes booking, clinic-information and page-inspection task operations
+ * and nothing else: there is no generic
  * path, method, body or URL parameter. Every mutation is an explicit user
  * action from the renderer, names an action of the *active* task by id, and
  * carries only the revision the user reviewed. Mutations are never retried;
@@ -256,12 +265,59 @@ export class ActiveTaskStore {
   }
 }
 
+/**
+ * What main needs to offer page inspection: its own destination policy (the
+ * runtime and worker apply theirs too) and the answer step, which owns the
+ * model router and therefore the provider credentials.
+ */
+export interface PageInspectionSupport {
+  policy: PublicUrlPolicy
+  answerer?: {
+    recipients(): AgentDisclosureRecipient[]
+    answer(input: {
+      question: string
+      observation: PageObservationDetail
+      recipients: readonly AgentDisclosureRecipient[]
+      taskId: string
+    }): Promise<AnswerOutcome>
+  }
+}
+
+const MAX_QUESTION = 500
+const INSPECTION_TEXT_CHARS = 12_000
+
+export function parseInspectionQuestion(value: unknown): string {
+  const question = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : ''
+  // eslint-disable-next-line no-control-regex
+  if (!question || question.length > MAX_QUESTION || /[\x00-\x1f\x7f]/.test(question)) {
+    fail('invalid_request', 'Ask a question of up to 500 characters about the page.')
+  }
+  return question
+}
+
+/** Inspection wording for ledger refusals whose default text talks about bookings. */
+function inspectionError(agentError: AgentError): AgentError {
+  switch (agentError.code) {
+    case 'stale_revision':
+      return { ...agentError, message: 'The inspection changed since you reviewed it. Review the current card.' }
+    case 'invalid_transition':
+      return { ...agentError, message: 'That step is not available for this inspection any more.' }
+    case 'approval_not_usable':
+      return { ...agentError, message: 'That approval can no longer be used. Review the inspection again.' }
+    case 'not_found':
+      return { ...agentError, message: 'That inspection does not belong to the current task.' }
+    default:
+      return agentError
+  }
+}
+
 export class AgentTaskController {
   private readonly inFlight = new Set<string>()
 
   constructor(
     private readonly runtime: RuntimeRequester,
-    private readonly store: ActiveTaskStore
+    private readonly store: ActiveTaskStore,
+    private readonly inspection?: PageInspectionSupport
   ) {}
 
   // ---- plumbing ------------------------------------------------------------
@@ -303,16 +359,24 @@ export class AgentTaskController {
     return taskId
   }
 
-  private async loadActions(taskId: string): Promise<{ actions: AgentActionView[]; generation: string }> {
+  private async loadActions(taskId: string): Promise<{ actions: AgentActionView[]; generation: string; inspectionId?: string }> {
     const reply = await this.call('GET', `/tasks/${taskId}/actions?limit=100`, undefined, TIMEOUTS.read)
-    return { actions: parseActionList(reply.body, taskId), generation: reply.generation }
+    const inspectionId = latestInspectionActionId(reply.body, taskId)
+    return { actions: parseActionList(reply.body, taskId), generation: reply.generation, ...(inspectionId ? { inspectionId } : {}) }
   }
 
   private async snapshot(taskId: string, afterSequence: number): Promise<AgentTaskSnapshot> {
     const taskReply = await this.call('GET', `/tasks/${taskId}`, undefined, TIMEOUTS.read)
     const task = parseTask(taskReply.body)
     if (task.taskId !== taskId) throw new WireError('task.id')
-    const { actions, generation } = await this.loadActions(taskId)
+    const { actions, generation, inspectionId } = await this.loadActions(taskId)
+    let inspection: AgentInspectionView | undefined
+    if (task.kind === 'page_inspection' && inspectionId) {
+      const detail = await this.loadInspection(inspectionId)
+      if (detail.generation !== generation) fail('runtime_restarted', 'The agent runtime restarted while loading. Showing the latest saved state.')
+      if (detail.detail.view.taskId !== taskId) throw new WireError('inspection.task_id')
+      inspection = detail.detail.view
+    }
     const events: AgentEventView[] = []
     let cursor = afterSequence
     for (let page = 0; ; page += 1) {
@@ -337,7 +401,14 @@ export class AgentTaskController {
     if (taskReply.generation !== generation) {
       fail('runtime_restarted', 'The agent runtime restarted while loading. Showing the latest saved state.')
     }
-    return { runtimeGeneration: generation, task, actions, events }
+    return { runtimeGeneration: generation, task, actions, events, ...(inspection ? { inspection } : {}) }
+  }
+
+  private async loadInspection(actionId: string): Promise<{ detail: InspectionDetail; generation: string }> {
+    const reply = await this.call('GET', `/actions/${actionId}/inspection`, undefined, TIMEOUTS.read)
+    const detail = parseInspection(reply.body)
+    if (detail.view.actionId !== actionId) throw new WireError('inspection.action_id')
+    return { detail, generation: reply.generation }
   }
 
   private async ownedAction(actionId: string): Promise<AgentActionView> {
@@ -534,6 +605,219 @@ export class AgentTaskController {
       await this.store.clear()
       return null
     })
+  }
+
+  // ---- page inspection (Milestone 7a) ----------------------------------------
+
+  private requireInspection(): PageInspectionSupport {
+    if (!this.inspection || !this.inspection.policy.configured) {
+      fail('inspection_unavailable', 'Page inspection is not set up on this computer. Nothing was opened.')
+    }
+    return this.inspection
+  }
+
+  private recipients(support: PageInspectionSupport): AgentDisclosureRecipient[] {
+    const recipients = support.answerer?.recipients() ?? []
+    if (recipients.length === 0) {
+      fail('inspection_unavailable', 'No text model is configured to answer from a page, so Lumi will not open it.')
+    }
+    return recipients
+  }
+
+  private async prepareInspection(taskId: string, recipients: AgentDisclosureRecipient[]): Promise<void> {
+    const reply = await this.call('POST', `/tasks/${taskId}/inspection/prepare`, {
+      disclosure: { recipients, max_text_chars: INSPECTION_TEXT_CHARS }
+    }, TIMEOUTS.write)
+    const action = parseInspectionAction(reply.body)
+    if (action.taskId !== taskId) throw new WireError('inspection.prepare')
+  }
+
+  /**
+   * Create a page-inspection task and show its exact approval card. Nothing is
+   * opened: the page is read only after the trusted Approve click.
+   *
+   * The URL is canonicalized and checked here, then again by the runtime, and
+   * again by the worker. The same typed request id is never turned into a
+   * second task, including after a main restart.
+   */
+  async createPageInspection(urlValue: unknown, questionValue: unknown, origin?: TaskOrigin): Promise<AgentResult<AgentTaskSnapshot>> {
+    let url: string
+    let question: string
+    let provenance: Record<string, string>
+    let support: PageInspectionSupport
+    let recipients: AgentDisclosureRecipient[]
+    try {
+      support = this.requireInspection()
+      if (typeof urlValue !== 'string') fail('invalid_request', 'Enter a web address to inspect.')
+      try {
+        url = support.policy.canonicalize(urlValue).url
+      } catch (error) {
+        if (error instanceof UrlPolicyError) fail('destination_not_allowed', describeRefusal(error.code))
+        throw error
+      }
+      question = parseInspectionQuestion(questionValue)
+      provenance = originFields(origin, `Inspect ${url}`)
+      recipients = this.recipients(support)
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    return this.exclusive('task', async () => {
+      if (origin) {
+        const activeId = await this.store.read()
+        if (activeId) {
+          const active = await this.snapshot(activeId, 0).catch(() => undefined)
+          if (active && (active.task.requestId === origin.turnId || active.task.voiceTurnId === origin.turnId)) return active
+        }
+      }
+      await this.assertNoUnresolvedAction()
+      const request = { type: 'page_inspection', ...provenance, url, question }
+      const reply = await this.call('POST', '/tasks', { request }, TIMEOUTS.write)
+      const task = parseTask(reply.body)
+      if (task.kind !== 'page_inspection' || task.inspection?.url !== url) throw new WireError('inspection.task')
+      await this.store.write(task.taskId)
+      await this.prepareInspection(task.taskId, recipients)
+      return await this.snapshot(task.taskId, 0)
+    })
+  }
+
+  /** A new card for the active inspection task. Returns the open one if it is still reviewable. */
+  async inspectPageAgain(): Promise<AgentResult<AgentTaskSnapshot>> {
+    let recipients: AgentDisclosureRecipient[]
+    try {
+      recipients = this.recipients(this.requireInspection())
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    return this.exclusive('task', async () => {
+      const taskId = await this.activeTaskId()
+      const current = await this.snapshot(taskId, 0)
+      if (current.task.kind !== 'page_inspection') fail('invalid_request', 'That step does not apply to this kind of task.')
+      await this.prepareInspection(taskId, recipients)
+      return await this.snapshot(taskId, 0)
+    })
+  }
+
+  private async ownedInspection(actionId: string): Promise<InspectionDetail> {
+    const taskId = await this.activeTaskId()
+    const { detail } = await this.loadInspection(actionId)
+    if (detail.view.taskId !== taskId) fail('not_found', 'That inspection does not belong to the current task.')
+    return detail
+  }
+
+  private async inspectionMutation(
+    actionIdValue: unknown, revisionValue: unknown, route: 'approve' | 'reject'
+  ): Promise<AgentResult<AgentInspectionView>> {
+    let actionId: string
+    let expectedRevision: number
+    try {
+      actionId = parseActionId(actionIdValue)
+      expectedRevision = parseExpectedRevision(revisionValue)
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    const result = await this.exclusive(`action:${actionId}`, async () => {
+      const current = await this.ownedInspection(actionId)
+      if (current.view.revision !== expectedRevision) {
+        throw new AgentRequestError({
+          code: 'stale_revision', message: 'The inspection changed since you reviewed it.', currentRevision: current.view.revision
+        })
+      }
+      const reply = await this.call('POST', `/actions/${actionId}/${route}`, { expected_revision: expectedRevision }, TIMEOUTS.write)
+      const action = parseInspectionAction(reply.body)
+      if (action.actionId !== actionId || action.taskId !== current.view.taskId) throw new WireError(`inspection.${route}`)
+      return (await this.loadInspection(actionId)).detail.view
+    })
+    return result.ok ? result : { ok: false, error: inspectionError(result.error) }
+  }
+
+  approveInspection(actionId: unknown, expectedRevision: unknown): Promise<AgentResult<AgentInspectionView>> {
+    return this.inspectionMutation(actionId, expectedRevision, 'approve')
+  }
+
+  rejectInspection(actionId: unknown, expectedRevision: unknown): Promise<AgentResult<AgentInspectionView>> {
+    return this.inspectionMutation(actionId, expectedRevision, 'reject')
+  }
+
+  /**
+   * Run the approved inspection once: the runtime claims the single-use
+   * approval, the worker reads the page, and the observation is stored. Then,
+   * and only from that stored observation, main asks a permitted model.
+   * Never retried: an unconfirmed execution is reported so the UI re-reads.
+   */
+  async executeInspection(actionIdValue: unknown, revisionValue: unknown): Promise<AgentResult<AgentInspectionView>> {
+    let actionId: string
+    let expectedRevision: number
+    try {
+      actionId = parseActionId(actionIdValue)
+      expectedRevision = parseExpectedRevision(revisionValue)
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    const result = await this.exclusive(`action:${actionId}`, async () => {
+      const current = await this.ownedInspection(actionId)
+      if (current.view.revision !== expectedRevision) {
+        throw new AgentRequestError({
+          code: 'stale_revision', message: 'The inspection changed since you reviewed it.', currentRevision: current.view.revision
+        })
+      }
+      const reply = await this.call('POST', `/actions/${actionId}/browser-execution`, { expected_revision: expectedRevision }, TIMEOUTS.execute)
+      const action = parseInspectionAction(reply.body)
+      if (action.actionId !== actionId || action.taskId !== current.view.taskId) throw new WireError('inspection.execute')
+      const executed = await this.ownedInspection(actionId)
+      if (executed.observation && !executed.view.answer) {
+        try {
+          return await this.answerFrom(executed)
+        } catch (error) {
+          // The observation is durable; the answer can be produced later from
+          // it without opening the page again. Report the view as it stands.
+          if (!(error instanceof AgentRequestError)) throw error
+        }
+      }
+      return executed.view
+    })
+    return result.ok ? result : { ok: false, error: inspectionError(result.error) }
+  }
+
+  /** Answer from the stored observation. Never opens the page. */
+  async answerInspection(actionIdValue: unknown): Promise<AgentResult<AgentInspectionView>> {
+    let actionId: string
+    try {
+      actionId = parseActionId(actionIdValue)
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    const result = await this.exclusive(`action:${actionId}`, async () => {
+      const current = await this.ownedInspection(actionId)
+      if (current.view.answer) return current.view
+      if (!current.observation) fail('answer_unavailable', 'There is no saved page observation to answer from.')
+      return await this.answerFrom(current)
+    })
+    return result.ok ? result : { ok: false, error: inspectionError(result.error) }
+  }
+
+  private async answerFrom(detail: InspectionDetail): Promise<AgentInspectionView> {
+    const answerer = this.inspection?.answerer
+    const observation = detail.observation
+    if (!answerer || !observation) fail('answer_unavailable', 'No text model is configured to answer from the page.')
+    const outcome = await answerer.answer({
+      question: detail.view.proposal.question,
+      observation,
+      recipients: detail.view.proposal.recipients,
+      taskId: detail.view.taskId
+    })
+    if (outcome.kind === 'unavailable') {
+      fail('answer_unavailable', 'Lumi read the page, but no approved text model answered. Try again; the page will not be opened again.')
+    }
+    const reply = await this.call('POST', `/actions/${detail.view.actionId}/inspection/answer`, {
+      observation_id: observation.observationId,
+      content_hash: observation.contentHash,
+      answer: outcome.answer,
+      provider: outcome.provider,
+      model: outcome.model
+    }, TIMEOUTS.write)
+    const recorded = parseInspection(reply.body)
+    if (recorded.view.actionId !== detail.view.actionId || !recorded.view.answer) throw new WireError('inspection.answer')
+    return recorded.view
   }
 
   // ---- read-only observation ------------------------------------------------

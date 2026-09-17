@@ -84,6 +84,16 @@ The only user-editable input is `agent-runtime.json`, read and validated by
 main. Distribution builds must be Authenticode-signed; see
 [PACKAGING.md](PACKAGING.md#windows-application-control).
 
+## Public page inspection (Milestone 7a)
+
+Page inspection is disabled unless trusted configuration names public hosts.
+The destination policy is enforced by main, the runtime and the worker, and the
+worker's network guard applies it to every request and redirect hop. Page
+content is `untrusted_environment` data: it reaches a model only inside a
+delimited section, only for providers the user's approval named, and an answer
+is stored only if its quotes and numbers are verifiably on the page. Details
+and limits: [PAGE-INSPECTION.md](PAGE-INSPECTION.md).
+
 ## Known gaps
 
 - The packaged build is unsigned. Machines with Smart App Control or WDAC in

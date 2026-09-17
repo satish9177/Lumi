@@ -28,12 +28,12 @@ becomes a failure.
 
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from pydantic import SecretStr
-from sqlalchemy.ext.asyncio import AsyncEngine
+from pydantic import SecretStr, ValidationError
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.browser.client import BrowserWorkerClient
 from app.browser.managed import ManagedBrowserWorker
@@ -57,12 +57,17 @@ from app.domain.browser_dispatch import (
 )
 from app.domain.errors import (
     ActionNotFoundError,
+    DestinationNotAllowedError,
     InvalidActionTransitionError,
+    PublicInspectionNotConfiguredError,
     StaleActionRevisionError,
 )
+from app.domain.page_observation import INSPECT_PUBLIC_PAGE, PUBLIC_WEB_SITE, PageObservation
+from app.domain.public_url import PublicUrlPolicy, UrlPolicyError
 from app.domain.sites import site_trust
-from app.repositories.actions import ActionRepository
+from app.repositories.actions import ActionRepository, AttemptRecord
 from app.repositories.browser import BrowserRepository
+from app.repositories.observations import ObservationRepository
 from app.services.actions import ActionService, ActionView
 
 logger = logging.getLogger("lumi.browser.execution")
@@ -111,6 +116,9 @@ class Outcome:
     error_code: str | None
     observation_id: uuid.UUID | None
     result: dict[str, Any]
+    #: The worker's raw observation. Only a reviewed reader (the inspection
+    #: path) validates and stores it; the booking path never looks at it.
+    observation: dict[str, Any] = field(default_factory=dict)
 
 
 class BrowserExecutionService:
@@ -123,11 +131,13 @@ class BrowserExecutionService:
         actions: ActionService,
         runtime_generation: uuid.UUID,
         worker: WorkerSource | None,
+        public_policy: PublicUrlPolicy | None = None,
     ) -> None:
         self._engine = engine
         self._actions = actions
         self._runtime_generation = runtime_generation
         self._worker = worker
+        self._public_policy = public_policy or PublicUrlPolicy()
 
     @property
     def is_configured(self) -> bool:
@@ -157,6 +167,20 @@ class BrowserExecutionService:
         return identity.worker_generation
 
     # ---- execution ----------------------------------------------------------
+
+    async def execute(self, action_id: uuid.UUID, *, expected_revision: int | None = None) -> ActionView:
+        """Select the reviewed executor for this action's tool, or refuse.
+
+        A closed mapping, not a registry lookup by caller-supplied name: the
+        tool name comes from the immutable persisted action.
+        """
+        view = await self._actions.get_action(action_id)
+        tool_name = view.action.tool_name
+        if tool_name == COMMIT_BOOKING:
+            return await self.execute_booking(action_id, expected_revision=expected_revision)
+        if tool_name == INSPECT_PUBLIC_PAGE:
+            return await self.execute_inspection(action_id, expected_revision=expected_revision)
+        raise BrowserExecutionNotSupportedError(action_id, tool_name)
 
     async def execute_booking(
         self, action_id: uuid.UUID, *, expected_revision: int | None = None
@@ -258,6 +282,138 @@ class BrowserExecutionService:
             outcome=outcome.outcome,
             result=outcome.result,
             error_code=outcome.error_code,
+        )
+
+    async def execute_inspection(
+        self, action_id: uuid.UUID, *, expected_revision: int | None = None
+    ) -> ActionView:
+        """Approve -> attempt -> isolated read -> stored observation, for one page.
+
+        Same order as a booking: everything that can fail harmlessly is checked
+        before the approval is claimed, the attempt and dispatch are committed
+        before the worker is contacted, and no transaction is open while the
+        page loads. The difference is what success means -- a validated,
+        hashed observation stored in the transaction that finishes the attempt.
+        """
+        from app.services.page_inspection import parse_inspection_proposal
+
+        view = await self._actions.get_action(action_id)
+        action = view.action
+        if action.tool_name != INSPECT_PUBLIC_PAGE:
+            raise BrowserExecutionNotSupportedError(action_id, action.tool_name)
+        if expected_revision is not None and action.revision != expected_revision:
+            raise StaleActionRevisionError(action_id, expected_revision, action.revision)
+        if action.status is not ActionStatus.APPROVED:
+            raise InvalidActionTransitionError(action_id, action.status, ActionStatus.EXECUTING)
+        proposal = parse_inspection_proposal(action_id, action.proposal)
+        # The runtime policy may have narrowed since approval. Refused before
+        # the approval is claimed, so nothing is consumed.
+        if not self._public_policy.configured:
+            raise PublicInspectionNotConfiguredError()
+        try:
+            if self._public_policy.check(proposal.url).url != proposal.url:
+                raise DestinationNotAllowedError("not_canonical")
+        except UrlPolicyError as error:
+            raise DestinationNotAllowedError(error.code) from None
+
+        client = await self._client()
+        try:
+            worker_generation = await self._bind_worker(client)
+
+            # --- the last database work before the outside world -------------
+            view = await self._actions.start_attempt(action_id, expected_revision=expected_revision)
+            attempt = next(a for a in view.attempts if a.finished_at is None)
+            dispatch_id = uuid.uuid4()
+            try:
+                async with self._engine.begin() as connection:
+                    await BrowserRepository(connection).insert_dispatch(
+                        dispatch_id=dispatch_id,
+                        action_id=action_id,
+                        attempt_id=attempt.id,
+                        worker_generation=worker_generation,
+                        operation=INSPECT_PUBLIC_PAGE,
+                        site=PUBLIC_WEB_SITE,
+                        effect=BrowserEffect.READ_ONLY,
+                    )
+            except Exception:
+                logger.exception("could not record the browser dispatch")
+                return await self._actions.finish_attempt(
+                    action_id, outcome=AttemptOutcome.FAILED, error_code="dispatch_not_recorded"
+                )
+            # --- committed. Nothing below holds a transaction ----------------
+
+            outcome = await self._dispatch(
+                client,
+                request=DispatchRequest(
+                    dispatch_id=dispatch_id,
+                    runtime_generation=self._runtime_generation,
+                    expected_worker_generation=worker_generation,
+                    action_id=action_id,
+                    attempt_id=attempt.id,
+                    operation=INSPECT_PUBLIC_PAGE,
+                    site=PUBLIC_WEB_SITE,
+                    input={"url": proposal.url},
+                ),
+            )
+        finally:
+            await client.aclose()
+
+        observation: PageObservation | None = None
+        if outcome.outcome is AttemptOutcome.SUCCEEDED:
+            try:
+                observation = PageObservation.model_validate(outcome.observation)
+                if (
+                    observation.requested_url != proposal.url
+                    or observation.observation_id != outcome.observation_id
+                ):
+                    raise ValueError("observation does not answer this dispatch")
+            except (ValidationError, ValueError):
+                # The page was read, but what came back cannot be trusted as
+                # evidence. Known: there is no usable observation.
+                observation = None
+                outcome = Outcome(
+                    outcome=AttemptOutcome.FAILED,
+                    dispatch_status=DispatchStatus.FAILED_BEFORE_EFFECT,
+                    submitted=False,
+                    error_code="observation_invalid",
+                    observation_id=None,
+                    result={**outcome.result, "status": DispatchStatus.FAILED_BEFORE_EFFECT.value},
+                )
+
+        await self._close_dispatch(dispatch_id, outcome)
+        logger.info(
+            "page inspection finished",
+            extra={
+                "action_id": str(action_id),
+                "attempt_id": str(attempt.id),
+                "runtime_generation": str(self._runtime_generation),
+                "worker_generation": str(worker_generation),
+                "dispatch_id": str(dispatch_id),
+                "operation": INSPECT_PUBLIC_PAGE,
+                "observation_id": str(outcome.observation_id) if outcome.observation_id else None,
+                "outcome": outcome.outcome.value,
+                "error_code": outcome.error_code,
+            },
+        )
+        result = _inspection_summary(outcome, observation)
+        if observation is None:
+            return await self._actions.finish_attempt(
+                action_id, outcome=outcome.outcome, result=result, error_code=outcome.error_code
+            )
+        stored = observation
+
+        async def store(connection: AsyncConnection, finished: AttemptRecord) -> None:
+            await ObservationRepository(connection).insert(
+                observation=stored,
+                task_id=action.task_id,
+                action_id=action_id,
+                attempt_id=finished.id,
+                dispatch_id=dispatch_id,
+                worker_generation=worker_generation,
+            )
+
+        return await self._actions.finish_attempt(
+            action_id, outcome=AttemptOutcome.SUCCEEDED, result=result, record=store
         )
 
     # ---- reconciliation -----------------------------------------------------
@@ -438,7 +594,39 @@ def _outcome_from_response(response: DispatchResponse) -> Outcome:
         error_code=response.error_code,
         observation_id=_observation_id(observation),
         result=_summarise(response),
+        observation=observation,
     )
+
+
+#: Refusal details a failed inspection may keep: stable codes and numbers only.
+_KEPT_INSPECTION_FAILURE_FIELDS = ("http_status", "redirect_refusal", "refusal")
+
+
+def _inspection_summary(outcome: Outcome, observation: PageObservation | None) -> dict[str, Any]:
+    """The attempt result for an inspection: identity and metadata, no page text."""
+    summary: dict[str, Any] = {
+        key: outcome.result[key]
+        for key in ("operation", "status", "worker_generation", "dispatch_id", "duration_ms", "replayed")
+        if key in outcome.result
+    }
+    summary["submitted"] = False
+    if observation is not None:
+        summary.update(
+            observation_id=str(observation.observation_id),
+            content_hash=observation.content_hash,
+            final_url=observation.final_url,
+            document_epoch=observation.document_epoch,
+            truncated=observation.truncated,
+            settled=observation.settled,
+            block_count=len(observation.blocks),
+            link_count=len(observation.links),
+        )
+    else:
+        for key in _KEPT_INSPECTION_FAILURE_FIELDS:
+            value = outcome.observation.get(key)
+            if isinstance(value, (int, str)) and not isinstance(value, bool) and len(str(value)) <= 64:
+                summary[key] = value
+    return summary
 
 
 def _outcome_from_error(error: BrowserWorkerError) -> Outcome:

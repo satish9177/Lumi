@@ -82,6 +82,31 @@ const CASES = {
     ['hostile page text cannot become a controller instruction', ts('src/main/agent/security-boundary.test.ts', 'hostile page text quoted back')],
     ['hostile profile text is never spoken', ts('src/main/agent/m6-controller.test.ts', 'page text that is not a plain value is never spoken')],
     ['preload exposes only fixed channels', ts('src/main/services/agent-boundary.test.ts', 'preload exposes only the fixed agent channels')]
+  ],
+  // Milestone 7a: one approved URL, one grounded answer.
+  inspection: [
+    ['refused destinations never reach the runtime', ts('src/main/services/agent-inspection.test.ts', 'refuses file:///C:/Windows/win.ini before contacting the runtime')],
+    ['the page is read once, only after the trusted approval', ts('src/main/services/agent-inspection.test.ts', 'reads once only after the trusted approval')],
+    ['"yes / approve / go ahead" only points at the card', ts('src/main/services/agent-inspection.test.ts', 'only points at the card')],
+    ['duplicate request after main restart shows the same card', ts('src/main/services/agent-inspection.test.ts', 'a duplicate typed request, even after a main restart')],
+    ['lost response: answered later from the saved page, no reopen', ts('src/main/services/agent-inspection.test.ts', 'a lost execution response is not retried')],
+    ['rating is answered from its label, not rank or solved count', ts('src/main/agent/page-answer.test.ts', 'finds the rating, not the rank or the solved count')],
+    ['missing rating is "not found", never guessed', ts('src/main/agent/page-answer.test.ts', 'a missing rating is not found, never guessed')],
+    ['ungrounded or action-bearing model output is refused', ts('src/main/agent/page-answer.test.ts', 'refuses')],
+    ['a model persuaded by a hostile page is refused', ts('src/main/agent/page-answer.test.ts', 'a model persuaded by a hostile page is refused')],
+    ['page text reaches only approved providers', ts('src/main/agent/page-answer.test.ts', 'sends page text only to providers the approval named')],
+    ['URL policy: schemes, credentials, local and IP destinations', py('tests/test_public_url_policy.py', 'test_refused_destinations_fail_closed_with_a_stable_code')],
+    ['hostile page: every exfiltration channel is closed', py('tests/test_public_page_worker.py', 'test_hostile_text_is_only_data_and_every_exfiltration_channel_is_closed')],
+    ['forbidden redirects are refused before they are requested', py('tests/test_public_page_worker.py', 'test_a_forbidden_redirect_is_refused_before_it_is_requested')],
+    ['dynamic page: document epoch and late content', py('tests/test_public_page_worker.py', 'test_a_page_that_replaces_itself_is_observed_at_its_new_document_epoch')],
+    ['the operation accepts nothing but a URL', py('tests/test_public_page_worker.py', 'test_the_operation_accepts_nothing_but_a_url')],
+    ['approved read stores one bound observation; consumed approval refused', py('tests/test_page_inspection_ledger.py', 'test_an_approved_inspection_reads_once_and_stores_one_bound_observation')],
+    ['stale revision and concurrent execution read once', py('tests/test_page_inspection_ledger.py', 'test_a_stale_revision_and_a_concurrent_second_execution_read_nothing_extra')],
+    ['kill before dispatch: unknown after restart, new approval required', py('tests/test_page_inspection_ledger.py', 'test_killed_after_claim_before_dispatch_is_unknown_after_restart_and_needs_new_approval')],
+    ['worker crash mid-read: unknown, not failed', py('tests/test_page_inspection_ledger.py', 'test_a_worker_that_dies_mid_read_leaves_an_unknown_not_a_failure')],
+    ['runtime crash mid-read: recovered as unknown', py('tests/test_page_inspection_ledger.py', 'test_a_runtime_that_dies_mid_read_is_recovered_as_unknown')],
+    ['ungrounded answers are refused by the runtime too', py('tests/test_page_inspection_api.py', 'test_an_ungrounded_answer_is_refused')],
+    ['stale observation answers are refused', py('tests/test_page_inspection_api.py', 'test_a_repeat_on_the_same_task_is_a_new_action_and_the_old_answer_goes_stale')]
   ]
 }
 

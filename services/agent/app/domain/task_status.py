@@ -38,6 +38,9 @@ class TaskEventType(StrEnum):
     #: A read-only clinic-information lookup finished; the payload holds the
     #: typed public profile facts that were read.
     TASK_INFO_LOOKUP_COMPLETED = "task.info_lookup_completed"
+    #: A grounded answer was recorded for an inspected page. The payload holds
+    #: ids, the content hash and the status -- never the page text or answer.
+    TASK_PAGE_ANSWER_RECORDED = "task.page_answer_recorded"
     ACTION_PROPOSED = "action.proposed"
     ACTION_APPROVAL_REQUESTED = "action.approval_requested"
     ACTION_APPROVED = "action.approved"

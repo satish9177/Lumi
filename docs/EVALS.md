@@ -21,6 +21,7 @@ The Python cases need `TEST_DATABASE_URL` and Playwright's Chromium.
 | Provider | malformed/hostile output refused; timeout failover and cooldown; fallback keeps one task and one action; all providers down → deterministic fallback; refusal not shopped; realtime session drop reported; errors carry no provider body |
 | Memory / context | stale preference overridden; website fact overrides memory; long history within budget; task state summarised; tampered memory ignored |
 | Security | renderer never sees provider credentials; Gemini token stays in main; model cannot request browser/HTTP/shell; closed tool vocabulary; voice cannot approve; hostile page text cannot become an instruction; hostile profile text never spoken; preload exposes only fixed channels |
+| Inspection (M7a) | refused destinations never reach the runtime; read once only after approval; "yes/approve/go ahead" only points at the card; duplicate request after restart; lost response answered later without reopening; rating not rank; missing rating not guessed; ungrounded/action-bearing output refused; hostile model refused; approved providers only; URL policy; hostile page exfiltration closed; forbidden redirects; document epoch; URL-only input; bound observation + consumed approval; stale revision + concurrency; kill before dispatch; worker crash; runtime crash; runtime re-verifies grounding; stale observation |
 
 Result on 2026-09-17: **43/43 passed**.
 
@@ -38,6 +39,7 @@ uv run pytest tests\test_electron_acceptance.py tests\test_voice_acceptance.py t
 | `test_electron_acceptance.py` | M4: panel booking, changed price, missing slot, lost response + hard kill |
 | `test_voice_acceptance.py` | M5: voice booking, refinement, voice-initiated lost response |
 | `test_m6_acceptance.py` | M6 A (compound voice, OpenAI protocol), A (compound voice over the Gemini Live relay), B (provider failover + restart), clinic info + preferences + ambiguous date, C (compound voice + lost response + hard kill) |
+| `test_inspection_acceptance.py` | M7a: approved page read + grounded answer, typed "approve" is not approval, missing rating, hostile page and hostile model, restart then answer from the saved page, hard kill mid-read → unknown, never retried |
 
 `LUMI_FIXED_NOW` pins the calendar to 16 September 2026 in these tests
 (unpackaged builds only) so "Saturday" keeps meaning the fixture's Saturday.

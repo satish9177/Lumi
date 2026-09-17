@@ -13,7 +13,9 @@ export const MODEL_TASK_CLASSES = [
   'summarization',
   'conversation',
   'screen_understanding',
-  'difficult_reasoning'
+  'difficult_reasoning',
+  /** Milestone 7a: answer the user's question from an untrusted page observation. */
+  'page_answer'
 ] as const
 export type ModelTaskClass = typeof MODEL_TASK_CLASSES[number]
 

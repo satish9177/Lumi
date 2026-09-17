@@ -51,7 +51,7 @@ export const CHANGED_FACT_FIELDS = ['slot_id', 'doctor', 'time', 'price', 'curre
 export type AgentChangedFactField = typeof CHANGED_FACT_FIELDS[number]
 
 export const TASK_EVENT_TYPES = [
-  'task.created', 'task.cancelled', 'task.criteria_updated', 'task.search_completed', 'task.info_lookup_completed', 'action.proposed', 'action.approval_requested',
+  'task.created', 'task.cancelled', 'task.criteria_updated', 'task.search_completed', 'task.info_lookup_completed', 'task.page_answer_recorded', 'action.proposed', 'action.approval_requested',
   'action.approved', 'action.rejected', 'action.execution_started', 'action.succeeded',
   'action.failed', 'action.outcome_unknown', 'action.reconciliation_started', 'action.reconciled'
 ] as const
@@ -82,7 +82,7 @@ export interface AgentBookingCriteria {
   dateTo?: string
 }
 
-export const TASK_KINDS = ['appointment_booking', 'clinic_info'] as const
+export const TASK_KINDS = ['appointment_booking', 'clinic_info', 'page_inspection'] as const
 export type AgentTaskKind = typeof TASK_KINDS[number]
 
 export const CLINIC_INFO_TOPICS = ['overview', 'hours', 'fee', 'languages', 'address', 'walk_ins'] as const
@@ -119,6 +119,8 @@ export interface AgentTaskView {
   criteria: AgentBookingCriteria
   /** Set for `clinic_info` tasks. */
   infoQuery?: AgentClinicInfoQuery
+  /** Set for `page_inspection` tasks: the user's URL and question. */
+  inspection?: AgentInspectionRequestView
   /** The completed voice turn that created this task, if any. */
   voiceTurnId?: string
   /** The typed request that created this task, if any. */
@@ -245,12 +247,110 @@ export interface AgentEventView {
   /** `task.info_lookup_completed`: the query and the profiles that were read. */
   infoQuery?: AgentClinicInfoQuery
   profiles?: AgentDoctorProfileView[]
+  /** `task.page_answer_recorded`: the recorded status only, never the answer or page text. */
+  answerStatus?: AgentPageAnswerStatus
+}
+
+// ---- Milestone 7a: one approved URL, one grounded answer ------------------------
+
+export const PAGE_ANSWER_STATUSES = ['answered', 'not_found', 'ambiguous', 'not_verified'] as const
+export type AgentPageAnswerStatus = typeof PAGE_ANSWER_STATUSES[number]
+
+/** Providers that may be named as recipients of page text. Never a credential. */
+export const DISCLOSURE_RECIPIENTS = ['openai', 'gemini', 'deepseek', 'scripted'] as const
+export type AgentDisclosureRecipient = typeof DISCLOSURE_RECIPIENTS[number]
+
+/** What the user asked, as stored on the task. */
+export interface AgentInspectionRequestView {
+  url: string
+  host: string
+  question: string
+}
+
+/** The persisted proposal the trusted approval card shows, field for field. */
+export interface AgentInspectionProposalView {
+  url: string
+  host: string
+  question: string
+  policyVersion: string
+  recipients: AgentDisclosureRecipient[]
+  maxTextChars: number
+  maxLinks: number
+  maxRedirects: number
+}
+
+export interface AgentInspectionAttemptView {
+  attemptId: string
+  attemptNumber: number
+  runtimeGeneration: string
+  startedAt: string
+  finishedAt?: string
+  outcome?: AgentAttemptOutcome
+  /** A stable refusal or failure code, never page text. */
+  errorCode?: string
+  refusal?: string
+  httpStatus?: number
+}
+
+/**
+ * Metadata about what was read. The page's text blocks do not cross preload;
+ * the renderer receives only the page title and final URL (shown as labelled
+ * plain text) and the bounded evidence quoted by a verified answer.
+ */
+export interface AgentObservationMetaView {
+  observationId: string
+  requestedUrl: string
+  finalUrl: string
+  redirects: string[]
+  title: string
+  documentEpoch: number
+  settled: boolean
+  truncated: boolean
+  observedAt: string
+  contentHash: string
+  blockCount: number
+  linkCount: number
+  workerGeneration: string
+}
+
+export interface AgentEvidenceView {
+  block: string
+  quote: string
+}
+
+export interface AgentPageAnswerView {
+  observationId: string
+  status: AgentPageAnswerStatus
+  answer: string
+  evidence: AgentEvidenceView[]
+  provider: AgentDisclosureRecipient
+  model: string
+  answeredAt: string
+}
+
+export interface AgentInspectionView {
+  actionId: string
+  taskId: string
+  toolName: 'inspect_public_page'
+  status: AgentActionStatus
+  revision: number
+  riskTier: AgentRiskTier
+  proposalDigest: string
+  createdAt: string
+  updatedAt: string
+  proposal: AgentInspectionProposalView
+  approval?: AgentApprovalView
+  attempts: AgentInspectionAttemptView[]
+  observation?: AgentObservationMetaView
+  answer?: AgentPageAnswerView
 }
 
 export interface AgentTaskSnapshot {
   runtimeGeneration: string
   task: AgentTaskView
   actions: AgentActionView[]
+  /** `page_inspection` tasks: the newest inspection action, with its evidence. */
+  inspection?: AgentInspectionView
   /** Events strictly after the requested sequence, ordered, without gaps. */
   events: AgentEventView[]
 }
@@ -274,6 +374,10 @@ export const AGENT_ERROR_CODES = [
   'already_booked',
   'browser_unavailable',
   'not_accepting_actions',
+  'destination_not_allowed',
+  'inspection_unavailable',
+  'stale_observation',
+  'answer_unavailable',
   'request_failed'
 ] as const
 export type AgentErrorCode = typeof AGENT_ERROR_CODES[number]
@@ -319,6 +423,20 @@ export interface AgentApi {
   submitTextRequest: (requestId: string, text: string) => Promise<AgentResult<VoiceTaskOutcome>>
   /** Read-only lookup for the active clinic-info task. */
   lookupClinicInfo: () => Promise<AgentResult<AgentDoctorProfileView[]>>
+  /**
+   * Milestone 7a. Create a page-inspection task from a URL and question the
+   * user typed, and show its exact approval card. Opens nothing.
+   */
+  createPageInspection: (url: string, question: string) => Promise<AgentResult<AgentTaskSnapshot>>
+  /** The trusted click: approve exactly the inspection on screen, by id and revision. */
+  approveInspection: (actionId: string, expectedRevision: number) => Promise<AgentResult<AgentInspectionView>>
+  rejectInspection: (actionId: string, expectedRevision: number) => Promise<AgentResult<AgentInspectionView>>
+  /** Run an approved inspection once, then answer from what was observed. */
+  executeInspection: (actionId: string, expectedRevision: number) => Promise<AgentResult<AgentInspectionView>>
+  /** Answer from the stored observation (after a restart or failed model call). Opens nothing. */
+  answerInspection: (actionId: string) => Promise<AgentResult<AgentInspectionView>>
+  /** A new inspection of the same page and question, behind a new approval card. */
+  inspectPageAgain: () => Promise<AgentResult<AgentTaskSnapshot>>
   listPreferences: () => Promise<AgentResult<AgentPreferenceView[]>>
   forgetPreference: (key: PreferenceKey) => Promise<AgentResult<AgentPreferenceView[]>>
   /** Redacted model/controller diagnostics. Empty in packaged builds unless enabled. */
@@ -342,6 +460,12 @@ export const AGENT_IPC_CHANNELS = {
   voiceCommand: 'lifelens:agent:voice-command',
   submitTextRequest: 'lifelens:agent:submit-text-request',
   lookupClinicInfo: 'lifelens:agent:lookup-clinic-info',
+  createPageInspection: 'lifelens:agent:create-page-inspection',
+  approveInspection: 'lifelens:agent:approve-inspection',
+  rejectInspection: 'lifelens:agent:reject-inspection',
+  executeInspection: 'lifelens:agent:execute-inspection',
+  answerInspection: 'lifelens:agent:answer-inspection',
+  inspectPageAgain: 'lifelens:agent:inspect-page-again',
   listPreferences: 'lifelens:agent:list-preferences',
   forgetPreference: 'lifelens:agent:forget-preference',
   getDiagnostics: 'lifelens:agent:get-diagnostics'

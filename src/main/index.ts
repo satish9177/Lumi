@@ -63,6 +63,9 @@ import { TaskRequestInterpreter } from './agent/task-request-interpreter'
 import { trustedCalendarClock } from './agent/trusted-clock'
 import { DemoClinicSite, readRuntimeConfig } from './agent/packaged-runtime'
 import { createModelRouter } from './models/model-config'
+import type { ModelRouter } from './models/model-router'
+import { PageAnswerer } from './agent/page-answer'
+import { PublicUrlPolicy, parseAllowedHosts, parseTestOrigins } from './agent/public-url-policy'
 import { isTrustedRendererUrl, isTrustedSenderFrame, type RendererLocation } from './services/ipc-sender'
 import { developmentContentSecurityPolicy } from './services/content-security-policy'
 import { AGENT_IPC_CHANNELS, type AgentRuntimeView } from '../shared/agent-contracts'
@@ -94,6 +97,12 @@ let personEnrollment: PersonEnrollmentService
 let windowState: WindowStateStore
 let droppedFiles: DroppedFileStore
 let agentRuntime: AgentRuntimeSupervisor | undefined
+/**
+ * Milestone 7a destination policy for page inspection, from main's trusted
+ * configuration only. Empty (no inspection) until configured; the runtime and
+ * browser worker receive the same lists and enforce them independently.
+ */
+let publicInspectionPolicy = new PublicUrlPolicy()
 let agentRuntimeShutdownStarted = false
 /** Packaged builds only: why there is no runtime, when there is none. */
 let agentRuntimeUnconfigured = false
@@ -331,6 +340,16 @@ function developmentAgentRuntimeSettings(): AgentRuntimeSettings {
     browserHeadless: process.env.LUMI_BROWSER_HEADED !== '1'
   }
   if (process.env.LUMI_AGENT_DATABASE_URL) settings.databaseUrl = process.env.LUMI_AGENT_DATABASE_URL
+  try {
+    const hosts = parseAllowedHosts(process.env.LUMI_PUBLIC_INSPECTION_HOSTS ?? '')
+    const testOrigins = parseTestOrigins(process.env.LUMI_INSPECTION_TEST_ORIGINS ?? '')
+    publicInspectionPolicy = new PublicUrlPolicy({ allowedHosts: hosts, testOrigins })
+    settings.publicInspectionHosts = hosts
+    settings.inspectionTestOrigins = testOrigins
+  } catch {
+    // Fail closed: a malformed list disables page inspection entirely.
+    console.error('Lumi page inspection configuration is invalid; page inspection is disabled.')
+  }
   return settings
 }
 
@@ -352,8 +371,11 @@ async function startPackagedAgentRuntime(): Promise<void> {
     databaseUrl: config.config.databaseUrl,
     browserHeadless: config.config.headless,
     browsersPath: paths.browsersPath,
-    migrate: true
+    migrate: true,
+    // Packaged builds offer public hosts only; loopback test origins never.
+    publicInspectionHosts: config.config.publicInspectionHosts
   }
+  publicInspectionPolicy = new PublicUrlPolicy({ allowedHosts: config.config.publicInspectionHosts })
   try {
     if (config.config.clinicSite === 'demo') {
       demoClinicSite = new DemoClinicSite(paths.pythonPath, paths.agentRoot)
@@ -1032,6 +1054,13 @@ app.whenReady().then(async () => {
     emit: emitFileSearchResolution
   })
   registerIpcHandlers()
+  let modelRouter: ModelRouter | undefined
+  try {
+    modelRouter = createModelRouter({ allowScripted: !app.isPackaged, diagnostics }).router
+  } catch {
+    console.error('Lumi model routing configuration is invalid; typed requests and page answers are disabled.')
+  }
+  const pageAnswerer = modelRouter ? new PageAnswerer(modelRouter) : undefined
   const agentTasks = new AgentTaskController(
     {
       // Resolved per call: a packaged runtime is created asynchronously.
@@ -1039,7 +1068,12 @@ app.whenReady().then(async () => {
         ? agentRuntime.request(method, path, body, timeoutMs)
         : Promise.reject(new RuntimeUnavailableError())
     },
-    new ActiveTaskStore(app.getPath('userData'))
+    new ActiveTaskStore(app.getPath('userData')),
+    {
+      // Read per call: the packaged configuration is loaded asynchronously.
+      get policy() { return publicInspectionPolicy },
+      ...(pageAnswerer ? { answerer: pageAnswerer } : {})
+    }
   )
   const calendar = trustedCalendarClock({ allowFixedNow: !app.isPackaged })
   const memory = new AgentMemoryStore(app.getPath('userData'))
@@ -1048,11 +1082,11 @@ app.whenReady().then(async () => {
     calendarNow: calendar.now, timeZone: calendar.timeZone, memory, diagnostics
   })
   let interpreter: TaskRequestInterpreter | undefined
-  try {
-    const { router } = createModelRouter({ allowScripted: !app.isPackaged, diagnostics })
+  if (modelRouter) {
     interpreter = new TaskRequestInterpreter({
-      router,
+      router: modelRouter,
       controller: voiceTasks,
+      inspections: agentTasks,
       loadTask: async () => {
         const loaded = await agentTasks.loadActiveTask(0)
         return loaded.ok ? loaded.value : null
@@ -1062,8 +1096,6 @@ app.whenReady().then(async () => {
       now: calendar.now,
       timeZone: calendar.timeZone
     })
-  } catch {
-    console.error('Lumi model routing configuration is invalid; typed requests are disabled.')
   }
   registerAgentIpc({
     ipcMain: ipcMain as unknown as IpcMainLike,

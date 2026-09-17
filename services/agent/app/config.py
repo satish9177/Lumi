@@ -6,6 +6,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
+from app.domain.public_url import PublicUrlPolicy, parse_allowed_hosts, parse_test_origins
+
 AGENT_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -83,6 +85,31 @@ class Settings(DatabaseSettings):
         default=None, validation_alias="LUMI_BROWSER_SITE_ORIGIN"
     )
     browser_headless: bool = Field(default=True, validation_alias="LUMI_BROWSER_HEADLESS")
+    #: Milestone 7a public page inspection. Hosts (`github.com,*.example.org`)
+    #: an approved inspection may open, and exact loopback test origins. Both
+    #: empty (the default) means there is no public inspection capability.
+    #: Supplied by Electron main from its own trusted configuration.
+    public_inspection_hosts: str = Field(default="", validation_alias="LUMI_PUBLIC_INSPECTION_HOSTS")
+    inspection_test_origins: str = Field(default="", validation_alias="LUMI_INSPECTION_TEST_ORIGINS")
+
+    @field_validator("public_inspection_hosts")
+    @classmethod
+    def _valid_inspection_hosts(cls, value: str) -> str:
+        parse_allowed_hosts(value)
+        return value
+
+    @field_validator("inspection_test_origins")
+    @classmethod
+    def _valid_inspection_test_origins(cls, value: str) -> str:
+        parse_test_origins(value)
+        return value
+
+    @property
+    def public_policy(self) -> PublicUrlPolicy:
+        return PublicUrlPolicy(
+            allowed_hosts=parse_allowed_hosts(self.public_inspection_hosts),
+            test_origins=parse_test_origins(self.inspection_test_origins),
+        )
 
     @field_validator("runtime_token")
     @classmethod

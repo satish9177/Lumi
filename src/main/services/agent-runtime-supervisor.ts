@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { isAbsolute, join, resolve } from 'node:path'
 import { spawn, type SpawnOptions } from 'node:child_process'
+import { parseAllowedHosts, parseTestOrigins } from '../agent/public-url-policy'
 
 export type AgentRuntimeState = 'stopped' | 'starting' | 'running' | 'unavailable' | 'failed' | 'stopping'
 
@@ -49,6 +50,10 @@ export interface AgentRuntimeSettings {
   browsersPath?: string
   /** Packaged builds: bring the schema to the Alembic head before starting. */
   migrate?: boolean
+  /** Milestone 7a: hosts an approved page inspection may open. Trusted configuration only. */
+  publicInspectionHosts?: readonly string[]
+  /** Unpackaged builds: exact http://127.0.0.1:<port> origins of controlled test pages. */
+  inspectionTestOrigins?: readonly string[]
 }
 
 export type RuntimeMethod = 'GET' | 'POST'
@@ -88,6 +93,9 @@ const ALLOWED_ROUTES: ReadonlyArray<{ method: RuntimeMethod; pattern: RegExp }> 
   { method: 'GET', pattern: new RegExp(`^/tasks/${UUID_PART}/actions[?]limit=[0-9]{1,3}$`) },
   { method: 'POST', pattern: new RegExp(`^/tasks/${UUID_PART}/booking/(search|prepare|criteria|cancel)$`) },
   { method: 'POST', pattern: new RegExp(`^/tasks/${UUID_PART}/info/lookup$`) },
+  { method: 'POST', pattern: new RegExp(`^/tasks/${UUID_PART}/inspection/prepare$`) },
+  { method: 'GET', pattern: new RegExp(`^/actions/${UUID_PART}/inspection$`) },
+  { method: 'POST', pattern: new RegExp(`^/actions/${UUID_PART}/inspection/answer$`) },
   { method: 'GET', pattern: new RegExp(`^/actions/${UUID_PART}$`) },
   {
     method: 'POST',
@@ -115,6 +123,12 @@ export function validateRuntimeSettings(settings: AgentRuntimeSettings): Record<
       throw new Error('The agent database URL must use postgresql+asyncpg.')
     }
     environment.DATABASE_URL = settings.databaseUrl
+  }
+  if (settings.publicInspectionHosts !== undefined && settings.publicInspectionHosts.length > 0) {
+    environment.LUMI_PUBLIC_INSPECTION_HOSTS = parseAllowedHosts(settings.publicInspectionHosts).join(',')
+  }
+  if (settings.inspectionTestOrigins !== undefined && settings.inspectionTestOrigins.length > 0) {
+    environment.LUMI_INSPECTION_TEST_ORIGINS = parseTestOrigins(settings.inspectionTestOrigins).join(',')
   }
   if (settings.browsersPath !== undefined) {
     if (!isAbsolute(settings.browsersPath) || /["\r\n]/.test(settings.browsersPath) || settings.browsersPath.length > 500) {

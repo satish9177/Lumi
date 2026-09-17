@@ -41,6 +41,7 @@ from playwright.async_api import async_playwright
 from pydantic import ValidationError
 
 from app.browser.config import WorkerSettings
+from app.browser.network_guard import PublicNetworkGuard
 from app.browser.protocol import (
     WORKER_TOKEN_HEADER,
     DispatchRequest,
@@ -49,8 +50,16 @@ from app.browser.protocol import (
     WorkerErrorBody,
     WorkerIdentity,
 )
-from app.browser.registry import BrowserOperation, Effect, OperationContext, build_registry
+from app.browser.registry import (
+    BrowserOperation,
+    Effect,
+    OperationContext,
+    OperationTarget,
+    build_registry,
+)
 from app.browser.session import BrowserSession, WorkerGeneration, token_matches
+from app.domain.page_observation import PUBLIC_WEB_SITE
+from app.domain.public_url import PublicUrlPolicy
 
 logger = logging.getLogger("lumi.browser.worker")
 
@@ -110,6 +119,7 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
     """Build the worker app. Invalid configuration fails before anything binds."""
     resolved = settings if settings is not None else WorkerSettings()
     registry = build_registry()
+    public_policy = resolved.public_policy
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -166,7 +176,7 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
                 worker_generation=generation.id,
                 started_at=generation.started_at.isoformat(),
                 headless=resolved.headless,
-                sites=sorted(resolved.origins),
+                sites=_site_names(resolved, public_policy),
                 operations=registry.names(),
             ).model_dump(mode="json")
         )
@@ -202,14 +212,36 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
                 generation.id,
             )
 
-        origin = resolved.origins.get(body.site)
-        if origin is None:
-            return _error(
-                status.HTTP_403_FORBIDDEN,
-                "site_not_allowed",
-                "That site is not in this worker's allowlist.",
-                generation.id,
-            )
+        if operation.target is OperationTarget.PUBLIC_PAGE:
+            # No origin to resolve: the approved URL is checked by the
+            # operation against this worker's own policy, and by the guard on
+            # every request. A public-page operation never runs without a
+            # persisted, approval-funded attempt.
+            if body.site != PUBLIC_WEB_SITE or not public_policy.configured:
+                return _error(
+                    status.HTTP_403_FORBIDDEN,
+                    "site_not_allowed",
+                    "Public page inspection is not enabled on this worker.",
+                    generation.id,
+                )
+            if body.action_id is None or body.attempt_id is None:
+                return _error(
+                    status.HTTP_400_BAD_REQUEST,
+                    "attempt_required",
+                    "A public-page operation requires a persisted execution attempt.",
+                    generation.id,
+                )
+            origin = ""
+        else:
+            reviewed_origin = resolved.origins.get(body.site)
+            if reviewed_origin is None:
+                return _error(
+                    status.HTTP_403_FORBIDDEN,
+                    "site_not_allowed",
+                    "That site is not in this worker's allowlist.",
+                    generation.id,
+                )
+            origin = reviewed_origin
 
         try:
             payload = operation.parse_input(body.input)
@@ -267,6 +299,7 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
                 origin=origin,
                 payload=payload,
                 timeout_seconds=resolved.operation_timeout_seconds or operation.timeout_seconds,
+                public_policy=public_policy,
             )
         except BaseException:
             ledger.release(body.dispatch_id)
@@ -286,6 +319,7 @@ async def _run(
     origin: str,
     payload: Any,
     timeout_seconds: float,
+    public_policy: PublicUrlPolicy | None = None,
 ) -> DispatchResponse:
     """Drive one operation in its own browser context, and classify the result.
 
@@ -305,8 +339,21 @@ async def _run(
         worker_generation=generation.id,
         origin=origin,
     )
-    context = await browser.new_context()
-    page = await context.new_page()
+    guard: PublicNetworkGuard | None = None
+    if operation.target is OperationTarget.PUBLIC_PAGE and public_policy is not None:
+        # A context that can only read: no service workers (which would sit
+        # outside request routing), no downloads, no permissions, no stored
+        # state. Every request is routed through the destination guard before
+        # the page makes its first one.
+        context = await browser.new_context(
+            service_workers="block", accept_downloads=False, permissions=[]
+        )
+        page = await context.new_page()
+        guard = PublicNetworkGuard(public_policy)
+        await guard.install(context, page)
+    else:
+        context = await browser.new_context()
+        page = await context.new_page()
     page.set_default_timeout(timeout_seconds * 1_000)
     page.set_default_navigation_timeout(timeout_seconds * 1_000)
     operation_context = OperationContext(
@@ -314,6 +361,8 @@ async def _run(
         origin=origin,
         dispatch_id=body.dispatch_id,
         observation_id=uuid.uuid4(),
+        public_policy=public_policy if guard is not None else None,
+        network_guard=guard,
     )
 
     status_value = OperationStatus.OUTCOME_UNKNOWN
@@ -368,6 +417,13 @@ async def _run(
         duration_ms=duration_ms,
         submitted=operation_context.submitted,
     )
+
+
+def _site_names(settings: WorkerSettings, policy: PublicUrlPolicy) -> list[str]:
+    names = set(settings.origins)
+    if policy.configured:
+        names.add(PUBLIC_WEB_SITE)
+    return sorted(names)
 
 
 def _classify_failure(context: OperationContext, reason: str) -> tuple[OperationStatus, str]:

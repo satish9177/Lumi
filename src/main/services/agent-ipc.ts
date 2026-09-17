@@ -72,6 +72,15 @@ export function registerAgentIpc({
   handle(AGENT_IPC_CHANNELS.submitTextRequest, (requestId, request) =>
     text ? text.submit(requestId, request) : { ok: false, error: UNAVAILABLE })
   handle(AGENT_IPC_CHANNELS.lookupClinicInfo, () => controller.lookupClinicInfo())
+  // Page inspection: positional primitives, validated inside the controller.
+  // Approval and execution are separate channels, each bound to the revision
+  // on screen; no channel accepts a proposal, digest, selector or script.
+  handle(AGENT_IPC_CHANNELS.createPageInspection, (url, question) => controller.createPageInspection(url, question))
+  handle(AGENT_IPC_CHANNELS.approveInspection, (actionId, revision) => controller.approveInspection(actionId, revision))
+  handle(AGENT_IPC_CHANNELS.rejectInspection, (actionId, revision) => controller.rejectInspection(actionId, revision))
+  handle(AGENT_IPC_CHANNELS.executeInspection, (actionId, revision) => controller.executeInspection(actionId, revision))
+  handle(AGENT_IPC_CHANNELS.answerInspection, (actionId) => controller.answerInspection(actionId))
+  handle(AGENT_IPC_CHANNELS.inspectPageAgain, () => controller.inspectPageAgain())
   handle(AGENT_IPC_CHANNELS.listPreferences, async (): Promise<AgentResult<AgentPreferenceView[]>> => {
     if (!memory) return { ok: true, value: [] }
     try {

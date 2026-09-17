@@ -140,5 +140,20 @@ export function narrateScripted(output: Json): ScriptedNarration {
     }
     case 'preference_saved':
       return { text: `I will remember that (${facts.preference.key.replaceAll('_', ' ')}: ${facts.preference.value}).` }
+    case 'inspection':
+      switch (facts.state) {
+        case 'approval_required':
+          return { text: `I cannot approve opening ${facts.host} by voice. Please review the inspection card and press Approve and inspect yourself.` }
+        case 'awaiting_approval':
+          return { text: `The inspection of ${facts.host} is waiting for you to approve it on the card.` }
+        case 'answered':
+          return { text: `The answer from ${facts.host} is on the inspection card, with the text it was based on.` }
+        case 'not_verified':
+          return { text: `I could not verify that from the page on ${facts.host}. The details are on the card.` }
+        case 'unknown':
+          return { text: `I do not know what was read from ${facts.host}, and I will not open it again by myself.` }
+        default:
+          return { text: `The inspection of ${facts.host} is shown on the card.` }
+      }
   }
 }

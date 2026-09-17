@@ -146,6 +146,46 @@ class SiteControl:
         pytest.fail(f"the fixture never reached {count} booking(s): {self.state()}")
 
 
+@contextmanager
+def public_fixture_site(log_path: Path, port: int | None = None) -> Iterator[Process]:
+    """The Milestone 7a public-page fixture (also used as a canary)."""
+    chosen = port if port is not None else free_port()
+    base_url = f"http://127.0.0.1:{chosen}"
+    with log_path.open("wb") as log:
+        process = _spawn(
+            ["-m", "evals.sites.public_pages.server", "--port", str(chosen), "--log-level", "warning"],
+            {**os.environ},
+            log,
+        )
+        try:
+            _wait_until_ready(process, f"{base_url}/__eval__/state", log_path)
+            yield Process(process, base_url, log_path)
+        finally:
+            kill(process)
+
+
+class PublicSiteControl:
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url
+
+    def reset(self) -> None:
+        httpx.post(f"{self.base_url}/__eval__/reset", timeout=10).raise_for_status()
+
+    def hits(self) -> dict[str, int]:
+        response = httpx.get(f"{self.base_url}/__eval__/state", timeout=10)
+        response.raise_for_status()
+        hits: dict[str, int] = response.json()["hits"]
+        return hits
+
+    def wait_for_hit(self, path: str, timeout: float = 60.0) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.hits().get(path, 0) > 0:
+                return
+            time.sleep(0.1)
+        pytest.fail(f"the fixture never saw a request for {path}: {self.hits()}")
+
+
 # ---- the browser worker -----------------------------------------------------
 
 
@@ -182,6 +222,8 @@ def browser_worker(
     token: SecretStr | None = None,
     port: int | None = None,
     operation_timeout_seconds: float = 0.0,
+    public_hosts: str = "",
+    inspection_test_origins: str = "",
 ) -> Iterator[WorkerProcess]:
     from app.browser.protocol import WORKER_TOKEN_HEADER
 
@@ -196,6 +238,8 @@ def browser_worker(
         "LUMI_BROWSER_ALLOWED_ORIGINS": f"appointment_fixture={site_origin}",
         "LUMI_BROWSER_HEADLESS": "true",
         "LUMI_BROWSER_OPERATION_TIMEOUT_SECONDS": str(operation_timeout_seconds),
+        "LUMI_BROWSER_PUBLIC_HOSTS": public_hosts,
+        "LUMI_BROWSER_INSPECTION_TEST_ORIGINS": inspection_test_origins,
     }
     with log_path.open("wb") as log:
         process = _spawn(
@@ -292,6 +336,7 @@ def runtime(
     worker_token: SecretStr | None = None,
     worker_timeout_seconds: float = 120.0,
     token: str | None = None,
+    extra_environment: dict[str, str] | None = None,
 ) -> Iterator[RuntimeProcess]:
     chosen = port if port is not None else free_port()
     base_url = f"http://127.0.0.1:{chosen}"
@@ -301,6 +346,7 @@ def runtime(
         environment["BROWSER_WORKER_URL"] = worker_url
         environment["BROWSER_WORKER_TOKEN"] = worker_token.get_secret_value()
         environment["BROWSER_WORKER_TIMEOUT_SECONDS"] = str(worker_timeout_seconds)
+    environment.update(extra_environment or {})
     with log_path.open("wb") as log:
         process = _spawn(runtime_arguments(chosen), environment, log)
         http = RuntimeHttp(base_url, credential)

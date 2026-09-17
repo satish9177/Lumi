@@ -32,8 +32,10 @@ from typing import Any
 from playwright.async_api import Page
 from pydantic import BaseModel
 
+from app.browser.network_guard import PublicNetworkGuard
 from app.browser.protocol import OperationStatus
 from app.domain.browser_dispatch import BrowserEffect
+from app.domain.public_url import PublicUrlPolicy
 
 #: The domain's effect classification, re-exported so an adapter has one
 #: import for everything it needs to declare an operation.
@@ -44,6 +46,20 @@ class RetryPolicy(StrEnum):
     SAFE_TO_RETRY = "SAFE_TO_RETRY"
     #: A lost answer must never be retried. Establish what happened first.
     RECONCILE_BEFORE_RETRY = "RECONCILE_BEFORE_RETRY"
+    #: Never repeated by Lumi, even though nothing consequential can have
+    #: happened: a repeat is a new action the user approves again.
+    NEW_APPROVAL_REQUIRED = "NEW_APPROVAL_REQUIRED"
+
+
+class OperationTarget(StrEnum):
+    """Where an operation's browser may go, and who decides."""
+
+    #: A reviewed site: the worker resolves the request's site name to an
+    #: origin from its own allowlist. The request never carries a URL.
+    REVIEWED_SITE = "REVIEWED_SITE"
+    #: One approved public page: the URL comes from the approved proposal and
+    #: is checked by the worker's own destination policy and network guard.
+    PUBLIC_PAGE = "PUBLIC_PAGE"
 
 
 class Reconciliation(StrEnum):
@@ -70,6 +86,10 @@ class OperationContext:
     #: the flag is already lost with it; if it dies between the click and the
     #: response, the flag is what stops the failure being called a known one.
     submitted: bool = False
+    #: PUBLIC_PAGE operations only: the worker's destination policy and the
+    #: guard already installed on this page's context.
+    public_policy: PublicUrlPolicy | None = None
+    network_guard: PublicNetworkGuard | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +117,7 @@ class BrowserOperation:
     preconditions: tuple[str, ...]
     postconditions: tuple[str, ...]
     handler: Handler
+    target: OperationTarget = OperationTarget.REVIEWED_SITE
 
     def parse_input(self, payload: dict[str, Any]) -> BaseModel:
         return self.input_model.model_validate(payload)
@@ -124,6 +145,14 @@ class OperationRegistry:
                 raise ValueError(
                     f"consequential operation {operation.name!r} must not be safe to retry"
                 )
+            if operation.target is OperationTarget.PUBLIC_PAGE and (
+                operation.effect is not Effect.READ_ONLY
+                or operation.retry is RetryPolicy.SAFE_TO_RETRY
+            ):
+                raise ValueError(
+                    f"public-page operation {operation.name!r} must be read-only and must "
+                    "not be retried without a new approval"
+                )
         self._operations = {operation.name: operation for operation in operations}
 
     def get(self, name: str) -> BrowserOperation | None:
@@ -144,8 +173,10 @@ def build_registry() -> OperationRegistry:
 
     Milestone 3 reviews exactly one site, so there is exactly one adapter. A
     second adapter is a second import here and a second entry in the worker's
-    origin allowlist -- it is never a runtime registration.
+    origin allowlist -- it is never a runtime registration. Milestone 7a adds
+    one generic, read-only public-page operation beside it.
     """
     from app.browser.adapters import appointment_fixture
+    from app.browser.operations import public_page
 
-    return OperationRegistry(appointment_fixture.OPERATIONS)
+    return OperationRegistry(appointment_fixture.OPERATIONS + public_page.OPERATIONS)

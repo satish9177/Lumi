@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
@@ -37,6 +38,20 @@ from app.repositories.actions import (
     AttemptRecord,
 )
 from app.repositories.tasks import TaskRecord, TaskRepository
+
+
+AttemptEvidenceWriter = Callable[[AsyncConnection, AttemptRecord], Awaitable[None]]
+
+#: Actions that still hold, or may still use, an approval.
+_OPEN_STATUSES = frozenset(
+    {
+        ActionStatus.PROPOSED,
+        ActionStatus.WAITING_APPROVAL,
+        ActionStatus.APPROVED,
+        ActionStatus.EXECUTING,
+        ActionStatus.RECONCILING,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,6 +303,64 @@ class ActionService:
             await self._record_proposed(connection, task, created)
             return await self._view(connection, created)
 
+    async def propose_or_reuse_open_action(
+        self,
+        task_id: uuid.UUID,
+        *,
+        tool_name: str,
+        risk_tier: RiskTier,
+        proposal: dict[str, Any],
+    ) -> ActionView:
+        """Propose, unless this exact proposal is already open for review.
+
+        For read-only work whose earlier attempts may legitimately stay
+        OUTCOME_UNKNOWN or SUCCEEDED: under the task lock, an open action of
+        this tool with the same digest that is still reviewable is returned as
+        it is (a duplicate request shows the same card). A different open
+        action is refused, except that an approval request which has expired
+        is withdrawn in this transaction so a fresh one can be made. Finished
+        actions never block, and are never reused: a repeat is a new action
+        with a new approval.
+        """
+        digest = compute_digest(proposal)
+        async with self._engine.begin() as connection:
+            repository = ActionRepository(connection)
+            task = await self._lock_task(TaskRepository(connection), task_id)
+            self._check_task_open(task)
+            existing = [
+                action
+                for action in await repository.list_actions(task_id, limit=500)
+                if action.tool_name == tool_name
+            ]
+            for action in existing:
+                if action.status not in _OPEN_STATUSES:
+                    continue
+                if action.status in (ActionStatus.PROPOSED, ActionStatus.WAITING_APPROVAL):
+                    approval = await repository.get_open_approval(action.id)
+                    expired = approval is not None and await repository.is_expired(approval.id)
+                    if action.proposal_digest == digest and not expired:
+                        return await self._view(connection, action)
+                    if expired:
+                        task = await self.reject_in_transaction(
+                            connection, task=task, action=action, reason="approval_expired"
+                        )
+                        continue
+                raise ActionAlreadyOpenError(task_id, action.id, action.status)
+            created = await repository.insert_action_if_absent(
+                action_id=uuid.uuid4(),
+                task_id=task_id,
+                idempotency_key=f"{tool_name}-{len(existing) + 1}",
+                tool_name=tool_name,
+                risk_tier=risk_tier,
+                proposal=proposal,
+                proposal_digest=digest,
+                status=ActionStatus.PROPOSED,
+            )
+            if created is None:  # pragma: no cover - the ordinal is taken under the lock.
+                raise ActionConcurrencyError(task_id)
+            await self._record_proposed(connection, task, created)
+            return await self._view(connection, created)
+
     async def get_action(self, action_id: uuid.UUID) -> ActionView:
         async with self._engine.connect() as connection:
             action = await ActionRepository(connection).get_action(action_id)
@@ -507,12 +580,17 @@ class ActionService:
         result: dict[str, Any] | None = None,
         error_code: str | None = None,
         expected_revision: int | None = None,
+        record: AttemptEvidenceWriter | None = None,
     ) -> ActionView:
         """Record what the executor observed.
 
         SUCCEEDED and FAILED are claims of knowledge. OUTCOME_UNKNOWN is how an
         executor says it lost the response and does not know whether the side
         effect happened; it is never retried automatically from here.
+
+        `record` writes evidence that belongs to the finished attempt (a page
+        observation) in this same transaction, so an attempt can never be
+        SUCCEEDED without its evidence, or its evidence stored without it.
         """
         target = action_status_for(outcome)
         async with self._engine.begin() as connection:
@@ -529,6 +607,8 @@ class ActionService:
             )
             if finished is None:  # pragma: no cover - the task row lock is held.
                 raise ActionConcurrencyError(action_id)
+            if record is not None:
+                await record(connection, finished)
 
             moved = await self._transition(
                 connection,

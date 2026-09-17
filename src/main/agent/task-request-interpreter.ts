@@ -16,6 +16,7 @@ import { ModelRoutingError, type ModelRouter } from '../models/model-router'
 import { NO_DIAGNOSTICS, type DiagnosticsSink } from './diagnostics'
 import type { PreferenceMemory } from './agent-memory'
 import type { CommandSource } from '../services/voice-task-controller'
+import type { TaskOrigin } from '../services/agent-tasks'
 
 /**
  * Typed requests from the task panel ("find a dermatologist tomorrow evening
@@ -107,7 +108,24 @@ export function parseInterpretation(text: string): Interpretation {
   }
 }
 
+/**
+ * A typed request that names exactly one http(s) address is a page inspection
+ * request. Deterministic: the address is the user's own text, never a model's
+ * output, and it only prepares an approval card.
+ */
+export function extractInspectionRequest(text: string): { url: string; question: string } | undefined {
+  const matches = text.match(/\bhttps?:\/\/[^\s<>"']+/gi)
+  if (!matches || matches.length !== 1) return undefined
+  const url = matches[0].replace(/[),.;!?]+$/, '')
+  const question = text.replace(matches[0], ' ').replace(/\s+/g, ' ').trim()
+  return { url, question: question || 'What does this page say?' }
+}
+
 export interface InterpreterDependencies {
+  /** Milestone 7a: prepare a page-inspection card. Never approves or opens a page. */
+  inspections?: {
+    createPageInspection(url: unknown, question: unknown, origin?: TaskOrigin): Promise<AgentResult<AgentTaskSnapshot>>
+  }
   router?: ModelRouter
   controller: { handle(value: unknown, source: CommandSource): Promise<AgentResult<VoiceTaskOutcome>> }
   loadTask: () => Promise<AgentTaskSnapshot | null>
@@ -152,6 +170,32 @@ export class TaskRequestInterpreter {
   }
 
   private async process(requestId: string, text: string): Promise<AgentResult<VoiceTaskOutcome>> {
+    const inspection = this.deps.inspections ? extractInspectionRequest(text) : undefined
+    if (inspection && this.deps.inspections) {
+      this.window.add({ role: 'user', text: '(page inspection request)' })
+      const created = await this.deps.inspections.createPageInspection(
+        inspection.url, inspection.question, { source: 'text', turnId: requestId, utterance: text }
+      )
+      if (!created.ok) return created
+      const snapshot = created.value
+      return {
+        ok: true,
+        value: {
+          // Reported as the status of the task the request created.
+          kind: 'task_status',
+          taskId: snapshot.task.taskId,
+          taskStatus: snapshot.task.status,
+          taskKind: snapshot.task.kind,
+          focus: 'approval_card',
+          narration: {
+            kind: 'inspection',
+            host: snapshot.task.inspection?.host ?? '',
+            state: snapshot.inspection ? 'awaiting_approval' : 'no_card'
+          },
+          replayed: false
+        }
+      }
+    }
     const interpretation = await this.interpret(text)
     this.window.add({ role: 'user', text })
     if (interpretation.kind === 'conversation') {

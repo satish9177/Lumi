@@ -58,7 +58,8 @@ class WorkerEndpoint:
 
 
 def worker_environment(
-    *, token: SecretStr, site_origin: str, headless: bool, parent_pid: int,
+    *, token: SecretStr, site_origin: str | None, headless: bool, parent_pid: int,
+    public_hosts: str = "", inspection_test_origins: str = "",
     source: dict[str, str] | None = None,
 ) -> dict[str, str]:
     inherited = os.environ if source is None else source
@@ -67,9 +68,11 @@ def worker_environment(
         PYTHONUTF8="1",
         PYTHONUNBUFFERED="1",
         LUMI_BROWSER_TOKEN=token.get_secret_value(),
-        LUMI_BROWSER_ALLOWED_ORIGINS=f"{DEFAULT_SITE}={site_origin}",
+        LUMI_BROWSER_ALLOWED_ORIGINS=f"{DEFAULT_SITE}={site_origin}" if site_origin else "",
         LUMI_BROWSER_HEADLESS="true" if headless else "false",
         LUMI_BROWSER_PARENT_PID=str(parent_pid),
+        LUMI_BROWSER_PUBLIC_HOSTS=public_hosts,
+        LUMI_BROWSER_INSPECTION_TEST_ORIGINS=inspection_test_origins,
     )
     return environment
 
@@ -84,14 +87,18 @@ class ManagedBrowserWorker:
     def __init__(
         self,
         *,
-        site_origin: str,
+        site_origin: str | None,
         headless: bool,
         timeout_seconds: float,
+        public_hosts: str = "",
+        inspection_test_origins: str = "",
         startup_timeout_seconds: float = 60.0,
         maximum_starts: int = 4,
         spawn: Callable[[list[str], dict[str, str]], subprocess.Popen[bytes]] | None = None,
     ) -> None:
         self._site_origin = site_origin
+        self._public_hosts = public_hosts
+        self._inspection_test_origins = inspection_test_origins
         self._headless = headless
         self._timeout_seconds = timeout_seconds
         self._startup_timeout = startup_timeout_seconds
@@ -137,6 +144,8 @@ class ManagedBrowserWorker:
             site_origin=self._site_origin,
             headless=self._headless,
             parent_pid=os.getpid(),
+            public_hosts=self._public_hosts,
+            inspection_test_origins=self._inspection_test_origins,
         )
         try:
             process = self._spawn(arguments, environment)

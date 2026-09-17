@@ -13,9 +13,11 @@ import pytest
 from pydantic import ValidationError
 
 from app.browser.adapters import appointment_fixture
+from app.browser.operations import public_page
 from app.browser.registry import (
     Effect,
     OperationRegistry,
+    OperationTarget,
     Reconciliation,
     RetryPolicy,
     build_registry,
@@ -33,6 +35,8 @@ EXPECTED_OPERATIONS = {
     "lookup_booking",
     # Milestone 6: the read-only clinic-information workflow.
     "read_doctor_profiles",
+    # Milestone 7a: one generic, read-only public page inspection.
+    "inspect_public_page",
 }
 
 
@@ -105,9 +109,46 @@ def test_lookup_never_touches_the_submission_flag() -> None:
 
 def test_no_operation_exposes_arbitrary_scripting() -> None:
     """The adapter must not contain a general escape hatch into the page."""
-    source = inspect.getsource(appointment_fixture)
-    for forbidden in ("page.evaluate", "evaluate_handle", "add_script_tag", "expose_function"):
-        assert forbidden not in source, f"{forbidden} would be a generic scripting primitive"
+    for module in (appointment_fixture, public_page):
+        source = inspect.getsource(module)
+        for forbidden in (
+            "page.evaluate", "evaluate_all", "evaluate_handle", "add_script_tag", "add_init_script",
+            "expose_function", "set_extra_http_headers", "add_cookies", "storage_state",
+        ):
+            assert forbidden not in source, f"{forbidden} would be a generic scripting primitive"
+
+
+def test_the_public_page_operation_is_read_only_and_never_retried_without_approval() -> None:
+    operation = REGISTRY.get("inspect_public_page")
+    assert operation is not None
+    assert operation.target is OperationTarget.PUBLIC_PAGE
+    assert operation.effect is Effect.READ_ONLY
+    assert operation.retry is RetryPolicy.NEW_APPROVAL_REQUIRED
+    assert operation.reconciliation is Reconciliation.NOT_REQUIRED
+    # Every reviewed-site operation keeps resolving its origin from the worker.
+    others = [REGISTRY.get(name) for name in REGISTRY.names() if name != "inspect_public_page"]
+    assert all(op is not None and op.target is OperationTarget.REVIEWED_SITE for op in others)
+
+
+def test_the_public_page_input_is_a_url_and_nothing_else() -> None:
+    operation = REGISTRY.get("inspect_public_page")
+    assert operation is not None
+    assert set(operation.input_model.model_fields) == {"url"}
+    for extra in ("selector", "xpath", "script", "javascript", "headers", "cookies", "browser_args", "click"):
+        with pytest.raises(ValidationError):
+            operation.parse_input({"url": "https://github.com/", extra: "x"})
+
+
+@pytest.mark.parametrize(
+    "change",
+    [{"effect": Effect.CONSEQUENTIAL}, {"effect": Effect.PREPARE}, {"retry": RetryPolicy.SAFE_TO_RETRY}],
+)
+def test_a_public_page_operation_that_could_act_or_retry_is_rejected(change: dict[str, object]) -> None:
+    operation = REGISTRY.get("inspect_public_page")
+    assert operation is not None
+    broken = replace(operation, **change)  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        OperationRegistry((broken,))
 
 
 def test_a_consequential_operation_without_reconciliation_is_rejected() -> None:

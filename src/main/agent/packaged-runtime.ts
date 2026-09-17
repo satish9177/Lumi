@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
+import { parseAllowedHosts } from './public-url-policy'
 
 /**
  * Packaged-app configuration for the agent runtime.
@@ -31,6 +32,8 @@ export interface PackagedRuntimeConfig {
   databaseUrl: string
   clinicSite: 'demo' | 'none' | { origin: string }
   headless: boolean
+  /** Milestone 7a: public hosts an approved page inspection may open. Empty: none. */
+  publicInspectionHosts: string[]
 }
 
 export type ConfigResult =
@@ -45,7 +48,7 @@ export function parseRuntimeConfig(value: unknown): ConfigResult {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return { kind: 'invalid', reason: 'not an object' }
   const record = value as Record<string, unknown>
   for (const key of Object.keys(record)) {
-    if (!['databaseUrl', 'clinicSite', 'headless', '$comment'].includes(key)) return { kind: 'invalid', reason: `unknown field ${key}` }
+    if (!['databaseUrl', 'clinicSite', 'headless', 'publicInspectionHosts', '$comment'].includes(key)) return { kind: 'invalid', reason: `unknown field ${key}` }
   }
   if (typeof record.databaseUrl !== 'string' || !DATABASE_URL.test(record.databaseUrl) || record.databaseUrl.length > 1_000) {
     return { kind: 'invalid', reason: 'databaseUrl must be a postgresql+asyncpg:// URL' }
@@ -62,7 +65,18 @@ export function parseRuntimeConfig(value: unknown): ConfigResult {
     }
   }
   if (record.headless !== undefined && typeof record.headless !== 'boolean') return { kind: 'invalid', reason: 'headless must be true or false' }
-  return { kind: 'ok', config: { databaseUrl: record.databaseUrl, clinicSite, headless: record.headless !== false } }
+  let publicInspectionHosts: string[] = []
+  if (record.publicInspectionHosts !== undefined) {
+    if (!Array.isArray(record.publicInspectionHosts) || record.publicInspectionHosts.some((host) => typeof host !== 'string')) {
+      return { kind: 'invalid', reason: 'publicInspectionHosts must be a list of host names' }
+    }
+    try {
+      publicInspectionHosts = parseAllowedHosts(record.publicInspectionHosts as string[])
+    } catch {
+      return { kind: 'invalid', reason: 'publicInspectionHosts must be public host names such as github.com' }
+    }
+  }
+  return { kind: 'ok', config: { databaseUrl: record.databaseUrl, clinicSite, headless: record.headless !== false, publicInspectionHosts } }
 }
 
 export async function readRuntimeConfig(userDataDir: string): Promise<ConfigResult> {

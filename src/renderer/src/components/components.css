@@ -591,3 +591,6 @@
   padding-left: 18px;
   overflow-wrap: anywhere;
 }
+
+.agent-evidence { margin: 4px 0 0; padding-left: 18px; }
+.agent-evidence li { margin: 2px 0; line-height: 1.4; overflow-wrap: anywhere; }

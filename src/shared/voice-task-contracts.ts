@@ -214,6 +214,23 @@ export interface VoiceDateOption {
   day?: AgentBookingDay
 }
 
+export const VOICE_INSPECTION_STATES = [
+  /** A card is waiting for the trusted click. */
+  'awaiting_approval',
+  /** The user tried to approve by voice or text. Nothing was approved. */
+  'approval_required',
+  'approved_not_opened',
+  'reading',
+  'answered',
+  'not_verified',
+  'read_not_answered',
+  'not_read',
+  'unknown',
+  'rejected',
+  'no_card'
+] as const
+export type VoiceInspectionState = typeof VOICE_INSPECTION_STATES[number]
+
 export const VOICE_CLARIFICATIONS = [
   'no_task',
   'task_closed',
@@ -270,6 +287,12 @@ export type VoiceNarration =
     dateOptions?: VoiceDateOption[]
   }
   | { kind: 'clinic_info'; topic: AgentClinicInfoTopic; profiles: VoiceProfileFact[] }
+  /**
+   * Milestone 7a page inspection. Only the host and a closed state: the page
+   * text and the answer stay on the trusted card and are never spoken from
+   * here, and no state means "approved".
+   */
+  | { kind: 'inspection'; host: string; state: VoiceInspectionState }
   | { kind: 'preference_saved'; preference: PreferenceValue }
   | { kind: 'refused'; code: AgentErrorCode }
 

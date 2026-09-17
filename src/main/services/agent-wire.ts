@@ -5,8 +5,10 @@ import {
   BOOKING_DAYS,
   CHANGED_FACT_FIELDS,
   CLINIC_INFO_TOPICS,
+  DISCLOSURE_RECIPIENTS,
   DISPATCH_STATUSES,
   LOOKUP_STATUSES,
+  PAGE_ANSWER_STATUSES,
   RISK_TIERS,
   TASK_EVENT_TYPES,
   TASK_STATUSES,
@@ -22,11 +24,19 @@ import {
   type AgentError,
   type AgentEventView,
   type AgentFoundBookingView,
+  type AgentInspectionAttemptView,
+  type AgentInspectionProposalView,
+  type AgentInspectionRequestView,
+  type AgentInspectionView,
+  type AgentObservationMetaView,
+  type AgentPageAnswerView,
   type AgentReceiptView,
   type AgentReconciliationView,
   type AgentSlotView,
   type AgentTaskView
 } from '../../shared/agent-contracts'
+import { describeRefusal } from '../agent/public-url-policy'
+import type { PageObservationDetail } from '../agent/page-answer'
 
 /**
  * Strict parsers from runtime JSON to closed desktop DTOs.
@@ -199,13 +209,43 @@ export function parseClinicInfo(value: unknown, taskId: string): ClinicInfoLooku
   return { task, profiles: parseProfiles(body.profiles, 'clinic_info.profiles') }
 }
 
+const WEB_URL = /^https?:\/\/[^\s]{1,2040}$/
+const BLOCK_ID = /^b[1-9][0-9]{0,2}$/
+const LINK_ID = /^l[1-9][0-9]?$/
+const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
+const POLICY_VERSION = /^[a-z0-9][a-z0-9.-]{0,39}$/
+const MAX_QUESTION = 500
+
+function webUrl(value: unknown, what: string): string {
+  return text(value, what, WEB_URL, 2_048)
+}
+
+function hostOf(url: string, what: string): string {
+  try {
+    const host = new URL(url).hostname
+    if (!host) throw new WireError(what)
+    return host
+  } catch {
+    throw new WireError(what)
+  }
+}
+
+/** The URL and question a page-inspection task was created with. */
+export function parseInspectionRequest(request: Json): AgentInspectionRequestView {
+  const url = webUrl(request.url, 'task.url')
+  return { url, host: hostOf(url, 'task.url'), question: text(request.question, 'task.question', undefined, MAX_QUESTION) }
+}
+
 export function parseTask(value: unknown): AgentTaskView {
   const task = record(value, 'task')
   const request = record(task.request, 'task.request')
-  if (request.type !== 'appointment_booking' && request.type !== 'clinic_info') throw new WireError('task.type')
+  if (request.type !== 'appointment_booking' && request.type !== 'clinic_info' && request.type !== 'page_inspection') {
+    throw new WireError('task.type')
+  }
   const kind = request.type
   const infoQuery = kind === 'clinic_info' ? parseInfoQuery(request) : undefined
   if (kind === 'clinic_info' && !infoQuery) throw new WireError('task.info_query')
+  const inspection = kind === 'page_inspection' ? parseInspectionRequest(request) : undefined
   return {
     taskId: uuid(task.id, 'task.id'),
     status: member(TASK_STATUSES, task.status, 'task.status'),
@@ -214,6 +254,7 @@ export function parseTask(value: unknown): AgentTaskView {
     kind,
     criteria: kind === 'appointment_booking' ? parseCriteria(request) : { specialty: '', day: '' },
     ...(infoQuery ? { infoQuery } : {}),
+    ...(inspection ? { inspection } : {}),
     ...(typeof request.voice_turn_id === 'string' && TURN_ID.test(request.voice_turn_id)
       ? { voiceTurnId: request.voice_turn_id }
       : {}),
@@ -512,6 +553,10 @@ export function parseEvent(value: unknown, taskId: string): AgentEventView {
     const profiles = optional(() => parseProfiles(payload.profiles, 'payload.profiles'))
     if (profiles) view.profiles = profiles
   }
+  if (type === 'task.page_answer_recorded') {
+    const answerStatus = optional(() => member(PAGE_ANSWER_STATUSES, payload.answer_status, 'payload.answer_status'))
+    if (answerStatus) view.answerStatus = answerStatus
+  }
   if (type === 'task.criteria_updated') {
     const invalidated = optional(() => parseIdList(payload.invalidated_action_ids, 'payload.invalidated'))
     if (invalidated) view.invalidatedActionIds = invalidated
@@ -532,6 +577,189 @@ export function parseEventPage(value: unknown, taskId: string, afterSequence: nu
     previous = event.sequence
     return event
   })
+}
+
+// ---- page inspection ---------------------------------------------------------
+
+/**
+ * The stored proposal is what the user approves. Every field is required and
+ * nothing else may be present, exactly as for a booking proposal.
+ */
+export function parseInspectionProposal(value: unknown): AgentInspectionProposalView {
+  const proposal = record(value, 'inspection.proposal')
+  const allowed = new Set(['schema_version', 'operation', 'effect', 'url', 'host', 'question', 'policy_version', 'limits', 'disclosure'])
+  if (Object.keys(proposal).some((key) => !allowed.has(key))) throw new WireError('inspection.proposal.fields')
+  if (proposal.schema_version !== 1 || proposal.operation !== 'inspect_public_page' || proposal.effect !== 'public_read') {
+    throw new WireError('inspection.proposal.kind')
+  }
+  const url = webUrl(proposal.url, 'inspection.url')
+  const host = text(proposal.host, 'inspection.host', /^[a-z0-9.-]{1,253}$/, 253)
+  if (hostOf(url, 'inspection.url') !== host) throw new WireError('inspection.host')
+  const limits = record(proposal.limits, 'inspection.limits')
+  const disclosure = record(proposal.disclosure, 'inspection.disclosure')
+  if (!Array.isArray(disclosure.recipients) || disclosure.recipients.length < 1 || disclosure.recipients.length > 3) {
+    throw new WireError('inspection.recipients')
+  }
+  return {
+    url,
+    host,
+    question: text(proposal.question, 'inspection.question', undefined, MAX_QUESTION),
+    policyVersion: text(proposal.policy_version, 'inspection.policy_version', POLICY_VERSION, 40),
+    recipients: disclosure.recipients.map((recipient) => member(DISCLOSURE_RECIPIENTS, recipient, 'inspection.recipient')),
+    maxTextChars: integer(disclosure.max_text_chars, 'inspection.max_text_chars', 1, 12_000),
+    maxLinks: integer(limits.max_links, 'inspection.max_links', 0, 20),
+    maxRedirects: integer(limits.max_redirects, 'inspection.max_redirects', 0, 5)
+  }
+}
+
+function parseInspectionAttempt(value: unknown, actionId: string): AgentInspectionAttemptView {
+  const attempt = record(value, 'attempt')
+  if (uuid(attempt.action_id, 'attempt.action_id') !== actionId) throw new WireError('attempt.action_id')
+  const finishedAt = nullableInstant(attempt.finished_at, 'attempt.finished_at')
+  const outcome = attempt.outcome === null || attempt.outcome === undefined
+    ? undefined
+    : member(ATTEMPT_OUTCOMES, attempt.outcome, 'attempt.outcome')
+  if ((finishedAt === undefined) !== (outcome === undefined)) throw new WireError('attempt.finished')
+  const errorCode = optional(() => text(attempt.error_code, 'attempt.error_code', CODE, 64))
+  const result = isRecord(attempt.result) ? attempt.result : {}
+  const refusal = optional(() => text(result.redirect_refusal ?? result.refusal, 'attempt.refusal', CODE, 64))
+  const httpStatus = optional(() => integer(result.http_status, 'attempt.http_status', 100, 599))
+  return {
+    attemptId: uuid(attempt.id, 'attempt.id'),
+    attemptNumber: integer(attempt.attempt_number, 'attempt.attempt_number', 1),
+    runtimeGeneration: uuid(attempt.runtime_generation, 'attempt.runtime_generation'),
+    startedAt: instant(attempt.started_at, 'attempt.started_at'),
+    ...(finishedAt ? { finishedAt } : {}),
+    ...(outcome ? { outcome } : {}),
+    ...(errorCode ? { errorCode } : {}),
+    ...(refusal ? { refusal } : {}),
+    ...(httpStatus !== undefined ? { httpStatus } : {})
+  }
+}
+
+export function parseInspectionAction(value: unknown): AgentInspectionView {
+  const action = record(value, 'inspection.action')
+  const actionId = uuid(action.id, 'action.id')
+  if (action.tool_name !== 'inspect_public_page') throw new WireError('action.tool_name')
+  if (!Array.isArray(action.attempts) || action.attempts.length > 100) throw new WireError('action.attempts')
+  const approval = parseApproval(action.approval, actionId)
+  const proposalDigest = text(action.proposal_digest, 'action.proposal_digest', DIGEST, 64)
+  if (approval && approval.proposalDigest !== proposalDigest) throw new WireError('approval.proposal_digest')
+  return {
+    actionId,
+    taskId: uuid(action.task_id, 'action.task_id'),
+    toolName: 'inspect_public_page',
+    status: member(ACTION_STATUSES, action.status, 'action.status'),
+    revision: integer(action.revision, 'action.revision', 1),
+    riskTier: member(RISK_TIERS, action.risk_tier, 'action.risk_tier'),
+    proposalDigest,
+    createdAt: instant(action.created_at, 'action.created_at'),
+    updatedAt: instant(action.updated_at, 'action.updated_at'),
+    proposal: parseInspectionProposal(action.proposal),
+    ...(approval ? { approval } : {}),
+    attempts: action.attempts.map((attempt) => parseInspectionAttempt(attempt, actionId))
+  }
+}
+
+function pageText(value: unknown, what: string, maximum: number, allowEmpty = false): string {
+  if (allowEmpty && value === '') return ''
+  return text(value, what, undefined, maximum)
+}
+
+export interface InspectionDetail {
+  view: AgentInspectionView
+  /** Full bounded page text, for main's answer step only. Never sent to the renderer. */
+  observation?: PageObservationDetail
+}
+
+/** `GET /actions/{id}/inspection` and the answer route's response. */
+export function parseInspection(value: unknown): InspectionDetail {
+  const body = record(value, 'inspection')
+  const view = parseInspectionAction(body.action)
+  if (body.observation === null || body.observation === undefined) {
+    if (body.answer !== null && body.answer !== undefined) throw new WireError('inspection.answer_without_observation')
+    return { view }
+  }
+  const raw = record(body.observation, 'observation')
+  if (uuid(raw.action_id, 'observation.action_id') !== view.actionId) throw new WireError('observation.action_id')
+  if (uuid(raw.task_id, 'observation.task_id') !== view.taskId) throw new WireError('observation.task_id')
+  if (raw.provenance !== 'untrusted_environment' || raw.schema_version !== 1) throw new WireError('observation.provenance')
+  if (!Array.isArray(raw.blocks) || raw.blocks.length > 200) throw new WireError('observation.blocks')
+  if (!Array.isArray(raw.links) || raw.links.length > 20) throw new WireError('observation.links')
+  if (!Array.isArray(raw.redirects) || raw.redirects.length > 5) throw new WireError('observation.redirects')
+  if (typeof raw.settled !== 'boolean' || typeof raw.truncated !== 'boolean') throw new WireError('observation.flags')
+  const blocks = raw.blocks.map((item, index) => {
+    const block = record(item, 'observation.block')
+    const id = text(block.id, 'block.id', BLOCK_ID, 4)
+    if (id !== `b${index + 1}`) throw new WireError('block.order')
+    return { id, text: pageText(block.text, 'block.text', 500) }
+  })
+  const links = raw.links.map((item, index) => {
+    const link = record(item, 'observation.link')
+    const id = text(link.id, 'link.id', LINK_ID, 3)
+    if (id !== `l${index + 1}`) throw new WireError('link.order')
+    return { id, text: pageText(link.text, 'link.text', 120, true), url: webUrl(link.url, 'link.url') }
+  })
+  const observation: PageObservationDetail = {
+    observationId: uuid(raw.id, 'observation.id'),
+    contentHash: text(raw.content_hash, 'observation.content_hash', DIGEST, 64),
+    requestedUrl: webUrl(raw.requested_url, 'observation.requested_url'),
+    finalUrl: webUrl(raw.final_url, 'observation.final_url'),
+    title: pageText(raw.title, 'observation.title', 200, true),
+    observedAt: instant(raw.observed_at, 'observation.observed_at'),
+    documentEpoch: integer(raw.document_epoch, 'observation.document_epoch', 1, 1_000),
+    settled: raw.settled,
+    truncated: raw.truncated,
+    blocks,
+    links
+  }
+  if (observation.requestedUrl !== view.proposal.url) throw new WireError('observation.requested_url')
+  const meta: AgentObservationMetaView = {
+    observationId: observation.observationId,
+    requestedUrl: observation.requestedUrl,
+    finalUrl: observation.finalUrl,
+    redirects: raw.redirects.map((redirect) => webUrl(redirect, 'observation.redirect')),
+    title: observation.title,
+    documentEpoch: observation.documentEpoch,
+    settled: observation.settled,
+    truncated: observation.truncated,
+    observedAt: observation.observedAt,
+    contentHash: observation.contentHash,
+    blockCount: blocks.length,
+    linkCount: links.length,
+    workerGeneration: uuid(raw.worker_generation, 'observation.worker_generation')
+  }
+  let answer: AgentPageAnswerView | undefined
+  if (body.answer !== null && body.answer !== undefined) {
+    const rawAnswer = record(body.answer, 'answer')
+    if (uuid(rawAnswer.observation_id, 'answer.observation_id') !== observation.observationId) throw new WireError('answer.observation_id')
+    if (!Array.isArray(rawAnswer.evidence) || rawAnswer.evidence.length > 3) throw new WireError('answer.evidence')
+    answer = {
+      observationId: observation.observationId,
+      status: member(PAGE_ANSWER_STATUSES, rawAnswer.status, 'answer.status'),
+      answer: text(rawAnswer.answer, 'answer.answer', undefined, 600),
+      evidence: rawAnswer.evidence.map((item) => {
+        const entry = record(item, 'answer.evidence')
+        return { block: text(entry.block, 'evidence.block', BLOCK_ID, 4), quote: text(entry.quote, 'evidence.quote', undefined, 300) }
+      }),
+      provider: member(DISCLOSURE_RECIPIENTS, rawAnswer.provider, 'answer.provider'),
+      model: text(rawAnswer.model, 'answer.model', MODEL_NAME, 64),
+      answeredAt: instant(rawAnswer.answered_at, 'answer.answered_at')
+    }
+  }
+  return { view: { ...view, observation: meta, ...(answer ? { answer } : {}) }, observation }
+}
+
+/** The newest inspection action id in a runtime action list, if any. */
+export function latestInspectionActionId(value: unknown, taskId: string): string | undefined {
+  const body = record(value, 'actions')
+  if (uuid(body.task_id, 'actions.task_id') !== taskId) throw new WireError('actions.task_id')
+  if (!Array.isArray(body.actions)) throw new WireError('actions.actions')
+  let latest: string | undefined
+  for (const raw of body.actions) {
+    if (isRecord(raw) && raw.tool_name === 'inspect_public_page') latest = uuid(raw.id, 'action.id')
+  }
+  return latest
 }
 
 // ---- errors ----------------------------------------------------------------
@@ -557,6 +785,13 @@ const ERROR_MAP: Record<string, { code: AgentError['code']; message: string }> =
   invalid_booking_criteria: { code: 'invalid_criteria', message: 'Those booking constraints could not be applied.' },
   booking_criteria_mismatch: { code: 'criteria_mismatch', message: 'That appointment no longer matches what you asked for. Nothing was prepared.' },
   task_kind_mismatch: { code: 'invalid_request', message: 'That step does not apply to this kind of task.' },
+  destination_not_allowed: { code: 'destination_not_allowed', message: 'That address cannot be inspected.' },
+  public_inspection_not_configured: { code: 'inspection_unavailable', message: 'Page inspection is not set up on this computer. Nothing was opened.' },
+  invalid_inspection_proposal: { code: 'invalid_response', message: 'The stored inspection could not be read. Nothing was opened.' },
+  observation_not_available: { code: 'answer_unavailable', message: 'There is no saved page observation to answer from.' },
+  stale_observation: { code: 'stale_observation', message: 'The page was inspected again. Lumi answers only from the newest inspection.' },
+  answer_not_grounded: { code: 'answer_unavailable', message: 'Lumi refused an answer the inspected page did not support.' },
+  browser_execution_not_supported: { code: 'invalid_request', message: 'That step does not apply to this kind of task.' },
   invalid_request: { code: 'invalid_request', message: 'Lumi refused an invalid request.' }
 }
 
@@ -569,5 +804,8 @@ export function projectRuntimeError(status: number, value: unknown): AgentError 
     : { code: status === 401 || status === 403 || status === 400 ? 'runtime_unavailable' : 'request_failed', message: 'The agent runtime could not complete that request.' }
   const current = body?.current_revision
   if (typeof current === 'number' && Number.isSafeInteger(current) && current >= 1) error.currentRevision = current
+  if (runtimeCode === 'destination_not_allowed' && typeof body?.reason === 'string' && CODE.test(body.reason)) {
+    error.message = describeRefusal(body.reason)
+  }
   return error
 }

@@ -23,6 +23,8 @@ telegram-*.json
 *.sqlite3
 model-cache/
 models/
+# Source code, not downloaded model files: the text model router lives here.
+!src/main/models/
 cache/
 *.pem
 *.key

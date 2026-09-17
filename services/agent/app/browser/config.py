@@ -15,6 +15,8 @@ proposal choose where the browser goes.
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.domain.public_url import PublicUrlPolicy, parse_allowed_hosts, parse_test_origins
+
 DEFAULT_SITE = "appointment_fixture"
 
 
@@ -49,6 +51,23 @@ class WorkerSettings(BaseSettings):
     #: Overrides every operation's declared timeout. Left at 0, each operation
     #: uses its own. Exists so an evaluation can widen the window deliberately.
     operation_timeout_seconds: float = Field(default=0.0, ge=0, le=3_600)
+    #: Milestone 7a public inspection: hosts an approved inspection may open
+    #: ("github.com,*.example.org"). Empty means no public inspection at all.
+    public_hosts: str = Field(default="")
+    #: Exact http://127.0.0.1:<port> origins of controlled test pages.
+    inspection_test_origins: str = Field(default="")
+
+    @field_validator("public_hosts")
+    @classmethod
+    def _valid_hosts(cls, value: str) -> str:
+        parse_allowed_hosts(value)
+        return value
+
+    @field_validator("inspection_test_origins")
+    @classmethod
+    def _valid_test_origins(cls, value: str) -> str:
+        parse_test_origins(value)
+        return value
 
     @field_validator("token")
     @classmethod
@@ -60,3 +79,10 @@ class WorkerSettings(BaseSettings):
     @property
     def origins(self) -> dict[str, str]:
         return _parse_origins(self.allowed_origins)
+
+    @property
+    def public_policy(self) -> PublicUrlPolicy:
+        return PublicUrlPolicy(
+            allowed_hosts=parse_allowed_hosts(self.public_hosts),
+            test_origins=parse_test_origins(self.inspection_test_origins),
+        )

@@ -29,6 +29,7 @@ import {
   type VoiceClarification,
   type VoiceClearableField,
   type VoiceCommandKind,
+  type VoiceInspectionState,
   type VoiceConstraintFact,
   type PlanChoice,
   type PlanStepName,
@@ -487,6 +488,36 @@ export function latestResults(events: readonly AgentEventView[]): RecordedResult
     }
   }
   return undefined
+}
+
+/**
+ * What voice may say about a page inspection: the host and a closed state.
+ * `proceed` is the user saying "yes", "approve" or "go ahead": the answer is
+ * always to point at the card, because speech cannot approve.
+ */
+export function describeInspectionForVoice(snapshot: AgentTaskSnapshot, intent: 'status' | 'proceed'): Described {
+  const host = snapshot.task.inspection?.host ?? ''
+  const inspection = snapshot.inspection
+  const card = (state: VoiceInspectionState): Described => ({ narration: { kind: 'inspection', host, state }, focus: 'approval_card' })
+  if (!inspection) return { narration: { kind: 'inspection', host, state: 'no_card' }, focus: 'task' }
+  switch (inspection.status) {
+    case 'PROPOSED':
+    case 'WAITING_APPROVAL':
+      return card(intent === 'proceed' ? 'approval_required' : 'awaiting_approval')
+    case 'APPROVED':
+      return card(intent === 'proceed' ? 'approval_required' : 'approved_not_opened')
+    case 'EXECUTING':
+      return { narration: { kind: 'inspection', host, state: 'reading' }, focus: 'task' }
+    case 'SUCCEEDED':
+      return card(!inspection.answer ? 'read_not_answered' : inspection.answer.status === 'answered' ? 'answered' : 'not_verified')
+    case 'FAILED':
+      return card('not_read')
+    case 'REJECTED':
+      return card('rejected')
+    case 'OUTCOME_UNKNOWN':
+    case 'RECONCILING':
+      return card('unknown')
+  }
 }
 
 function currentBooking(snapshot: AgentTaskSnapshot): AgentActionView | undefined {
@@ -1017,7 +1048,9 @@ export class VoiceTaskController {
     if (plan.showForApproval) {
       // Surfaces the trusted card. It never approves: speech has no approval.
       last = await this.proceed()
-      status.set('show_for_approval', last.narration.kind === 'approval_required' ? 'done' : 'stopped')
+      const surfaced = last.narration.kind === 'approval_required' ||
+        (last.narration.kind === 'inspection' && last.narration.state === 'approval_required')
+      status.set('show_for_approval', surfaced ? 'done' : 'stopped')
     }
     return finish(last ?? this.outcome('run_plan', null, 'none', { kind: 'needs_clarification', reason: 'not_understood' }))
   }
@@ -1059,6 +1092,11 @@ export class VoiceTaskController {
   private async proceed(): Promise<VoiceTaskOutcome> {
     const snapshot = await this.load()
     if (!snapshot) return this.outcome('proceed_with_booking', null, 'task', { kind: 'needs_clarification', reason: 'no_task' })
+    if (snapshot.task.kind === 'page_inspection') {
+      // Never approves and never opens the page: it only points at the card.
+      const described = describeInspectionForVoice(snapshot, 'proceed')
+      return this.outcome('proceed_with_booking', snapshot, described.focus, described.narration)
+    }
     const booking = currentBooking(snapshot)
     if (!booking || ((booking.status === 'REJECTED' || booking.status === 'FAILED') && !isTerminal(snapshot))) {
       return this.outcome('proceed_with_booking', snapshot, 'task', { kind: 'needs_clarification', reason: 'nothing_prepared' })
@@ -1077,6 +1115,10 @@ export class VoiceTaskController {
     if (!snapshot) return this.outcome('task_status', null, 'none', { kind: 'needs_clarification', reason: 'no_task' })
     if (snapshot.task.status === 'CANCELLED') {
       return this.outcome('task_status', snapshot, 'task', { kind: 'task_cancelled', rejectedBooking: false })
+    }
+    if (snapshot.task.kind === 'page_inspection') {
+      const described = describeInspectionForVoice(snapshot, 'status')
+      return this.outcome('task_status', snapshot, described.focus, described.narration)
     }
     if (snapshot.task.kind === 'clinic_info') {
       const profiles = latestProfiles(snapshot.events)

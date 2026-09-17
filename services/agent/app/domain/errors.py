@@ -188,3 +188,40 @@ class BookingCriteriaMismatchError(Exception):
         super().__init__(f"Slot {slot_id} no longer matches the constraints of task {task_id}.")
         self.task_id = task_id
         self.slot_id = slot_id
+
+
+class DestinationNotAllowedError(Exception):
+    """The approved address no longer passes the runtime's destination policy."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__("That page is not an allowed inspection destination.")
+        self.code = code
+
+
+class InspectionProposalError(Exception):
+    """A stored inspection proposal the runtime cannot parse is never executed."""
+
+    def __init__(self, action_id: uuid.UUID) -> None:
+        super().__init__(f"Action {action_id} does not hold a valid page inspection proposal.")
+        self.action_id = action_id
+
+
+class PublicInspectionNotConfiguredError(Exception):
+    def __init__(self) -> None:
+        super().__init__("Public page inspection is not configured.")
+
+
+class ObservationNotAvailableError(Exception):
+    """The action has no stored observation to answer from."""
+
+    def __init__(self, action_id: uuid.UUID) -> None:
+        super().__init__(f"Action {action_id} has no stored page observation.")
+        self.action_id = action_id
+
+
+class StaleObservationError(Exception):
+    """An answer was built from an observation that is no longer current."""
+
+    def __init__(self, observation_id: uuid.UUID) -> None:
+        super().__init__(f"Observation {observation_id} is not the current observation.")
+        self.observation_id = observation_id

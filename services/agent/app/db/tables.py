@@ -277,3 +277,76 @@ Index(
     browser_dispatches.c.action_id,
     browser_dispatches.c.started_at,
 )
+
+
+ANSWER_STATUSES = ("answered", "not_found", "ambiguous", "not_verified")
+
+#: Milestone 7a: one bounded, hashed page observation per successful
+#: `inspect_public_page` attempt, and at most one grounded answer for it. The
+#: evidence columns are immutable and the answer can be written once (trigger
+#: in migration 0004). There is deliberately no column for cookies, headers,
+#: storage state, DOM or screenshots.
+page_observations = Table(
+    "page_observations",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False),
+    Column("action_id", Uuid(), ForeignKey("actions.id", ondelete="RESTRICT"), nullable=False),
+    Column(
+        "attempt_id", Uuid(), ForeignKey("action_attempts.id", ondelete="RESTRICT"), nullable=False
+    ),
+    Column(
+        "dispatch_id",
+        Uuid(),
+        ForeignKey("browser_dispatches.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    Column(
+        "worker_generation",
+        Uuid(),
+        ForeignKey("browser_worker_generations.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    Column("schema_version", Integer(), nullable=False),
+    Column("provenance", String(32), nullable=False),
+    Column("requested_url", String(2048), nullable=False),
+    Column("final_url", String(2048), nullable=False),
+    Column("title", String(200), nullable=False),
+    Column("document_epoch", Integer(), nullable=False),
+    Column("settled", Boolean(), nullable=False),
+    Column("truncated", Boolean(), nullable=False),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("projection", JSONB(), nullable=False),
+    Column("answer_status", String(16), nullable=True),
+    Column("answer", JSONB(), nullable=True),
+    Column("answer_provider", String(16), nullable=True),
+    Column("answer_model", String(64), nullable=True),
+    Column("answered_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("attempt_id"),
+    UniqueConstraint("dispatch_id"),
+    CheckConstraint("schema_version = 1", name="schema_version"),
+    CheckConstraint("provenance = 'untrusted_environment'", name="provenance"),
+    CheckConstraint("document_epoch >= 1", name="document_epoch_positive"),
+    CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_format"),
+    CheckConstraint("jsonb_typeof(projection) = 'object'", name="projection_is_object"),
+    CheckConstraint(
+        "answer_status IS NULL OR answer_status IN ("
+        + ", ".join(f"'{status}'" for status in ANSWER_STATUSES)
+        + ")",
+        name="answer_status",
+    ),
+    CheckConstraint(
+        "(answered_at IS NULL) = (answer IS NULL) AND (answered_at IS NULL) = (answer_status IS NULL)",
+        name="answer_complete",
+    ),
+    CheckConstraint("answer IS NULL OR jsonb_typeof(answer) = 'object'", name="answer_is_object"),
+)
+
+Index(
+    "ix_page_observations_task_id_created_at",
+    page_observations.c.task_id,
+    page_observations.c.created_at,
+)
+Index("ix_page_observations_action_id", page_observations.c.action_id)

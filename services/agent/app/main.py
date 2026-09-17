@@ -15,6 +15,7 @@ from app.services.actions import ActionService
 from app.services.booking_preparation import BookingPreparationService
 from app.services.booking_tasks import BookingTaskService
 from app.services.clinic_info import ClinicInfoService
+from app.services.page_inspection import PageInspectionService
 from app.services.browser_execution import (
     BrowserExecutionService,
     BrowserWorkerConfig,
@@ -31,12 +32,14 @@ def _worker_source(settings: Settings) -> WorkerSource | None:
     external = _worker_config(settings)
     if external is not None:
         return external
-    if settings.browser_site_origin is None:
+    if settings.browser_site_origin is None and not settings.public_policy.configured:
         return None
     return ManagedBrowserWorker(
         site_origin=settings.browser_site_origin,
         headless=settings.browser_headless,
         timeout_seconds=settings.browser_worker_timeout_seconds,
+        public_hosts=settings.public_inspection_hosts,
+        inspection_test_origins=settings.inspection_test_origins,
     )
 
 
@@ -92,6 +95,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     actions=action_service,
                     runtime_generation=generation.id,
                     worker=worker,
+                    public_policy=resolved.public_policy,
+                )
+                app.state.page_inspection_service = PageInspectionService(
+                    engine,
+                    tasks=task_service,
+                    actions=action_service,
+                    policy=resolved.public_policy,
                 )
                 app.state.booking_task_service = BookingTaskService(action_service)
                 app.state.booking_preparation_service = BookingPreparationService(

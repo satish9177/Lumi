@@ -11,6 +11,7 @@ from app.browser.errors import (
     BrowserWorkerNotConfiguredError,
 )
 from app.domain.booking import BookingProposalError
+from app.domain.page_observation import AnswerNotGroundedError
 from app.domain.errors import (
     BookingCriteriaError,
     BookingCriteriaMismatchError,
@@ -32,6 +33,11 @@ from app.domain.errors import (
     TaskNotCancellableError,
     TaskKindMismatchError,
     TaskNotFoundError,
+    DestinationNotAllowedError,
+    InspectionProposalError,
+    ObservationNotAvailableError,
+    PublicInspectionNotConfiguredError,
+    StaleObservationError,
 )
 
 
@@ -79,6 +85,30 @@ async def _approval_not_usable(_: Request, exc: Exception) -> JSONResponse:
     return _error(
         status.HTTP_409_CONFLICT,
         ErrorDetail(code="approval_not_usable", message=str(exc), reason=exc.reason),
+    )
+
+
+async def _destination_not_allowed(_: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, DestinationNotAllowedError)
+    return _error(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        ErrorDetail(
+            code="destination_not_allowed",
+            message="That page is not an allowed inspection destination.",
+            reason=exc.code,
+        ),
+    )
+
+
+async def _answer_not_grounded(_: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, AnswerNotGroundedError)
+    return _error(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        ErrorDetail(
+            code="answer_not_grounded",
+            message="The answer is not supported by the stored observation.",
+            reason=exc.code,
+        ),
     )
 
 
@@ -202,6 +232,40 @@ def register_error_handlers(app: FastAPI) -> None:
             status.HTTP_409_CONFLICT,
             "booking_criteria_mismatch",
             "That appointment no longer matches the requested constraints.",
+        ),
+    )
+    app.add_exception_handler(DestinationNotAllowedError, _destination_not_allowed)
+    app.add_exception_handler(AnswerNotGroundedError, _answer_not_grounded)
+    app.add_exception_handler(
+        InspectionProposalError,
+        _fixed(
+            status.HTTP_409_CONFLICT,
+            "invalid_inspection_proposal",
+            "The stored inspection proposal is not valid.",
+        ),
+    )
+    app.add_exception_handler(
+        PublicInspectionNotConfiguredError,
+        _fixed(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "public_inspection_not_configured",
+            "Public page inspection is not configured.",
+        ),
+    )
+    app.add_exception_handler(
+        ObservationNotAvailableError,
+        _fixed(
+            status.HTTP_409_CONFLICT,
+            "observation_not_available",
+            "There is no stored page observation for that action.",
+        ),
+    )
+    app.add_exception_handler(
+        StaleObservationError,
+        _fixed(
+            status.HTTP_409_CONFLICT,
+            "stale_observation",
+            "That observation is no longer the current one.",
         ),
     )
     app.add_exception_handler(StaleTaskRevisionError, _stale_task_revision)

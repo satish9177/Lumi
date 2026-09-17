@@ -8,6 +8,7 @@ import {
   type AgentBookingCriteria,
   type AgentError,
   type AgentEventView,
+  type AgentInspectionView,
   type AgentResult,
   type AgentRuntimeView,
   type AgentSlotView,
@@ -20,13 +21,16 @@ import {
   describeBooking,
   describeCriteria,
   describeEvent,
+  describeInspection,
   describeOutcome,
+  describeRecipients,
   formatAppointmentTime,
   formatPrice,
   latestSearchResults,
   mergeEvents,
   topicLabel,
-  type BookingControl
+  type BookingControl,
+  type InspectionControl
 } from '../agent-task-view'
 import './components.css'
 
@@ -44,6 +48,7 @@ interface TaskState {
   task: AgentTaskView
   actions: AgentActionView[]
   events: AgentEventView[]
+  inspection?: AgentInspectionView
 }
 
 const RUNTIME_LABELS: Record<AgentRuntimeView['state'], string> = {
@@ -86,6 +91,8 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 
   const [requestOutcome, setRequestOutcome] = useState<VoiceTaskOutcome>()
   const [preferences, setPreferences] = useState<AgentPreferenceView[]>([])
   const [diagnostics, setDiagnostics] = useState<ModelDiagnosticView[]>()
+  const [inspectUrl, setInspectUrl] = useState('')
+  const [inspectQuestion, setInspectQuestion] = useState('')
 
   stateRef.current = state
 
@@ -122,7 +129,8 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 
       generation: snapshot.runtimeGeneration,
       task: snapshot.task,
       actions: snapshot.actions,
-      events: sameTask && !full ? mergeEvents(current.events, snapshot.events) : mergeEvents([], snapshot.events)
+      events: sameTask && !full ? mergeEvents(current.events, snapshot.events) : mergeEvents([], snapshot.events),
+      ...(snapshot.inspection ? { inspection: snapshot.inspection } : {})
     }
     stateRef.current = next
     setState(next)
@@ -218,6 +226,45 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 
     if (result.value.focus === 'approval_card') setPendingCardFocus(Date.now())
   }
 
+  /** Shows an approval card; nothing is opened until Approve is pressed. */
+  async function createInspection(): Promise<void> {
+    const result = await run('inspect_prepare', () => agent.createPageInspection(inspectUrl, inspectQuestion))
+    if (result?.ok && mounted.current) {
+      setInspectUrl('')
+      setInspectQuestion('')
+      await refresh(true)
+      setPendingCardFocus(Date.now())
+    }
+  }
+
+  async function onInspectionControl(control: InspectionControl, inspection: AgentInspectionView): Promise<void> {
+    // The revision and digest that were on screen when the user pressed.
+    const { actionId, revision, proposalDigest } = inspection
+    switch (control) {
+      case 'approve_and_inspect':
+        await run('inspect_execute', async () => {
+          const approved = await agent.approveInspection(actionId, revision)
+          if (!approved.ok) return approved
+          if (approved.value.proposalDigest !== proposalDigest || approved.value.status !== 'APPROVED') {
+            return { ok: false, error: { code: 'invalid_response', message: 'The approved inspection did not match what you reviewed. Nothing was opened.' } }
+          }
+          return agent.executeInspection(actionId, approved.value.revision)
+        })
+        return
+      case 'inspect_now':
+        await run('inspect_execute', () => agent.executeInspection(actionId, revision))
+        return
+      case 'reject':
+        await run('reject', () => agent.rejectInspection(actionId, revision))
+        return
+      case 'answer_from_observation':
+        await run('inspect_answer', () => agent.answerInspection(actionId))
+        return
+      case 'inspect_again':
+        await run('inspect_prepare', () => agent.inspectPageAgain())
+    }
+  }
+
   async function lookupInfo(): Promise<void> {
     await run('lookup', () => agent.lookupClinicInfo())
   }
@@ -302,7 +349,8 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 
   // Durable results from the task timeline, unless a fresher local search is
   // on screen. Hidden while a booking is open or once the task is closed.
   const isInfoTask = state?.task.kind === 'clinic_info'
-  const shownSlots = isInfoTask ? undefined : taskClosed || bookingOpen ? slots : slots ?? (state ? latestSearchResults(state.events) : undefined)
+  const isInspectionTask = state?.task.kind === 'page_inspection'
+  const shownSlots = isInfoTask || isInspectionTask ? undefined : taskClosed || bookingOpen ? slots : slots ?? (state ? latestSearchResults(state.events) : undefined)
   const profiles = state && isInfoTask ? latestProfiles(state.events) : undefined
 
   return (
@@ -379,15 +427,43 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 
           </section>
         )}
 
+        {runtimeReady && loaded && !state && (
+          <form className="agent-section" aria-label="Inspect a public page" data-testid="agent-inspect-form"
+            onSubmit={(event) => { event.preventDefault(); void createInspection() }}>
+            <p className="workspace-note">
+              Lumi can read one public web page and answer a question from what it shows. You approve the exact address first; nothing is opened before that.
+            </p>
+            <label className="agent-field">
+              Page address
+              <input value={inspectUrl} maxLength={2_048} inputMode="url" data-testid="agent-inspect-url"
+                placeholder="github.com/owner/repository"
+                onChange={(event) => setInspectUrl(event.target.value)} />
+            </label>
+            <label className="agent-field">
+              Question about the page
+              <input value={inspectQuestion} maxLength={500} data-testid="agent-inspect-question"
+                placeholder="What is this repository for?"
+                onChange={(event) => setInspectQuestion(event.target.value)} />
+            </label>
+            <button className="primary-button" type="submit"
+              disabled={!canCreate || !inspectUrl.trim() || !inspectQuestion.trim()}>
+              Prepare inspection
+            </button>
+          </form>
+        )}
+
         {state && (
           <>
-            <section className="agent-section" aria-label={isInfoTask ? 'Clinic information task' : 'Booking task'}
+            <section className="agent-section"
+              aria-label={isInfoTask ? 'Clinic information task' : isInspectionTask ? 'Page inspection task' : 'Booking task'}
               data-testid="agent-task" data-task-kind={state.task.kind}>
-              <p className="eyebrow">{isInfoTask ? 'CLINIC INFO' : 'TASK'} · {state.task.status.replaceAll('_', ' ')}</p>
+              <p className="eyebrow">{isInfoTask ? 'CLINIC INFO' : isInspectionTask ? 'PAGE INSPECTION' : 'TASK'} · {state.task.status.replaceAll('_', ' ')}</p>
               <p className="workspace-note" data-testid="agent-task-criteria">
                 {isInfoTask && state.task.infoQuery
                   ? `${state.task.infoQuery.doctor || state.task.infoQuery.specialty} · ${topicLabel(state.task.infoQuery.topic)}`
-                  : describeCriteria(state.task.criteria)}
+                  : isInspectionTask && state.task.inspection
+                    ? `${state.task.inspection.host} · ${state.task.inspection.question}`
+                    : describeCriteria(state.task.criteria)}
               </p>
               <div className="actions">
                 {isInfoTask && !taskClosed ? (
@@ -395,7 +471,13 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 
                     Look up again
                   </button>
                 ) : null}
-                {!isInfoTask && !taskClosed && !bookingOpen ? (
+                {isInspectionTask && !taskClosed && !state.inspection ? (
+                  <button className="secondary-button" type="button" disabled={!runtimeReady || Boolean(busy)}
+                    onClick={() => void run('inspect_prepare', () => agent.inspectPageAgain())}>
+                    Show approval card
+                  </button>
+                ) : null}
+                {!isInfoTask && !isInspectionTask && !taskClosed && !bookingOpen ? (
                   <button className="secondary-button" type="button" disabled={!runtimeReady || Boolean(busy)} onClick={() => void search()}>
                     Search appointments
                   </button>
@@ -429,6 +511,20 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 
             )}
 
             {profiles && <ClinicProfiles profiles={profiles} />}
+
+            {state.inspection && (
+              <div ref={bookingRegion} tabIndex={-1} className="agent-booking-region"
+                data-testid="agent-inspection-region" data-voice-focus={focusedSerial}>
+                <InspectionCard
+                  inspection={state.inspection}
+                  now={now}
+                  disabled={!runtimeReady || Boolean(busy)}
+                  busy={busy}
+                  taskClosed={taskClosed}
+                  onControl={(control) => void onInspectionControl(control, state.inspection!)}
+                />
+              </div>
+            )}
 
             {booking && (
               <div ref={bookingRegion} tabIndex={-1} className="agent-booking-region"
@@ -595,6 +691,94 @@ function BookingCard({ action, events, now, disabled, busy, taskClosed, onContro
   )
 }
 
+const INSPECTION_CONTROL_LABELS: Record<InspectionControl, string> = {
+  approve_and_inspect: 'Approve and inspect',
+  inspect_now: 'Inspect now',
+  reject: 'Reject',
+  answer_from_observation: 'Answer from saved page',
+  inspect_again: 'Inspect again (new approval)'
+}
+
+/**
+ * The trusted approval and result card for one page inspection. Every label
+ * is Lumi's. Page-controlled text appears only as plain text in labelled
+ * fields: the quoted evidence of a verified answer, the page title and the
+ * final URL. It never supplies a label, a control or an instruction.
+ */
+function InspectionCard({ inspection, now, disabled, busy, taskClosed, onControl }: {
+  inspection: AgentInspectionView
+  now: number
+  disabled: boolean
+  busy?: string
+  taskClosed: boolean
+  onControl: (control: InspectionControl) => void
+}) {
+  const described = describeInspection(inspection, now)
+  const model = taskClosed ? { ...described, controls: [] } : described
+  const { proposal, observation, answer } = inspection
+  return (
+    <article className={`agent-booking-card tone-${model.tone}`} role="group" aria-label={model.title}
+      data-testid="agent-inspection-card" data-action-status={inspection.status} data-action-id={inspection.actionId}
+      data-action-revision={inspection.revision} data-answer-status={answer?.status}>
+      <p className="lifelens-card-eyebrow">{model.eyebrow}</p>
+      <h3 className="lifelens-card-heading" data-testid="agent-inspection-title">{model.title}</h3>
+      {model.showProposal && (
+        <dl className="agent-booking-details" data-testid="agent-inspection-proposal">
+          <dt>Website</dt><dd data-testid="agent-inspection-host"><strong>{proposal.host}</strong></dd>
+          <dt>Address</dt><dd className="agent-digest" data-testid="agent-inspection-url">{proposal.url}</dd>
+          <dt>Lumi will</dt>
+          <dd>Open this address once in an isolated browser and read its visible text and up to {proposal.maxLinks} links. Read-only: no clicking, typing, sign-in, downloads or uploads.</dd>
+          <dt>Your question</dt><dd data-testid="agent-inspection-question">{proposal.question}</dd>
+          <dt>Sent to answer</dt>
+          <dd data-testid="agent-inspection-disclosure">
+            Up to {proposal.maxTextChars.toLocaleString()} characters of the page’s text and your question go to: {describeRecipients(proposal.recipients)}.
+          </dd>
+        </dl>
+      )}
+      {answer?.status === 'answered' && (
+        <div data-testid="agent-inspection-answer">
+          <p><strong>{answer.answer}</strong></p>
+          <p className="workspace-note">Quoted from the page:</p>
+          <ul className="agent-evidence">
+            {answer.evidence.map((item) => (
+              <li key={`${item.block}-${item.quote}`}><q>{item.quote}</q></li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {model.lines.map((line) => <p key={line}>{line}</p>)}
+      {observation && (
+        <dl className="agent-booking-details" data-testid="agent-inspection-source">
+          <dt>Source</dt><dd className="agent-digest">{observation.finalUrl}</dd>
+          {observation.redirects.length > 0 && (<><dt>Redirected</dt><dd>{observation.redirects.length} time{observation.redirects.length === 1 ? '' : 's'}</dd></>)}
+          <dt>Read at</dt><dd>{new Date(observation.observedAt).toLocaleString()}</dd>
+          <dt>Page title</dt><dd>{observation.title || '(none)'}</dd>
+          <dt>Observation</dt>
+          <dd>
+            {observation.blockCount} text blocks, {observation.linkCount} links
+            {observation.truncated ? ' · long page, only the first part was read' : ''}
+            {observation.settled ? '' : ' · the page was still changing'}
+            {answer ? ` · answered by ${describeRecipients([answer.provider])}` : ''}
+          </dd>
+        </dl>
+      )}
+      {model.controls.length > 0 && (
+        <div className="lifelens-confirmation-actions">
+          {model.controls.map((control) => (
+            <button key={control} type="button" disabled={disabled}
+              className={control === 'approve_and_inspect' || control === 'inspect_now' || control === 'answer_from_observation'
+                ? 'lifelens-confirm-button' : 'lifelens-dismiss-button'}
+              aria-busy={busy !== undefined || undefined}
+              onClick={() => onControl(control)}>
+              {INSPECTION_CONTROL_LABELS[control]}
+            </button>
+          ))}
+        </div>
+      )}
+    </article>
+  )
+}
+
 function Timeline({ events }: { events: AgentEventView[] }) {
   return (
     <section className="agent-section" aria-label="Task timeline">
@@ -662,6 +846,9 @@ function busyText(label: string): string {
     case 'reconcile': return 'Checking the existing booking — not booking again…'
     case 'request': return 'Understanding your request…'
     case 'lookup': return 'Reading the clinic site (read-only)…'
+    case 'inspect_prepare': return 'Preparing the approval card — nothing is opened yet…'
+    case 'inspect_execute': return 'Reading the approved page once, then answering from it…'
+    case 'inspect_answer': return 'Answering from the saved page — not opening it again…'
     default: return 'Working…'
   }
 }
