@@ -108,6 +108,17 @@ const CASES = {
     ['runtime crash mid-read: recovered as unknown', py('tests/test_page_inspection_ledger.py', 'test_a_runtime_that_dies_mid_read_is_recovered_as_unknown')],
     ['ungrounded answers are refused by the runtime too', py('tests/test_page_inspection_api.py', 'test_an_ungrounded_answer_is_refused')],
     ['stale observation answers are refused', py('tests/test_page_inspection_api.py', 'test_a_repeat_on_the_same_task_is_a_new_action_and_the_old_answer_goes_stale')]
+  ],
+  // The main composer: main decides which single path owns a typed request.
+  composer: [
+    ['inspection request becomes a card; realtime and open_url never reached', ts('src/renderer/src/composer-routing.test.ts', 'creates the durable inspection and focuses its card')],
+    ['typed "yes / approve / go ahead" cannot approve the page', ts('src/renderer/src/composer-routing.test.ts', 'only points at the card')],
+    ['request -> card -> click -> one read -> answer in the conversation', ts('src/renderer/src/composer-routing.test.ts', 'request -> card -> trusted click')],
+    ['a failed read never falls through to open_url', ts('src/renderer/src/composer-routing.test.ts', 'a failed read is reported and never falls through')],
+    ['a refused address is still owned by the agent', ts('src/renderer/src/composer-routing.test.ts', 'a refused address is still owned by the agent')],
+    ['ordinary conversation reaches realtime exactly once', ts('src/renderer/src/composer-routing.test.ts', 'with no agent task reaches realtime exactly once')],
+    ['appointment requests still reach the durable agent', ts('src/renderer/src/composer-routing.test.ts', 'still go to the durable agent, not realtime')],
+    ['unreachable router sends nothing anywhere', ts('src/renderer/src/composer-routing.test.ts', 'if main cannot be asked, nothing is sent anywhere')]
   ]
 }
 

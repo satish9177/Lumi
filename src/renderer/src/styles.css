@@ -178,6 +178,13 @@ input:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.conversation .message-user {
+  align-self: flex-end;
+  max-width: 85%;
+  text-align: right;
+  opacity: 0.8;
+}
+
 .conversation-empty {
   margin: auto 0;
   display: flex;

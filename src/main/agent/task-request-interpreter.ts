@@ -1,4 +1,9 @@
-import type { AgentResult, AgentTaskSnapshot } from '../../shared/agent-contracts'
+import {
+  TERMINAL_TASK_STATUSES,
+  type AgentResult,
+  type AgentTaskSnapshot,
+  type TypedRequestRoute
+} from '../../shared/agent-contracts'
 import {
   PlanWireError,
   clinicQueryFromWire,
@@ -19,8 +24,9 @@ import type { CommandSource } from '../services/voice-task-controller'
 import type { TaskOrigin } from '../services/agent-tasks'
 
 /**
- * Typed requests from the task panel ("find a dermatologist tomorrow evening
- * and prepare the cheapest").
+ * Typed requests from Lumi's main composer and the task panel ("find a
+ * dermatologist tomorrow evening and prepare the cheapest", "inspect
+ * https://github.com/... and tell me what it does").
  *
  * 1. Assemble a bounded context (utterance, durable task state, preferences,
  *    episodic summaries, recent turns).
@@ -61,8 +67,14 @@ export const INTERPRETATION_SCHEMA = {
   required: ['intent']
 } as const
 
+/**
+ * What durable state a command acts on. A command whose state does not exist
+ * ("yes" or "check the weather" with no task) is not the agent's request.
+ */
+export type CommandScope = 'standalone' | 'any_task' | 'open_task'
+
 export type Interpretation =
-  | { kind: 'command'; build: (turn: VoiceTurn) => VoiceTaskCommand }
+  | { kind: 'command'; scope: CommandScope; build: (turn: VoiceTurn) => VoiceTaskCommand }
   | { kind: 'conversation' }
 
 /** Strictly parse model (or rule) JSON. Throws on anything outside the contract. */
@@ -91,19 +103,19 @@ export function parseInterpretation(text: string): Interpretation {
   switch (intent as InterpretationWire['intent']) {
     case 'appointment_plan': {
       const plan = planFromWire(wire.plan)
-      return { kind: 'command', build: (turn) => ({ kind: 'run_plan', turn, plan }) }
+      return { kind: 'command', scope: plan.search ? 'standalone' : 'open_task', build: (turn) => ({ kind: 'run_plan', turn, plan }) }
     }
     case 'clinic_info': {
       const query = clinicQueryFromWire(wire.clinic)
-      return { kind: 'command', build: (turn) => ({ kind: 'clinic_info', turn, query }) }
+      return { kind: 'command', scope: 'standalone', build: (turn) => ({ kind: 'clinic_info', turn, query }) }
     }
     case 'remember_preference': {
       const preference = preferenceFromWire(wire.preference)
-      return { kind: 'command', build: (turn) => ({ kind: 'remember_preference', turn, preference }) }
+      return { kind: 'command', scope: 'standalone', build: (turn) => ({ kind: 'remember_preference', turn, preference }) }
     }
-    case 'status': return { kind: 'command', build: (turn) => ({ kind: 'task_status', turn }) }
-    case 'check_booking': return { kind: 'command', build: (turn) => ({ kind: 'check_booking', turn }) }
-    case 'cancel_task': return { kind: 'command', build: (turn) => ({ kind: 'cancel_task', turn }) }
+    case 'status': return { kind: 'command', scope: 'any_task', build: (turn) => ({ kind: 'task_status', turn }) }
+    case 'check_booking': return { kind: 'command', scope: 'any_task', build: (turn) => ({ kind: 'check_booking', turn }) }
+    case 'cancel_task': return { kind: 'command', scope: 'open_task', build: (turn) => ({ kind: 'cancel_task', turn }) }
     case 'conversation': return { kind: 'conversation' }
   }
 }
@@ -137,30 +149,80 @@ export interface InterpreterDependencies {
 
 const REQUEST_ID = /^[A-Za-z0-9_-]{8,64}$/
 const MAX_TEXT = 1_000
+const INVALID_REFERENCE = { ok: false, error: { code: 'invalid_request', message: 'That request reference is invalid.' } } as const
+const INVALID_TEXT = { ok: false, error: { code: 'invalid_request', message: 'Type a request of up to 1,000 characters.' } } as const
+const REQUEST_FAILED = { ok: false, error: { code: 'request_failed', message: 'Lumi could not handle that request. Nothing was done.' } } as const
+const NOT_UNDERSTOOD: VoiceTaskOutcome = {
+  kind: 'task_status', focus: 'none', replayed: false, narration: { kind: 'needs_clarification', reason: 'not_understood' }
+}
+
+function normalize(value: unknown): string {
+  return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : ''
+}
+
+function withinLimits(text: string): boolean {
+  // eslint-disable-next-line no-control-regex
+  return text.length <= MAX_TEXT && !/[\x00-\x1f\x7f]/.test(text)
+}
+
+/** A command is the agent's only if the durable state it acts on exists. */
+function inScope(scope: CommandScope, task: AgentTaskSnapshot | null): boolean {
+  if (scope === 'standalone') return true
+  if (!task) return false
+  return scope === 'any_task' || !TERMINAL_TASK_STATUSES.includes(task.task.status)
+}
 
 export class TaskRequestInterpreter {
   private readonly window = new ConversationWindow()
-  private readonly handled = new Map<string, Promise<AgentResult<VoiceTaskOutcome>>>()
+  private readonly handled = new Map<string, Promise<TypedRequestRoute>>()
   private readonly diagnostics: DiagnosticsSink
 
   constructor(private readonly deps: InterpreterDependencies) {
     this.diagnostics = deps.diagnostics ?? NO_DIAGNOSTICS
   }
 
-  /** The IPC entry point. The same request id is answered once, however often it arrives. */
-  submit(requestIdValue: unknown, textValue: unknown): Promise<AgentResult<VoiceTaskOutcome>> {
-    if (typeof requestIdValue !== 'string' || !REQUEST_ID.test(requestIdValue)) {
-      return Promise.resolve({ ok: false, error: { code: 'invalid_request', message: 'That request reference is invalid.' } })
+  /**
+   * The task panel's entry point. The same request id is answered once,
+   * however often it arrives. A request no capability claims is reported as
+   * not understood, because the panel has no conversation to hand it to.
+   */
+  async submit(requestIdValue: unknown, textValue: unknown): Promise<AgentResult<VoiceTaskOutcome>> {
+    if (typeof requestIdValue !== 'string' || !REQUEST_ID.test(requestIdValue)) return INVALID_REFERENCE
+    const text = normalize(textValue)
+    if (!text || !withinLimits(text)) return INVALID_TEXT
+    const route = await this.once(requestIdValue, text)
+    return route.handled ? route.result : { ok: true, value: NOT_UNDERSTOOD }
+  }
+
+  /**
+   * The main composer's entry point. Main, not the renderer, decides whether a
+   * durable-agent capability owns the request:
+   *
+   *  - a request naming exactly one http(s) address is always a page
+   *    inspection, even when the inspection is refused, so it can never fall
+   *    through to a conversation tool that opens the address;
+   *  - otherwise a command the interpreter produced is owned only if the
+   *    durable state it acts on exists;
+   *  - anything else is `handled: false`, and nothing was done.
+   *
+   * Invalid input is refused as handled: failing closed never passes it on.
+   */
+  async route(requestIdValue: unknown, textValue: unknown): Promise<TypedRequestRoute> {
+    if (typeof requestIdValue !== 'string' || !REQUEST_ID.test(requestIdValue)) return { handled: true, result: INVALID_REFERENCE }
+    const text = normalize(textValue)
+    if (!text) return { handled: true, result: INVALID_TEXT }
+    if (!withinLimits(text)) {
+      // Too long for the agent; the conversation applies its own limits.
+      return this.deps.inspections && extractInspectionRequest(text) ? { handled: true, result: INVALID_TEXT } : { handled: false }
     }
-    const text = typeof textValue === 'string' ? textValue.replace(/\s+/g, ' ').trim() : ''
-    // eslint-disable-next-line no-control-regex
-    if (!text || text.length > MAX_TEXT || /[\x00-\x1f\x7f]/.test(text)) {
-      return Promise.resolve({ ok: false, error: { code: 'invalid_request', message: 'Type a request of up to 1,000 characters.' } })
-    }
-    const previous = this.handled.get(requestIdValue)
+    return this.once(requestIdValue, text)
+  }
+
+  private once(requestId: string, text: string): Promise<TypedRequestRoute> {
+    const previous = this.handled.get(requestId)
     if (previous) return previous
-    const run = this.process(requestIdValue, text)
-    this.handled.set(requestIdValue, run)
+    const run = this.process(requestId, text).catch((): TypedRequestRoute => ({ handled: true, result: REQUEST_FAILED }))
+    this.handled.set(requestId, run)
     while (this.handled.size > 256) {
       const oldest = this.handled.keys().next().value
       if (oldest === undefined) break
@@ -169,49 +231,55 @@ export class TaskRequestInterpreter {
     return run
   }
 
-  private async process(requestId: string, text: string): Promise<AgentResult<VoiceTaskOutcome>> {
+  private async process(requestId: string, text: string): Promise<TypedRequestRoute> {
     const inspection = this.deps.inspections ? extractInspectionRequest(text) : undefined
     if (inspection && this.deps.inspections) {
       this.window.add({ role: 'user', text: '(page inspection request)' })
       const created = await this.deps.inspections.createPageInspection(
         inspection.url, inspection.question, { source: 'text', turnId: requestId, utterance: text }
       )
-      if (!created.ok) return created
+      if (!created.ok) return { handled: true, result: created }
       const snapshot = created.value
       return {
-        ok: true,
-        value: {
-          // Reported as the status of the task the request created.
-          kind: 'task_status',
-          taskId: snapshot.task.taskId,
-          taskStatus: snapshot.task.status,
-          taskKind: snapshot.task.kind,
-          focus: 'approval_card',
-          narration: {
-            kind: 'inspection',
-            host: snapshot.task.inspection?.host ?? '',
-            state: snapshot.inspection ? 'awaiting_approval' : 'no_card'
-          },
-          replayed: false
+        handled: true,
+        result: {
+          ok: true,
+          value: {
+            // Reported as the status of the task the request created.
+            kind: 'task_status',
+            taskId: snapshot.task.taskId,
+            taskStatus: snapshot.task.status,
+            taskKind: snapshot.task.kind,
+            focus: 'approval_card',
+            narration: {
+              kind: 'inspection',
+              host: snapshot.task.inspection?.host ?? '',
+              state: snapshot.inspection ? 'awaiting_approval' : 'no_card'
+            },
+            replayed: false
+          }
         }
       }
     }
-    const interpretation = await this.interpret(text)
+    const { interpretation, task } = await this.interpretWithTask(text)
     this.window.add({ role: 'user', text })
-    if (interpretation.kind === 'conversation') {
-      return {
-        ok: true,
-        value: { kind: 'task_status', focus: 'none', replayed: false, narration: { kind: 'needs_clarification', reason: 'not_understood' } }
-      }
-    }
+    if (interpretation.kind === 'conversation' || !inScope(interpretation.scope, task)) return { handled: false }
     const command = interpretation.build({ turnId: requestId, utterance: text })
     const result = await this.deps.controller.handle(command, 'text')
     if (result.ok) this.window.add({ role: 'assistant', text: `(${result.value.narration.kind})` })
-    return result
+    return { handled: true, result }
   }
 
   async interpret(text: string): Promise<Interpretation> {
+    return (await this.interpretWithTask(text)).interpretation
+  }
+
+  private async interpretWithTask(text: string): Promise<{ interpretation: Interpretation; task: AgentTaskSnapshot | null }> {
     const task = await this.deps.loadTask().catch(() => null)
+    return { interpretation: await this.interpretAgainst(text, task), task }
+  }
+
+  private async interpretAgainst(text: string, task: AgentTaskSnapshot | null): Promise<Interpretation> {
     if (this.deps.router) {
       const now = new Date((this.deps.now ?? Date.now)())
       const timeZone = (this.deps.timeZone ?? (() => Intl.DateTimeFormat().resolvedOptions().timeZone))()

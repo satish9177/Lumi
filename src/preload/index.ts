@@ -44,6 +44,9 @@ const agentApi: AgentApi = {
   // Text only; main interprets it and can never approve or execute from it.
   submitTextRequest: (requestId: string, text: string) =>
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.submitTextRequest, requestId, text),
+  // The main composer's text; main alone decides which path owns it.
+  routeTypedRequest: (requestId: string, text: string) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.routeTypedRequest, requestId, text),
   lookupClinicInfo: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.lookupClinicInfo),
   // Two strings the user typed; main validates the URL against its destination
   // policy and the runtime validates it again. Nothing here can approve.

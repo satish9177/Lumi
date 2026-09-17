@@ -45,6 +45,7 @@ pytestmark = [
 ]
 
 QUESTION = "What is my contest rating?"
+GREETING = "Hi, I am Lumi. I am ready to look at a screen with you."
 
 
 @pytest.fixture
@@ -189,6 +190,79 @@ def test_one_approved_url_one_grounded_answer_through_the_desktop_app(
         after = _ledger(migrated_database_url)
         assert (after["actions"] - before["actions"], after["attempts"] - before["attempts"]) == (1, 1)
         assert canary.hits() == {}
+        _no_csp_violations(app.console)
+    _wait_for_no_processes("*app.server*")
+
+
+def _conversation(app: Desktop) -> list[str]:
+    return [line.strip() for line in app.page.locator('[role="log"] .message').all_inner_texts()]
+
+
+def _ask_in_composer(app: Desktop, text: str) -> None:
+    """Type into Lumi's main composer, as a user does, and press Enter."""
+    page = app.page
+    if not page.get_by_role("button", name="Collapse to orb").count():
+        page.get_by_role("button", name="Open Lumi").click()
+    composer = page.get_by_label("Ask Lumi")
+    composer.fill(text)
+    # Send is enabled once the (mock) voice session is connected.
+    page.wait_for_function("() => document.querySelector('button.send-button')?.disabled === false", timeout=60_000)
+    composer.press("Enter")
+
+
+def test_the_main_composer_owns_an_inspection_request_and_shows_the_answer_in_the_conversation(
+    migrated_database_url: str, site: SiteControl, playwright: Any, pages: tuple[PublicSiteControl, PublicSiteControl], tmp_path: Path
+) -> None:
+    public, _ = pages
+    _off_thread(truncate_all, migrated_database_url)
+    _wait_for_no_processes("*app.server*")
+    with desktop(
+        playwright, profile=tmp_path / "profile", database_url=migrated_database_url, site_origin=site.base_url,
+        log_path=tmp_path / "electron.log", extra_environment=_environment(public.base_url, "gemini:rules"),
+    ) as app:
+        page = app.page
+        rated = f"{public.base_url}/profiles/rated"
+        request = f"What is my contest rating? {rated}"
+
+        # --- the normal composer, not the agent panel ------------------------
+        _ask_in_composer(app, request)
+        card = _wait_card(app, "WAITING_APPROVAL", timeout=60)
+        assert page.get_by_test_id("agent-task-panel").count() == 1
+        assert page.get_by_role("dialog", name="Lumi agent").count() == 1
+        assert page.get_by_test_id("agent-inspection-url").inner_text() == rated
+        assert _buttons(card) == ["Reject", "Approve and inspect"]
+        # Nothing was opened: not by the isolated worker, not by a default browser.
+        page.wait_for_timeout(1_500)
+        assert public.hits() == {}
+        # After the voice greeting, exactly the request and Lumi's status line:
+        # the realtime conversation never answered it.
+        assert _conversation(app) == [
+            GREETING,
+            request,
+            "Prepared an inspection of 127.0.0.1. Nothing is opened until you press Approve and inspect.",
+        ]
+        assert _ledger(migrated_database_url)["tasks"] == 1
+
+        # --- the trusted click; the answer follows without a second click ----
+        card.get_by_role("button", name="Approve and inspect").click()
+        page.locator('[data-testid="agent-inspection-card"][data-answer-status="answered"]').wait_for(timeout=BOOK_SECONDS * 1000)
+        page.get_by_role("log").filter(has_text="From the inspected page on 127.0.0.1:").wait_for(timeout=10_000)
+        assert "1,842" in _conversation(app)[-1]
+        assert public.hits() == {"/profiles/rated": 1}
+        ledger = _ledger(migrated_database_url)
+        assert (ledger["tasks"], ledger["approvals_granted"], ledger["attempts"], ledger["answers"]) == (1, 1, 1, 1)
+
+        # --- ordinary chat still reaches the conversation --------------------
+        page.get_by_role("button", name="Close agent").click()
+        before = len(_conversation(app))
+        _ask_in_composer(app, "Hello")
+        page.wait_for_function(
+            f"() => document.querySelectorAll('[role=\"log\"] .message').length > {before + 1}", timeout=30_000
+        )
+        assert _conversation(app)[before] == "Hello"
+        assert page.get_by_test_id("agent-task-panel").count() == 0
+        assert _ledger(migrated_database_url)["tasks"] == 1
+        assert public.hits() == {"/profiles/rated": 1}
         _no_csp_violations(app.console)
     _wait_for_no_processes("*app.server*")
 

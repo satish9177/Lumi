@@ -196,7 +196,7 @@ describe('the narrow scam intent', () => {
   })
 
   it('opens the confirmation from Lumi rather than from the model', () => {
-    expect(app).toContain("classifyUserIntent(question).intent === 'scam_check'")
+    expect(app).toContain("classifyUserIntent(text).intent === 'scam_check'")
     expect(app).toContain('requestScamCheck()')
   })
 })

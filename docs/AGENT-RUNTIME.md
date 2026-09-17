@@ -800,6 +800,18 @@ authority. Milestone 6 adds front doors and inputs around them; see
   model router (`intent_extraction`) → the same strict parser → the same
   controller, once per request id. `request_id` is stored on the task like
   `voice_turn_id`, so a replay never creates a second task.
+- **Main composer routing.** Lumi's main composer calls
+  `routeTypedRequest(requestId, text)` before anything else. Main answers
+  `{handled: true, result}` or `{handled: false}`, and only an unhandled
+  request continues to the realtime conversation, so exactly one path owns a
+  request. A request naming exactly one http(s) address is always handled as a
+  page inspection, even when the address is refused, so it can never become a
+  legacy `open_url` call. Any other command is handled only if the durable
+  state it acts on exists (a new search, clinic question or "remember" needs
+  none; status and check need a task; "yes", refinements, choices and cancel
+  need an open task), so "Hello", "yes" or "check the weather" with no task
+  stay ordinary conversation. Invalid input or an interpreter failure is
+  refused as handled; the renderer sends nothing if main cannot be asked.
 - **Clinic information** (`clinic_info` tasks). `POST
   /tasks/{id}/info/lookup` reads public doctor profiles through the reviewed
   `read_doctor_profiles` operation (READ_ONLY, SAFE_TO_RETRY) and appends

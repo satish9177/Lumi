@@ -18,7 +18,8 @@ a GET.
 ## Flow
 
 ```text
-renderer form / typed request containing one URL
+renderer form / main composer or task-panel request containing one URL
+  -> main composer: routeTypedRequest claims it (never reaches realtime/open_url)
   -> preload (fixed channels, positional strings)
   -> main: canonicalize + destination policy; question bounds
   -> runtime POST /tasks {type: page_inspection, url, question}        (policy again)

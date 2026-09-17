@@ -421,6 +421,12 @@ export interface AgentApi {
    * can never approve or execute.
    */
   submitTextRequest: (requestId: string, text: string) => Promise<AgentResult<VoiceTaskOutcome>>
+  /**
+   * The main composer's first stop. Main decides whether a durable-agent
+   * capability owns the request; only an unhandled request may continue to
+   * the realtime conversation. Never approves or executes anything.
+   */
+  routeTypedRequest: (requestId: string, text: string) => Promise<TypedRequestRoute>
   /** Read-only lookup for the active clinic-info task. */
   lookupClinicInfo: () => Promise<AgentResult<AgentDoctorProfileView[]>>
   /**
@@ -443,6 +449,17 @@ export interface AgentApi {
   getDiagnostics: () => Promise<AgentResult<ModelDiagnosticView[]>>
 }
 
+/**
+ * How main routed one request typed in the main composer. Exactly one path
+ * owns a request: `handled` means the durable agent took it (successfully or
+ * not) and it must not also reach the realtime conversation, where a legacy
+ * tool could act on it; `handled: false` means no durable-agent capability
+ * claimed it and nothing was done.
+ */
+export type TypedRequestRoute =
+  | { handled: false }
+  | { handled: true; result: AgentResult<VoiceTaskOutcome> }
+
 export const AGENT_IPC_CHANNELS = {
   getRuntimeStatus: 'lifelens:agent:get-runtime-status',
   runtimeStatusChanged: 'lifelens:agent:runtime-status-changed',
@@ -459,6 +476,7 @@ export const AGENT_IPC_CHANNELS = {
   reconcileAction: 'lifelens:agent:reconcile-action',
   voiceCommand: 'lifelens:agent:voice-command',
   submitTextRequest: 'lifelens:agent:submit-text-request',
+  routeTypedRequest: 'lifelens:agent:route-typed-request',
   lookupClinicInfo: 'lifelens:agent:lookup-clinic-info',
   createPageInspection: 'lifelens:agent:create-page-inspection',
   approveInspection: 'lifelens:agent:approve-inspection',

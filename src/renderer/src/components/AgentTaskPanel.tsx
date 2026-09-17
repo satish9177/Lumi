@@ -39,6 +39,8 @@ export interface AgentTaskPanelProps {
   onClose: () => void
   /** A voice step asked the panel to re-read durable state and draw attention. */
   focusRequest?: { target: VoiceTaskFocus; serial: number }
+  /** A trusted inspection control returned this view; the app may show its outcome in the conversation. */
+  onInspectionResult?: (inspection: AgentInspectionView) => void
   /** Injectable for tests. */
   pollIntervalMs?: number
 }
@@ -63,14 +65,15 @@ const RUNTIME_LABELS: Record<AgentRuntimeView['state'], string> = {
 }
 
 /**
- * Durable appointment-booking task: explicit create/search/prepare controls,
- * the persisted approval preview, and the task timeline.
+ * The durable Lumi agent task (appointment booking, clinic information or
+ * page inspection): explicit controls, the persisted approval preview, and
+ * the task timeline.
  *
  * Nothing here changes state on mount, on polling or on reconnect: polling
  * only reads. Every mutation is a button the user pressed, and approval sends
  * only the action id and the revision that was on screen.
  */
-export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 2_000 }: AgentTaskPanelProps) {
+export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResult, pollIntervalMs = 2_000 }: AgentTaskPanelProps) {
   const [runtime, setRuntime] = useState<AgentRuntimeView>({ state: 'starting' })
   const [state, setState] = useState<TaskState | null>(null)
   const [loaded, setLoaded] = useState(false)
@@ -240,25 +243,28 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 
   async function onInspectionControl(control: InspectionControl, inspection: AgentInspectionView): Promise<void> {
     // The revision and digest that were on screen when the user pressed.
     const { actionId, revision, proposalDigest } = inspection
+    const report = (result: AgentResult<AgentInspectionView> | undefined): void => {
+      if (result?.ok && mounted.current) onInspectionResult?.(result.value)
+    }
     switch (control) {
       case 'approve_and_inspect':
-        await run('inspect_execute', async () => {
+        report(await run('inspect_execute', async () => {
           const approved = await agent.approveInspection(actionId, revision)
           if (!approved.ok) return approved
           if (approved.value.proposalDigest !== proposalDigest || approved.value.status !== 'APPROVED') {
             return { ok: false, error: { code: 'invalid_response', message: 'The approved inspection did not match what you reviewed. Nothing was opened.' } }
           }
           return agent.executeInspection(actionId, approved.value.revision)
-        })
+        }))
         return
       case 'inspect_now':
-        await run('inspect_execute', () => agent.executeInspection(actionId, revision))
+        report(await run('inspect_execute', () => agent.executeInspection(actionId, revision)))
         return
       case 'reject':
-        await run('reject', () => agent.rejectInspection(actionId, revision))
+        report(await run('reject', () => agent.rejectInspection(actionId, revision)))
         return
       case 'answer_from_observation':
-        await run('inspect_answer', () => agent.answerInspection(actionId))
+        report(await run('inspect_answer', () => agent.answerInspection(actionId)))
         return
       case 'inspect_again':
         await run('inspect_prepare', () => agent.inspectPageAgain())
@@ -356,8 +362,8 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, pollIntervalMs = 
   return (
     <div className="agent-task-panel" data-testid="agent-task-panel">
       <header className="settings-header">
-        <h2>Appointment booking</h2>
-        <button className="icon-button" type="button" aria-label="Close appointment booking" onClick={onClose}>&times;</button>
+        <h2>Lumi agent</h2>
+        <button className="icon-button" type="button" aria-label="Close agent" onClick={onClose}>&times;</button>
       </header>
       <div className="settings-scroll">
         <p className={`agent-runtime-state state-${runtime.state}`} role="status" data-testid="agent-runtime-state">

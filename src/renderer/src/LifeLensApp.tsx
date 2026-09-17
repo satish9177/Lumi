@@ -60,10 +60,17 @@ import {
 import { ScriptedRealtimeServer, installGeminiHarness, installRealtimeHarness } from './realtime-scripted'
 import { GeminiLiveProvider } from './voice/gemini-live-provider'
 import { BrowserPcmAudio, SilentAudio } from './voice/pcm-audio'
-import type { AgentResult } from '../../shared/agent-contracts'
+import type { AgentInspectionView, AgentResult } from '../../shared/agent-contracts'
+import { describeOutcome } from './agent-task-view'
+import { describeInspectionForConversation, submitComposerRequest } from './composer-routing'
 import type { VoiceTaskCommand, VoiceTaskFocus, VoiceTaskOutcome } from '../../shared/voice-task-contracts'
 
 const VOICE_PAUSED_NOTICE = 'Voice paused to save cost — ask a question to reconnect.'
+
+interface TranscriptLine {
+  readonly role: 'user' | 'assistant'
+  readonly text: string
+}
 
 interface PendingProposal {
   readonly proposal: ToolProposal
@@ -122,7 +129,10 @@ export default function LifeLensApp() {
   const composerRef = useRef<HTMLTextAreaElement>(null)
   const [online, setOnline] = useState(() => navigator.onLine)
   const conversationRef = useRef<HTMLDivElement>(null)
-  const [transcript, setTranscript] = useState<string[]>([])
+  const [transcript, setTranscript] = useState<TranscriptLine[]>([])
+  // Synchronous guard: one composer request is routed at a time.
+  const routingRef = useRef(false)
+  const reportedInspectionsRef = useRef(new Set<string>())
   const [documentRoots, setDocumentRoots] = useState<ApprovedDocumentRoot[]>([])
   const [searchQuery, setSearchQuery] = useState('resume')
   const [searchResults, setSearchResults] = useState<DocumentSearchResult[]>([])
@@ -387,8 +397,39 @@ export default function LifeLensApp() {
     }
   }, [])
 
-  const appendTranscript = (text: string): void => {
-    setTranscript((current) => [...current, text].slice(-8))
+  const appendTranscript = (text: string, role: TranscriptLine['role'] = 'assistant'): void => {
+    setTranscript((current) => [...current, { role, text }].slice(-8))
+  }
+
+  /** Opens the trusted agent surface and draws attention to a region, never a button. */
+  const focusAgent = (focus: VoiceTaskFocus): void => {
+    setAgentTasksOpen(true)
+    setAgentFocus((current) => ({ target: focus, serial: (current?.serial ?? 0) + 1 }))
+  }
+
+  /**
+   * The durable agent owned a composer request. The conversation gets the
+   * request and one app-authored status line; any older legacy tool result is
+   * cleared so it cannot read as this request's outcome.
+   */
+  const showAgentOutcome = (request: string, result: AgentResult<VoiceTaskOutcome>): void => {
+    appendTranscript(request, 'user')
+    setToolResult(undefined)
+    if (!result.ok) {
+      appendTranscript(result.error.message)
+      return
+    }
+    appendTranscript(describeOutcome(result.value))
+    if (result.value.focus !== 'none') focusAgent(result.value.focus)
+  }
+
+  /** A finished inspection's outcome, once per state, in the main conversation. */
+  const showInspectionResult = (inspection: AgentInspectionView): void => {
+    const line = describeInspectionForConversation(inspection)
+    const key = `${inspection.actionId}:${inspection.status}:${inspection.answer?.status ?? ''}`
+    if (!line || reportedInspectionsRef.current.has(key)) return
+    reportedInspectionsRef.current.add(key)
+    appendTranscript(line)
   }
 
   const updateDocumentRoots = (roots: ApprovedDocumentRoot[]): void => {
@@ -557,13 +598,10 @@ export default function LifeLensApp() {
     try {
       result = await window.lifeLens.agent.voiceCommand(command)
     } catch {
-      result = { ok: false, error: { code: 'request_failed', message: 'Lumi could not reach its appointment task.' } }
+      result = { ok: false, error: { code: 'request_failed', message: 'Lumi could not reach its agent task.' } }
     }
     const focus = result.ok ? result.value.focus : 'none'
-    if (focus !== 'none') {
-      setAgentTasksOpen(true)
-      setAgentFocus((current) => ({ target: focus, serial: (current?.serial ?? 0) + 1 }))
-    }
+    if (focus !== 'none') focusAgent(focus)
     // Spoken only while this voice session is current. The durable result is
     // already in the task panel either way.
     clientRef.current?.completeVoiceTask(serverCall, result)
@@ -758,29 +796,48 @@ export default function LifeLensApp() {
     void captureScreen(serverCall)
   }
 
+  /**
+   * A typed request goes to main's router first. Only a request no durable
+   * agent capability owns continues to the realtime conversation, so a page
+   * inspection can never become a legacy `open_url` call.
+   */
   const askQuestion = async (): Promise<void> => {
+    const request = question.trim()
+    if (!request || routingRef.current) return
+    routingRef.current = true
+    setError(undefined)
+    setQuestion('')
     try {
-      setError(undefined)
-      await ensureConnected()
-      const client = clientRef.current
-      if (!client) {
-        throw new Error('Connect voice first, then ask Lumi a question.')
-      }
       try {
-        await window.lifeLens.noteUserRequest(question)
+        await window.lifeLens.noteUserRequest(request)
       } catch {
         // Intent tracking is advisory; the request itself still proceeds.
       }
-      await client.sendUserRequest(question)
-      // Lumi, not the model, decides that a scam question opens the scam-check
-      // gate — and opening the gate still captures nothing.
-      if (classifyUserIntent(question).intent === 'scam_check') {
-        requestScamCheck()
-      }
-      setQuestion('')
+      await submitComposerRequest(request, {
+        route: (requestId, text) => window.lifeLens.agent.routeTypedRequest(requestId, text),
+        agentHandled: showAgentOutcome,
+        converse: async (text) => {
+          await ensureConnected()
+          const client = clientRef.current
+          if (!client) {
+            throw new Error('Connect voice first, then ask Lumi a question.')
+          }
+          appendTranscript(text, 'user')
+          await client.sendUserRequest(text)
+          // Lumi, not the model, decides that a scam question opens the
+          // scam-check gate — and opening the gate still captures nothing.
+          if (classifyUserIntent(text).intent === 'scam_check') {
+            requestScamCheck()
+          }
+        }
+      })
     } catch (requestError) {
+      // Nothing was sent; keep the words for another try.
+      setQuestion((current) => current || request)
       setCompanionState('error')
       setError(messageFrom(requestError))
+    } finally {
+      routingRef.current = false
     }
   }
 
@@ -1517,7 +1574,9 @@ export default function LifeLensApp() {
             </div>
           )}
 
-          {transcript.map((line, index) => <p className="message" key={`${line}-${index}`}>{line}</p>)}
+          {transcript.map((line, index) => (
+            <p className={line.role === 'user' ? 'message message-user' : 'message'} key={`${index}-${line.text}`}>{line.text}</p>
+          ))}
 
           {capturePickerOpen && (
             <section className="source-picker" aria-label="Choose a screen or window to capture">
@@ -1724,7 +1783,7 @@ export default function LifeLensApp() {
               {COPY.scamCheck.quickAction}
             </button>
             <button className="chip" type="button" onClick={() => setAgentTasksOpen(true)} data-testid="open-agent-tasks">
-              Book appointment
+              Agent tasks
             </button>
           </div>
 
@@ -1774,8 +1833,9 @@ export default function LifeLensApp() {
           </form>
 
           {agentTasksOpen && (
-            <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Appointment booking">
-              <AgentTaskPanel agent={window.lifeLens.agent} focusRequest={agentFocus} onClose={() => setAgentTasksOpen(false)} />
+            <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Lumi agent">
+              <AgentTaskPanel agent={window.lifeLens.agent} focusRequest={agentFocus} onInspectionResult={showInspectionResult}
+                onClose={() => setAgentTasksOpen(false)} />
             </div>
           )}
 

@@ -1,4 +1,4 @@
-import { AGENT_IPC_CHANNELS, type AgentResult, type AgentRuntimeView } from '../../shared/agent-contracts'
+import { AGENT_IPC_CHANNELS, type AgentResult, type AgentRuntimeView, type TypedRequestRoute } from '../../shared/agent-contracts'
 import {
   PREFERENCE_KEYS,
   type AgentPreferenceView,
@@ -6,6 +6,7 @@ import {
   type PreferenceKey
 } from '../../shared/model-contracts'
 import type { VoiceTaskOutcome } from '../../shared/voice-task-contracts'
+import { extractInspectionRequest } from '../agent/task-request-interpreter'
 import type { AgentTaskController } from './agent-tasks'
 import type { VoiceTaskController } from './voice-task-controller'
 
@@ -27,7 +28,10 @@ export interface AgentIpcDependencies {
   runtimeStatus: () => AgentRuntimeView
   restartRuntime: () => Promise<AgentRuntimeView>
   /** Typed requests. Absent in builds without the interpreter. */
-  text?: { submit(requestId: unknown, text: unknown): Promise<AgentResult<VoiceTaskOutcome>> }
+  text?: {
+    submit(requestId: unknown, text: unknown): Promise<AgentResult<VoiceTaskOutcome>>
+    route(requestId: unknown, text: unknown): Promise<TypedRequestRoute>
+  }
   memory?: {
     preferences(): Promise<AgentPreferenceView[]>
     forget(key: PreferenceKey): Promise<AgentPreferenceView[]>
@@ -36,6 +40,19 @@ export interface AgentIpcDependencies {
 }
 
 const UNAVAILABLE = { code: 'request_failed', message: 'That is not available in this build.' } as const
+const INSPECTION_UNAVAILABLE = {
+  code: 'inspection_unavailable', message: 'Page inspection needs a configured text model. Nothing was opened.'
+} as const
+
+/**
+ * Without an interpreter no durable capability can take a request, but a
+ * page-inspection request is still claimed: it must not reach a conversation
+ * tool that would open the address instead.
+ */
+function routeWithoutInterpreter(request: unknown): TypedRequestRoute {
+  const text = typeof request === 'string' ? request.replace(/\s+/g, ' ').trim() : ''
+  return extractInspectionRequest(text) ? { handled: true, result: { ok: false, error: INSPECTION_UNAVAILABLE } } : { handled: false }
+}
 
 export function registerAgentIpc({
   ipcMain, assertTrustedSender, controller, voice, runtimeStatus, restartRuntime, text, memory, diagnostics
@@ -71,6 +88,17 @@ export function registerAgentIpc({
   // A typed request is interpreted in main into the same closed commands.
   handle(AGENT_IPC_CHANNELS.submitTextRequest, (requestId, request) =>
     text ? text.submit(requestId, request) : { ok: false, error: UNAVAILABLE })
+  // The main composer asks here first; only `handled: false` may go on to the
+  // realtime conversation. The interpreter never rejects; if it somehow does,
+  // the request is refused rather than passed on.
+  handle(AGENT_IPC_CHANNELS.routeTypedRequest, async (requestId, request): Promise<TypedRequestRoute> => {
+    if (!text) return routeWithoutInterpreter(request)
+    try {
+      return await text.route(requestId, request)
+    } catch {
+      return { handled: true, result: { ok: false, error: { code: 'request_failed', message: 'Lumi could not handle that request. Nothing was done.' } } }
+    }
+  })
   handle(AGENT_IPC_CHANNELS.lookupClinicInfo, () => controller.lookupClinicInfo())
   // Page inspection: positional primitives, validated inside the controller.
   // Approval and execution are separate channels, each bound to the revision

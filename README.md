@@ -44,7 +44,7 @@ uv run python -m evals.sites.appointments.server --port 8801   # demo clinic sit
 cd ..\..; npm.cmd run dev
 ```
 
-Open Lumi → **Book appointment** → type *"Find a dermatologist Saturday evening under 1000 and prepare the cheapest one"*. With no model keys, typed requests use deterministic English rules and voice runs in mock mode. Full guide: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+Open Lumi → **Agent tasks** → type *"Find a dermatologist Saturday evening under 1000 and prepare the cheapest one"*. Requests typed in the main composer reach the same agent when it owns them (for example *"Inspect https://github.com/satish9177/Lumi and tell me what this project does"* shows the inspection approval card); everything else goes to the voice conversation. With no model keys, typed requests use deterministic English rules and voice runs in mock mode. Full guide: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Providers
 
