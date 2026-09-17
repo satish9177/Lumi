@@ -446,7 +446,7 @@ export function describeInspection(inspection: AgentInspectionView, now: number)
     case 'EXECUTING':
       return {
         ...base, tone: 'progress', eyebrow: 'READING', title: 'Reading the page',
-        lines: ['Lumi is reading this page once in an isolated browser. It will not click, type or sign in.'], controls: []
+        lines: ['Lumi is inspecting this page once in an isolated browser — no clicks, form submissions, uploads, downloads, or non-GET requests.'], controls: []
       }
     case 'OUTCOME_UNKNOWN':
     case 'RECONCILING':
@@ -454,7 +454,7 @@ export function describeInspection(inspection: AgentInspectionView, now: number)
         ...base, tone: 'uncertain', eyebrow: 'RESULT UNKNOWN', title: 'Lumi does not know what was read',
         lines: [
           'The page may have been opened, but Lumi did not receive or save what it read. Nothing was answered.',
-          'Reading a public page changes nothing Lumi needs to check, and Lumi will not retry by itself. A new inspection needs a new approval.'
+          'Inspecting a page sends no form submissions or other non-GET requests, so there is no action for Lumi to check. Lumi will not retry by itself; a new inspection needs a new approval.'
         ],
         controls: ['inspect_again']
       }

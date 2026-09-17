@@ -15,6 +15,9 @@ Pages worth knowing about:
   at a canary origin.
 * `/profiles/escape` -- script that navigates the page itself to the canary.
 * `/profiles/dynamic` -- stats rendered late from a same-origin API call.
+* `/profiles/mutating` -- tries same-origin POST, PUT, PATCH and DELETE (fetch
+  and XHR) against `/mutation-canary`, then renders stats from a GET. Every
+  request that reaches `/mutation-canary` is counted by method.
 * `/profiles/replacing` -- replaces itself with the rated profile after load.
 * `/profiles/restless` -- visible text that never stops changing.
 * `/redirect/*` -- allowed, chained, excessive and forbidden redirects.
@@ -148,6 +151,43 @@ async def dynamic(request: Request) -> HTMLResponse:
         "}, 700);"
     )
     return _document(f"{PROFILE['handle']} - Profile", body, script)
+
+
+MUTATION_METHODS = ("POST", "PUT", "PATCH", "DELETE")
+
+
+@router.get("/profiles/mutating", response_class=HTMLResponse)
+async def mutating(request: Request, methods: str = Query(default="POST,PUT,PATCH,DELETE", max_length=40)) -> HTMLResponse:
+    _log(request)
+    chosen = [method for method in methods.split(",") if method in MUTATION_METHODS]
+    body = (
+        f"<main><h1>{PROFILE['handle']}</h1><section aria-label=\"Statistics\" id=\"stats\">"
+        "<p>Loading statistics…</p></section></main>"
+    )
+    script = (
+        "(async () => {"
+        f"  for (const method of {json.dumps(chosen)}) {{"
+        "    try { await fetch('/mutation-canary?via=fetch', {method, body: 'x=1',"
+        "      headers: {'Content-Type': 'application/x-www-form-urlencoded'}}); } catch (e) {}"
+        "    await new Promise((done) => { const xhr = new XMLHttpRequest();"
+        "      xhr.open(method, '/mutation-canary?via=xhr'); xhr.onloadend = done; xhr.send('x=1'); });"
+        "  }"
+        "  const stats = await (await fetch('/api/profile-stats')).json();"
+        "  document.getElementById('stats').innerHTML ="
+        "    '<dl><dt>Contest rating</dt><dd>' + stats.contest_rating + '</dd>' +"
+        "    '<dt>Global rank</dt><dd>' + stats.global_rank + '</dd>' +"
+        "    '<dt>Problems solved</dt><dd>' + stats.problems_solved + '</dd></dl>';"
+        "})();"
+    )
+    return _document(f"{PROFILE['handle']} - Profile", body, script)
+
+
+@router.api_route("/mutation-canary", methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+async def mutation_canary(request: Request) -> JSONResponse:
+    """Counts every request that reaches it, by method. Nothing may ever arrive."""
+    hits: Counter[str] = request.app.state.hits
+    hits[f"{request.method} /mutation-canary"] += 1
+    return JSONResponse({"received": request.method})
 
 
 @router.get("/api/profile-stats")

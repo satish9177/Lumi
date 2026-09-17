@@ -96,6 +96,7 @@ const CASES = {
     ['a model persuaded by a hostile page is refused', ts('src/main/agent/page-answer.test.ts', 'a model persuaded by a hostile page is refused')],
     ['page text reaches only approved providers', ts('src/main/agent/page-answer.test.ts', 'sends page text only to providers the approval named')],
     ['URL policy: schemes, credentials, local and IP destinations', py('tests/test_public_url_policy.py', 'test_refused_destinations_fail_closed_with_a_stable_code')],
+    ['page scripts cannot send POST/PUT/PATCH/DELETE; GET content still loads', py('tests/test_network_guard_methods.py', 'test_the_guard_refuses_and_records_every_mutation_method')],
     ['hostile page: every exfiltration channel is closed', py('tests/test_public_page_worker.py', 'test_hostile_text_is_only_data_and_every_exfiltration_channel_is_closed')],
     ['forbidden redirects are refused before they are requested', py('tests/test_public_page_worker.py', 'test_a_forbidden_redirect_is_refused_before_it_is_requested')],
     ['dynamic page: document epoch and late content', py('tests/test_public_page_worker.py', 'test_a_page_that_replaces_itself_is_observed_at_its_new_document_epoch')],

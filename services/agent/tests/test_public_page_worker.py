@@ -137,6 +137,19 @@ async def test_hostile_text_is_only_data_and_every_exfiltration_channel_is_close
     assert pages.site.hits() == {"/profiles/hostile": 1}
 
 
+@pytest.mark.parametrize("methods", ["POST", "PUT", "PATCH", "DELETE", "POST,PUT,PATCH,DELETE"])
+async def test_same_origin_mutation_requests_never_leave_the_browser(pages: Pages, methods: str) -> None:
+    """The page's own fetch/XHR POST, PUT, PATCH or DELETE is refused; GET content still loads."""
+    url = f"{pages.site.base_url}/profiles/mutating?methods={methods.replace(',', '%2C')}"
+    observation = _observation(await pages.inspect(url))
+    assert observation.settled
+    assert PROFILE["contest_rating"] in _text(observation)
+    hits = pages.site.hits()
+    assert not any(path.endswith("/mutation-canary") for path in hits), hits
+    assert hits.get("/api/profile-stats") == 1
+    assert hits.get("/profiles/mutating") == 1
+
+
 async def test_a_page_that_navigates_itself_away_is_refused_without_contacting_it(pages: Pages) -> None:
     response = await pages.inspect(f"{pages.site.base_url}/profiles/escape?canary={pages.canary.base_url}")
     assert response.status is OperationStatus.FAILED_BEFORE_EFFECT

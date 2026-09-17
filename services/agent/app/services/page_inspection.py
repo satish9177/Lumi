@@ -18,7 +18,12 @@ worker never sees the question. The answer can only be recorded for the latest
 observation of the task, bound to its content hash, and only if every quote it
 cites really is in the cited block.
 
-Outcome semantics for this read-only operation, stated once:
+`inspect_public_page` is classified READ_ONLY. For M7a that means Lumi performs
+no intentional mutation operation: no clicks, form submissions, uploads,
+downloads, or non-GET requests. It does not mean opening a page is free of
+remote side effects -- a site may log or count a GET.
+
+Outcome semantics for this operation, stated once:
 
 * SUCCEEDED -- a validated observation is durably stored with the attempt.
 * FAILED -- Lumi knows no usable observation was obtained (the destination was

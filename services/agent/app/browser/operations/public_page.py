@@ -304,8 +304,10 @@ OPERATIONS: tuple[BrowserOperation, ...] = (
     BrowserOperation(
         name=INSPECT_PUBLIC_PAGE,
         description=(
-            "Open one approved public page in a fresh isolated context and read bounded "
-            "visible text and links. No clicking, typing, sign-in, downloads or uploads."
+            "Inspect one approved public page in a fresh isolated context and read bounded "
+            "visible text and links. No clicks, form submissions, uploads, downloads, or "
+            "non-GET requests. READ_ONLY here means Lumi performs no intentional mutation "
+            "operation; a GET can still have incidental effects on the remote server."
         ),
         input_model=InspectPageInput,
         output_model=PageObservation,
@@ -324,6 +326,7 @@ OPERATIONS: tuple[BrowserOperation, ...] = (
         ),
         postconditions=(
             "every redirect hop and the final document passed the destination policy",
+            "no request other than GET or HEAD left the browser context",
             "a bounded observation whose content hash matches its text and links was produced",
         ),
         handler=inspect_public_page,

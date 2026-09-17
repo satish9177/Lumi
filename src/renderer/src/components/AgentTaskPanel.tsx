@@ -727,7 +727,7 @@ function InspectionCard({ inspection, now, disabled, busy, taskClosed, onControl
           <dt>Website</dt><dd data-testid="agent-inspection-host"><strong>{proposal.host}</strong></dd>
           <dt>Address</dt><dd className="agent-digest" data-testid="agent-inspection-url">{proposal.url}</dd>
           <dt>Lumi will</dt>
-          <dd>Open this address once in an isolated browser and read its visible text and up to {proposal.maxLinks} links. Read-only: no clicking, typing, sign-in, downloads or uploads.</dd>
+          <dd data-testid="agent-inspection-operation">Inspect this public page — no clicks, form submissions, uploads, downloads, or non-GET requests. Lumi opens it once in an isolated browser and reads its visible text and up to {proposal.maxLinks} links.</dd>
           <dt>Your question</dt><dd data-testid="agent-inspection-question">{proposal.question}</dd>
           <dt>Sent to answer</dt>
           <dd data-testid="agent-inspection-disclosure">

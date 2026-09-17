@@ -7,7 +7,13 @@ The user gives a public page address and a question. Lumi shows an exact
 approval card. After the trusted click, an isolated browser reads that one page
 once. The runtime stores a bounded observation. Electron main then answers
 from that observation, quoting the page. This is not browsing: there is no
-clicking, typing, search, sign-in, download, upload or follow-up navigation.
+clicking, typing, search, sign-in, download, upload, form submission, follow-up
+navigation, or non-GET request.
+
+"Read-only" is used narrowly. The operation is classified `READ_ONLY`, which in
+M7a means Lumi performs no intentional mutation operation. It does not mean
+opening a page has zero remote side effects: a server can log, count or react to
+a GET.
 
 ## Flow
 
@@ -19,7 +25,8 @@ renderer form / typed request containing one URL
   -> runtime POST /tasks/{id}/inspection/prepare {disclosure}
        immutable proposal: url, host, question, policy_version, limits,
        disclosure recipients  -> digest -> exact, expiring approval request
-  -> trusted card (host, URL, "read-only", question, who receives page text)
+  -> trusted card (host, URL, "no clicks, form submissions, uploads, downloads,
+     or non-GET requests", question, who receives page text)
   -> trusted click: /approve, then /browser-execution with the revision on screen
        start_attempt (claims the single-use approval) -> dispatch row committed
        -> worker inspect_public_page {url}                           (policy again)
@@ -57,7 +64,10 @@ makes.
   checks the target and navigates to it as a new request, for at most 5 hops.
   Subresource redirects are dropped.
 * **Everything else the page does:** only document, script, stylesheet and
-  fetch/XHR requests are allowed, and only to allowed hosts. Images, media,
+  fetch/XHR requests are allowed, only to allowed hosts, and only with GET or
+  HEAD. A page's own `fetch`/XHR POST, PUT, PATCH or DELETE -- same-origin
+  included -- and any form submission are refused before they leave the
+  context. Images, media,
   fonts, beacons, WebSockets and event streams are refused. Popups are closed,
   service workers are blocked, and downloads, attachments and non-HTML
   documents are refused.

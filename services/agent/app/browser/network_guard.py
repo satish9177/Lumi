@@ -19,6 +19,12 @@ and fail-closed:
   Images, media, fonts, beacons, event streams, manifests and WebSockets are
   refused, which also removes most passive exfiltration channels a page has.
   Documents must be HTML or plain text and must not be attachments.
+* **GET and HEAD only.** No request with any other method leaves the context:
+  not a form submission, not a same-origin `fetch(..., {method: "POST"})`, not
+  PUT, PATCH, DELETE or OPTIONS. Inspecting a page must never let that page make
+  Lumi send a mutation request on its behalf. This does not make GET free of
+  server-side effects (a site can count or log a GET); it means Lumi issues no
+  intentional mutation operation.
 
 What it does not do, stated plainly: it is not an egress proxy. Resolution
 happens here and again inside Playwright's driver, so a hostile DNS server can
@@ -47,8 +53,8 @@ from app.domain.public_url import (
 logger = logging.getLogger("lumi.browser.network_guard")
 
 ALLOWED_RESOURCE_TYPES = frozenset({"document", "stylesheet", "script", "xhr", "fetch"})
-DOCUMENT_METHODS = frozenset({"GET", "HEAD"})
-SUBRESOURCE_METHODS = frozenset({"GET", "HEAD", "POST"})
+#: Every permitted request, document or subresource, same-origin or not.
+ALLOWED_METHODS = frozenset({"GET", "HEAD"})
 REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 DOCUMENT_CONTENT_TYPES = frozenset({"text/html", "application/xhtml+xml", "text/plain"})
 MAX_RESPONSE_BYTES = 5_000_000
@@ -77,6 +83,8 @@ class PublicNetworkGuard:
         #: Why the main document's last navigation was refused, if it was.
         self.main_frame_block: str | None = None
         self.blocked: Counter[str] = Counter()
+        #: Refused request methods, e.g. {"POST": 2}. Method names only, never URLs.
+        self.blocked_methods: Counter[str] = Counter()
 
     async def install(self, context: BrowserContext, page: Page) -> None:
         self._page = page
@@ -144,8 +152,10 @@ class PublicNetworkGuard:
         if resource_type not in ALLOWED_RESOURCE_TYPES:
             await self._refuse(route, "resource_type_blocked", main_document=main_document)
             return
-        methods = DOCUMENT_METHODS if resource_type == "document" else SUBRESOURCE_METHODS
-        if request.method not in methods:
+        method = request.method.upper()
+        if method not in ALLOWED_METHODS:
+            self.blocked_methods[method if method.isalpha() and len(method) <= 16 else "OTHER"] += 1
+            logger.info("refused a non-GET request during page inspection", extra={"method": method})
             await self._refuse(route, "method_blocked", main_document=main_document)
             return
         try:

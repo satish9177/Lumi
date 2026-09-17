@@ -145,7 +145,8 @@ describe('the trusted inspection card', () => {
     const model = describeInspection(unknown, NOW)
     expect(model.tone).toBe('uncertain')
     expect(model.controls).toEqual(['inspect_again'])
-    expect(model.lines.join(' ')).toContain('A new inspection needs a new approval')
+    expect(model.lines.join(' ')).toContain('a new inspection needs a new approval')
+    expect(model.lines.join(' ')).toContain('no form submissions or other non-GET requests')
   })
 
   it('distinguishes "page read" from "question answered"', () => {
