@@ -1,6 +1,6 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type { VoiceRelayApi, VoiceRelayServerEvent } from '../../shared/voice-relay-contracts'
 import { constraintsFromWire, planFromWire } from '../../shared/plan-wire'
 import { VOICE_TASK_INSTRUCTIONS, VOICE_TASK_TOOL_DEFINITIONS } from '../../renderer/src/voice-task-tools'
@@ -13,13 +13,16 @@ import { ApplicationDefaultCredentials } from '../models/google-auth'
 import { createModelRouter } from '../models/model-config'
 import { ModelRoutingError } from '../models/model-router'
 import { GeminiLiveRelay } from './gemini-live-relay'
+import { requireLiveAudio } from './live-audio-fixtures'
 
 /**
  * Opt-in live provider validation. Never part of CI:
  *
- *   LUMI_LIVE_PROVIDER_TESTS=1 LUMI_VERTEX_ENABLED=1 LUMI_LIVE_AUDIO_DIR=<dir> npx vitest run src/main/voice/providers.live.test.ts
+ *   npm run live:audio   # synthetic utterances into dist/live-audio
+ *   LUMI_LIVE_PROVIDER_TESTS=1 LUMI_VERTEX_ENABLED=1 LUMI_LIVE_AUDIO_DIR=dist/live-audio npx vitest run src/main/voice/providers.live.test.ts
  *
- * The audio directory holds synthetic utterances (see scripts/live/make-test-audio.md).
+ * The audio directory holds the synthetic utterances described in
+ * live-audio-fixtures.ts (docs/EVALS.md has the PowerShell version).
  * Results are written as a structured report without free-form transcripts
  * beyond the synthetic test phrases themselves.
  */
@@ -33,12 +36,12 @@ afterAll(() => {
   if (LIVE) writeFileSync(REPORT, JSON.stringify(report, null, 2))
 })
 
+let audio: Record<string, Buffer> = {}
+
 function pcm(name: string): Buffer {
-  const raw = join(AUDIO_DIR, `${name}.pcm`)
-  if (existsSync(raw)) return readFileSync(raw)
-  const wav = readFileSync(join(AUDIO_DIR, `${name}.wav`))
-  const data = wav.indexOf(Buffer.from('data'))
-  return wav.subarray(data + 8)
+  const fixture = audio[name]
+  if (!fixture) throw new Error(`no synthetic audio fixture named ${name}`)
+  return fixture
 }
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
@@ -139,6 +142,9 @@ function criteriaOf(call: { name: string; argumentsJson: string }): Record<strin
 }
 
 describe.skipIf(!LIVE)('live: Gemini Live on Vertex AI', () => {
+  // Enabled live runs fail loudly, with the fix, when fixtures are missing or malformed.
+  beforeAll(() => { audio = requireLiveAudio(AUDIO_DIR) })
+
   it('connects, transcribes, requests a typed tool, answers with audio, is interruptible, and reconnects', async () => {
     const diagnostics = new DiagnosticsLog()
     const first = await session(diagnostics)

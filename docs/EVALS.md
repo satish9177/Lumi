@@ -55,13 +55,60 @@ See [PACKAGING.md](PACKAGING.md).
 
 ## Live providers (manual, opt-in, paid)
 
+Run from the repository root in PowerShell. Google uses Application Default
+Credentials (`gcloud auth application-default login`, project from
+`LUMI_VERTEX_PROJECT`, `GOOGLE_CLOUD_PROJECT` or the ADC quota project); keys
+stay in the shell and are never written to the repository.
+
 ```powershell
+# 1. Generate the synthetic utterances (Vertex AI gemini-2.5-flash-tts via ADC)
+npm.cmd run live:audio            # writes dist\live-audio\*.wav + manifest.json
+
+# 2. Run the live checks
 $env:LUMI_LIVE_PROVIDER_TESTS = '1'
-$env:LUMI_VERTEX_ENABLED = '1'            # and/or OPENAI_API_KEY / DEEPSEEK_API_KEY
-$env:LUMI_LIVE_AUDIO_DIR = '<dir>'        # en_compound.wav, en_stop.wav, en_in.pcm, te_mixed.pcm, te_pure.pcm
+$env:LUMI_VERTEX_ENABLED = '1'
+$env:LUMI_LIVE_AUDIO_DIR = "$PWD\dist\live-audio"
+$env:OPENAI_API_KEY = '...'       # optional; OpenAI text is reported skipped without it
+$env:DEEPSEEK_API_KEY = '...'     # optional; DeepSeek text is reported skipped without it
 npx vitest run src/main/voice/providers.live.test.ts
 ```
 
-Providers without credentials are reported as skipped. Use synthetic
-utterances only; the report records the synthetic transcripts and structured
-results, never real speech. Results and limitations: [PROVIDERS.md](PROVIDERS.md).
+The structured report goes to `live-provider-report.json` (git-ignored;
+override with `LUMI_LIVE_REPORT`).
+
+### Audio fixtures
+
+`scripts/live/make-test-audio.ts` speaks the fixed phrases in
+`src/main/voice/live-audio-fixtures.ts` and writes each one as a canonical PCM
+WAV in the exact format Lumi streams to Gemini Live: **16 000 Hz, mono,
+signed 16-bit little-endian PCM** (the TTS model's 24 kHz output is
+resampled). Only the PCM samples are sent (`realtimeInput.audio`,
+`audio/pcm;rate=16000`); the WAV header never leaves the test.
+
+| File | Language | Phrase | Used by |
+| --- | --- | --- | --- |
+| `en_compound` | en-IN | Find me a dermatologist on Saturday evening under 1000 rupees and prepare the cheapest one. | main scenario (tool call, transcript) |
+| `en_stop` | en-IN | Stop, stop. Wait a moment, please stop talking. | barge-in over the spoken answer |
+| `en_in` | en-IN | Find me a dermatologist Saturday evening under 1000 rupees. | multilingual (asserted) |
+| `te_mixed` | te-IN | Saturday evening dermatologist appointment choodu, 1000 rupees lopala. | multilingual (recorded) |
+| `te_pure` | te-IN | శనివారం సాయంత్రం చర్మ వైద్యుడి అపాయింట్‌మెంట్ 1000 రూపాయల లోపల చూడు. | multilingual (recorded) |
+
+Options: `npm.cmd run live:audio -- --out <dir>`, `LUMI_LIVE_TTS_MODEL`,
+`LUMI_LIVE_TTS_VOICE` (default `Kore`), `LUMI_VERTEX_LOCATION`. TTS output
+is not bit-identical between runs; `manifest.json` records model, voice,
+duration and SHA-256 per file.
+
+Any other synthetic source works if it produces `<name>.wav` in that format
+or headerless `<name>.pcm` (16 kHz mono s16le), e.g.
+`ffmpeg -i in.wav -ar 16000 -ac 1 -c:a pcm_s16le en_in.wav`. Never use
+recordings of real people.
+
+When live tests are enabled, the Gemini Live suite checks the directory and
+all five fixtures before connecting and fails with an explanation if
+`LUMI_LIVE_AUDIO_DIR` is unset, the directory or a file is missing, or a WAV
+is malformed or not 16 kHz mono PCM16. It never skips.
+
+Only the English utterances are asserted; whether Telugu and code-switched
+speech produced the same criteria is recorded in the report
+(`gemini_multilingual_equivalent`). Results and limitations:
+[PROVIDERS.md](PROVIDERS.md).

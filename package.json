@@ -15,7 +15,8 @@
     "package": "npm run build && npm run build:agent-runtime && electron-builder --win --x64",
     "build:agent-runtime": "node scripts/build-agent-runtime.mjs",
     "package:dir": "npm run build && npm run build:agent-runtime && electron-builder --win --x64 --dir",
-    "eval": "node scripts/run-evals.mjs"
+    "eval": "node scripts/run-evals.mjs",
+    "live:audio": "vite-node scripts/live/make-test-audio.ts"
   },
   "build": {
     "appId": "com.lifelens.app",

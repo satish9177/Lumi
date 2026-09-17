@@ -100,13 +100,16 @@ the provider's own count in diagnostics. A 400-turn history stays under the
 Command:
 
 ```powershell
+npm.cmd run live:audio
 $env:LUMI_LIVE_PROVIDER_TESTS = '1'; $env:LUMI_VERTEX_ENABLED = '1'
-$env:LUMI_LIVE_AUDIO_DIR = '<folder with synthetic utterances>'
+$env:LUMI_LIVE_AUDIO_DIR = "$PWD\dist\live-audio"
 npx vitest run src/main/voice/providers.live.test.ts
 ```
 
 The utterances were synthetic: English via Windows speech synthesis and
-English/Telugu/code-switched via Vertex `gemini-2.5-flash-tts`. The full
+English/Telugu/code-switched via Vertex `gemini-2.5-flash-tts`. They are now
+generated reproducibly by `npm run live:audio` (Vertex `gemini-2.5-flash-tts`
+only; see [EVALS.md](EVALS.md#audio-fixtures)). The full
 structured report is
 [reviews/milestone-6-live-providers.json](reviews/milestone-6-live-providers.json).
 
