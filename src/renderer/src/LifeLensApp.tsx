@@ -62,7 +62,7 @@ import { GeminiLiveProvider } from './voice/gemini-live-provider'
 import { BrowserPcmAudio, SilentAudio } from './voice/pcm-audio'
 import type { AgentInspectionView, AgentResult } from '../../shared/agent-contracts'
 import { describeOutcome } from './agent-task-view'
-import { describeInspectionForConversation, submitComposerRequest } from './composer-routing'
+import { describeInspectionForConversation, realtimeConversation, submitComposerRequest } from './composer-routing'
 import type { VoiceTaskCommand, VoiceTaskFocus, VoiceTaskOutcome } from '../../shared/voice-task-contracts'
 
 const VOICE_PAUSED_NOTICE = 'Voice paused to save cost — ask a question to reconnect.'
@@ -130,8 +130,10 @@ export default function LifeLensApp() {
   const [online, setOnline] = useState(() => navigator.onLine)
   const conversationRef = useRef<HTMLDivElement>(null)
   const [transcript, setTranscript] = useState<TranscriptLine[]>([])
-  // Synchronous guard: one composer request is routed at a time.
+  // Synchronous guard: one composer request is routed at a time. The state
+  // only disables the control; the ref is what two clicks in one frame hit.
   const routingRef = useRef(false)
+  const [isSendingRequest, setIsSendingRequest] = useState(false)
   const reportedInspectionsRef = useRef(new Set<string>())
   const [documentRoots, setDocumentRoots] = useState<ApprovedDocumentRoot[]>([])
   const [searchQuery, setSearchQuery] = useState('resume')
@@ -614,6 +616,13 @@ export default function LifeLensApp() {
     await connectVoice()
   }
 
+  /** Connect-then-send for an unhandled request. Nothing else connects voice. */
+  const conversationStep = realtimeConversation({
+    ensureConnected,
+    client: () => clientRef.current,
+    appendUserLine: (text) => appendTranscript(text, 'user')
+  })
+
   const openCompanion = (): void => {
     setExpanded(true)
     if (!clientRef.current?.isConnected()) {
@@ -805,6 +814,7 @@ export default function LifeLensApp() {
     const request = question.trim()
     if (!request || routingRef.current) return
     routingRef.current = true
+    setIsSendingRequest(true)
     setError(undefined)
     setQuestion('')
     try {
@@ -816,14 +826,10 @@ export default function LifeLensApp() {
       await submitComposerRequest(request, {
         route: (requestId, text) => window.lifeLens.agent.routeTypedRequest(requestId, text),
         agentHandled: showAgentOutcome,
+        // Voice is connected only from here, so an agent-owned request never
+        // waits for (or starts) a voice session.
         converse: async (text) => {
-          await ensureConnected()
-          const client = clientRef.current
-          if (!client) {
-            throw new Error('Connect voice first, then ask Lumi a question.')
-          }
-          appendTranscript(text, 'user')
-          await client.sendUserRequest(text)
+          await conversationStep(text)
           // Lumi, not the model, decides that a scam question opens the
           // scam-check gate — and opening the gate still captures nothing.
           if (classifyUserIntent(text).intent === 'scam_check') {
@@ -838,6 +844,7 @@ export default function LifeLensApp() {
       setError(messageFrom(requestError))
     } finally {
       routingRef.current = false
+      setIsSendingRequest(false)
     }
   }
 
@@ -1479,10 +1486,14 @@ export default function LifeLensApp() {
   const entireDisplays = captureSources.filter((source) => source.kind === 'screen')
   const visibleLinks = explanation?.signals.filter((signal) => signal.kind === 'link') ?? []
   const hasConversation = transcript.length > 0 || Boolean(explanation) || searchResults.length > 0 || Boolean(capture)
-  const sendDisabledReason = !clientRef.current
-    ? COPY.labels.sendDisabledConnecting
-    : !question.trim()
-      ? COPY.labels.sendDisabledEmpty
+  /**
+   * Sending needs text, not a voice session: main decides which path owns a
+   * request, and the durable agent answers typed requests with voice down.
+   */
+  const sendDisabledReason = !question.trim()
+    ? COPY.labels.sendDisabledEmpty
+    : isSendingRequest
+      ? COPY.labels.sendDisabledBusy
       : undefined
   const canSend = sendDisabledReason === undefined
   const status = deriveStatus({
@@ -1810,7 +1821,10 @@ export default function LifeLensApp() {
               className="icon-button"
               type="button"
               aria-label={capture ? COPY.labels.captureAgain : COPY.labels.captureScreen}
-              title={capture ? COPY.labels.captureAgain : COPY.labels.captureScreen}
+              // Capture needs the voice session; typed requests do not.
+              title={!clientRef.current
+                ? COPY.labels.voiceDisconnected
+                : capture ? COPY.labels.captureAgain : COPY.labels.captureScreen}
               onClick={() => requestScreenContext()}
               disabled={!clientRef.current || isCapturing}
               aria-busy={isCapturing || undefined}

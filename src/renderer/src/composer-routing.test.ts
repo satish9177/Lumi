@@ -32,7 +32,7 @@ import { VoiceTaskController } from '../../main/services/voice-task-controller'
 import { FakeBookingRuntime } from '../../main/testing/fake-booking-runtime'
 import { FakeInspectionRuntime, ORIGIN } from '../../main/testing/fake-inspection-runtime'
 import { describeOutcome } from './agent-task-view'
-import { describeInspectionForConversation, submitComposerRequest } from './composer-routing'
+import { describeInspectionForConversation, realtimeConversation, submitComposerRequest } from './composer-routing'
 
 /**
  * The main composer, end to end across the bridge: renderer routing module ->
@@ -110,7 +110,15 @@ function desktop(runtime: RuntimeRequester, options: { interpreter?: boolean } =
   // The legacy realtime conversation, as it behaved before routing existed.
   const legacy = { telegram: vi.fn(), capture: vi.fn() }
   const conversation: string[] = []
-  const converse = async (text: string): Promise<void> => {
+  // No voice session exists until something connects one, exactly as when
+  // Lumi has just started or voice has been paused.
+  const session = { connects: 0, connectFails: false, client: undefined as { sendUserRequest: (text: string) => Promise<void> } | undefined }
+  const ensureConnected = async (): Promise<void> => {
+    session.connects += 1
+    if (session.connectFails) throw new Error('Lumi could not reach the voice service.')
+    session.client = { sendUserRequest: async (text) => { await legacyConversation(text) } }
+  }
+  const legacyConversation = async (text: string): Promise<void> => {
     conversation.push(text)
     const url = /https?:\/\/\S+/.exec(text)?.[0]
     if (url) {
@@ -121,6 +129,12 @@ function desktop(runtime: RuntimeRequester, options: { interpreter?: boolean } =
     if (/telegram/i.test(text)) legacy.telegram()
     if (/screen|page/i.test(text)) legacy.capture()
   }
+  // The app's own conversation step: connect, then send.
+  const converse = realtimeConversation({
+    ensureConnected,
+    client: () => session.client,
+    appendUserLine: () => undefined
+  })
 
   // What LifeLensApp shows: the transcript and the focused agent surface.
   const transcript: string[] = []
@@ -157,7 +171,7 @@ function desktop(runtime: RuntimeRequester, options: { interpreter?: boolean } =
     return done
   }
 
-  return { agent, send, approveCard, conversation, legacy, transcript, focus }
+  return { agent, send, approveCard, conversation, legacy, transcript, focus, session }
 }
 
 function noLegacyEffects(app: ReturnType<typeof desktop>): void {
@@ -165,6 +179,8 @@ function noLegacyEffects(app: ReturnType<typeof desktop>): void {
   expect(shell.openExternal).not.toHaveBeenCalled()
   expect(app.legacy.telegram).not.toHaveBeenCalled()
   expect(app.legacy.capture).not.toHaveBeenCalled()
+  // An agent-owned request neither needs nor starts a voice session.
+  expect(app.session.connects).toBe(0)
 }
 
 describe('a page-inspection request typed in the main composer', () => {
@@ -365,18 +381,97 @@ describe('appointment requests typed in the main composer', () => {
   })
 })
 
+describe('typed requests do not depend on voice', () => {
+  it('a page inspection is created with no voice session, and none is started', async () => {
+    const runtime = new FakeInspectionRuntime()
+    const app = desktop(runtime)
+    expect(app.session.client).toBeUndefined()
+
+    expect(await app.send(EXAMPLE)).toBe('agent')
+
+    const loaded = await app.agent.loadActiveTask()
+    expect(loaded.ok && loaded.value?.task.kind).toBe('page_inspection')
+    expect(loaded.ok && loaded.value?.inspection?.status).toBe('WAITING_APPROVAL')
+    expect(app.focus).toEqual(['approval_card'])
+    // Never connected, never sent, nothing opened.
+    expect(app.session.connects).toBe(0)
+    noLegacyEffects(app)
+  })
+
+  it('an appointment request works with no voice session either', async () => {
+    const runtime = new FakeBookingRuntime()
+    const app = desktop(runtime)
+    expect(await app.send('Find me a dermatologist on Saturday')).toBe('agent')
+    expect(runtime.counts.creates).toBe(1)
+    expect(app.session.connects).toBe(0)
+  })
+
+  it('an unhandled request connects voice first, then sends exactly once', async () => {
+    const app = desktop(new FakeInspectionRuntime())
+    expect(await app.send('Hello')).toBe('conversation')
+    expect(app.session.connects).toBe(1)
+    expect(app.conversation).toEqual(['Hello'])
+  })
+
+  it('a voice connection failure affects only the conversation request', async () => {
+    const runtime = new FakeInspectionRuntime()
+    const app = desktop(runtime)
+    app.session.connectFails = true
+
+    // The durable agent still answers a request it owns.
+    expect(await app.send(EXAMPLE)).toBe('agent')
+    expect(app.focus).toEqual(['approval_card'])
+    expect(app.session.connects).toBe(0)
+
+    // Ordinary chat reports the failure honestly and sends nothing.
+    await expect(app.send('Hello')).rejects.toThrow('Lumi could not reach the voice service.')
+    expect(app.conversation).toEqual([])
+    expect(shell.openExternal).not.toHaveBeenCalled()
+
+    // And the failure created no durable task of its own.
+    const loaded = await app.agent.loadActiveTask()
+    expect(loaded.ok && loaded.value?.task.kind).toBe('page_inspection')
+  })
+
+  it('without a voice client an unhandled request says so rather than failing silently', async () => {
+    const connects: number[] = []
+    const converse = realtimeConversation({
+      ensureConnected: async () => { connects.push(1) },
+      client: () => undefined,
+      appendUserLine: () => { throw new Error('a line was added although nothing was sent') }
+    })
+    await expect(converse('Hello')).rejects.toThrow('Connect voice first, then ask Lumi a question.')
+    expect(connects).toHaveLength(1)
+  })
+})
+
 describe('the app uses the router for every typed request', () => {
   const app = readFileSync(join(process.cwd(), 'src/renderer/src/LifeLensApp.tsx'), 'utf8')
   const start = app.indexOf('const askQuestion = async')
   const body = app.slice(start, app.indexOf('const chooseDocumentRoot', start))
 
-  it('asks main first and sends to realtime only from the unhandled branch', () => {
+  it('asks main first and reaches realtime only from the unhandled branch', () => {
     expect(body).toContain('submitComposerRequest(request, {')
     expect(body).toContain('route: (requestId, text) => window.lifeLens.agent.routeTypedRequest(requestId, text)')
     const converse = body.slice(body.indexOf('converse: async (text) => {'))
-    expect(converse).toContain('client.sendUserRequest(text)')
-    // Exactly one realtime send in the whole app, inside that branch.
-    expect(app.match(/sendUserRequest\(/g)).toHaveLength(1)
+    expect(converse).toContain('conversationStep(text)')
+    // The app sends to realtime only through the tested conversation step,
+    // and that step is the only place the composer path connects voice.
+    expect(app).not.toMatch(/sendUserRequest\(/)
+    expect(body).not.toContain('ensureConnected')
+    expect(app).toContain('const conversationStep = realtimeConversation({')
+  })
+
+  it('send needs text, not a voice session, and one request at a time', () => {
+    const gate = app.slice(app.indexOf('const sendDisabledReason ='), app.indexOf('const canSend ='))
+    expect(gate).not.toContain('clientRef')
+    expect(gate).toContain('COPY.labels.sendDisabledEmpty')
+    expect(gate).toContain('COPY.labels.sendDisabledBusy')
+    // The synchronous guard, and the disabled control that follows it.
+    expect(body).toContain('if (!request || routingRef.current) return')
+    expect(body).toContain('routingRef.current = true')
+    expect(body).toContain('setIsSendingRequest(true)')
+    expect(app).toContain('disabled={!canSend}')
   })
 
   it('shows the agent surface with neutral names', () => {

@@ -23,6 +23,30 @@ export interface ComposerRoutingDependencies {
 
 export type ComposerRoute = 'agent' | 'conversation'
 
+export interface ConversationDependencies {
+  /** Connects the voice session. Only ever called for an unhandled request. */
+  ensureConnected: () => Promise<void>
+  client: () => { sendUserRequest: (text: string) => Promise<void> } | undefined
+  appendUserLine: (text: string) => void
+}
+
+/**
+ * The ordinary conversation step: connect, then send. Voice is connected here
+ * and nowhere else on this path, so a request the durable agent owns never
+ * needs a voice session — typed capabilities do not depend on voice being up.
+ */
+export function realtimeConversation(deps: ConversationDependencies): (text: string) => Promise<void> {
+  return async (text: string): Promise<void> => {
+    await deps.ensureConnected()
+    const client = deps.client()
+    if (!client) {
+      throw new Error('Connect voice first, then ask Lumi a question.')
+    }
+    deps.appendUserLine(text)
+    await client.sendUserRequest(text)
+  }
+}
+
 export function newComposerRequestId(): string {
   return `req_${crypto.randomUUID().replaceAll('-', '')}`
 }

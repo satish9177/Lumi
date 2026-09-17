@@ -370,8 +370,9 @@ export const COPY = {
     analyseDroppedFile: (name: string) => `Analyse ${name}`,
     sendDroppedFile: (name: string) => `Send ${name} on Telegram`,
     /** Explains a disabled control rather than leaving the user guessing. */
-    sendDisabledConnecting: 'Lumi is still connecting.',
-    sendDisabledEmpty: 'Type a question first.'
+    sendDisabledEmpty: 'Type a question first.',
+    sendDisabledBusy: 'Lumi is still working on your last request.',
+    voiceDisconnected: 'Voice is not connected. Typed requests still work.'
   },
 
   /* --------------------------------------------------------------- generic */

@@ -199,14 +199,19 @@ def _conversation(app: Desktop) -> list[str]:
 
 
 def _ask_in_composer(app: Desktop, text: str) -> None:
-    """Type into Lumi's main composer, as a user does, and press Enter."""
+    """Type into Lumi's main composer, as a user does, and press Enter.
+
+    Deliberately does not wait for the voice session: sending needs text, not
+    a connected voice, because main decides which path owns the request.
+    """
     page = app.page
     if not page.get_by_role("button", name="Collapse to orb").count():
         page.get_by_role("button", name="Open Lumi").click()
     composer = page.get_by_label("Ask Lumi")
+    composer.wait_for(timeout=30_000)
     composer.fill(text)
-    # Send is enabled once the (mock) voice session is connected.
-    page.wait_for_function("() => document.querySelector('button.send-button')?.disabled === false", timeout=60_000)
+    # Enabled by the text alone.
+    page.wait_for_function("() => document.querySelector('button.send-button')?.disabled === false", timeout=10_000)
     composer.press("Enter")
 
 
@@ -224,7 +229,7 @@ def test_the_main_composer_owns_an_inspection_request_and_shows_the_answer_in_th
         rated = f"{public.base_url}/profiles/rated"
         request = f"What is my contest rating? {rated}"
 
-        # --- the normal composer, not the agent panel ------------------------
+        # --- the normal composer, before voice is even connected -------------
         _ask_in_composer(app, request)
         card = _wait_card(app, "WAITING_APPROVAL", timeout=60)
         assert page.get_by_test_id("agent-task-panel").count() == 1
@@ -234,13 +239,14 @@ def test_the_main_composer_owns_an_inspection_request_and_shows_the_answer_in_th
         # Nothing was opened: not by the isolated worker, not by a default browser.
         page.wait_for_timeout(1_500)
         assert public.hits() == {}
-        # After the voice greeting, exactly the request and Lumi's status line:
-        # the realtime conversation never answered it.
-        assert _conversation(app) == [
-            GREETING,
-            request,
-            "Prepared an inspection of 127.0.0.1. Nothing is opened until you press Approve and inspect.",
-        ]
+        # Exactly the request and Lumi's status line: the realtime conversation
+        # never answered it. The mock voice greeting may land at any point,
+        # because connecting it was never part of this request.
+        prepared = "Prepared an inspection of 127.0.0.1. Nothing is opened until you press Approve and inspect."
+        conversation = _conversation(app)
+        assert request in conversation and prepared in conversation
+        assert conversation.index(request) < conversation.index(prepared)
+        assert [line for line in conversation if line not in {GREETING, request, prepared}] == []
         assert _ledger(migrated_database_url)["tasks"] == 1
 
         # --- the trusted click; the answer follows without a second click ----

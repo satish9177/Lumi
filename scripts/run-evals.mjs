@@ -118,7 +118,10 @@ const CASES = {
     ['a refused address is still owned by the agent', ts('src/renderer/src/composer-routing.test.ts', 'a refused address is still owned by the agent')],
     ['ordinary conversation reaches realtime exactly once', ts('src/renderer/src/composer-routing.test.ts', 'with no agent task reaches realtime exactly once')],
     ['appointment requests still reach the durable agent', ts('src/renderer/src/composer-routing.test.ts', 'still go to the durable agent, not realtime')],
-    ['unreachable router sends nothing anywhere', ts('src/renderer/src/composer-routing.test.ts', 'if main cannot be asked, nothing is sent anywhere')]
+    ['unreachable router sends nothing anywhere', ts('src/renderer/src/composer-routing.test.ts', 'if main cannot be asked, nothing is sent anywhere')],
+    ['a typed agent request needs no voice session', ts('src/renderer/src/composer-routing.test.ts', 'a page inspection is created with no voice session')],
+    ['an unhandled request connects voice, then sends once', ts('src/renderer/src/composer-routing.test.ts', 'an unhandled request connects voice first')],
+    ['a voice failure affects only the conversation request', ts('src/renderer/src/composer-routing.test.ts', 'a voice connection failure affects only the conversation request')]
   ]
 }
 
