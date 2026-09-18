@@ -106,16 +106,42 @@ observed links reach it as refs and hosts rather than addresses. The browser
 context is task-owned, unauthenticated and disposable, and every semantic ref
 dies with the document that issued it.
 
-Research deliberately reaches hosts no allowlist named, which widens the
-residual DNS-rebinding gap the Milestone 7a guard already documents: the
-destination is checked twice but the connection is not pinned, so this is a
-policy boundary and not a network sandbox. Details and limits:
-[PUBLIC-RESEARCH.md](PUBLIC-RESEARCH.md).
+Research deliberately reaches hosts no allowlist named. Until Milestone 8 that
+meant the destination was checked in one place and connected from another — and
+a successful check was cached per host for the lifetime of the context — so a
+hostile DNS server could answer once for the check and again for the connection.
+
+## Egress broker (Milestone 8 S0)
+
+The managed research browser no longer opens its own connections. Chromium is
+launched through a loopback egress broker inside the browser worker
+(`app/browser/egress_broker.py`), with `--proxy-bypass-list=<-loopback>` so that
+loopback has no private door. For each connection the broker resolves the host,
+requires every resolved address to be globally routable, and opens the socket to
+an address from that one resolution. The address that passed the check is the
+address on the wire.
+
+TLS is never intercepted: a permitted `CONNECT` is spliced, so certificate
+validation stays Chromium's and no interception authority exists. The broker can
+also be put in a **frozen** mode in which it refuses every connection *before*
+resolving anything — the primitive a later network freeze needs, because a DNS
+lookup is itself an exfiltration channel.
+
+This is a network-policy boundary for managed browser traffic, not an OS
+sandbox, and not all of Lumi's traffic. Details and the full residual list:
+[PUBLIC-RESEARCH.md](PUBLIC-RESEARCH.md) and
+[reviews/milestone-8-s0.md](reviews/milestone-8-s0.md).
 
 ## Known gaps
 
-- Research has no connection-time egress broker, so its destination policy
-  can be raced by a hostile DNS server (rebinding). See PUBLIC-RESEARCH.md.
+- The broker constrains Chromium, not its host process. A compromised browser
+  worker can open sockets directly and bypass every check in this section.
+- Runtime-side traffic is not brokered: the configured `public_search` endpoint,
+  provider calls and the database connection all go direct.
+- Outside frozen mode the broker still resolves names, so a hostile page can
+  still signal data through a DNS label. Only the freeze closes that.
+- `wss:` and `https:` are the same `CONNECT` at the broker, so WebSocket
+  blocking remains a Playwright-level control in the network guard.
 - The packaged build is unsigned. Machines with Smart App Control or WDAC in
   enforcement mode can block unsigned binaries (observed; see PACKAGING.md).
 - Voice narration is steered, not enforced: a live model could still misspeak.

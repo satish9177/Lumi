@@ -202,6 +202,38 @@ WebSockets; no popups (a popup is closed, never adopted as a tab); no
 downloads or attachments; no non-HTML document types; and it validates every
 redirect hop itself rather than letting Chromium follow one.
 
+### The egress broker (Milestone 8 S0)
+
+Underneath all of that, **the browser does not open its own connections.**
+Chromium is launched pointing at a local egress broker
+(`app/browser/egress_broker.py`) that runs inside the browser worker, binds an
+ephemeral loopback port, and requires a per-launch credential on every request
+including `CONNECT`. For a connection it permits, the broker resolves the
+requested host itself, requires every returned address to be globally routable,
+and then opens the socket to an address from *that* resolution. Chromium does
+not independently choose the destination address for a brokered connection.
+
+Two details make it a boundary rather than a decoration:
+
+* Chromium bypasses proxies for loopback by default, so the browser is launched
+  with `--proxy-bypass-list=<-loopback>`. Without it a page could reach
+  `http://127.0.0.1:…` directly.
+* Playwright's driver — which is what `route.fetch` uses, and therefore how the
+  network guard fetches every request — sends `CONNECT` to the broker for
+  everything it fetches, including plaintext test origins. That is verified by
+  a test, not assumed.
+
+The broker never terminates TLS. A permitted `CONNECT` is answered and then
+spliced byte for byte, so certificate validation, hostname verification and HSTS
+remain Chromium's and a certificate error remains an error. There is no
+interception certificate authority.
+
+Plaintext HTTP is reachable only for exactly-configured local fixture origins;
+public destinations are `https:` on port 443 or nothing.
+
+Search is the exception, and it is deliberate: it is a runtime-side request, not
+browser traffic, and it is not brokered. See below.
+
 Search is **not** a browser operation. It is a bounded JSON GET the runtime
 makes, so no search credential and no search-engine markup ever reaches the
 browser.
@@ -288,13 +320,27 @@ navigates to an address the user typed and follows links; it simply has no
 
 ## Limits stated plainly
 
-* **This is not a network sandbox.** The destination policy is enforced at two
-  checkpoints (the guard resolves the host, and Playwright's driver resolves it
-  again), so a hostile DNS server can still race the two — classic DNS
-  rebinding. Milestone 7a narrows that with a host allowlist; research cannot,
-  because it does not know its destinations. A connection-time egress broker
-  that resolves and pins the address it dials is still unbuilt. Do not read
-  "Lumi cannot reach private addresses" as a sandbox guarantee.
+* **This is not a sandbox, and the broker does not make it one.** The broker is
+  a *network-policy boundary for managed browser traffic*. It constrains
+  Chromium; it does not constrain the worker process that hosts it. Code running
+  natively in that process — which a compromised worker would be — can open any
+  socket it likes. Process separation is not privilege isolation, and nothing in
+  Milestone 8 S0 changes that.
+* **What the broker does close.** DNS rebinding, for connections it carries:
+  there is one resolution and the socket is opened to an address from it, so
+  there is no second lookup to poison. Before S0 the destination was checked in
+  one place and connected from another, and the guard additionally *cached* a
+  host's successful resolution for the lifetime of the context — so later
+  requests to that host were matched against a remembered answer while the
+  connection was made afresh. That cache is gone; refusals are still remembered,
+  successes are re-checked, and the connection-time decision is the broker's.
+* **Not everything Lumi does is brokered.** `public_search` is a runtime-side
+  JSON `GET` to a *configured* endpoint. It never goes through the broker and is
+  not browser traffic; its destination comes from trusted configuration rather
+  than from a page or a model, and it is shape- and resolution-checked in the
+  runtime. Provider traffic, database traffic and every other runtime request
+  are likewise outside the broker. "All of Lumi's network traffic is brokered"
+  would be false; "the managed research browser's connections are" is true.
 * **`READ_ONLY` is narrow.** It means Lumi issues no intentional mutation
   operation. A `GET` can still be logged, counted or acted on by a server.
 * **Popup closing has a narrow race.** Playwright fires the context's `page`
