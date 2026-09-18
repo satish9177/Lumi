@@ -49,6 +49,13 @@ export interface ContextInput {
   localDate?: string
   timeZone?: string
   /**
+   * Trusted, app-authored facts about the current work: budgets, which
+   * operations a confirmed scope allows, which refs exist. Always included,
+   * because a planner that cannot see its own limits will propose past them.
+   * Never website content.
+   */
+  facts?: { label: string; lines: readonly string[] }
+  /**
    * Untrusted environment data (a page observation). Always included, inside
    * its own delimiters, clipped line by line to the remaining budget. Page
    * text cannot forge either delimiter.
@@ -90,6 +97,14 @@ export function extractUntrusted(input: string): string[] {
   const end = input.indexOf(UNTRUSTED_CLOSE)
   if (start < 0 || end < start) return []
   return input.slice(start, end).split('\n').slice(2)
+}
+
+/** Pull the trusted facts section back out (scripted provider only). */
+export function extractFacts(input: string): string[] {
+  const start = input.indexOf('RESEARCH STATE')
+  if (start < 0) return []
+  const end = input.indexOf(UNTRUSTED_OPEN, start)
+  return input.slice(start, end < 0 ? undefined : end).split('\n').slice(1).filter(Boolean)
 }
 
 /** Pull the utterance back out of an assembled input (scripted provider only). */
@@ -151,6 +166,11 @@ export function buildContext(input: ContextInput, budget: { maxInputTokens: numb
   const utterance = clip(input.utterance, MAX_UTTERANCE_CHARS)
   const clock = input.localDate ? `Today is ${input.localDate} (${input.timeZone ?? 'local time'}).\n` : ''
   add('utterance', `${clock}${UTTERANCE_OPEN}\n${utterance.text}\n${UTTERANCE_CLOSE}`, true, utterance.truncated)
+
+  if (input.facts) {
+    const lines = input.facts.lines.map((line) => clip(line, 500).text).filter(Boolean)
+    add('facts', `${clip(input.facts.label, 120).text}:\n${lines.join('\n')}`, true)
+  }
 
   if (input.untrusted) {
     const header = `${UNTRUSTED_OPEN} (${clip(input.untrusted.label, 200).text})\n` +

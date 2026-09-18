@@ -43,6 +43,9 @@ def test_action_states_are_exactly_defined() -> None:
         "PROPOSED",
         "WAITING_APPROVAL",
         "APPROVED",
+        # Milestone 7b: authorised by a confirmed scope, not by an exact
+        # approval of this step. Deliberately a different state.
+        "AUTHORIZED",
         "REJECTED",
         "EXECUTING",
         "SUCCEEDED",

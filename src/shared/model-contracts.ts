@@ -15,7 +15,11 @@ export const MODEL_TASK_CLASSES = [
   'screen_understanding',
   'difficult_reasoning',
   /** Milestone 7a: answer the user's question from an untrusted page observation. */
-  'page_answer'
+  'page_answer',
+  /** Milestone 7b: choose the one next bounded public-research step. */
+  'research_planning',
+  /** Milestone 7b: answer the research objective from collected observations. */
+  'research_answer'
 ] as const
 export type ModelTaskClass = typeof MODEL_TASK_CLASSES[number]
 

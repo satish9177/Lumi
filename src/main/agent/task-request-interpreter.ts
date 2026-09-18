@@ -9,9 +9,11 @@ import {
   clinicQueryFromWire,
   planFromWire,
   preferenceFromWire,
+  researchObjectiveFromWire,
   CLINIC_QUERY_SCHEMA_PROPERTIES,
   PLAN_SCHEMA_PROPERTIES,
-  PREFERENCE_SCHEMA_PROPERTIES
+  PREFERENCE_SCHEMA_PROPERTIES,
+  RESEARCH_SCHEMA_PROPERTIES
 } from '../../shared/plan-wire'
 import { localDateString } from '../../shared/relative-dates'
 import { interpretByRules, type InterpretationWire } from '../../shared/rule-interpreter'
@@ -44,7 +46,9 @@ import type { TaskOrigin } from '../services/agent-tasks'
 export const INTERPRETATION_RULES = [
   'You convert one user request for the Lumi desktop assistant into JSON. You never act, and nothing you write is executed directly.',
   'Output exactly one JSON object with an "intent" field and, depending on it, "plan", "clinic" or "preference". No prose.',
-  'intent is one of: appointment_plan (find, change, pick, prepare an appointment, or "book it"), clinic_info (doctor hours, fee, languages, address, walk-ins), status, check_booking (check an uncertain booking), cancel_task, remember_preference (only when the user explicitly says remember), conversation (anything else).',
+  'intent is one of: appointment_plan (find, change, pick, prepare an appointment, or "book it"), clinic_info (doctor hours, fee, languages, address, walk-ins), public_research (find something out from public web pages: a repository, a public profile, public job listings, public documentation, anything the user asks Lumi to look up on the web), status, check_booking (check an uncertain booking), cancel_task, remember_preference (only when the user explicitly says remember), conversation (anything else).',
+  'For public_research, "research" has one key, "objective": what to find out, in the user\'s own words. You never choose a web address, a step, a selector or a script; Lumi asks the user for permission first and then plans each step itself.',
+  'Use public_research only when the user wants something looked up on the public web. A question you can answer from your own knowledge, without opening a page, is conversation.',
   'plan has optional keys: search (a NEW search), refine (change the current search), choose, prepare (boolean), show_for_approval (boolean). Never both search and refine. prepare needs choose. At most four steps.',
   `specialty is exactly one of: ${VOICE_SPECIALTIES.join(', ')} ("dermatologist" or "skin doctor" is Dermatology, "dentist" is Dentistry).`,
   'Constraint fields: specialty, when ({kind: today|tomorrow|day_after_tomorrow|weekday|next_weekday|this_weekend|next_weekend|date, weekday, date}), part_of_day (morning|afternoon|evening|any), earliest_time and latest_time (24-hour HH:MM, clinic-local), max_price_inr (integer rupees). refine may also have clear: [specialty|day|time|price].',
@@ -59,9 +63,10 @@ export const INTERPRETATION_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    intent: { type: 'string', enum: ['appointment_plan', 'clinic_info', 'status', 'check_booking', 'cancel_task', 'remember_preference', 'conversation'] },
+    intent: { type: 'string', enum: ['appointment_plan', 'clinic_info', 'public_research', 'status', 'check_booking', 'cancel_task', 'remember_preference', 'conversation'] },
     plan: { type: 'object', additionalProperties: false, properties: PLAN_SCHEMA_PROPERTIES },
     clinic: { type: 'object', additionalProperties: false, properties: CLINIC_QUERY_SCHEMA_PROPERTIES },
+    research: { type: 'object', additionalProperties: false, properties: RESEARCH_SCHEMA_PROPERTIES },
     preference: { type: 'object', additionalProperties: false, properties: PREFERENCE_SCHEMA_PROPERTIES }
   },
   required: ['intent']
@@ -75,6 +80,12 @@ export type CommandScope = 'standalone' | 'any_task' | 'open_task'
 
 export type Interpretation =
   | { kind: 'command'; scope: CommandScope; build: (turn: VoiceTurn) => VoiceTaskCommand }
+  /**
+   * Milestone 7b. Owned by the durable agent, and standalone: a research
+   * request needs no existing task. It creates one, shows the bounded scope
+   * card, and stops there -- an interpretation can never grant the scope.
+   */
+  | { kind: 'research'; objective: string }
   | { kind: 'conversation' }
 
 /** Strictly parse model (or rule) JSON. Throws on anything outside the contract. */
@@ -90,6 +101,7 @@ export function parseInterpretation(text: string): Interpretation {
   const allowed: Record<string, readonly string[]> = {
     appointment_plan: ['intent', 'plan'],
     clinic_info: ['intent', 'clinic'],
+    public_research: ['intent', 'research'],
     remember_preference: ['intent', 'preference'],
     status: ['intent'], check_booking: ['intent'], cancel_task: ['intent'], conversation: ['intent']
   }
@@ -109,6 +121,8 @@ export function parseInterpretation(text: string): Interpretation {
       const query = clinicQueryFromWire(wire.clinic)
       return { kind: 'command', scope: 'standalone', build: (turn) => ({ kind: 'clinic_info', turn, query }) }
     }
+    case 'public_research':
+      return { kind: 'research', objective: researchObjectiveFromWire(wire.research) }
     case 'remember_preference': {
       const preference = preferenceFromWire(wire.preference)
       return { kind: 'command', scope: 'standalone', build: (turn) => ({ kind: 'remember_preference', turn, preference }) }
@@ -138,6 +152,13 @@ export interface InterpreterDependencies {
   inspections?: {
     createPageInspection(url: unknown, question: unknown, origin?: TaskOrigin): Promise<AgentResult<AgentTaskSnapshot>>
   }
+  /**
+   * Milestone 7b: create a research task and show its bounded scope card.
+   * Never grants the scope, never searches and never opens a page.
+   */
+  research?: {
+    createResearchTask(objective: unknown, origin?: TaskOrigin): Promise<AgentResult<AgentTaskSnapshot>>
+  }
   router?: ModelRouter
   controller: { handle(value: unknown, source: CommandSource): Promise<AgentResult<VoiceTaskOutcome>> }
   loadTask: () => Promise<AgentTaskSnapshot | null>
@@ -152,6 +173,10 @@ const MAX_TEXT = 1_000
 const INVALID_REFERENCE = { ok: false, error: { code: 'invalid_request', message: 'That request reference is invalid.' } } as const
 const INVALID_TEXT = { ok: false, error: { code: 'invalid_request', message: 'Type a request of up to 1,000 characters.' } } as const
 const REQUEST_FAILED = { ok: false, error: { code: 'request_failed', message: 'Lumi could not handle that request. Nothing was done.' } } as const
+const RESEARCH_UNAVAILABLE = {
+  ok: false,
+  error: { code: 'research_unavailable', message: 'Public web research is not set up on this computer. Nothing was searched or opened.' }
+} as const
 const NOT_UNDERSTOOD: VoiceTaskOutcome = {
   kind: 'task_status', focus: 'none', replayed: false, narration: { kind: 'needs_clarification', reason: 'not_understood' }
 }
@@ -263,6 +288,35 @@ export class TaskRequestInterpreter {
     }
     const { interpretation, task } = await this.interpretWithTask(text)
     this.window.add({ role: 'user', text })
+    if (interpretation.kind === 'research') {
+      // Owned by the durable agent whether or not research is configured: a
+      // request to look something up on the web must never fall through to a
+      // conversation tool that would open an address itself.
+      if (!this.deps.research) return { handled: true, result: RESEARCH_UNAVAILABLE }
+      const created = await this.deps.research.createResearchTask(
+        interpretation.objective, { source: 'text', turnId: requestId, utterance: text }
+      )
+      if (!created.ok) return { handled: true, result: created }
+      const snapshot = created.value
+      return {
+        handled: true,
+        result: {
+          ok: true,
+          value: {
+            kind: 'task_status',
+            taskId: snapshot.task.taskId,
+            taskStatus: snapshot.task.status,
+            taskKind: snapshot.task.kind,
+            focus: 'approval_card',
+            narration: {
+              kind: 'research',
+              state: snapshot.research?.grant?.status === 'ACTIVE' ? 'researching' : 'awaiting_permission'
+            },
+            replayed: false
+          }
+        }
+      }
+    }
     if (interpretation.kind === 'conversation' || !inScope(interpretation.scope, task)) return { handled: false }
     const command = interpretation.build({ turnId: requestId, utterance: text })
     const result = await this.deps.controller.handle(command, 'text')

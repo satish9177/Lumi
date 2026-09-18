@@ -27,10 +27,13 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from playwright.async_api import Page
 from pydantic import BaseModel
+
+if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime only.
+    from app.browser.research_session import ResearchBrowserSession
 
 from app.browser.network_guard import PublicNetworkGuard
 from app.browser.protocol import OperationStatus
@@ -46,6 +49,10 @@ class RetryPolicy(StrEnum):
     SAFE_TO_RETRY = "SAFE_TO_RETRY"
     #: A lost answer must never be retried. Establish what happened first.
     RECONCILE_BEFORE_RETRY = "RECONCILE_BEFORE_RETRY"
+    #: Nothing consequential can have happened, but the browser may have moved,
+    #: so repeating the same step blindly would act on a document nobody looked
+    #: at. Re-observe the tab and let the planner choose again.
+    OBSERVE_THEN_REPLAN = "OBSERVE_THEN_REPLAN"
     #: Never repeated by Lumi, even though nothing consequential can have
     #: happened: a repeat is a new action the user approves again.
     NEW_APPROVAL_REQUIRED = "NEW_APPROVAL_REQUIRED"
@@ -60,6 +67,10 @@ class OperationTarget(StrEnum):
     #: One approved public page: the URL comes from the approved proposal and
     #: is checked by the worker's own destination policy and network guard.
     PUBLIC_PAGE = "PUBLIC_PAGE"
+    #: Milestone 7b: a step inside a task-owned public research session. The
+    #: destination comes from a semantic ref the worker itself issued (or from
+    #: an address the user typed), and is checked by the same policy and guard.
+    RESEARCH_SESSION = "RESEARCH_SESSION"
 
 
 class Reconciliation(StrEnum):
@@ -90,6 +101,9 @@ class OperationContext:
     #: guard already installed on this page's context.
     public_policy: PublicUrlPolicy | None = None
     network_guard: PublicNetworkGuard | None = None
+    #: RESEARCH_SESSION operations only: the task-owned session this step runs
+    #: in, which owns its own policy, guard, tabs and ref tables.
+    research_session: "ResearchBrowserSession | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -153,6 +167,14 @@ class OperationRegistry:
                     f"public-page operation {operation.name!r} must be read-only and must "
                     "not be retried without a new approval"
                 )
+            if operation.target is OperationTarget.RESEARCH_SESSION and (
+                operation.effect is not Effect.READ_ONLY
+                or operation.retry is not RetryPolicy.OBSERVE_THEN_REPLAN
+            ):
+                raise ValueError(
+                    f"research operation {operation.name!r} must be read-only and must be "
+                    "recovered by re-observing rather than by repeating itself"
+                )
         self._operations = {operation.name: operation for operation in operations}
 
     def get(self, name: str) -> BrowserOperation | None:
@@ -174,9 +196,12 @@ def build_registry() -> OperationRegistry:
     Milestone 3 reviews exactly one site, so there is exactly one adapter. A
     second adapter is a second import here and a second entry in the worker's
     origin allowlist -- it is never a runtime registration. Milestone 7a adds
-    one generic, read-only public-page operation beside it.
+    one generic, read-only public-page operation beside it, and Milestone 7b
+    adds five read-only research operations that run in a task-owned session.
     """
     from app.browser.adapters import appointment_fixture
-    from app.browser.operations import public_page
+    from app.browser.operations import public_page, research
 
-    return OperationRegistry(appointment_fixture.OPERATIONS + public_page.OPERATIONS)
+    return OperationRegistry(
+        appointment_fixture.OPERATIONS + public_page.OPERATIONS + research.OPERATIONS
+    )

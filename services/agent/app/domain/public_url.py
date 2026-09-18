@@ -40,6 +40,10 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 POLICY_VERSION = "public-url-v1"
+#: Milestone 7b research: the same shape and resolution rules, with the host
+#: allowlist replaced by "any host that is not local, reserved or private".
+#: A distinct version string so a grant records which rules authorised it.
+RESEARCH_POLICY_VERSION = "public-research-v1"
 MAX_URL_LENGTH = 2_048
 MAX_ALLOWED_HOSTS = 64
 
@@ -151,10 +155,19 @@ class PublicUrlPolicy:
     allowed_hosts: frozenset[str] = field(default_factory=frozenset)
     test_origins: frozenset[str] = field(default_factory=frozenset)
     version: str = POLICY_VERSION
+    #: Milestone 7b. When true, layer 2 (the trusted host allowlist) is replaced
+    #: by "any name that passes layer 1 and resolves only to globally routable
+    #: addresses". Research needs this: a research task cannot know its
+    #: destinations in advance. It does not weaken layers 1 and 3, and it is
+    #: never set on the Milestone 7a inspection policy, which keeps its
+    #: allowlist. The residual DNS-rebinding gap documented at the top of this
+    #: module is *wider* here, because the allowlist no longer bounds which
+    #: names may be resolved at all; see `network_policy` in the M7b review.
+    allow_any_public_host: bool = False
 
     @property
     def configured(self) -> bool:
-        return bool(self.allowed_hosts or self.test_origins)
+        return bool(self.allowed_hosts or self.test_origins or self.allow_any_public_host)
 
     def check(self, raw: str) -> CheckedUrl:
         """Shape and scope. Returns the one canonical spelling, or refuses."""
@@ -198,7 +211,7 @@ class PublicUrlPolicy:
         else:
             raise UrlPolicyError("ip_literal")
         _check_host_name(host)
-        if not _host_is_allowed(host, self.allowed_hosts):
+        if not self.allow_any_public_host and not _host_is_allowed(host, self.allowed_hosts):
             raise UrlPolicyError("destination_not_allowed")
         return CheckedUrl(url=f"https://{host}{path}{query}", host=host, test_origin=False)
 

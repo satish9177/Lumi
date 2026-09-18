@@ -1,6 +1,8 @@
-"""The network boundary around one public-page inspection.
+"""The network boundary around a public browsing context.
 
-Every request the inspection's browser context makes -- the page, its frames,
+One guard serves one browser context: a single Milestone 7a inspection page, or
+a Milestone 7b research session's task-owned tabs. Every request that context
+makes -- the page, its frames,
 scripts, stylesheets and API calls, and anything a popup tries -- passes through
 `PublicNetworkGuard._handle` before it leaves the machine. The guard is narrow
 and fail-closed:
@@ -28,9 +30,13 @@ and fail-closed:
 
 What it does not do, stated plainly: it is not an egress proxy. Resolution
 happens here and again inside Playwright's driver, so a hostile DNS server can
-still race the two (rebinding). That is why M7a combines this guard with a
-trusted host allowlist rather than offering arbitrary hosts; the connection-time
-egress broker is Milestone 7b work.
+still race the two (rebinding). Milestone 7a narrows that gap with a trusted
+host allowlist. Milestone 7b research does *not* have that allowlist -- it
+cannot, because a research task does not know its destinations in advance -- so
+the residual rebinding gap is real and is documented rather than papered over.
+A connection-time egress broker that resolves and pins the address it dials is
+still unbuilt; until it exists, "Lumi cannot reach private addresses" is a
+policy enforced at two checkpoints, not a network sandbox.
 """
 
 import asyncio
@@ -74,7 +80,15 @@ class PublicNetworkGuard:
         self._resolver = resolver
         self._timeout_ms = request_timeout_seconds * 1_000
         self._resolutions: dict[str, UrlPolicyError | None] = {}
-        self._page: Page | None = None
+        #: Every page this guard owns. One for a Milestone 7a inspection; up to
+        #: the tab budget for a Milestone 7b research session, all in the same
+        #: context and all routed through this one guard.
+        self._pages: set[Page] = set()
+        #: Non-zero while this guard's owner is deliberately creating a tab.
+        #: Playwright fires the context's `page` event for pages *we* open too,
+        #: and it can fire before `new_page()` returns, so without this a
+        #: session would close its own tab as if it were a popup.
+        self._expected = 0
         self._popups: set[asyncio.Task[None]] = set()
         #: Set while the operation itself is following main-document redirects.
         self.following_redirects = False
@@ -86,11 +100,25 @@ class PublicNetworkGuard:
         #: Refused request methods, e.g. {"POST": 2}. Method names only, never URLs.
         self.blocked_methods: Counter[str] = Counter()
 
-    async def install(self, context: BrowserContext, page: Page) -> None:
-        self._page = page
+    async def install(self, context: BrowserContext, page: Page | None = None) -> None:
+        if page is not None:
+            self._pages.add(page)
         await context.route("**/*", self._handle)
         await context.route_web_socket(re.compile(r".*"), self._refuse_socket)
         context.on("page", self._close_popup)
+
+    def track(self, page: Page) -> None:
+        """Adopt a task-owned tab. A page this guard does not know is a popup."""
+        self._pages.add(page)
+
+    def expect_page(self) -> None:
+        self._expected += 1
+
+    def stop_expecting(self) -> None:
+        self._expected = max(0, self._expected - 1)
+
+    def untrack(self, page: Page) -> None:
+        self._pages.discard(page)
 
     # ---- handlers -------------------------------------------------------------
 
@@ -100,7 +128,11 @@ class PublicNetworkGuard:
         await socket.close(code=1008, reason="blocked")
 
     def _close_popup(self, popup: Page) -> None:
-        if popup is self._page:
+        if popup in self._pages:
+            return
+        if self._expected > 0:
+            # A tab this session asked for. Adopt it rather than close it.
+            self._pages.add(popup)
             return
         self.blocked["popup_blocked"] += 1
         task = asyncio.ensure_future(self._close(popup))
@@ -115,10 +147,11 @@ class PublicNetworkGuard:
             pass
 
     def _is_main_document(self, request: Request) -> bool:
-        if self._page is None or not request.is_navigation_request():
+        if not self._pages or not request.is_navigation_request():
             return False
         try:
-            return request.frame == self._page.main_frame
+            frame = request.frame
+            return any(frame == page.main_frame for page in self._pages)
         except PlaywrightError:
             return False
 

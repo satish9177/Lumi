@@ -74,6 +74,16 @@ export const DEFAULT_ROUTES: RoutingTable = {
   page_answer: {
     providers: [{ provider: 'gemini', model: 'gemini-2.5-flash' }, { provider: 'openai' }, { provider: 'deepseek' }],
     maxInputTokens: 6_000, maxOutputTokens: 600, timeoutMs: 30_000
+  },
+  // Milestone 7b. One step per call, so the budget is per call and small; the
+  // task-wide token budget is enforced by the research loop, not here.
+  research_planning: {
+    providers: [{ provider: 'gemini', model: 'gemini-2.5-flash' }, { provider: 'openai' }, { provider: 'deepseek' }],
+    maxInputTokens: 8_000, maxOutputTokens: 700, timeoutMs: 30_000
+  },
+  research_answer: {
+    providers: [{ provider: 'gemini', model: 'gemini-2.5-flash' }, { provider: 'openai' }, { provider: 'deepseek' }],
+    maxInputTokens: 12_000, maxOutputTokens: 900, timeoutMs: 45_000
   }
 }
 

@@ -12,6 +12,9 @@ from app.browser.errors import (
 )
 from app.domain.booking import BookingProposalError
 from app.domain.page_observation import AnswerNotGroundedError
+from app.domain.research import AnswerNotGroundedError as ResearchAnswerNotGroundedError
+from app.domain.research import ResearchRefusal
+from app.services.research_search import SearchFailedError
 from app.domain.errors import (
     BookingCriteriaError,
     BookingCriteriaMismatchError,
@@ -37,6 +40,14 @@ from app.domain.errors import (
     InspectionProposalError,
     ObservationNotAvailableError,
     PublicInspectionNotConfiguredError,
+    ResearchAnswerAlreadyRecordedError,
+    ResearchBudgetExhaustedError,
+    ResearchGrantNotFoundError,
+    ResearchGrantNotUsableError,
+    ResearchNotConfiguredError,
+    ResearchSessionUnavailableError,
+    ResearchStepInFlightError,
+    ResearchStepRefusedError,
     StaleObservationError,
 )
 
@@ -110,6 +121,23 @@ async def _answer_not_grounded(_: Request, exc: Exception) -> JSONResponse:
             reason=exc.code,
         ),
     )
+
+
+def _reasoned(status_code: int, code: str, message: str, attribute: str) -> Handler:
+    """A stable code plus one machine-readable reason. Never internal text."""
+
+    async def handler(_: Request, exc: Exception) -> JSONResponse:
+        reason = getattr(exc, attribute, None)
+        return _error(
+            status_code,
+            ErrorDetail(
+                code=code,
+                message=message,
+                reason=str(reason) if isinstance(reason, str) else None,
+            ),
+        )
+
+    return handler
 
 
 def _fixed(status_code: int, code: str, message: str) -> Handler:
@@ -266,6 +294,102 @@ def register_error_handlers(app: FastAPI) -> None:
             status.HTTP_409_CONFLICT,
             "stale_observation",
             "That observation is no longer the current one.",
+        ),
+    )
+    # --- Milestone 7b public research ------------------------------------
+    app.add_exception_handler(
+        ResearchNotConfiguredError,
+        _fixed(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "research_not_configured",
+            "Public web research is not configured.",
+        ),
+    )
+    app.add_exception_handler(
+        ResearchGrantNotFoundError,
+        _fixed(
+            status.HTTP_404_NOT_FOUND,
+            "research_grant_not_found",
+            "There is no research scope for that task.",
+        ),
+    )
+    app.add_exception_handler(
+        ResearchGrantNotUsableError,
+        _reasoned(
+            status.HTTP_409_CONFLICT,
+            "research_grant_not_usable",
+            "That research scope does not authorise anything right now.",
+            "reason",
+        ),
+    )
+    app.add_exception_handler(
+        ResearchStepRefusedError,
+        _reasoned(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "research_step_refused",
+            "That research step was refused.",
+            "code",
+        ),
+    )
+    app.add_exception_handler(
+        ResearchRefusal,
+        _reasoned(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "research_step_refused",
+            "That research input was refused.",
+            "code",
+        ),
+    )
+    app.add_exception_handler(
+        ResearchBudgetExhaustedError,
+        _reasoned(
+            status.HTTP_409_CONFLICT,
+            "research_budget_exhausted",
+            "This research task has reached one of its limits.",
+            "limit",
+        ),
+    )
+    app.add_exception_handler(
+        ResearchStepInFlightError,
+        _fixed(
+            status.HTTP_409_CONFLICT,
+            "research_step_in_flight",
+            "A research step for this task has not finished yet.",
+        ),
+    )
+    app.add_exception_handler(
+        ResearchSessionUnavailableError,
+        _reasoned(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "research_session_unavailable",
+            "The research browser session is not available.",
+            "code",
+        ),
+    )
+    app.add_exception_handler(
+        ResearchAnswerAlreadyRecordedError,
+        _fixed(
+            status.HTTP_409_CONFLICT,
+            "research_answer_already_recorded",
+            "This research task already has a recorded answer.",
+        ),
+    )
+    app.add_exception_handler(
+        ResearchAnswerNotGroundedError,
+        _reasoned(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "research_answer_not_grounded",
+            "The answer is not supported by what this task observed.",
+            "code",
+        ),
+    )
+    app.add_exception_handler(
+        SearchFailedError,
+        _reasoned(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "research_search_failed",
+            "The public search could not be completed.",
+            "code",
         ),
     )
     app.add_exception_handler(StaleTaskRevisionError, _stale_task_revision)

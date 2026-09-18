@@ -7,13 +7,18 @@ import {
   CLINIC_INFO_TOPICS,
   DISCLOSURE_RECIPIENTS,
   DISPATCH_STATUSES,
+  GRANT_STATUSES,
   LOOKUP_STATUSES,
   PAGE_ANSWER_STATUSES,
+  RESEARCH_ANSWER_STATUSES,
+  RESEARCH_OPERATIONS,
+  RESEARCH_STOP_REASONS,
   RISK_TIERS,
   TASK_EVENT_TYPES,
   TASK_STATUSES,
   type AgentActionView,
   type AgentApprovalView,
+  type AgentAttemptOutcome,
   type AgentAttemptResultView,
   type AgentAttemptView,
   type AgentBookingCriteria,
@@ -32,6 +37,14 @@ import {
   type AgentPageAnswerView,
   type AgentReceiptView,
   type AgentReconciliationView,
+  type AgentResearchAnswerView,
+  type AgentResearchBudgets,
+  type AgentResearchGrantView,
+  type AgentResearchObservationView,
+  type AgentResearchRequestView,
+  type AgentResearchScopeView,
+  type AgentResearchSessionView,
+  type AgentResearchView,
   type AgentSlotView,
   type AgentTaskView
 } from '../../shared/agent-contracts'
@@ -213,7 +226,7 @@ const WEB_URL = /^https?:\/\/[^\s]{1,2040}$/
 const BLOCK_ID = /^b[1-9][0-9]{0,2}$/
 const LINK_ID = /^l[1-9][0-9]?$/
 const MODEL_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/
-const POLICY_VERSION = /^[a-z0-9][a-z0-9.-]{0,39}$/
+const POLICY_VERSION_PATTERN = /^[a-z0-9][a-z0-9.-]{0,39}$/
 const MAX_QUESTION = 500
 
 function webUrl(value: unknown, what: string): string {
@@ -239,13 +252,17 @@ export function parseInspectionRequest(request: Json): AgentInspectionRequestVie
 export function parseTask(value: unknown): AgentTaskView {
   const task = record(value, 'task')
   const request = record(task.request, 'task.request')
-  if (request.type !== 'appointment_booking' && request.type !== 'clinic_info' && request.type !== 'page_inspection') {
+  if (
+    request.type !== 'appointment_booking' && request.type !== 'clinic_info' &&
+    request.type !== 'page_inspection' && request.type !== 'public_research'
+  ) {
     throw new WireError('task.type')
   }
   const kind = request.type
   const infoQuery = kind === 'clinic_info' ? parseInfoQuery(request) : undefined
   if (kind === 'clinic_info' && !infoQuery) throw new WireError('task.info_query')
   const inspection = kind === 'page_inspection' ? parseInspectionRequest(request) : undefined
+  const research = kind === 'public_research' ? parseResearchRequest(request) : undefined
   return {
     taskId: uuid(task.id, 'task.id'),
     status: member(TASK_STATUSES, task.status, 'task.status'),
@@ -255,6 +272,7 @@ export function parseTask(value: unknown): AgentTaskView {
     criteria: kind === 'appointment_booking' ? parseCriteria(request) : { specialty: '', day: '' },
     ...(infoQuery ? { infoQuery } : {}),
     ...(inspection ? { inspection } : {}),
+    ...(research ? { research } : {}),
     ...(typeof request.voice_turn_id === 'string' && TURN_ID.test(request.voice_turn_id)
       ? { voiceTurnId: request.voice_turn_id }
       : {}),
@@ -604,7 +622,7 @@ export function parseInspectionProposal(value: unknown): AgentInspectionProposal
     url,
     host,
     question: text(proposal.question, 'inspection.question', undefined, MAX_QUESTION),
-    policyVersion: text(proposal.policy_version, 'inspection.policy_version', POLICY_VERSION, 40),
+    policyVersion: text(proposal.policy_version, 'inspection.policy_version', POLICY_VERSION_PATTERN, 40),
     recipients: disclosure.recipients.map((recipient) => member(DISCLOSURE_RECIPIENTS, recipient, 'inspection.recipient')),
     maxTextChars: integer(disclosure.max_text_chars, 'inspection.max_text_chars', 1, 12_000),
     maxLinks: integer(limits.max_links, 'inspection.max_links', 0, 20),
@@ -762,6 +780,319 @@ export function latestInspectionActionId(value: unknown, taskId: string): string
   return latest
 }
 
+
+// ---- Milestone 7b: public web research -------------------------------------
+//
+// Notice what is *not* parsed here: the addresses observed links and search
+// results point at. The runtime keeps them in its own `targets` table and does
+// not send them, so main -- and therefore any model main calls -- never holds
+// an address a page or a search provider chose. Page addresses Lumi actually
+// visited *are* parsed: they are the sources the user is shown.
+
+const RESEARCH_REF = /^o[1-9][0-9]{0,3}$/
+const RESEARCH_LINK_REF = /^l[1-9][0-9]?$/
+const RESEARCH_RESULT_REF = /^r[1-9][0-9]?$/
+const TAB_REF = /^t[1-5]$/
+const HOST = /^[a-z0-9._:-]{1,253}$/
+const HTTP_READ_METHOD = /^(GET|HEAD)$/
+const SESSION_STATUS = /^[A-Z]{4,6}$/
+const MAX_OBJECTIVE = 500
+const MAX_RESEARCH_ANSWER = 1_200
+
+function decimal(value: unknown, what: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > 1e9) {
+    throw new WireError(what)
+  }
+  return value
+}
+
+/** The objective a public-research task was created with. */
+export function parseResearchRequest(request: Json): AgentResearchRequestView {
+  return { objective: text(request.objective, 'task.objective', undefined, MAX_OBJECTIVE) }
+}
+
+function parseResearchBudgets(value: unknown): AgentResearchBudgets {
+  const budgets = record(value, 'research.budgets')
+  return {
+    maxSteps: integer(budgets.max_steps, 'budgets.max_steps', 1, 200),
+    maxObservations: integer(budgets.max_observations, 'budgets.max_observations', 1, 300),
+    maxPlannerCalls: integer(budgets.max_planner_calls, 'budgets.max_planner_calls', 1, 200),
+    maxTabs: integer(budgets.max_tabs, 'budgets.max_tabs', 1, 5),
+    maxActiveSeconds: integer(budgets.max_active_seconds, 'budgets.max_active_seconds', 10, 3_600),
+    maxModelInputTokens: integer(budgets.max_model_input_tokens, 'budgets.max_input', 1_000, 1_000_000),
+    maxModelOutputTokens: integer(budgets.max_model_output_tokens, 'budgets.max_output', 100, 64_000),
+    maxVisionCalls: integer(budgets.max_vision_calls, 'budgets.max_vision', 0, 20)
+  }
+}
+
+function labels(value: unknown, what: string): string[] {
+  if (!Array.isArray(value) || value.length > 16) throw new WireError(what)
+  return value.map((entry) => text(entry, what, CODE, 64))
+}
+
+/**
+ * The scope the user is asked to confirm. Every field is required and nothing
+ * unexpected may be present: this is the card's contents, and a card that
+ * cannot be rendered exactly is not rendered at all.
+ */
+export function parseResearchScope(value: unknown): AgentResearchScopeView {
+  const scope = record(value, 'research.scope')
+  const allowed = new Set([
+    'schema_version', 'kind', 'policy_version', 'allowed_operations', 'allowed', 'forbidden',
+    'schemes', 'methods', 'hosts', 'budgets', 'disclosure', 'seeds'
+  ])
+  if (Object.keys(scope).some((key) => !allowed.has(key))) throw new WireError('research.scope.fields')
+  if (scope.schema_version !== 1 || scope.kind !== 'public_research') throw new WireError('research.scope.kind')
+  if (!Array.isArray(scope.allowed_operations) || scope.allowed_operations.length === 0) {
+    throw new WireError('research.scope.operations')
+  }
+  if (!Array.isArray(scope.schemes) || !Array.isArray(scope.methods)) throw new WireError('research.scope.network')
+  if (!Array.isArray(scope.seeds) || scope.seeds.length > 3) throw new WireError('research.scope.seeds')
+  const disclosure = record(scope.disclosure, 'research.disclosure')
+  if (!Array.isArray(disclosure.recipients) || disclosure.recipients.length < 1 || disclosure.recipients.length > 3) {
+    throw new WireError('research.recipients')
+  }
+  let hosts: 'any_public' | string[]
+  if (scope.hosts === 'any_public') {
+    hosts = 'any_public'
+  } else {
+    if (!Array.isArray(scope.hosts) || scope.hosts.length > 64) throw new WireError('research.scope.hosts')
+    hosts = scope.hosts.map((host) => text(host, 'research.scope.host', undefined, 253))
+  }
+  return {
+    policyVersion: text(scope.policy_version, 'research.policy_version', POLICY_VERSION_PATTERN, 40),
+    allowedOperations: scope.allowed_operations.map((operation) =>
+      member(RESEARCH_OPERATIONS, operation, 'research.operation')),
+    allowed: labels(scope.allowed, 'research.scope.allowed'),
+    forbidden: labels(scope.forbidden, 'research.scope.forbidden'),
+    schemes: labels(scope.schemes, 'research.scope.schemes'),
+    methods: scope.methods.map((method) => text(method, 'research.scope.method', HTTP_READ_METHOD, 4)),
+    hosts,
+    budgets: parseResearchBudgets(scope.budgets),
+    recipients: disclosure.recipients.map((recipient) =>
+      member(DISCLOSURE_RECIPIENTS, recipient, 'research.recipient')),
+    maxTextChars: integer(disclosure.max_text_chars, 'research.max_text_chars', 1, 12_000),
+    seeds: scope.seeds.map((seed) => webUrl(seed, 'research.seed'))
+  }
+}
+
+function parseResearchGrant(value: unknown, taskId: string): AgentResearchGrantView | undefined {
+  if (value === null || value === undefined) return undefined
+  const grant = record(value, 'research.grant')
+  if (uuid(grant.task_id, 'grant.task_id') !== taskId) throw new WireError('grant.task_id')
+  const scope = parseResearchScope(grant.scope)
+  const confirmedAt = nullableInstant(grant.confirmed_at, 'grant.confirmed_at')
+  const expiresAt = nullableInstant(grant.expires_at, 'grant.expires_at')
+  const status = member(GRANT_STATUSES, grant.status, 'grant.status')
+  // An active scope always has a window, and anything past PENDING was
+  // confirmed. A grant that claims otherwise is not presented as live.
+  if (status === 'ACTIVE' && !expiresAt) throw new WireError('grant.expires_at')
+  if (status !== 'PENDING' && !confirmedAt) throw new WireError('grant.confirmed_at')
+  return {
+    grantId: uuid(grant.id, 'grant.id'),
+    status,
+    revision: integer(grant.revision, 'grant.revision', 1),
+    scopeDigest: text(grant.scope_digest, 'grant.scope_digest', DIGEST, 64),
+    scope,
+    createdAt: instant(grant.created_at, 'grant.created_at'),
+    ...(confirmedAt ? { confirmedAt } : {}),
+    ...(expiresAt ? { expiresAt } : {})
+  }
+}
+
+function parseResearchObservation(value: unknown, taskId: string): AgentResearchObservationView {
+  const raw = record(value, 'research.observation')
+  if (uuid(raw.task_id, 'observation.task_id') !== taskId) throw new WireError('observation.task_id')
+  if (raw.provenance !== 'untrusted_environment' || raw.schema_version !== 1) {
+    throw new WireError('observation.provenance')
+  }
+  if (!Array.isArray(raw.blocks) || raw.blocks.length > 120) throw new WireError('observation.blocks')
+  if (!Array.isArray(raw.links) || raw.links.length > 25) throw new WireError('observation.links')
+  if (!Array.isArray(raw.results) || raw.results.length > 10) throw new WireError('observation.results')
+  if (!Array.isArray(raw.open_tabs) || raw.open_tabs.length > 5) throw new WireError('observation.tabs')
+  if (typeof raw.settled !== 'boolean' || typeof raw.truncated !== 'boolean') throw new WireError('observation.flags')
+  const kind = raw.kind
+  if (kind !== 'page' && kind !== 'search_results' && kind !== 'tab_state') throw new WireError('observation.kind')
+  const sequence = integer(raw.sequence, 'observation.sequence', 1, 10_000)
+  const ref = text(raw.ref, 'observation.ref', RESEARCH_REF, 5)
+  if (ref !== `o${sequence}`) throw new WireError('observation.ref')
+  const blocks = raw.blocks.map((item, index) => {
+    const block = record(item, 'observation.block')
+    const id = text(block.id, 'block.id', BLOCK_ID, 4)
+    if (id !== `b${index + 1}`) throw new WireError('block.order')
+    return { id, text: pageText(block.text, 'block.text', 500) }
+  })
+  const links = raw.links.map((item, index) => {
+    const link = record(item, 'observation.link')
+    const id = text(link.id, 'link.id', RESEARCH_LINK_REF, 3)
+    if (id !== `l${index + 1}`) throw new WireError('link.order')
+    // No address: only a ref, a label and a host cross this boundary.
+    if ('url' in link) throw new WireError('link.url_present')
+    return {
+      ref: id,
+      text: pageText(link.text, 'link.text', 120, true),
+      host: text(link.host, 'link.host', HOST, 253)
+    }
+  })
+  const results = raw.results.map((item, index) => {
+    const result = record(item, 'observation.result')
+    const id = text(result.id, 'result.id', RESEARCH_RESULT_REF, 3)
+    if (id !== `r${index + 1}`) throw new WireError('result.order')
+    if ('url' in result) throw new WireError('result.url_present')
+    return {
+      ref: id,
+      title: pageText(result.title, 'result.title', 200, true),
+      host: text(result.host, 'result.host', HOST, 253),
+      snippet: pageText(result.snippet, 'result.snippet', 300, true)
+    }
+  })
+  const finalUrl = raw.final_url === null || raw.final_url === undefined
+    ? undefined
+    : webUrl(raw.final_url, 'observation.final_url')
+  const tab = raw.tab === null || raw.tab === undefined ? undefined : text(raw.tab, 'observation.tab', TAB_REF, 2)
+  const query = raw.query === null || raw.query === undefined
+    ? undefined
+    : pageText(raw.query, 'observation.query', 200, true)
+  const sessionId = raw.session_id === null || raw.session_id === undefined
+    ? undefined
+    : uuid(raw.session_id, 'observation.session_id')
+  const finalHost = raw.final_host === null || raw.final_host === undefined
+    ? undefined
+    : text(raw.final_host, 'observation.final_host', HOST, 253)
+  return {
+    observationId: uuid(raw.id, 'observation.id'),
+    ref,
+    sequence,
+    kind,
+    operation: member(RESEARCH_OPERATIONS, raw.operation, 'observation.operation'),
+    ...(tab ? { tab } : {}),
+    documentEpoch: integer(raw.document_epoch, 'observation.document_epoch', 1, 10_000),
+    ...(query !== undefined ? { query } : {}),
+    ...(finalUrl ? { finalUrl } : {}),
+    ...(finalHost ? { finalHost } : {}),
+    title: pageText(raw.title, 'observation.title', 200, true),
+    settled: raw.settled,
+    truncated: raw.truncated,
+    observedAt: instant(raw.observed_at, 'observation.observed_at'),
+    contentHash: text(raw.content_hash, 'observation.content_hash', DIGEST, 64),
+    blocks,
+    links,
+    results,
+    openTabs: raw.open_tabs.map((entry) => text(entry, 'observation.tab', TAB_REF, 2)),
+    ...(sessionId ? { sessionId } : {})
+  }
+}
+
+function parseResearchAnswer(value: unknown): AgentResearchAnswerView | undefined {
+  if (value === null || value === undefined) return undefined
+  const answer = record(value, 'research.answer')
+  if (!Array.isArray(answer.evidence) || answer.evidence.length > 6) throw new WireError('answer.evidence')
+  return {
+    status: member(RESEARCH_ANSWER_STATUSES, answer.status, 'answer.status'),
+    stopReason: member(RESEARCH_STOP_REASONS, answer.stop_reason, 'answer.stop_reason'),
+    answer: text(answer.answer, 'answer.answer', undefined, MAX_RESEARCH_ANSWER),
+    evidence: answer.evidence.map((item) => {
+      const entry = record(item, 'answer.evidence')
+      return {
+        observation: text(entry.observation, 'evidence.observation', RESEARCH_REF, 5),
+        block: text(entry.block, 'evidence.block', BLOCK_ID, 4),
+        quote: text(entry.quote, 'evidence.quote', undefined, 300)
+      }
+    }),
+    provider: member(DISCLOSURE_RECIPIENTS, answer.provider, 'answer.provider'),
+    model: text(answer.model, 'answer.model', MODEL_NAME, 64),
+    stepsUsed: integer(answer.steps_used, 'answer.steps_used', 0, 1_000),
+    observationsUsed: integer(answer.observations_used, 'answer.observations_used', 0, 1_000),
+    plannerCalls: integer(answer.planner_calls, 'answer.planner_calls', 0, 1_000),
+    createdAt: instant(answer.created_at, 'answer.created_at')
+  }
+}
+
+export interface ResearchDetail {
+  view: AgentResearchView
+  task: AgentTaskView
+}
+
+/** `GET /tasks/{id}/research`, and the body of every research mutation. */
+export function parseResearch(value: unknown): ResearchDetail {
+  const body = record(value, 'research')
+  const task = parseTask(body.task)
+  if (task.kind !== 'public_research') throw new WireError('research.task_kind')
+  const usage = record(body.usage, 'research.usage')
+  if (!Array.isArray(body.observations) || body.observations.length > 300) {
+    throw new WireError('research.observations')
+  }
+  if (typeof body.search_configured !== 'boolean') throw new WireError('research.search_configured')
+  if (typeof body.unresolved_step !== 'boolean') throw new WireError('research.unresolved_step')
+  let session: AgentResearchSessionView | undefined
+  if (body.session !== null && body.session !== undefined) {
+    const raw = record(body.session, 'research.session')
+    session = {
+      sessionId: uuid(raw.id, 'session.id'),
+      status: text(raw.status, 'session.status', SESSION_STATUS, 8),
+      createdAt: instant(raw.created_at, 'session.created_at')
+    }
+  }
+  const observations = body.observations.map((item) => parseResearchObservation(item, task.taskId))
+  let previous = 0
+  for (const observation of observations) {
+    if (observation.sequence <= previous) throw new WireError('research.observation_order')
+    previous = observation.sequence
+  }
+  const grant = parseResearchGrant(body.grant, task.taskId)
+  const answer = parseResearchAnswer(body.answer)
+  return {
+    task,
+    view: {
+      taskId: task.taskId,
+      objective: text(body.objective, 'research.objective', undefined, MAX_OBJECTIVE),
+      ...(grant ? { grant } : {}),
+      ...(session ? { session } : {}),
+      observations,
+      ...(answer ? { answer } : {}),
+      usage: {
+        steps: integer(usage.steps, 'usage.steps', 0, 10_000),
+        observations: integer(usage.observations, 'usage.observations', 0, 10_000),
+        plannerCalls: integer(usage.planner_calls, 'usage.planner_calls', 0, 10_000),
+        activeSeconds: decimal(usage.active_seconds, 'usage.active_seconds'),
+        tabs: integer(usage.tabs, 'usage.tabs', 0, 5)
+      },
+      searchConfigured: body.search_configured,
+      unresolvedStep: body.unresolved_step
+    }
+  }
+}
+
+export interface ResearchStepOutcome extends ResearchDetail {
+  observation?: AgentResearchObservationView
+  outcome: AgentAttemptOutcome
+  errorCode?: string
+  replayed: boolean
+}
+
+/** `POST /tasks/{id}/research/steps`: what one step established. */
+export function parseResearchStep(value: unknown): ResearchStepOutcome {
+  const body = record(value, 'research.step')
+  const { view, task } = parseResearch(body.research)
+  const action = record(body.action, 'research.step.action')
+  if (typeof action.tool_name !== 'string' || !action.tool_name.startsWith('research_')) {
+    throw new WireError('research.step.tool_name')
+  }
+  if (typeof body.replayed !== 'boolean') throw new WireError('research.step.replayed')
+  const observation = body.observation === null || body.observation === undefined
+    ? undefined
+    : parseResearchObservation(body.observation, view.taskId)
+  const errorCode = optional(() => text(body.error_code, 'research.step.error_code', CODE, 64))
+  return {
+    view,
+    task,
+    ...(observation ? { observation } : {}),
+    outcome: member(ATTEMPT_OUTCOMES, body.outcome, 'research.step.outcome'),
+    ...(errorCode ? { errorCode } : {}),
+    replayed: body.replayed
+  }
+}
+
 // ---- errors ----------------------------------------------------------------
 
 const ERROR_MAP: Record<string, { code: AgentError['code']; message: string }> = {
@@ -792,6 +1123,16 @@ const ERROR_MAP: Record<string, { code: AgentError['code']; message: string }> =
   stale_observation: { code: 'stale_observation', message: 'The page was inspected again. Lumi answers only from the newest inspection.' },
   answer_not_grounded: { code: 'answer_unavailable', message: 'Lumi refused an answer the inspected page did not support.' },
   browser_execution_not_supported: { code: 'invalid_request', message: 'That step does not apply to this kind of task.' },
+  research_not_configured: { code: 'research_unavailable', message: 'Public web research is not set up on this computer. Nothing was searched or opened.' },
+  research_grant_not_found: { code: 'research_not_granted', message: 'That research task has no scope to work under. Start it again.' },
+  research_grant_not_usable: { code: 'research_not_granted', message: 'That research permission is no longer usable. Nothing was searched or opened.' },
+  research_step_refused: { code: 'research_refused', message: 'Lumi refused that research step.' },
+  research_budget_exhausted: { code: 'research_budget_exhausted', message: 'This research task reached one of its limits and stopped.' },
+  research_step_in_flight: { code: 'research_in_flight', message: 'Lumi is still finishing the previous research step.' },
+  research_session_unavailable: { code: 'research_unavailable', message: 'The isolated research browser is not available. Nothing was opened.' },
+  research_answer_already_recorded: { code: 'invalid_transition', message: 'This research task already has an answer.' },
+  research_answer_not_grounded: { code: 'answer_unavailable', message: 'Lumi refused an answer the pages it read did not support.' },
+  research_search_failed: { code: 'research_unavailable', message: 'The public search could not be completed. Nothing else was opened.' },
   invalid_request: { code: 'invalid_request', message: 'Lumi refused an invalid request.' }
 }
 

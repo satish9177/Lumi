@@ -509,22 +509,7 @@ class BrowserExecutionService:
     async def _dispatch(
         self, client: BrowserWorkerClient, *, request: DispatchRequest
     ) -> Outcome:
-        """Call the worker and classify. This is where honesty is enforced."""
-        try:
-            response = await client.dispatch(request)
-        except BrowserWorkerError as error:
-            return _outcome_from_error(error)
-        except Exception as error:  # noqa: BLE001 - fail safe, never fail confident.
-            logger.exception("unexpected browser dispatch failure")
-            return Outcome(
-                outcome=AttemptOutcome.OUTCOME_UNKNOWN,
-                dispatch_status=DispatchStatus.OUTCOME_UNKNOWN,
-                submitted=False,
-                error_code="dispatch_error",
-                observation_id=None,
-                result={"reason": type(error).__name__},
-            )
-        return _outcome_from_response(response)
+        return await dispatch_and_classify(client, request=request)
 
     async def _lookup(self, client: BrowserWorkerClient, *, request: DispatchRequest) -> Outcome:
         outcome = await self._dispatch(client, request=request)
@@ -583,6 +568,32 @@ class BrowserExecutionService:
 
 
 # ---- classification ---------------------------------------------------------
+
+
+async def dispatch_and_classify(
+    client: BrowserWorkerClient, *, request: DispatchRequest
+) -> Outcome:
+    """Call the worker and classify. This is where honesty is enforced.
+
+    Shared by every executor -- booking, page inspection and research steps --
+    so there is one place that decides what a lost answer means, and no
+    executor can quietly decide a timeout was a failure.
+    """
+    try:
+        response = await client.dispatch(request)
+    except BrowserWorkerError as error:
+        return _outcome_from_error(error)
+    except Exception as error:  # noqa: BLE001 - fail safe, never fail confident.
+        logger.exception("unexpected browser dispatch failure")
+        return Outcome(
+            outcome=AttemptOutcome.OUTCOME_UNKNOWN,
+            dispatch_status=DispatchStatus.OUTCOME_UNKNOWN,
+            submitted=False,
+            error_code="dispatch_error",
+            observation_id=None,
+            result={"reason": type(error).__name__},
+        )
+    return _outcome_from_response(response)
 
 
 def _outcome_from_response(response: DispatchResponse) -> Outcome:

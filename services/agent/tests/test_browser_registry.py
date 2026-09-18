@@ -37,6 +37,22 @@ EXPECTED_OPERATIONS = {
     "read_doctor_profiles",
     # Milestone 7a: one generic, read-only public page inspection.
     "inspect_public_page",
+    # Milestone 7b: the five read-only research operations. `public_search` is
+    # deliberately absent: it is a bounded JSON GET the runtime makes itself,
+    # so no search credential and no search-result markup reaches the browser.
+    "research_navigate",
+    "research_observe",
+    "research_scroll",
+    "research_history",
+    "research_tab",
+}
+
+RESEARCH_OPERATIONS = {
+    "research_navigate",
+    "research_observe",
+    "research_scroll",
+    "research_history",
+    "research_tab",
 }
 
 
@@ -125,9 +141,44 @@ def test_the_public_page_operation_is_read_only_and_never_retried_without_approv
     assert operation.effect is Effect.READ_ONLY
     assert operation.retry is RetryPolicy.NEW_APPROVAL_REQUIRED
     assert operation.reconciliation is Reconciliation.NOT_REQUIRED
-    # Every reviewed-site operation keeps resolving its origin from the worker.
-    others = [REGISTRY.get(name) for name in REGISTRY.names() if name != "inspect_public_page"]
+    # Every other non-research operation keeps resolving its origin from the
+    # worker's own allowlist.
+    others = [
+        REGISTRY.get(name)
+        for name in REGISTRY.names()
+        if name != "inspect_public_page" and name not in RESEARCH_OPERATIONS
+    ]
     assert all(op is not None and op.target is OperationTarget.REVIEWED_SITE for op in others)
+
+
+def test_research_operations_are_read_only_and_recovered_by_re_observing() -> None:
+    """A research step is never repeated blindly: the browser may have moved."""
+    for name in RESEARCH_OPERATIONS:
+        operation = REGISTRY.get(name)
+        assert operation is not None, name
+        assert operation.target is OperationTarget.RESEARCH_SESSION
+        assert operation.effect is Effect.READ_ONLY
+        assert operation.retry is RetryPolicy.OBSERVE_THEN_REPLAN
+        assert operation.reconciliation is Reconciliation.NOT_REQUIRED
+
+
+@pytest.mark.parametrize(
+    ("name", "fields"),
+    [
+        ("research_navigate", {"sequence", "tab", "url", "target_kind", "target_ref", "expected_document_epoch"}),
+        ("research_observe", {"sequence", "tab"}),
+        ("research_scroll", {"sequence", "tab", "direction"}),
+        ("research_history", {"sequence", "tab", "direction"}),
+        ("research_tab", {"sequence", "action", "tab"}),
+    ],
+)
+def test_research_inputs_hold_no_selector_script_or_method(name: str, fields: set[str]) -> None:
+    operation = REGISTRY.get(name)
+    assert operation is not None
+    assert set(operation.input_model.model_fields) == fields
+    for extra in ("selector", "xpath", "script", "javascript", "headers", "cookies", "browser_args", "method", "click", "coordinates"):
+        with pytest.raises(ValidationError):
+            operation.parse_input({"sequence": 1, "tab": "t1", extra: "x"})
 
 
 def test_the_public_page_input_is_a_url_and_nothing_else() -> None:

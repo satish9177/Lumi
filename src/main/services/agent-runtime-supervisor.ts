@@ -54,6 +54,19 @@ export interface AgentRuntimeSettings {
   publicInspectionHosts?: readonly string[]
   /** Unpackaged builds: exact http://127.0.0.1:<port> origins of controlled test pages. */
   inspectionTestOrigins?: readonly string[]
+  /**
+   * Milestone 7b public research. `researchAnyPublicHost` is the honest name
+   * for what research needs: a research task cannot know its destinations in
+   * advance, so the host allowlist layer is replaced by "not local, not
+   * private, not reserved, resolving only to globally routable addresses".
+   * `researchHosts` narrows it again when configuration wants a list.
+   */
+  researchAnyPublicHost?: boolean
+  researchHosts?: readonly string[]
+  /** Unpackaged builds only: exact loopback origins of controlled fixtures. */
+  researchTestOrigins?: readonly string[]
+  /** A URL template containing `{query}`; empty means research has no search. */
+  researchSearchEndpoint?: string
 }
 
 export type RuntimeMethod = 'GET' | 'POST'
@@ -96,6 +109,11 @@ const ALLOWED_ROUTES: ReadonlyArray<{ method: RuntimeMethod; pattern: RegExp }> 
   { method: 'POST', pattern: new RegExp(`^/tasks/${UUID_PART}/inspection/prepare$`) },
   { method: 'GET', pattern: new RegExp(`^/actions/${UUID_PART}/inspection$`) },
   { method: 'POST', pattern: new RegExp(`^/actions/${UUID_PART}/inspection/answer$`) },
+  { method: 'GET', pattern: new RegExp(`^/tasks/${UUID_PART}/research$`) },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/tasks/${UUID_PART}/research/(prepare|grant|revoke|steps|answer)$`)
+  },
   { method: 'GET', pattern: new RegExp(`^/actions/${UUID_PART}$`) },
   {
     method: 'POST',
@@ -129,6 +147,28 @@ export function validateRuntimeSettings(settings: AgentRuntimeSettings): Record<
   }
   if (settings.inspectionTestOrigins !== undefined && settings.inspectionTestOrigins.length > 0) {
     environment.LUMI_INSPECTION_TEST_ORIGINS = parseTestOrigins(settings.inspectionTestOrigins).join(',')
+  }
+  if (settings.researchAnyPublicHost === true) {
+    environment.LUMI_RESEARCH_ANY_PUBLIC_HOST = 'true'
+  }
+  if (settings.researchHosts !== undefined && settings.researchHosts.length > 0) {
+    environment.LUMI_RESEARCH_HOSTS = parseAllowedHosts(settings.researchHosts).join(',')
+  }
+  if (settings.researchTestOrigins !== undefined && settings.researchTestOrigins.length > 0) {
+    environment.LUMI_RESEARCH_TEST_ORIGINS = parseTestOrigins(settings.researchTestOrigins).join(',')
+  }
+  if (settings.researchSearchEndpoint !== undefined && settings.researchSearchEndpoint !== '') {
+    // A URL template, checked here as a shape and again by the runtime against
+    // its own destination policy before a single request is made.
+    const endpoint = settings.researchSearchEndpoint
+    if (
+      !/^https?:\/\/[^\s"'\\]{1,1000}$/.test(endpoint) ||
+      !endpoint.includes('{query}') ||
+      endpoint.split('{query}').length !== 2
+    ) {
+      throw new Error('The research search endpoint must be an http(s) URL containing exactly one {query}.')
+    }
+    environment.LUMI_RESEARCH_SEARCH_ENDPOINT = endpoint
   }
   if (settings.browsersPath !== undefined) {
     if (!isAbsolute(settings.browsersPath) || /["\r\n]/.test(settings.browsersPath) || settings.browsersPath.length > 500) {

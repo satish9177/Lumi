@@ -31,7 +31,8 @@ class _TestEnvironment(BaseSettings):
 
 
 TRUNCATE_ALL = (
-    "TRUNCATE page_observations, browser_dispatches, browser_worker_generations, action_attempts, approvals, "
+    "TRUNCATE research_answers, research_observations, page_observations, browser_dispatches, "
+    "research_sessions, step_authorizations, task_grants, browser_worker_generations, action_attempts, approvals, "
     "actions, runtime_generations, task_events, tasks RESTART IDENTITY"
 )
 TEST_RUNTIME_TOKEN = SecretStr("test-runtime-token-with-at-least-32-bytes")

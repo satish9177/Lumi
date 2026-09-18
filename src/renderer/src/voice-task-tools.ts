@@ -287,6 +287,8 @@ function guidance(narration: VoiceNarration): string {
       return 'Confirm briefly that Lumi will remember this preference. Say the user can remove it in the task panel.'
     case 'inspection':
       return 'This is a web page inspection. You cannot approve it or open the page by voice, and you do not have the page text. Point the user to the inspection card: approval, the answer and its source are shown there.'
+    case 'research':
+      return 'This is a public web research task. You cannot allow it, run it or read the pages by voice, and you do not have any page text. Point the user to the research card: the permission, the progress, the sources and the answer are all shown there.'
   }
 }
 

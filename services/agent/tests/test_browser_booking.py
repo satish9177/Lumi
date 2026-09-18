@@ -582,11 +582,29 @@ def test_the_worker_reads_the_credential_from_the_documented_header(
 
 
 def test_the_worker_exposes_no_generic_automation_endpoints(worker: WorkerProcess) -> None:
-    """There is no evaluate/javascript/click-anything surface to find."""
+    """There is no evaluate/javascript/click-anything surface to find.
+
+    The session routes are lifecycle only: they open and close a task-owned
+    browser context. Neither takes a URL, an operation, a selector or a script,
+    and neither drives a page.
+    """
     import httpx
 
     schema = httpx.get(f"{worker.base_url}/openapi.json", timeout=30).json()
-    assert sorted(schema["paths"]) == ["/health", "/v1/dispatch"]
+    assert sorted(schema["paths"]) == [
+        "/health",
+        "/v1/dispatch",
+        "/v1/sessions/close",
+        "/v1/sessions/open",
+    ]
+    for path in ("/v1/sessions/open", "/v1/sessions/close"):
+        body = schema["paths"][path]["post"]["requestBody"]["content"]["application/json"]
+        reference = body["schema"]["$ref"].rsplit("/", 1)[-1]
+        assert set(schema["components"]["schemas"][reference]["properties"]) == {
+            "session_id",
+            "runtime_generation",
+            "expected_worker_generation",
+        }
 
 
 def test_the_worker_refuses_input_that_does_not_match_the_operation(

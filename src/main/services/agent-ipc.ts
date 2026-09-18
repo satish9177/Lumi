@@ -109,6 +109,15 @@ export function registerAgentIpc({
   handle(AGENT_IPC_CHANNELS.executeInspection, (actionId, revision) => controller.executeInspection(actionId, revision))
   handle(AGENT_IPC_CHANNELS.answerInspection, (actionId) => controller.answerInspection(actionId))
   handle(AGENT_IPC_CHANNELS.inspectPageAgain, () => controller.inspectPageAgain())
+  // Public research. `grantResearchScope` is the trusted click: it names the
+  // grant on screen and the revision that was shown, and it is the only
+  // channel that can make research possible. There is deliberately no channel
+  // that submits a step, so neither the renderer nor a model can choose one.
+  handle(AGENT_IPC_CHANNELS.createResearchTask, (objective) => controller.createResearchTask(objective))
+  handle(AGENT_IPC_CHANNELS.grantResearchScope, (grantId, revision) => controller.grantResearchScope(grantId, revision))
+  handle(AGENT_IPC_CHANNELS.declineResearchScope, (grantId, revision) => controller.declineResearchScope(grantId, revision))
+  handle(AGENT_IPC_CHANNELS.runResearch, () => controller.runResearch())
+  handle(AGENT_IPC_CHANNELS.stopResearch, () => controller.stopResearch())
   handle(AGENT_IPC_CHANNELS.listPreferences, async (): Promise<AgentResult<AgentPreferenceView[]>> => {
     if (!memory) return { ok: true, value: [] }
     try {

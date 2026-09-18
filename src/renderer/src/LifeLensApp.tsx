@@ -60,9 +60,14 @@ import {
 import { ScriptedRealtimeServer, installGeminiHarness, installRealtimeHarness } from './realtime-scripted'
 import { GeminiLiveProvider } from './voice/gemini-live-provider'
 import { BrowserPcmAudio, SilentAudio } from './voice/pcm-audio'
-import type { AgentInspectionView, AgentResult } from '../../shared/agent-contracts'
+import type { AgentInspectionView, AgentResearchView, AgentResult } from '../../shared/agent-contracts'
 import { describeOutcome } from './agent-task-view'
-import { describeInspectionForConversation, realtimeConversation, submitComposerRequest } from './composer-routing'
+import {
+  describeInspectionForConversation,
+  describeResearchForConversation,
+  realtimeConversation,
+  submitComposerRequest
+} from './composer-routing'
 import type { VoiceTaskCommand, VoiceTaskFocus, VoiceTaskOutcome } from '../../shared/voice-task-contracts'
 
 const VOICE_PAUSED_NOTICE = 'Voice paused to save cost — ask a question to reconnect.'
@@ -135,6 +140,7 @@ export default function LifeLensApp() {
   const routingRef = useRef(false)
   const [isSendingRequest, setIsSendingRequest] = useState(false)
   const reportedInspectionsRef = useRef(new Set<string>())
+  const reportedResearchRef = useRef(new Set<string>())
   const [documentRoots, setDocumentRoots] = useState<ApprovedDocumentRoot[]>([])
   const [searchQuery, setSearchQuery] = useState('resume')
   const [searchResults, setSearchResults] = useState<DocumentSearchResult[]>([])
@@ -431,6 +437,15 @@ export default function LifeLensApp() {
     const key = `${inspection.actionId}:${inspection.status}:${inspection.answer?.status ?? ''}`
     if (!line || reportedInspectionsRef.current.has(key)) return
     reportedInspectionsRef.current.add(key)
+    appendTranscript(line)
+  }
+
+  /** A finished research task's outcome, once per state, in the conversation. */
+  const showResearchResult = (research: AgentResearchView): void => {
+    const line = describeResearchForConversation(research)
+    const key = `${research.taskId}:${research.grant?.status ?? ''}:${research.answer?.status ?? ''}`
+    if (!line || reportedResearchRef.current.has(key)) return
+    reportedResearchRef.current.add(key)
     appendTranscript(line)
   }
 
@@ -1849,6 +1864,7 @@ export default function LifeLensApp() {
           {agentTasksOpen && (
             <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Lumi agent">
               <AgentTaskPanel agent={window.lifeLens.agent} focusRequest={agentFocus} onInspectionResult={showInspectionResult}
+                onResearchResult={showResearchResult}
                 onClose={() => setAgentTasksOpen(false)} />
             </div>
           )}

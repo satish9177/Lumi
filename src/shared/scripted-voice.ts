@@ -140,6 +140,23 @@ export function narrateScripted(output: Json): ScriptedNarration {
     }
     case 'preference_saved':
       return { text: `I will remember that (${facts.preference.key.replaceAll('_', ' ')}: ${facts.preference.value}).` }
+    case 'research':
+      switch (facts.state) {
+        case 'permission_required':
+          return { text: 'I cannot allow public web research by voice. Please review the research card and press Allow research yourself.' }
+        case 'awaiting_permission':
+          return { text: 'The research card is waiting for you to allow public web research.' }
+        case 'researching':
+          return { text: 'I am reading public pages for that. The progress and the sources are on the research card.' }
+        case 'answered':
+          return { text: 'The answer is on the research card, with the public pages it came from.' }
+        case 'not_verified':
+          return { text: 'I could not verify that from the public pages I was able to read. The details are on the card.' }
+        case 'stopped':
+          return { text: 'The research is stopped. Nothing else will be opened.' }
+        default:
+          return { text: 'The research task is shown on the card.' }
+      }
     case 'inspection':
       switch (facts.state) {
         case 'approval_required':

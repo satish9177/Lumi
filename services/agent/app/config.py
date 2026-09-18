@@ -6,7 +6,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
-from app.domain.public_url import PublicUrlPolicy, parse_allowed_hosts, parse_test_origins
+from app.domain.public_url import (
+    RESEARCH_POLICY_VERSION,
+    PublicUrlPolicy,
+    parse_allowed_hosts,
+    parse_test_origins,
+)
 
 AGENT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -109,6 +114,80 @@ class Settings(DatabaseSettings):
         return PublicUrlPolicy(
             allowed_hosts=parse_allowed_hosts(self.public_inspection_hosts),
             test_origins=parse_test_origins(self.inspection_test_origins),
+        )
+
+    # --- Milestone 7b public research ------------------------------------
+    #
+    # Research is a separate capability from Milestone 7a inspection, with its
+    # own destination policy. Inspection keeps its host allowlist whatever
+    # research allows; nothing here widens it.
+    #
+    # `research_any_public_host` is the honest name for what research needs: a
+    # research task cannot know its destinations in advance, so the allowlist
+    # layer is replaced by "not local, not private, not reserved, and resolving
+    # only to globally routable addresses". The residual DNS-rebinding gap that
+    # leaves is documented in `app/browser/network_guard.py`.
+    research_any_public_host: bool = Field(
+        default=False, validation_alias="LUMI_RESEARCH_ANY_PUBLIC_HOST"
+    )
+    research_hosts: str = Field(default="", validation_alias="LUMI_RESEARCH_HOSTS")
+    research_test_origins: str = Field(default="", validation_alias="LUMI_RESEARCH_TEST_ORIGINS")
+    research_max_tabs: int = Field(
+        default=5, ge=1, le=5, validation_alias="LUMI_RESEARCH_MAX_TABS"
+    )
+    #: How long one confirmed research scope authorises steps for. Ten minutes
+    #: initially; configurable because it is a tuning value, not an invariant.
+    research_grant_ttl_seconds: int = Field(
+        default=600, ge=30, le=3_600, validation_alias="LUMI_RESEARCH_GRANT_TTL_SECONDS"
+    )
+    #: How long a single-use step authorization may be claimed for. Short: it
+    #: is minted and consumed inside one request.
+    research_step_ttl_seconds: int = Field(
+        default=120, ge=5, le=600, validation_alias="LUMI_RESEARCH_STEP_TTL_SECONDS"
+    )
+    #: The public search endpoint, a URL template containing `{query}`. It is a
+    #: bounded JSON GET the *runtime* makes, so no search credential and no
+    #: search-result markup ever reaches the browser worker. Empty means
+    #: research has no search primitive; navigation and links still work.
+    research_search_endpoint: str = Field(
+        default="", validation_alias="LUMI_RESEARCH_SEARCH_ENDPOINT"
+    )
+    research_search_api_key: SecretStr | None = Field(
+        default=None, validation_alias="LUMI_RESEARCH_SEARCH_API_KEY"
+    )
+    research_search_header: str = Field(
+        default="X-Subscription-Token", validation_alias="LUMI_RESEARCH_SEARCH_HEADER"
+    )
+    research_search_timeout_seconds: float = Field(
+        default=15.0, gt=0, le=60, validation_alias="LUMI_RESEARCH_SEARCH_TIMEOUT_SECONDS"
+    )
+
+    @field_validator("research_hosts")
+    @classmethod
+    def _valid_research_hosts(cls, value: str) -> str:
+        parse_allowed_hosts(value)
+        return value
+
+    @field_validator("research_test_origins")
+    @classmethod
+    def _valid_research_test_origins(cls, value: str) -> str:
+        parse_test_origins(value)
+        return value
+
+    @field_validator("research_search_header")
+    @classmethod
+    def _valid_search_header(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{0,63}", value):
+            raise ValueError("LUMI_RESEARCH_SEARCH_HEADER must be a plain header name")
+        return value
+
+    @property
+    def research_policy(self) -> PublicUrlPolicy:
+        return PublicUrlPolicy(
+            allowed_hosts=parse_allowed_hosts(self.research_hosts),
+            test_origins=parse_test_origins(self.research_test_origins),
+            version=RESEARCH_POLICY_VERSION,
+            allow_any_public_host=self.research_any_public_host,
         )
 
     @field_validator("runtime_token")

@@ -15,6 +15,7 @@
 export type InterpretationIntent =
   | 'appointment_plan'
   | 'clinic_info'
+  | 'public_research'
   | 'status'
   | 'check_booking'
   | 'cancel_task'
@@ -27,7 +28,27 @@ export interface InterpretationWire {
   intent: InterpretationIntent
   plan?: Json
   clinic?: Json
+  research?: Json
   preference?: Json
+}
+
+/**
+ * Explicit public-research cues only. The rules are a last-resort fallback, so
+ * they are deliberately narrow: "find a dermatologist tomorrow" must stay an
+ * appointment plan, and an ordinary question must stay a conversation.
+ */
+const RESEARCH_CUES = [
+  /\bresearch\b/,
+  /\b(?:search|look) (?:the |on the )?(?:web|internet|online|github)\b/,
+  /\b(?:on|from) the (?:web|internet)\b/,
+  /\bpublic(?:ly)? (?:information|available|pages?|profile|listings?)\b/,
+  /\b(?:find|look up|search for|show me)\b[^.]*\b(?:repository|repositories|repo|github|leetcode|profile|documentation|docs|listings?|postings?|job|jobs|rating|stars?|contributors?)\b/,
+  /\bwith sources\b/,
+  /\bcite (?:your )?sources\b/
+]
+
+export function looksLikeResearch(text: string): boolean {
+  return RESEARCH_CUES.some((cue) => cue.test(text))
 }
 
 export interface RuleContext {
@@ -163,6 +184,11 @@ export function interpretByRules(raw: string, context: RuleContext = {}): Interp
   const infoTopic = INFO_TOPICS.find(([pattern]) => pattern.test(text))
   const doctor = doctorOf(text)
   const specialty = specialtyOf(text)
+  // Checked before the appointment rules, but only for an explicit research
+  // cue and only when no clinic subject is in play.
+  if (looksLikeResearch(text) && !doctor && !specialty) {
+    return { intent: 'public_research', research: { objective: raw.trim() } }
+  }
   if (infoTopic && (doctor || specialty) && !/\b(find|search|appointment|slot|book)\b/.test(text)) {
     return {
       intent: 'clinic_info',

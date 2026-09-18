@@ -51,7 +51,10 @@ class AttemptRecord:
     id: uuid.UUID
     action_id: uuid.UUID
     attempt_number: int
-    approval_id: uuid.UUID
+    #: Exactly one of these is set: an exact approval the user granted for this
+    #: proposal, or the single-use step authorization a task grant derived.
+    approval_id: uuid.UUID | None
+    step_authorization_id: uuid.UUID | None
     runtime_generation: uuid.UUID
     started_at: datetime
     finished_at: datetime | None
@@ -98,6 +101,7 @@ def _attempt(row: Row[Any]) -> AttemptRecord:
         action_id=row.action_id,
         attempt_number=row.attempt_number,
         approval_id=row.approval_id,
+        step_authorization_id=row.step_authorization_id,
         runtime_generation=row.runtime_generation,
         started_at=row.started_at,
         finished_at=row.finished_at,
@@ -318,9 +322,13 @@ class ActionRepository:
         attempt_id: uuid.UUID,
         action_id: uuid.UUID,
         attempt_number: int,
-        approval_id: uuid.UUID,
         runtime_generation: uuid.UUID,
+        approval_id: uuid.UUID | None = None,
+        step_authorization_id: uuid.UUID | None = None,
     ) -> AttemptRecord:
+        """One attempt, funded by exactly one authority (a database CHECK)."""
+        if (approval_id is None) == (step_authorization_id is None):
+            raise ValueError("an attempt is funded by an approval or a step authorization")
         result = await self._connection.execute(
             insert(action_attempts)
             .values(
@@ -328,6 +336,7 @@ class ActionRepository:
                 action_id=action_id,
                 attempt_number=attempt_number,
                 approval_id=approval_id,
+                step_authorization_id=step_authorization_id,
                 runtime_generation=runtime_generation,
             )
             .returning(*action_attempts.c)

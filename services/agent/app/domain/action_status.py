@@ -22,6 +22,11 @@ class ActionStatus(StrEnum):
     PROPOSED = "PROPOSED"
     WAITING_APPROVAL = "WAITING_APPROVAL"
     APPROVED = "APPROVED"
+    # Milestone 7b: authorised by a reusable, scoped task grant rather than by
+    # an exact per-action approval. Deliberately a distinct state from
+    # APPROVED: the user confirmed a bounded scope once, not this exact step,
+    # and the timeline must not claim otherwise.
+    AUTHORIZED = "AUTHORIZED"
     REJECTED = "REJECTED"
     EXECUTING = "EXECUTING"
     SUCCEEDED = "SUCCEEDED"
@@ -60,9 +65,15 @@ OPEN_APPROVAL_STATUSES: frozenset[ApprovalStatus] = frozenset(
 )
 
 _ALLOWED_TRANSITIONS: dict[ActionStatus, frozenset[ActionStatus]] = {
-    ActionStatus.PROPOSED: frozenset({ActionStatus.WAITING_APPROVAL, ActionStatus.REJECTED}),
+    ActionStatus.PROPOSED: frozenset(
+        {ActionStatus.WAITING_APPROVAL, ActionStatus.AUTHORIZED, ActionStatus.REJECTED}
+    ),
     ActionStatus.WAITING_APPROVAL: frozenset({ActionStatus.APPROVED, ActionStatus.REJECTED}),
     ActionStatus.APPROVED: frozenset({ActionStatus.EXECUTING, ActionStatus.REJECTED}),
+    # No edge from AUTHORIZED to APPROVED, or back from EXECUTING: a scoped
+    # authorization never becomes an exact approval, and a started attempt is
+    # never un-started.
+    ActionStatus.AUTHORIZED: frozenset({ActionStatus.EXECUTING, ActionStatus.REJECTED}),
     # No edge back to APPROVED: a started attempt is never un-started.
     ActionStatus.EXECUTING: frozenset(
         {ActionStatus.SUCCEEDED, ActionStatus.FAILED, ActionStatus.OUTCOME_UNKNOWN}
@@ -84,6 +95,7 @@ _TASK_STATUS_FOR_ACTION: dict[ActionStatus, TaskStatus | None] = {
     ActionStatus.PROPOSED: None,
     ActionStatus.WAITING_APPROVAL: TaskStatus.WAITING_APPROVAL,
     ActionStatus.APPROVED: TaskStatus.READY,
+    ActionStatus.AUTHORIZED: TaskStatus.READY,
     ActionStatus.REJECTED: TaskStatus.READY,
     ActionStatus.EXECUTING: TaskStatus.EXECUTING,
     ActionStatus.SUCCEEDED: TaskStatus.READY,

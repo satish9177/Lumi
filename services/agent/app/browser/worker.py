@@ -47,6 +47,8 @@ from app.browser.protocol import (
     DispatchRequest,
     DispatchResponse,
     OperationStatus,
+    SessionRequest,
+    SessionResponse,
     WorkerErrorBody,
     WorkerIdentity,
 )
@@ -57,9 +59,11 @@ from app.browser.registry import (
     OperationTarget,
     build_registry,
 )
+from app.browser.research_session import ResearchBrowserSession, SessionError, SessionStore
 from app.browser.session import BrowserSession, WorkerGeneration, token_matches
 from app.domain.page_observation import PUBLIC_WEB_SITE
 from app.domain.public_url import PublicUrlPolicy
+from app.domain.research import PUBLIC_RESEARCH_SITE
 
 logger = logging.getLogger("lumi.browser.worker")
 
@@ -120,6 +124,7 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
     resolved = settings if settings is not None else WorkerSettings()
     registry = build_registry()
     public_policy = resolved.public_policy
+    research_policy = resolved.research_policy
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -129,6 +134,8 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
         app.state.generation = generation
         app.state.browser = browser
         app.state.ledger = DispatchLedger()
+        # One active research task at a time, as this milestone intends.
+        app.state.sessions = SessionStore(limit=1)
         logger.info(
             "browser worker ready",
             extra={
@@ -136,11 +143,14 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
                 "headless": resolved.headless,
                 "sites": sorted(resolved.origins),
                 "operations": registry.names(),
+                "research_enabled": research_policy.configured,
             },
         )
         try:
             yield
         finally:
+            sessions: SessionStore = app.state.sessions
+            await sessions.close_all()
             await browser.close()
             await playwright.stop()
 
@@ -176,8 +186,80 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
                 worker_generation=generation.id,
                 started_at=generation.started_at.isoformat(),
                 headless=resolved.headless,
-                sites=_site_names(resolved, public_policy),
+                sites=_site_names(resolved, public_policy, research_policy),
                 operations=registry.names(),
+            ).model_dump(mode="json")
+        )
+
+    @app.post("/v1/sessions/open")
+    async def open_session(
+        request: Request, body: SessionRequest, token: str = credential
+    ) -> Response:
+        """Create the task-owned public context, or return the existing one."""
+        refusal = _authenticate(token)
+        if refusal is not None:
+            return refusal
+        generation: WorkerGeneration = request.app.state.generation
+        if body.expected_worker_generation != generation.id:
+            return _error(
+                status.HTTP_409_CONFLICT,
+                "stale_worker_generation",
+                "This session was addressed to a different worker generation.",
+                generation.id,
+            )
+        if not research_policy.configured:
+            return _error(
+                status.HTTP_403_FORBIDDEN,
+                "site_not_allowed",
+                "Public research is not enabled on this worker.",
+                generation.id,
+            )
+        sessions: SessionStore = request.app.state.sessions
+        try:
+            session = await sessions.open(
+                browser=request.app.state.browser,
+                session_id=body.session_id,
+                policy=research_policy,
+                max_tabs=resolved.research_max_tabs,
+            )
+        except SessionError as error:
+            return _error(
+                status.HTTP_409_CONFLICT,
+                error.code,
+                "That research session could not be opened.",
+                generation.id,
+            )
+        return JSONResponse(
+            content=SessionResponse(
+                session_id=session.id,
+                worker_generation=generation.id,
+                status="OPEN",
+                open_tabs=session.open_tabs,
+            ).model_dump(mode="json")
+        )
+
+    @app.post("/v1/sessions/close")
+    async def close_session(
+        request: Request, body: SessionRequest, token: str = credential
+    ) -> Response:
+        """Dispose of the context and every ref table it issued."""
+        refusal = _authenticate(token)
+        if refusal is not None:
+            return refusal
+        generation: WorkerGeneration = request.app.state.generation
+        sessions: SessionStore = request.app.state.sessions
+        # A session belonging to a previous generation is already gone with the
+        # process that held it, so closing it is a no-op, not a conflict.
+        closed = (
+            await sessions.close(body.session_id)
+            if body.expected_worker_generation == generation.id
+            else False
+        )
+        return JSONResponse(
+            content=SessionResponse(
+                session_id=body.session_id,
+                worker_generation=generation.id,
+                status="CLOSED" if closed else "NOT_FOUND",
             ).model_dump(mode="json")
         )
 
@@ -212,7 +294,44 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
                 generation.id,
             )
 
-        if operation.target is OperationTarget.PUBLIC_PAGE:
+        research_session: ResearchBrowserSession | None = None
+        if operation.target is OperationTarget.RESEARCH_SESSION:
+            # No origin and no session creation here: the session must already
+            # exist in this worker generation, and the destination comes from a
+            # ref this worker issued or an address the user typed.
+            if body.site != PUBLIC_RESEARCH_SITE or not research_policy.configured:
+                return _error(
+                    status.HTTP_403_FORBIDDEN,
+                    "site_not_allowed",
+                    "Public research is not enabled on this worker.",
+                    generation.id,
+                )
+            if body.action_id is None or body.attempt_id is None:
+                return _error(
+                    status.HTTP_400_BAD_REQUEST,
+                    "attempt_required",
+                    "A research operation requires a persisted execution attempt.",
+                    generation.id,
+                )
+            if body.session_id is None:
+                return _error(
+                    status.HTTP_400_BAD_REQUEST,
+                    "session_required",
+                    "A research operation requires a task-owned session.",
+                    generation.id,
+                )
+            sessions: SessionStore = request.app.state.sessions
+            try:
+                research_session = sessions.get(body.session_id)
+            except SessionError as error:
+                return _error(
+                    status.HTTP_409_CONFLICT,
+                    error.code,
+                    "That research session does not exist in this worker.",
+                    generation.id,
+                )
+            origin = ""
+        elif operation.target is OperationTarget.PUBLIC_PAGE:
             # No origin to resolve: the approved URL is checked by the
             # operation against this worker's own policy, and by the guard on
             # every request. A public-page operation never runs without a
@@ -300,6 +419,7 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
                 payload=payload,
                 timeout_seconds=resolved.operation_timeout_seconds or operation.timeout_seconds,
                 public_policy=public_policy,
+                research_session=research_session,
             )
         except BaseException:
             ledger.release(body.dispatch_id)
@@ -320,6 +440,7 @@ async def _run(
     payload: Any,
     timeout_seconds: float,
     public_policy: PublicUrlPolicy | None = None,
+    research_session: ResearchBrowserSession | None = None,
 ) -> DispatchResponse:
     """Drive one operation in its own browser context, and classify the result.
 
@@ -340,7 +461,18 @@ async def _run(
         origin=origin,
     )
     guard: PublicNetworkGuard | None = None
-    if operation.target is OperationTarget.PUBLIC_PAGE and public_policy is not None:
+    #: A research step runs in the task's own long-lived context, so this
+    #: dispatch must neither create one nor close one when it finishes.
+    owns_context = operation.target is not OperationTarget.RESEARCH_SESSION
+    if operation.target is OperationTarget.RESEARCH_SESSION and research_session is not None:
+        context = research_session.context
+        active = research_session.active
+        page = (
+            research_session.tabs[active].page
+            if active is not None and active in research_session.tabs
+            else await context.new_page()
+        )
+    elif operation.target is OperationTarget.PUBLIC_PAGE and public_policy is not None:
         # A context that can only read: no service workers (which would sit
         # outside request routing), no downloads, no permissions, no stored
         # state. Every request is routed through the destination guard before
@@ -363,6 +495,7 @@ async def _run(
         observation_id=uuid.uuid4(),
         public_policy=public_policy if guard is not None else None,
         network_guard=guard,
+        research_session=research_session,
     )
 
     status_value = OperationStatus.OUTCOME_UNKNOWN
@@ -385,7 +518,8 @@ async def _run(
                 operation_context, _browser_error_code(error)
             )
     finally:
-        await context.close()
+        if owns_context:
+            await context.close()
 
     duration_ms = int((time.monotonic() - started) * 1_000)
     logger.info(
@@ -396,6 +530,7 @@ async def _run(
             "runtime_generation": str(body.runtime_generation),
             "worker_generation": str(generation.id),
             "browser_session_id": str(session.id),
+            "research_session_id": str(research_session.id) if research_session else None,
             "dispatch_id": str(body.dispatch_id),
             "operation": operation.name,
             "effect": operation.effect.value,
@@ -419,10 +554,14 @@ async def _run(
     )
 
 
-def _site_names(settings: WorkerSettings, policy: PublicUrlPolicy) -> list[str]:
+def _site_names(
+    settings: WorkerSettings, policy: PublicUrlPolicy, research: PublicUrlPolicy
+) -> list[str]:
     names = set(settings.origins)
     if policy.configured:
         names.add(PUBLIC_WEB_SITE)
+    if research.configured:
+        names.add(PUBLIC_RESEARCH_SITE)
     return sorted(names)
 
 

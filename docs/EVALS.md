@@ -23,7 +23,11 @@ The Python cases need `TEST_DATABASE_URL` and Playwright's Chromium.
 | Security | renderer never sees provider credentials; Gemini token stays in main; model cannot request browser/HTTP/shell; closed tool vocabulary; voice cannot approve; hostile page text cannot become an instruction; hostile profile text never spoken; preload exposes only fixed channels |
 | Inspection (M7a) | refused destinations never reach the runtime; read once only after approval; "yes/approve/go ahead" only points at the card; duplicate request after restart; lost response answered later without reopening; rating not rank; missing rating not guessed; ungrounded/action-bearing output refused; hostile model refused; approved providers only; URL policy; hostile page exfiltration closed; forbidden redirects; document epoch; URL-only input; bound observation + consumed approval; stale revision + concurrency; kill before dispatch; worker crash; runtime crash; runtime re-verifies grounding; stale observation |
 
-Result on 2026-09-17: **43/43 passed**.
+| Research (M7b) | step vocabulary refuses selectors, scripts and addresses; a search query cannot carry private data out; public hosts allowed but no forbidden destination; ungrounded answers refused; no step before the trusted grant; single-use step authorizations; expired and revoked scopes authorise nothing; the timeline says authorized, never approved; duplicated planner requests execute nothing twice; budgets stop the task; one session serves the task; link refs followed without naming an address; stale refs refused without a request; the worker applies its own policy; hostile pages open no channel; mutation requests never leave the browser; forbidden redirects never requested; tabs bounded; multi-hop research ends grounded; a decoy cannot ground the answer; unsupported operations refused; the budget stops an endless corridor; a worker restart stales every ref; a runtime crash is unknown, never repeated; a planner cannot name an address, a selector or a script; a persuaded model cannot record an invented figure; nothing searched before the trusted click; a refused step is re-observed, never repeated; an unconfirmed step is reported, never repeated; links reach the desktop as refs and hosts |
+| Composer (M7b) | a research request becomes a permission card, not a realtime turn; research searches only after the trusted Allow click; an unconfigured research request is still owned by the agent; an ordinary question still reaches realtime |
+
+Results: **43/43** on 2026-09-17 (Milestones 1-7a) and **118/118** on
+2026-09-18 (with the Milestone 7b cases above).
 
 ## Electron acceptance (real desktop app)
 
@@ -31,7 +35,13 @@ Result on 2026-09-17: **43/43 passed**.
 npm.cmd run build
 cd services\agent
 $env:LUMI_ELECTRON_E2E = '1'
-uv run pytest tests\test_electron_acceptance.py tests\test_voice_acceptance.py tests\test_m6_acceptance.py
+# One file per run. Each case launches Electron, Chromium, the runtime and a
+# fixture site, and the 60-second launch deadline is easy to miss when four
+# files share one machine -- that shows up as "the Lumi renderer never loaded".
+uv run pytest tests\test_electron_acceptance.py
+uv run pytest tests\test_voice_acceptance.py
+uv run pytest tests\test_m6_acceptance.py
+uv run pytest tests\test_inspection_acceptance.py
 ```
 
 | File | Scenario |
@@ -40,6 +50,12 @@ uv run pytest tests\test_electron_acceptance.py tests\test_voice_acceptance.py t
 | `test_voice_acceptance.py` | M5: voice booking, refinement, voice-initiated lost response |
 | `test_m6_acceptance.py` | M6 A (compound voice, OpenAI protocol), A (compound voice over the Gemini Live relay), B (provider failover + restart), clinic info + preferences + ambiguous date, C (compound voice + lost response + hard kill) |
 | `test_inspection_acceptance.py` | M7a: approved page read + grounded answer, typed "approve" is not approval, missing rating, hostile page and hostile model, restart then answer from the saved page, hard kill mid-read → unknown, never retried |
+
+Milestone 7b research is covered by runtime-level acceptance rather than a
+separate Electron E2E file: `services/agent/tests/test_research_ledger.py`
+drives real processes (runtime, isolated worker, Chromium, fixture site and a
+canary) through the whole pipeline, and `src/renderer/src/composer-routing-research.test.ts`
+covers renderer → preload → main → runtime ownership.
 
 `LUMI_FIXED_NOW` pins the calendar to 16 September 2026 in these tests
 (unpackaged builds only) so "Saturday" keeps meaning the fixture's Saturday.

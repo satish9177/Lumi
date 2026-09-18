@@ -16,12 +16,34 @@ from app.domain.page_observation import (
     PageLink,
     TextBlock,
 )
+from app.domain.research import (
+    GrantStatus,
+    ObservedLink,
+    # Same name, different model: a research block has its own limits, and the
+    # Milestone 7a block type must not silently validate one.
+)
+from app.domain.research import TextBlock as ResearchTextBlock
+from app.domain.research import (
+    ResearchAnswer,
+    ResearchBudgets,
+    ResearchDisclosure,
+    ResearchEvidence,
+    ResearchOperation,
+    ResearchScope,
+    SearchResult,
+)
 from app.domain.task_status import TaskStatus
 from app.repositories.actions import ApprovalRecord, AttemptRecord
 from app.repositories.observations import ObservationRecord
+from app.repositories.research import AnswerRecord as ResearchAnswerRecord
+from app.repositories.research import GrantRecord
+from app.repositories.research import ObservationRecord as ResearchObservationRecord
+from app.repositories.research import SessionRecord
 from app.repositories.tasks import TaskEventRecord, TaskRecord
 from app.services.actions import ActionView
 from app.services.booking_preparation import SLOT_ID_PATTERN
+from app.services.research_tasks import ResearchView as ResearchViewModel
+from app.services.research_tasks import StepResult as StepResultModel
 
 MAX_REQUEST_BYTES = 64_000
 
@@ -207,7 +229,11 @@ class AttemptResponse(BaseModel):
     id: uuid.UUID
     action_id: uuid.UUID
     attempt_number: int
-    approval_id: uuid.UUID
+    #: Exactly one of these is set: the exact approval the user granted for
+    #: this proposal, or the single-use step authorization a research grant
+    #: derived. Never both, never neither (a database CHECK).
+    approval_id: uuid.UUID | None
+    step_authorization_id: uuid.UUID | None
     runtime_generation: uuid.UUID
     started_at: datetime
     finished_at: datetime | None
@@ -222,6 +248,7 @@ class AttemptResponse(BaseModel):
             action_id=attempt.action_id,
             attempt_number=attempt.attempt_number,
             approval_id=attempt.approval_id,
+            step_authorization_id=attempt.step_authorization_id,
             runtime_generation=attempt.runtime_generation,
             started_at=attempt.started_at,
             finished_at=attempt.finished_at,
@@ -478,6 +505,295 @@ class RecordPageAnswerBody(BaseModel):
     answer: PageAnswer
     provider: Literal["openai", "gemini", "deepseek", "scripted"]
     model: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+# ---- Milestone 7b: public web research -------------------------------------
+#
+# Note what crosses this boundary and what does not. The response carries
+# semantic refs, bounded labels, hosts, and the addresses of pages Lumi
+# actually visited (its cited sources). It does **not** carry the addresses
+# observed links or search results point at: those live in the runtime's
+# `targets` column and in the worker's ref tables, so a planner is never handed
+# an address it could paste back as a destination.
+
+
+class PrepareResearchBody(BaseModel):
+    """Who may receive observed page text, and the budgets to enforce.
+
+    The objective comes from the persisted task. Everything authority-bearing
+    in the scope -- the operation list, the network rules, the policy version,
+    the seed addresses -- is built by the runtime from its own configuration.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    disclosure: ResearchDisclosure
+    budgets: ResearchBudgets = Field(default_factory=ResearchBudgets)
+
+
+class ConfirmResearchGrantBody(BaseModel):
+    """The trusted click: this grant, at the revision that was on screen."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    grant_id: uuid.UUID
+    expected_revision: int = Field(ge=1)
+
+
+class RevokeResearchGrantBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    grant_id: uuid.UUID | None = None
+    expected_revision: int | None = Field(default=None, ge=1)
+    reason: Literal["user_stopped", "user_declined", "task_cancelled"] = "user_stopped"
+
+
+class ResearchGrantResponse(BaseModel):
+    id: uuid.UUID
+    task_id: uuid.UUID
+    status: GrantStatus
+    revision: int
+    policy_version: str
+    scope_digest: str
+    scope: ResearchScope
+    created_at: datetime
+    confirmed_at: datetime | None
+    expires_at: datetime | None
+    revoked_at: datetime | None
+    completed_at: datetime | None
+
+    @classmethod
+    def from_record(cls, record: GrantRecord) -> "ResearchGrantResponse":
+        return cls(
+            id=record.id,
+            task_id=record.task_id,
+            status=record.status,
+            revision=record.revision,
+            policy_version=record.policy_version,
+            scope_digest=record.scope_digest,
+            scope=record.scope,
+            created_at=record.created_at,
+            confirmed_at=record.confirmed_at,
+            expires_at=record.expires_at,
+            revoked_at=record.revoked_at,
+            completed_at=record.completed_at,
+        )
+
+
+class ResearchSessionResponse(BaseModel):
+    id: uuid.UUID
+    status: str
+    worker_generation: uuid.UUID
+    created_at: datetime
+    closed_at: datetime | None
+
+    @classmethod
+    def from_record(cls, record: SessionRecord) -> "ResearchSessionResponse":
+        return cls(
+            id=record.id,
+            status=record.status,
+            worker_generation=record.worker_generation,
+            created_at=record.created_at,
+            closed_at=record.closed_at,
+        )
+
+
+class ResearchObservationResponse(BaseModel):
+    """One bounded observation. Everything in it is untrusted page data."""
+
+    id: uuid.UUID
+    task_id: uuid.UUID
+    action_id: uuid.UUID
+    attempt_id: uuid.UUID
+    session_id: uuid.UUID | None
+    worker_generation: uuid.UUID | None
+    sequence: int
+    #: The model-facing ref for this observation: `o<sequence>`.
+    ref: str
+    schema_version: int
+    provenance: Literal["untrusted_environment"]
+    kind: str
+    operation: ResearchOperation
+    tab: str | None
+    document_epoch: int
+    query: str | None
+    requested_url: str | None
+    final_url: str | None
+    final_host: str | None
+    redirects: list[str]
+    title: str
+    settled: bool
+    truncated: bool
+    observed_at: datetime
+    content_hash: str
+    blocks: list[ResearchTextBlock]
+    links: list[ObservedLink]
+    results: list[SearchResult]
+    open_tabs: list[str]
+    total_text_chars: int
+    total_link_count: int
+
+    @classmethod
+    def from_record(cls, record: ResearchObservationRecord) -> "ResearchObservationResponse":
+        observation = record.observation
+        return cls(
+            id=observation.observation_id,
+            task_id=record.task_id,
+            action_id=record.action_id,
+            attempt_id=record.attempt_id,
+            session_id=record.session_id,
+            worker_generation=record.worker_generation,
+            sequence=observation.sequence,
+            ref=observation.ref,
+            schema_version=observation.schema_version,
+            provenance=observation.provenance,
+            kind=observation.kind,
+            operation=observation.operation,
+            tab=observation.tab,
+            document_epoch=observation.document_epoch,
+            query=observation.query,
+            requested_url=observation.requested_url,
+            final_url=observation.final_url,
+            final_host=observation.final_host,
+            redirects=observation.redirects,
+            title=observation.title,
+            settled=observation.settled,
+            truncated=observation.truncated,
+            observed_at=observation.observed_at,
+            content_hash=observation.content_hash,
+            blocks=observation.blocks,
+            links=observation.links,
+            results=observation.results,
+            open_tabs=observation.open_tabs,
+            total_text_chars=observation.total_text_chars,
+            total_link_count=observation.total_link_count,
+        )
+
+
+class ResearchBudgetUsageResponse(BaseModel):
+    steps: int
+    observations: int
+    planner_calls: int
+    active_seconds: float
+    tabs: int
+
+
+class ResearchAnswerResponse(BaseModel):
+    status: str
+    stop_reason: str
+    answer: str
+    evidence: list[ResearchEvidence]
+    provider: str
+    model: str
+    steps_used: int
+    observations_used: int
+    planner_calls: int
+    created_at: datetime
+
+    @classmethod
+    def from_record(cls, record: ResearchAnswerRecord) -> "ResearchAnswerResponse":
+        return cls(
+            status=record.answer.status,
+            stop_reason=record.answer.stop_reason,
+            answer=record.answer.answer,
+            evidence=record.answer.evidence,
+            provider=record.provider,
+            model=record.model,
+            steps_used=record.steps_used,
+            observations_used=record.observations_used,
+            planner_calls=record.planner_calls,
+            created_at=record.created_at,
+        )
+
+
+class ResearchResponse(BaseModel):
+    task: TaskResponse
+    objective: str
+    grant: ResearchGrantResponse | None
+    session: ResearchSessionResponse | None
+    observations: list[ResearchObservationResponse]
+    answer: ResearchAnswerResponse | None
+    usage: ResearchBudgetUsageResponse
+    #: Whether a public search provider is configured at all. Without one the
+    #: task can still navigate to an address the user typed and follow links.
+    search_configured: bool
+    #: A step of this task has no outcome Lumi can stand behind. Further steps
+    #: are refused while this is true, and nothing is repeated on its behalf.
+    unresolved_step: bool
+
+    @classmethod
+    def from_view(cls, view: ResearchViewModel) -> "ResearchResponse":
+        return cls(
+            task=TaskResponse.from_record(view.task),
+            objective=view.objective,
+            grant=ResearchGrantResponse.from_record(view.grant) if view.grant else None,
+            session=ResearchSessionResponse.from_record(view.session) if view.session else None,
+            observations=[
+                ResearchObservationResponse.from_record(record) for record in view.observations
+            ],
+            answer=ResearchAnswerResponse.from_record(view.answer) if view.answer else None,
+            usage=ResearchBudgetUsageResponse(
+                steps=view.usage.steps,
+                observations=view.usage.observations,
+                planner_calls=view.usage.planner_calls,
+                active_seconds=round(view.usage.active_seconds, 3),
+                tabs=view.usage.tabs,
+            ),
+            search_configured=view.search_configured,
+            unresolved_step=view.unresolved_step,
+        )
+
+
+class ResearchStepResponse(BaseModel):
+    research: ResearchResponse
+    action: ActionResponse
+    observation: ResearchObservationResponse | None
+    outcome: AttemptOutcome
+    error_code: str | None
+    replayed: bool
+
+    @classmethod
+    def from_result(cls, result: StepResultModel) -> "ResearchStepResponse":
+        return cls(
+            research=ResearchResponse.from_view(result.view),
+            action=ActionResponse.from_view(result.action),
+            observation=(
+                ResearchObservationResponse.from_record(result.observation)
+                if result.observation
+                else None
+            ),
+            outcome=result.outcome,
+            error_code=result.error_code,
+            replayed=result.replayed,
+        )
+
+
+class ExecuteResearchStepBody(BaseModel):
+    """One step, as the trusted planner submits it.
+
+    `step` is deliberately an opaque object here and is parsed by the closed
+    `ResearchStep` union in `app.domain.research`, so an operation outside the
+    vocabulary is refused with a stable code rather than as a generic schema
+    error. `request_id` makes the submission idempotent: replaying it returns
+    the stored result of that step and executes nothing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str = Field(min_length=8, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    step: dict[str, Any]
+    planner_calls: int = Field(default=0, ge=0, le=1_000)
+
+
+class RecordResearchAnswerBody(BaseModel):
+    """The one grounded answer, with the planner budget it was reached under."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    answer: ResearchAnswer
+    provider: Literal["openai", "gemini", "deepseek", "scripted"]
+    model: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+    planner_calls: int = Field(default=0, ge=0, le=1_000)
 
 
 class HealthResponse(BaseModel):

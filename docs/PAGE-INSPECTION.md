@@ -1,5 +1,9 @@
 # Page inspection (Milestone 7a)
 
+For research across pages the user has not named, see
+[PUBLIC-RESEARCH.md](PUBLIC-RESEARCH.md) (Milestone 7b), which keeps this
+policy and this card unchanged and adds a separate, scoped one.
+
 One approved URL, one grounded answer. Design source:
 [`plans/general-computer-use-architecture.md`](plans/general-computer-use-architecture.md) §L M7a and §M.
 

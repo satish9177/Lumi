@@ -503,6 +503,10 @@ export function describeInspectionForVoice(snapshot: AgentTaskSnapshot, intent: 
   switch (inspection.status) {
     case 'PROPOSED':
     case 'WAITING_APPROVAL':
+    // An inspection is authorised by an exact approval, never by a scope, so
+    // AUTHORIZED cannot occur here; it is listed so the compiler keeps this
+    // switch exhaustive as the ledger grows.
+    case 'AUTHORIZED':
       return card(intent === 'proceed' ? 'approval_required' : 'awaiting_approval')
     case 'APPROVED':
       return card(intent === 'proceed' ? 'approval_required' : 'approved_not_opened')
@@ -555,6 +559,9 @@ export function describeBooking(action: AgentActionView, events: readonly AgentE
   const card = (narration: VoiceNarration): Described => ({ narration, focus: 'approval_card' })
   switch (action.status) {
     case 'PROPOSED':
+    // A booking is always an exact approval. AUTHORIZED belongs to scoped
+    // research steps and cannot appear on a booking action.
+    case 'AUTHORIZED':
       return card({ kind: intent === 'proceed' ? 'approval_required' : 'approval_ready', booking })
     case 'WAITING_APPROVAL':
       if (!action.approval || action.approval.status !== 'PENDING' || approvalExpired(action, now)) {

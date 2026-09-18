@@ -16,9 +16,11 @@ from app.api.schemas import (
     CancelBookingTaskResponse,
     CancelTaskBody,
     ClinicInfoResponse,
+    ConfirmResearchGrantBody,
     DoctorProfileResponse,
     CreateTaskBody,
     ErrorResponse,
+    ExecuteResearchStepBody,
     ExpectedRevisionBody,
     FinishAttemptBody,
     FinishReconciliationBody,
@@ -26,7 +28,12 @@ from app.api.schemas import (
     InspectionResponse,
     PrepareBookingBody,
     PrepareInspectionBody,
+    PrepareResearchBody,
     RecordPageAnswerBody,
+    RecordResearchAnswerBody,
+    ResearchResponse,
+    ResearchStepResponse,
+    RevokeResearchGrantBody,
     ProposeActionBody,
     RejectActionBody,
     ReviseBookingCriteriaBody,
@@ -49,8 +56,16 @@ from app.services.clinic_info import (
 from app.domain.errors import BrowserObservationError, DestinationNotAllowedError
 from app.domain.page_observation import PAGE_INSPECTION_TASK_TYPE
 from app.domain.public_url import UrlPolicyError
+from app.domain.research import (
+    PUBLIC_RESEARCH_TASK_TYPE,
+    ResearchRefusal,
+    ResearchStepEnvelope,
+    parse_step,
+)
 from app.services.page_inspection import PageInspectionService
 from app.services.page_inspection import validate_request as validate_inspection_request
+from app.services.research_tasks import ResearchService
+from app.services.research_tasks import validate_request as validate_research_request
 from app.services.tasks import TaskService
 
 logger = logging.getLogger(__name__)
@@ -121,6 +136,13 @@ async def create_task(
         try:
             validate_clinic_info_request(request)
         except BrowserObservationError:
+            raise RequestValidationError([]) from None
+    if request.get("type") == PUBLIC_RESEARCH_TASK_TYPE:
+        # A research task is never stored without an objective that could be
+        # worked on. The scope card is a separate, explicit step after this.
+        try:
+            validate_research_request(request)
+        except (ResearchRefusal, ValueError):
             raise RequestValidationError([]) from None
     if request.get("type") == PAGE_INSPECTION_TASK_TYPE:
         inspection: PageInspectionService = http_request.app.state.page_inspection_service
@@ -600,6 +622,129 @@ async def get_page_inspection(
 ) -> InspectionResponse:
     view = await service.describe(action_id)
     return InspectionResponse.build(view.action, view.observation)
+
+
+# --- Public web research (Milestone 7b) ---------------------------------------
+#
+# Six routes. Notice which one is different: `research/grant` is the trusted
+# click, and it is the *only* way a scope becomes usable. Every other route
+# either reads, or executes one step inside a scope that is already active.
+#
+# `research/steps` takes one member of a closed operation union plus a request
+# id. It has no field for a selector, a script, a URL, an HTTP method, a
+# header, a cookie or a browser flag, and there is no route that accepts a
+# sequence of operations: one step, one authorization, one observation.
+
+
+def get_research_service(request: Request) -> ResearchService:
+    service: ResearchService = request.app.state.research_service
+    return service
+
+
+ResearchServiceDep = Annotated[ResearchService, Depends(get_research_service)]
+
+
+@router.get(
+    "/tasks/{task_id}/research",
+    response_model=ResearchResponse,
+    responses=_NOT_FOUND,
+    summary="The research task, its scope, its observations and its answer",
+)
+async def get_research(task_id: uuid.UUID, service: ResearchServiceDep) -> ResearchResponse:
+    return ResearchResponse.from_view(await service.describe(task_id))
+
+
+@router.post(
+    "/tasks/{task_id}/research/prepare",
+    status_code=status.HTTP_201_CREATED,
+    response_model=ResearchResponse,
+    responses={**_NOT_FOUND, **_CONFLICT, **_UNAVAILABLE},
+    summary="Build the bounded research scope and open its card (grants nothing)",
+)
+async def prepare_research(
+    task_id: uuid.UUID, body: PrepareResearchBody, service: ResearchServiceDep
+) -> ResearchResponse:
+    view = await service.prepare(task_id, disclosure=body.disclosure, budgets=body.budgets)
+    return ResearchResponse.from_view(view)
+
+
+@router.post(
+    "/tasks/{task_id}/research/grant",
+    response_model=ResearchResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Confirm the research scope shown on the trusted card",
+)
+async def grant_research_scope(
+    task_id: uuid.UUID, body: ConfirmResearchGrantBody, service: ResearchServiceDep
+) -> ResearchResponse:
+    """Grants the stored scope by reference; no scope payload is accepted."""
+    view = await service.confirm(
+        task_id, grant_id=body.grant_id, expected_revision=body.expected_revision
+    )
+    return ResearchResponse.from_view(view)
+
+
+@router.post(
+    "/tasks/{task_id}/research/revoke",
+    response_model=ResearchResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Withdraw the research scope and drop the browser session",
+)
+async def revoke_research_scope(
+    task_id: uuid.UUID, body: RevokeResearchGrantBody, service: ResearchServiceDep
+) -> ResearchResponse:
+    view = await service.revoke(
+        task_id,
+        reason=body.reason,
+        grant_id=body.grant_id,
+        expected_revision=body.expected_revision,
+    )
+    return ResearchResponse.from_view(view)
+
+
+@router.post(
+    "/tasks/{task_id}/research/steps",
+    status_code=status.HTTP_201_CREATED,
+    response_model=ResearchStepResponse,
+    responses={**_NOT_FOUND, **_CONFLICT, **_UNAVAILABLE},
+    summary="Execute exactly one authorised research operation (internal)",
+)
+async def execute_research_step(
+    task_id: uuid.UUID, body: ExecuteResearchStepBody, service: ResearchServiceDep
+) -> ResearchStepResponse:
+    """One step, checked against the task's grant before anything happens.
+
+    The step is parsed by the closed operation union first, so an operation
+    that is not in the reviewed vocabulary is refused here and never reaches
+    the grant check, the ledger or the browser. Replaying the same
+    `request_id` returns the stored result of that step and executes nothing,
+    which is what makes a duplicated planner request safe.
+    """
+    envelope = ResearchStepEnvelope(
+        request_id=body.request_id,
+        step=parse_step(body.step),
+        planner_calls=body.planner_calls,
+    )
+    return ResearchStepResponse.from_result(await service.execute_step(task_id, envelope))
+
+
+@router.post(
+    "/tasks/{task_id}/research/answer",
+    response_model=ResearchResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Record the one grounded research answer and close the scope",
+)
+async def record_research_answer(
+    task_id: uuid.UUID, body: RecordResearchAnswerBody, service: ResearchServiceDep
+) -> ResearchResponse:
+    view = await service.record_answer(
+        task_id,
+        answer=body.answer,
+        provider=body.provider,
+        model=body.model,
+        planner_calls=body.planner_calls,
+    )
+    return ResearchResponse.from_view(view)
 
 
 @router.post(

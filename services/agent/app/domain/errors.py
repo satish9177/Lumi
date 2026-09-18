@@ -225,3 +225,69 @@ class StaleObservationError(Exception):
     def __init__(self, observation_id: uuid.UUID) -> None:
         super().__init__(f"Observation {observation_id} is not the current observation.")
         self.observation_id = observation_id
+
+
+# ---- Milestone 7b: public web research --------------------------------------
+
+
+class ResearchNotConfiguredError(Exception):
+    """This runtime has no research destination policy, so it has no capability."""
+
+    def __init__(self) -> None:
+        super().__init__("Public web research is not configured.")
+
+
+class ResearchGrantNotFoundError(Exception):
+    def __init__(self, task_id: uuid.UUID) -> None:
+        super().__init__(f"Task {task_id} has no research scope to work under.")
+        self.task_id = task_id
+
+
+class ResearchGrantNotUsableError(Exception):
+    """The scope exists but authorises nothing right now.
+
+    Never widened, never revived and never inferred from a spoken "yes": the
+    only way to a usable grant is a fresh scope card and a fresh trusted click.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"The research scope cannot be used: {reason}.")
+        self.reason = reason
+
+
+class ResearchStepRefusedError(Exception):
+    """A step deterministic policy refused. `code` is stable and safe to show."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(f"The research step was refused ({code}).")
+        self.code = code
+
+
+class ResearchBudgetExhaustedError(Exception):
+    """A configured limit was reached. The task stops with a partial result."""
+
+    def __init__(self, limit: str) -> None:
+        super().__init__(f"The research budget is exhausted ({limit}).")
+        self.limit = limit
+
+
+class ResearchStepInFlightError(Exception):
+    """One operation at a time. A second request is refused, never queued."""
+
+    def __init__(self, action_id: uuid.UUID) -> None:
+        super().__init__(f"Research step {action_id} has not finished yet.")
+        self.action_id = action_id
+
+
+class ResearchSessionUnavailableError(Exception):
+    """The task-owned browser session is gone or was never opened."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(f"The research browser session is unavailable ({code}).")
+        self.code = code
+
+
+class ResearchAnswerAlreadyRecordedError(Exception):
+    def __init__(self, task_id: uuid.UUID) -> None:
+        super().__init__(f"Task {task_id} already has a recorded research answer.")
+        self.task_id = task_id

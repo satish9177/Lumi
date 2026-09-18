@@ -20,7 +20,7 @@ Identity travels with every dispatch:
 """
 
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -48,6 +48,8 @@ __all__ = [
     "DispatchResponse",
     "LookupStatus",
     "OperationStatus",
+    "SessionRequest",
+    "SessionResponse",
     "WorkerErrorBody",
     "WorkerIdentity",
 ]
@@ -70,6 +72,10 @@ class DispatchRequest(BaseModel):
     operation: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
     #: A reviewed site name, resolved by the worker against its own allowlist.
     site: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    #: Milestone 7b: the task-owned research session this step runs in. The
+    #: worker refuses a session id it has never opened rather than creating
+    #: one, so a task can never be handed a browser with no history.
+    session_id: uuid.UUID | None = None
     #: Validated against the operation's input model by the worker. It is never
     #: passed to the browser as-is.
     input: dict[str, Any] = Field(default_factory=dict)
@@ -97,6 +103,25 @@ class DispatchResponse(BaseModel):
     #: True when this dispatch id had already been handled and the stored answer
     #: was replayed. No browser work happened.
     replayed: bool = False
+
+
+class SessionRequest(BaseModel):
+    """Open or close one research session, addressed to one worker generation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: uuid.UUID
+    runtime_generation: uuid.UUID
+    expected_worker_generation: uuid.UUID
+
+
+class SessionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: uuid.UUID
+    worker_generation: uuid.UUID
+    status: Literal["OPEN", "CLOSED", "NOT_FOUND"]
+    open_tabs: list[str] = Field(default_factory=list)
 
 
 class WorkerIdentity(BaseModel):

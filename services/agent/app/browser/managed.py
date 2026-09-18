@@ -60,6 +60,8 @@ class WorkerEndpoint:
 def worker_environment(
     *, token: SecretStr, site_origin: str | None, headless: bool, parent_pid: int,
     public_hosts: str = "", inspection_test_origins: str = "",
+    research_any_public_host: bool = False, research_hosts: str = "",
+    research_test_origins: str = "", research_max_tabs: int = 5,
     source: dict[str, str] | None = None,
 ) -> dict[str, str]:
     inherited = os.environ if source is None else source
@@ -73,6 +75,10 @@ def worker_environment(
         LUMI_BROWSER_PARENT_PID=str(parent_pid),
         LUMI_BROWSER_PUBLIC_HOSTS=public_hosts,
         LUMI_BROWSER_INSPECTION_TEST_ORIGINS=inspection_test_origins,
+        LUMI_BROWSER_RESEARCH_ANY_PUBLIC_HOST="true" if research_any_public_host else "false",
+        LUMI_BROWSER_RESEARCH_HOSTS=research_hosts,
+        LUMI_BROWSER_RESEARCH_TEST_ORIGINS=research_test_origins,
+        LUMI_BROWSER_RESEARCH_MAX_TABS=str(research_max_tabs),
     )
     return environment
 
@@ -92,6 +98,10 @@ class ManagedBrowserWorker:
         timeout_seconds: float,
         public_hosts: str = "",
         inspection_test_origins: str = "",
+        research_any_public_host: bool = False,
+        research_hosts: str = "",
+        research_test_origins: str = "",
+        research_max_tabs: int = 5,
         startup_timeout_seconds: float = 60.0,
         maximum_starts: int = 4,
         spawn: Callable[[list[str], dict[str, str]], subprocess.Popen[bytes]] | None = None,
@@ -99,6 +109,10 @@ class ManagedBrowserWorker:
         self._site_origin = site_origin
         self._public_hosts = public_hosts
         self._inspection_test_origins = inspection_test_origins
+        self._research_any_public_host = research_any_public_host
+        self._research_hosts = research_hosts
+        self._research_test_origins = research_test_origins
+        self._research_max_tabs = research_max_tabs
         self._headless = headless
         self._timeout_seconds = timeout_seconds
         self._startup_timeout = startup_timeout_seconds
@@ -146,6 +160,10 @@ class ManagedBrowserWorker:
             parent_pid=os.getpid(),
             public_hosts=self._public_hosts,
             inspection_test_origins=self._inspection_test_origins,
+            research_any_public_host=self._research_any_public_host,
+            research_hosts=self._research_hosts,
+            research_test_origins=self._research_test_origins,
+            research_max_tabs=self._research_max_tabs,
         )
         try:
             process = self._spawn(arguments, environment)

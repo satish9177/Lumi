@@ -70,8 +70,12 @@ Create `%APPDATA%\Lumi\agent-runtime.json` with your PostgreSQL URL and `"clinic
 ```powershell
 npm.cmd run typecheck; npm.cmd test; npm.cmd run build
 cd services\agent; uv run pytest; uv run mypy
-npm.cmd run eval                                   # 43 deterministic eval cases
-$env:LUMI_ELECTRON_E2E='1'; uv run pytest tests\test_electron_acceptance.py tests\test_voice_acceptance.py tests\test_m6_acceptance.py
+npm.cmd run eval                                   # 118 deterministic eval cases
+# One file at a time: each case launches Electron, Chromium and the runtime,
+# and a 60s launch deadline is easy to miss when four files share a machine.
+$env:LUMI_ELECTRON_E2E='1'; uv run pytest tests\test_electron_acceptance.py
+uv run pytest tests\test_voice_acceptance.py; uv run pytest tests\test_m6_acceptance.py
+uv run pytest tests\test_inspection_acceptance.py
 $env:LUMI_PACKAGED_E2E='1'; uv run pytest tests\test_packaged_app.py
 ```
 
@@ -84,6 +88,8 @@ What each suite proves and how to run the opt-in live provider checks: [docs/EVA
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Processes, request lifecycle, module map |
 | [SECURITY.md](docs/SECURITY.md) | Trust boundaries, credentials, model output, memory |
 | [AGENT-RUNTIME.md](docs/AGENT-RUNTIME.md) | Durable tasks, ledger, approvals, recovery, browser execution (M1–M6) |
+| [PAGE-INSPECTION.md](docs/PAGE-INSPECTION.md) | One approved URL, one grounded answer (M7a) |
+| [PUBLIC-RESEARCH.md](docs/PUBLIC-RESEARCH.md) | Bounded public web research: scope, refs, budgets, limits (M7b) |
 | [PROVIDERS.md](docs/PROVIDERS.md) | Voice/text providers, routing, context budgets, live validation |
 | [PACKAGING.md](docs/PACKAGING.md) | Bundled runtime, configuration, Application Control |
 | [EVALS.md](docs/EVALS.md) | Deterministic, desktop, packaged and live evaluations |

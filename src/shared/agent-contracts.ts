@@ -25,7 +25,14 @@ export const TASK_STATUSES = [
 export type AgentTaskStatus = typeof TASK_STATUSES[number]
 
 export const ACTION_STATUSES = [
-  'PROPOSED', 'WAITING_APPROVAL', 'APPROVED', 'REJECTED', 'EXECUTING', 'SUCCEEDED',
+  'PROPOSED', 'WAITING_APPROVAL', 'APPROVED',
+  /**
+   * Milestone 7b. Authorized by a bounded task grant the user confirmed once,
+   * not by an exact approval of this step. Deliberately a different word: the
+   * timeline must never claim the user reviewed each research step.
+   */
+  'AUTHORIZED',
+  'REJECTED', 'EXECUTING', 'SUCCEEDED',
   'FAILED', 'OUTCOME_UNKNOWN', 'RECONCILING'
 ] as const
 export type AgentActionStatus = typeof ACTION_STATUSES[number]
@@ -51,8 +58,10 @@ export const CHANGED_FACT_FIELDS = ['slot_id', 'doctor', 'time', 'price', 'curre
 export type AgentChangedFactField = typeof CHANGED_FACT_FIELDS[number]
 
 export const TASK_EVENT_TYPES = [
-  'task.created', 'task.cancelled', 'task.criteria_updated', 'task.search_completed', 'task.info_lookup_completed', 'task.page_answer_recorded', 'action.proposed', 'action.approval_requested',
-  'action.approved', 'action.rejected', 'action.execution_started', 'action.succeeded',
+  'task.created', 'task.cancelled', 'task.criteria_updated', 'task.search_completed', 'task.info_lookup_completed', 'task.page_answer_recorded',
+  'task.research_scope_requested', 'task.research_scope_granted', 'task.research_scope_revoked', 'task.research_answer_recorded',
+  'action.proposed', 'action.approval_requested',
+  'action.approved', 'action.authorized', 'action.rejected', 'action.execution_started', 'action.succeeded',
   'action.failed', 'action.outcome_unknown', 'action.reconciliation_started', 'action.reconciled'
 ] as const
 export type AgentTaskEventType = typeof TASK_EVENT_TYPES[number]
@@ -82,7 +91,7 @@ export interface AgentBookingCriteria {
   dateTo?: string
 }
 
-export const TASK_KINDS = ['appointment_booking', 'clinic_info', 'page_inspection'] as const
+export const TASK_KINDS = ['appointment_booking', 'clinic_info', 'page_inspection', 'public_research'] as const
 export type AgentTaskKind = typeof TASK_KINDS[number]
 
 export const CLINIC_INFO_TOPICS = ['overview', 'hours', 'fee', 'languages', 'address', 'walk_ins'] as const
@@ -121,6 +130,8 @@ export interface AgentTaskView {
   infoQuery?: AgentClinicInfoQuery
   /** Set for `page_inspection` tasks: the user's URL and question. */
   inspection?: AgentInspectionRequestView
+  /** Set for `public_research` tasks: the objective the user typed. */
+  research?: AgentResearchRequestView
   /** The completed voice turn that created this task, if any. */
   voiceTurnId?: string
   /** The typed request that created this task, if any. */
@@ -345,12 +356,188 @@ export interface AgentInspectionView {
   answer?: AgentPageAnswerView
 }
 
+// ---- Milestone 7b: bounded public web research ------------------------------------
+
+export const GRANT_STATUSES = ['PENDING', 'ACTIVE', 'REVOKED', 'EXPIRED', 'COMPLETED'] as const
+export type AgentGrantStatus = typeof GRANT_STATUSES[number]
+
+export const RESEARCH_OPERATIONS = [
+  'public_search', 'navigate', 'observe', 'scroll', 'history', 'tab'
+] as const
+export type AgentResearchOperation = typeof RESEARCH_OPERATIONS[number]
+
+export const RESEARCH_ANSWER_STATUSES = ['answered', 'partial', 'not_found', 'not_verified'] as const
+export type AgentResearchAnswerStatus = typeof RESEARCH_ANSWER_STATUSES[number]
+
+export const RESEARCH_STOP_REASONS = [
+  'goal_reached', 'no_evidence', 'budget_exhausted', 'blocked', 'planner_failed',
+  'user_stopped', 'outside_scope'
+] as const
+export type AgentResearchStopReason = typeof RESEARCH_STOP_REASONS[number]
+
+/** What the user's objective was, as stored on the task. */
+export interface AgentResearchRequestView {
+  objective: string
+}
+
+export interface AgentResearchBudgets {
+  maxSteps: number
+  maxObservations: number
+  maxPlannerCalls: number
+  maxTabs: number
+  maxActiveSeconds: number
+  maxModelInputTokens: number
+  maxModelOutputTokens: number
+  maxVisionCalls: number
+}
+
+/**
+ * Exactly what one confirmed scope authorises, as the trusted card shows it.
+ * `allowed` and `forbidden` are the runtime's own machine-readable lists; the
+ * renderer turns them into its own words and never renders website text here.
+ */
+export interface AgentResearchScopeView {
+  policyVersion: string
+  allowedOperations: AgentResearchOperation[]
+  allowed: string[]
+  forbidden: string[]
+  schemes: string[]
+  methods: string[]
+  /** `any_public`, or the host list configuration narrowed research to. */
+  hosts: 'any_public' | string[]
+  budgets: AgentResearchBudgets
+  recipients: AgentDisclosureRecipient[]
+  maxTextChars: number
+  /** Addresses the *user* typed in the objective, if any. */
+  seeds: string[]
+}
+
+export interface AgentResearchGrantView {
+  grantId: string
+  status: AgentGrantStatus
+  revision: number
+  scopeDigest: string
+  scope: AgentResearchScopeView
+  createdAt: string
+  confirmedAt?: string
+  expiresAt?: string
+}
+
+export interface AgentResearchSessionView {
+  sessionId: string
+  status: string
+  createdAt: string
+}
+
+/** One observed link: a ref, a label and a host. Never an address. */
+export interface AgentResearchLinkView {
+  ref: string
+  text: string
+  host: string
+}
+
+export interface AgentResearchResultView {
+  ref: string
+  title: string
+  host: string
+  snippet: string
+}
+
+/**
+ * One bounded observation. Everything here is untrusted page data: the
+ * renderer shows the source address and title as labelled plain text, and
+ * nothing from a page ever becomes a label, a control or an instruction.
+ */
+export interface AgentResearchObservationView {
+  observationId: string
+  /** The model-facing ref, `o<sequence>`. */
+  ref: string
+  sequence: number
+  kind: 'page' | 'search_results' | 'tab_state'
+  operation: AgentResearchOperation
+  tab?: string
+  documentEpoch: number
+  query?: string
+  finalUrl?: string
+  finalHost?: string
+  title: string
+  settled: boolean
+  truncated: boolean
+  observedAt: string
+  contentHash: string
+  blocks: AgentResearchBlockView[]
+  links: AgentResearchLinkView[]
+  results: AgentResearchResultView[]
+  openTabs: string[]
+  sessionId?: string
+}
+
+export interface AgentResearchBlockView {
+  id: string
+  text: string
+}
+
+export interface AgentResearchEvidenceView {
+  observation: string
+  block: string
+  quote: string
+}
+
+export interface AgentResearchAnswerView {
+  status: AgentResearchAnswerStatus
+  stopReason: AgentResearchStopReason
+  answer: string
+  evidence: AgentResearchEvidenceView[]
+  provider: AgentDisclosureRecipient
+  model: string
+  stepsUsed: number
+  observationsUsed: number
+  plannerCalls: number
+  createdAt: string
+}
+
+export interface AgentResearchUsageView {
+  steps: number
+  observations: number
+  plannerCalls: number
+  activeSeconds: number
+  tabs: number
+}
+
+export interface AgentResearchView {
+  taskId: string
+  objective: string
+  grant?: AgentResearchGrantView
+  session?: AgentResearchSessionView
+  observations: AgentResearchObservationView[]
+  answer?: AgentResearchAnswerView
+  usage: AgentResearchUsageView
+  searchConfigured: boolean
+  /**
+   * A step of this task has no outcome Lumi can stand behind: it is executing,
+   * or it ended with an unknown outcome. Further steps are refused while this
+   * is true, and nothing is repeated on its behalf.
+   */
+  unresolvedStep: boolean
+}
+
+/** One source Lumi actually opened, for the sources list under an answer. */
+export interface AgentResearchSourceView {
+  ref: string
+  url: string
+  host: string
+  title: string
+  observedAt: string
+}
+
 export interface AgentTaskSnapshot {
   runtimeGeneration: string
   task: AgentTaskView
   actions: AgentActionView[]
   /** `page_inspection` tasks: the newest inspection action, with its evidence. */
   inspection?: AgentInspectionView
+  /** `public_research` tasks: the scope, the observations and the answer. */
+  research?: AgentResearchView
   /** Events strictly after the requested sequence, ordered, without gaps. */
   events: AgentEventView[]
 }
@@ -378,6 +565,11 @@ export const AGENT_ERROR_CODES = [
   'inspection_unavailable',
   'stale_observation',
   'answer_unavailable',
+  'research_unavailable',
+  'research_not_granted',
+  'research_refused',
+  'research_budget_exhausted',
+  'research_in_flight',
   'request_failed'
 ] as const
 export type AgentErrorCode = typeof AGENT_ERROR_CODES[number]
@@ -443,6 +635,27 @@ export interface AgentApi {
   answerInspection: (actionId: string) => Promise<AgentResult<AgentInspectionView>>
   /** A new inspection of the same page and question, behind a new approval card. */
   inspectPageAgain: () => Promise<AgentResult<AgentTaskSnapshot>>
+  /**
+   * Milestone 7b. Create a public-research task from an objective the user
+   * typed and show its bounded scope card. Searches nothing and opens nothing.
+   */
+  createResearchTask: (objective: string) => Promise<AgentResult<AgentTaskSnapshot>>
+  /**
+   * The trusted click: confirm exactly the scope on screen, by grant id and
+   * the revision that was shown. This is the only way research becomes
+   * possible; no voice command, typed sentence or model output reaches it.
+   */
+  grantResearchScope: (grantId: string, expectedRevision: number) => Promise<AgentResult<AgentTaskSnapshot>>
+  /** Decline the scope card. Nothing was searched or opened. */
+  declineResearchScope: (grantId: string, expectedRevision: number) => Promise<AgentResult<AgentTaskSnapshot>>
+  /**
+   * Run the bounded research loop under the active scope: plan one step, run
+   * it, observe, replan, and stop at the goal or a budget. Safe to call again
+   * after it returns; it never runs two loops at once.
+   */
+  runResearch: () => Promise<AgentResult<AgentTaskSnapshot>>
+  /** Stop now: withdraw the scope, drop the browser session, keep the evidence. */
+  stopResearch: () => Promise<AgentResult<AgentTaskSnapshot>>
   listPreferences: () => Promise<AgentResult<AgentPreferenceView[]>>
   forgetPreference: (key: PreferenceKey) => Promise<AgentResult<AgentPreferenceView[]>>
   /** Redacted model/controller diagnostics. Empty in packaged builds unless enabled. */
@@ -484,6 +697,11 @@ export const AGENT_IPC_CHANNELS = {
   executeInspection: 'lifelens:agent:execute-inspection',
   answerInspection: 'lifelens:agent:answer-inspection',
   inspectPageAgain: 'lifelens:agent:inspect-page-again',
+  createResearchTask: 'lifelens:agent:create-research-task',
+  grantResearchScope: 'lifelens:agent:grant-research-scope',
+  declineResearchScope: 'lifelens:agent:decline-research-scope',
+  runResearch: 'lifelens:agent:run-research',
+  stopResearch: 'lifelens:agent:stop-research',
   listPreferences: 'lifelens:agent:list-preferences',
   forgetPreference: 'lifelens:agent:forget-preference',
   getDiagnostics: 'lifelens:agent:get-diagnostics'
@@ -492,7 +710,7 @@ export const AGENT_IPC_CHANNELS = {
 /** Actions whose side effect is unresolved or in flight. */
 export const UNRESOLVED_ACTION_STATUSES: readonly AgentActionStatus[] = ['EXECUTING', 'OUTCOME_UNKNOWN', 'RECONCILING']
 
-/** Prepared, possibly approved, never executed: still safe to reject. */
-export const OPEN_ACTION_STATUSES: readonly AgentActionStatus[] = ['PROPOSED', 'WAITING_APPROVAL', 'APPROVED']
+/** Prepared, possibly approved or authorized, never executed: safe to reject. */
+export const OPEN_ACTION_STATUSES: readonly AgentActionStatus[] = ['PROPOSED', 'WAITING_APPROVAL', 'APPROVED', 'AUTHORIZED']
 
 export const TERMINAL_TASK_STATUSES: readonly AgentTaskStatus[] = ['SUCCEEDED', 'FAILED', 'CANCELLED']

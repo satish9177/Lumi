@@ -33,6 +33,8 @@ from app.browser.protocol import (
     WORKER_TOKEN_HEADER,
     DispatchRequest,
     DispatchResponse,
+    SessionRequest,
+    SessionResponse,
     WorkerErrorBody,
     WorkerIdentity,
 )
@@ -90,6 +92,35 @@ class BrowserWorkerClient:
             return WorkerIdentity.model_validate(response.json())
         except (ValueError, ValidationError) as error:
             raise BrowserWorkerUnavailableError(f"unreadable health response: {type(error).__name__}")
+
+    async def open_session(self, request: SessionRequest) -> SessionResponse:
+        """Ask the worker to create the task-owned research context."""
+        return await self._session_call("/v1/sessions/open", request)
+
+    async def close_session(self, request: SessionRequest) -> SessionResponse:
+        """Dispose of the context and every semantic ref it issued."""
+        return await self._session_call("/v1/sessions/close", request)
+
+    async def _session_call(self, path: str, request: SessionRequest) -> SessionResponse:
+        try:
+            response = await self._client.post(path, json=request.model_dump(mode="json"))
+        except httpx.ConnectError:
+            raise BrowserWorkerUnavailableError("the worker refused the connection")
+        except httpx.HTTPError as error:
+            raise BrowserWorkerLostResponseError(type(error).__name__)
+        if response.status_code >= 400:
+            raise _rejection(response)
+        try:
+            answer = SessionResponse.model_validate(response.json())
+        except (ValueError, ValidationError) as error:
+            raise BrowserWorkerLostResponseError(
+                f"the worker returned an unreadable result ({type(error).__name__})"
+            )
+        if answer.session_id != request.session_id:
+            raise StaleWorkerResultError("it answers a different session")
+        if answer.worker_generation != request.expected_worker_generation:
+            raise StaleWorkerResultError("it came from a different worker generation")
+        return answer
 
     async def dispatch(self, request: DispatchRequest) -> DispatchResponse:
         try:

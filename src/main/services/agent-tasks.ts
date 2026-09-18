@@ -13,6 +13,7 @@ import {
   type AgentError,
   type AgentEventView,
   type AgentInspectionView,
+  type AgentResearchStopReason,
   type AgentResult,
   type AgentSlotView,
   type AgentTaskSnapshot
@@ -24,6 +25,8 @@ import {
   type RuntimeReply
 } from './agent-runtime-supervisor'
 import type { AnswerOutcome, PageObservationDetail } from '../agent/page-answer'
+import type { ResearchAnswerOutcome } from '../agent/research-answer'
+import type { ResearchDecision, ResearchPlanOutcome, ResearchStepChoice } from '../agent/research-planner'
 import { PublicUrlPolicy, UrlPolicyError, describeRefusal } from '../agent/public-url-policy'
 import {
   WireError,
@@ -37,11 +40,15 @@ import {
   parseClinicInfo,
   parseCriteriaRevision,
   parseEventPage,
+  parseResearch,
+  parseResearchStep,
   parseSearch,
   parseTask,
   projectRuntimeError,
   type CriteriaRevision,
   type InspectionDetail,
+  type ResearchDetail,
+  type ResearchStepOutcome,
   type TaskCancellation
 } from './agent-wire'
 
@@ -285,6 +292,54 @@ export interface PageInspectionSupport {
 
 const MAX_QUESTION = 500
 const INSPECTION_TEXT_CHARS = 12_000
+const MAX_OBJECTIVE = 500
+const RESEARCH_TEXT_CHARS = 10_000
+/**
+ * How many refused or failed steps a research loop absorbs by re-observing
+ * before it stops. Small on purpose: a planner that keeps asking for something
+ * the scope does not allow is stopped, not negotiated with.
+ */
+const RESEARCH_MAX_REFUSALS = 2
+
+export function parseResearchObjective(value: unknown): string {
+  const objective = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : ''
+  // eslint-disable-next-line no-control-regex
+  if (!objective || objective.length > MAX_OBJECTIVE || /[\x00-\x1f\x7f]/.test(objective)) {
+    fail('invalid_request', 'Describe what to research in up to 500 characters.')
+  }
+  return objective
+}
+
+/**
+ * What main needs to offer public research: its own destination policy (the
+ * runtime and worker apply theirs too), the bounded planner, and the answer
+ * step. Both model roles live here because main is the only process that holds
+ * provider credentials.
+ */
+export interface ResearchSupport {
+  policy: PublicUrlPolicy
+  planner?: {
+    recipients(): string[]
+    next(input: {
+      objective: string
+      view: AgentResearchViewInput
+      taskId: string
+      permits?: (id: string) => boolean
+    }): Promise<ResearchPlanOutcome>
+  }
+  answerer?: {
+    recipients(): AgentDisclosureRecipient[]
+    answer(input: {
+      objective: string
+      view: AgentResearchViewInput
+      recipients: readonly AgentDisclosureRecipient[]
+      stopReason: AgentResearchStopReason
+      taskId: string
+    }): Promise<ResearchAnswerOutcome>
+  }
+}
+
+type AgentResearchViewInput = ResearchDetail['view']
 
 export function parseInspectionQuestion(value: unknown): string {
   const question = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : ''
@@ -317,7 +372,8 @@ export class AgentTaskController {
   constructor(
     private readonly runtime: RuntimeRequester,
     private readonly store: ActiveTaskStore,
-    private readonly inspection?: PageInspectionSupport
+    private readonly inspection?: PageInspectionSupport,
+    private readonly research?: ResearchSupport
   ) {}
 
   // ---- plumbing ------------------------------------------------------------
@@ -377,6 +433,12 @@ export class AgentTaskController {
       if (detail.detail.view.taskId !== taskId) throw new WireError('inspection.task_id')
       inspection = detail.detail.view
     }
+    let research: AgentResearchViewInput | undefined
+    if (task.kind === 'public_research') {
+      const loaded = await this.loadResearch(taskId)
+      if (loaded.generation !== generation) fail('runtime_restarted', 'The agent runtime restarted while loading. Showing the latest saved state.')
+      research = loaded.detail.view
+    }
     const events: AgentEventView[] = []
     let cursor = afterSequence
     for (let page = 0; ; page += 1) {
@@ -401,7 +463,14 @@ export class AgentTaskController {
     if (taskReply.generation !== generation) {
       fail('runtime_restarted', 'The agent runtime restarted while loading. Showing the latest saved state.')
     }
-    return { runtimeGeneration: generation, task, actions, events, ...(inspection ? { inspection } : {}) }
+    return {
+      runtimeGeneration: generation,
+      task,
+      actions,
+      events,
+      ...(inspection ? { inspection } : {}),
+      ...(research ? { research } : {})
+    }
   }
 
   private async loadInspection(actionId: string): Promise<{ detail: InspectionDetail; generation: string }> {
@@ -818,6 +887,317 @@ export class AgentTaskController {
     const recorded = parseInspection(reply.body)
     if (recorded.view.actionId !== detail.view.actionId || !recorded.view.answer) throw new WireError('inspection.answer')
     return recorded.view
+  }
+
+
+  // ---- public web research (Milestone 7b) ------------------------------------
+  //
+  // Main owns the planner, so main owns this loop. What it may not do is
+  // decide whether a step is allowed: every iteration submits one step to the
+  // runtime, which checks it against the scope the user confirmed and refuses
+  // it otherwise. A refusal ends the loop or forces a re-observation; it is
+  // never argued with, and the same step is never repeated blindly.
+
+  private requireResearch(): ResearchSupport {
+    if (!this.research || !this.research.policy.configured) {
+      fail('research_unavailable', 'Public web research is not set up on this computer. Nothing was searched or opened.')
+    }
+    if (!this.research.planner || !this.research.answerer) {
+      fail('research_unavailable', 'No text model is configured to plan or answer research, so Lumi will not start it.')
+    }
+    return this.research
+  }
+
+  private researchRecipients(support: ResearchSupport): AgentDisclosureRecipient[] {
+    const recipients = support.answerer?.recipients() ?? []
+    if (recipients.length === 0) {
+      fail('research_unavailable', 'No text model is configured to answer from public pages, so Lumi will not open any.')
+    }
+    return recipients
+  }
+
+  private async loadResearch(taskId: string): Promise<{ detail: ResearchDetail; generation: string }> {
+    const reply = await this.call('GET', `/tasks/${taskId}/research`, undefined, TIMEOUTS.read)
+    const detail = parseResearch(reply.body)
+    if (detail.view.taskId !== taskId) throw new WireError('research.task_id')
+    return { detail, generation: reply.generation }
+  }
+
+  private async prepareResearch(taskId: string, recipients: AgentDisclosureRecipient[]): Promise<ResearchDetail> {
+    const reply = await this.call('POST', `/tasks/${taskId}/research/prepare`, {
+      disclosure: { recipients, max_text_chars: RESEARCH_TEXT_CHARS }
+    }, TIMEOUTS.write)
+    const detail = parseResearch(reply.body)
+    if (detail.view.taskId !== taskId) throw new WireError('research.prepare')
+    return detail
+  }
+
+  /**
+   * Create a public-research task and show its bounded scope card. Nothing is
+   * searched and nothing is opened: the scope authorises work only after the
+   * trusted Allow click, which is a separate IPC channel.
+   */
+  async createResearchTask(objectiveValue: unknown, origin?: TaskOrigin): Promise<AgentResult<AgentTaskSnapshot>> {
+    let objective: string
+    let provenance: Record<string, string>
+    let support: ResearchSupport
+    let recipients: AgentDisclosureRecipient[]
+    try {
+      support = this.requireResearch()
+      objective = parseResearchObjective(objectiveValue)
+      provenance = originFields(origin, objective)
+      recipients = this.researchRecipients(support)
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    return this.exclusive('task', async () => {
+      if (origin) {
+        // The same typed request or voice turn never becomes a second task,
+        // including after a main restart.
+        const activeId = await this.store.read()
+        if (activeId) {
+          const active = await this.snapshot(activeId, 0).catch(() => undefined)
+          if (active && (active.task.requestId === origin.turnId || active.task.voiceTurnId === origin.turnId)) return active
+        }
+      }
+      await this.assertNoUnresolvedAction()
+      const request = { type: 'public_research', ...provenance, objective }
+      const reply = await this.call('POST', '/tasks', { request }, TIMEOUTS.write)
+      const task = parseTask(reply.body)
+      if (task.kind !== 'public_research' || task.research?.objective !== objective) {
+        throw new WireError('research.task')
+      }
+      await this.store.write(task.taskId)
+      await this.prepareResearch(task.taskId, recipients)
+      return await this.snapshot(task.taskId, 0)
+    })
+  }
+
+  /**
+   * The trusted click. Confirms exactly the scope that was on screen, by id
+   * and revision. There is no other route to an active scope: no voice
+   * command, no typed sentence and no model output reaches this method.
+   */
+  grantResearchScope(grantId: unknown, expectedRevision: unknown): Promise<AgentResult<AgentTaskSnapshot>> {
+    return this.researchScopeMutation(grantId, expectedRevision, 'grant')
+  }
+
+  /** Decline the card. The scope is withdrawn; nothing was searched or opened. */
+  declineResearchScope(grantId: unknown, expectedRevision: unknown): Promise<AgentResult<AgentTaskSnapshot>> {
+    return this.researchScopeMutation(grantId, expectedRevision, 'decline')
+  }
+
+  private async researchScopeMutation(
+    grantIdValue: unknown, revisionValue: unknown, kind: 'grant' | 'decline'
+  ): Promise<AgentResult<AgentTaskSnapshot>> {
+    let grantId: string
+    let expectedRevision: number
+    try {
+      grantId = parseActionId(grantIdValue)
+      expectedRevision = parseExpectedRevision(revisionValue)
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    return this.exclusive('research', async () => {
+      const taskId = await this.activeTaskId()
+      const { detail } = await this.loadResearch(taskId)
+      const grant = detail.view.grant
+      if (!grant || grant.grantId !== grantId) {
+        fail('not_found', 'That research permission does not belong to the current task.')
+      }
+      if (grant.revision !== expectedRevision) {
+        throw new AgentRequestError({
+          code: 'stale_revision',
+          message: 'The research permission changed since you reviewed it. Review the current card.',
+          currentRevision: grant.revision
+        })
+      }
+      const body = kind === 'grant'
+        ? { grant_id: grantId, expected_revision: expectedRevision }
+        : { grant_id: grantId, expected_revision: expectedRevision, reason: 'user_declined' as const }
+      const reply = await this.call('POST', `/tasks/${taskId}/research/${kind === 'grant' ? 'grant' : 'revoke'}`, body, TIMEOUTS.write)
+      const updated = parseResearch(reply.body)
+      if (updated.view.taskId !== taskId) throw new WireError(`research.${kind}`)
+      return await this.snapshot(taskId, 0)
+    })
+  }
+
+  /** Stop now: withdraw the scope, drop the browser session, keep the evidence. */
+  async stopResearch(): Promise<AgentResult<AgentTaskSnapshot>> {
+    return this.exclusive('research', async () => {
+      const taskId = await this.activeTaskId()
+      const reply = await this.call('POST', `/tasks/${taskId}/research/revoke`, { reason: 'user_stopped' }, TIMEOUTS.write)
+      const updated = parseResearch(reply.body)
+      if (updated.view.taskId !== taskId) throw new WireError('research.revoke')
+      return await this.snapshot(taskId, 0)
+    })
+  }
+
+  /**
+   * Run the bounded research loop under the active scope.
+   *
+   * One planner call, one step, one observation, then plan again -- and every
+   * exit is explicit: the goal, a budget, a refusal, or a planner that could
+   * not answer within its contract. Nothing here retries a step, and an
+   * unconfirmed step is reported rather than repeated: the browser may have
+   * moved even though nothing consequential happened.
+   */
+  async runResearch(): Promise<AgentResult<AgentTaskSnapshot>> {
+    let support: ResearchSupport
+    let recipients: AgentDisclosureRecipient[]
+    try {
+      support = this.requireResearch()
+      recipients = this.researchRecipients(support)
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    return this.exclusive('research', async () => {
+      const taskId = await this.activeTaskId()
+      let { detail } = await this.loadResearch(taskId)
+      if (detail.task.kind !== 'public_research') fail('invalid_request', 'That step does not apply to this kind of task.')
+      if (detail.view.answer) return await this.snapshot(taskId, 0)
+      const grant = detail.view.grant
+      if (!grant || grant.status !== 'ACTIVE') {
+        fail('research_not_granted', 'Allow public research on the card first. Nothing has been searched or opened.')
+      }
+      if (grant.expiresAt && Date.parse(grant.expiresAt) <= Date.now()) {
+        fail('research_not_granted', 'That research permission has expired. Nothing was searched or opened.')
+      }
+      const objective = detail.view.objective
+      const budgets = grant.scope.budgets
+      const started = Date.now()
+      let plannerCalls = detail.view.usage.plannerCalls
+      let refusals = 0
+      let forced: ResearchStepChoice | undefined
+
+      for (let iteration = 0; ; iteration += 1) {
+        const view = detail.view
+        const overBudget = iteration >= budgets.maxSteps + 1 ||
+          view.usage.steps >= budgets.maxSteps ||
+          view.usage.observations >= budgets.maxObservations ||
+          plannerCalls >= budgets.maxPlannerCalls ||
+          (Date.now() - started) / 1_000 > budgets.maxActiveSeconds
+        if (overBudget) {
+          return await this.finishResearch(taskId, support, recipients, 'budget_exhausted', plannerCalls)
+        }
+
+        let step: ResearchStepChoice
+        if (forced) {
+          step = forced
+          forced = undefined
+        } else {
+          plannerCalls += 1
+          let decision: ResearchDecision
+          try {
+            decision = (await support.planner!.next({ objective, view, taskId, permits: (id) => recipients.includes(id as AgentDisclosureRecipient) })).decision
+          } catch {
+            // Every permitted model failed, or none could answer inside the
+            // contract. Stop honestly rather than guessing a step.
+            return await this.finishResearch(taskId, support, recipients, 'planner_failed', plannerCalls)
+          }
+          if (decision.kind === 'finish') {
+            return await this.finishResearch(taskId, support, recipients, 'goal_reached', plannerCalls)
+          }
+          if (decision.kind === 'stop') {
+            return await this.finishResearch(taskId, support, recipients, decision.stopReason, plannerCalls)
+          }
+          step = decision.step
+        }
+
+        let outcome: ResearchStepOutcome
+        try {
+          outcome = await this.submitResearchStep(taskId, step, plannerCalls)
+        } catch (error) {
+          const agentError = toAgentError(error)
+          if (agentError.code === 'research_budget_exhausted') {
+            return await this.finishResearch(taskId, support, recipients, 'budget_exhausted', plannerCalls)
+          }
+          if (agentError.code === 'research_refused' && refusals < RESEARCH_MAX_REFUSALS) {
+            // A stale ref, a wrong tab, or a step the scope does not allow.
+            // Re-observe authoritative browser state and let the planner
+            // choose again from what is actually there.
+            refusals += 1
+            forced = { operation: 'observe', tab: 't1' }
+            ;({ detail } = await this.loadResearch(taskId))
+            continue
+          }
+          if (agentError.code === 'research_refused' || agentError.code === 'research_in_flight' ||
+              agentError.code === 'research_unavailable' || agentError.code === 'research_not_granted') {
+            return await this.finishResearch(taskId, support, recipients, 'blocked', plannerCalls)
+          }
+          throw error
+        }
+        detail = { view: outcome.view, task: outcome.task }
+        if (outcome.outcome !== 'SUCCEEDED') {
+          refusals += 1
+          if (refusals > RESEARCH_MAX_REFUSALS) {
+            return await this.finishResearch(taskId, support, recipients, 'blocked', plannerCalls)
+          }
+          if (outcome.outcome === 'OUTCOME_UNKNOWN') {
+            // Lumi does not know what the browser did. The next step is to
+            // look, not to repeat: an unresolved step also blocks the task
+            // until it is recorded, so report and let the user retry.
+            return await this.snapshot(taskId, 0)
+          }
+          forced = { operation: 'observe', tab: 't1' }
+        }
+      }
+    })
+  }
+
+  private async submitResearchStep(
+    taskId: string, step: ResearchStepChoice, plannerCalls: number
+  ): Promise<ResearchStepOutcome> {
+    const requestId = `req_${randomUUID().replaceAll('-', '')}`
+    const reply = await this.call('POST', `/tasks/${taskId}/research/steps`, {
+      request_id: requestId,
+      step,
+      planner_calls: plannerCalls
+    }, TIMEOUTS.execute)
+    const outcome = parseResearchStep(reply.body)
+    if (outcome.view.taskId !== taskId) throw new WireError('research.step')
+    return outcome
+  }
+
+  /**
+   * Compose one grounded answer from the collected observations and record it.
+   * The page is never opened again: this reads only what Lumi already stored.
+   */
+  private async finishResearch(
+    taskId: string,
+    support: ResearchSupport,
+    recipients: AgentDisclosureRecipient[],
+    stopReason: AgentResearchStopReason,
+    plannerCalls: number
+  ): Promise<AgentTaskSnapshot> {
+    const { detail } = await this.loadResearch(taskId)
+    if (detail.view.answer) return await this.snapshot(taskId, 0)
+    const outcome = await support.answerer!.answer({
+      objective: detail.view.objective,
+      view: detail.view,
+      recipients,
+      stopReason,
+      taskId
+    })
+    if (outcome.kind === 'unavailable') {
+      // The evidence is durable. Nothing is recorded, so the answer can be
+      // composed later without opening a single page again.
+      fail('answer_unavailable', 'Lumi read the public pages, but no approved text model answered. Nothing was opened again.')
+    }
+    const reply = await this.call('POST', `/tasks/${taskId}/research/answer`, {
+      answer: {
+        status: outcome.answer.status,
+        stop_reason: outcome.answer.stopReason,
+        answer: outcome.answer.answer,
+        evidence: outcome.answer.evidence
+      },
+      provider: outcome.provider,
+      model: outcome.model,
+      planner_calls: plannerCalls
+    }, TIMEOUTS.write)
+    const recorded = parseResearch(reply.body)
+    if (recorded.view.taskId !== taskId || !recorded.view.answer) throw new WireError('research.answer')
+    return await this.snapshot(taskId, 0)
   }
 
   // ---- read-only observation ------------------------------------------------

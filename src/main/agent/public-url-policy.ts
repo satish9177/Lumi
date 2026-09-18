@@ -14,6 +14,13 @@
  */
 
 export const POLICY_VERSION = 'public-url-v1'
+/**
+ * Milestone 7b research: the same shape and the same refusals, with the host
+ * allowlist replaced by "any host that is not local, private or reserved". A
+ * research task cannot know its destinations in advance. Layers 1 and 3 are
+ * untouched, and the Milestone 7a inspection policy keeps its allowlist.
+ */
+export const RESEARCH_POLICY_VERSION = 'public-research-v1'
 const MAX_URL_LENGTH = 2_048
 const MAX_ALLOWED_HOSTS = 64
 
@@ -93,14 +100,24 @@ function hostAllowed(host: string, allowed: ReadonlySet<string>): boolean {
 export class PublicUrlPolicy {
   private readonly allowedHosts: ReadonlySet<string>
   private readonly testOrigins: ReadonlySet<string>
+  private readonly allowAnyPublicHost: boolean
+  readonly version: string
 
-  constructor(options: { allowedHosts?: readonly string[]; testOrigins?: readonly string[] } = {}) {
+  constructor(options: {
+    allowedHosts?: readonly string[]
+    testOrigins?: readonly string[]
+    /** Milestone 7b research. Never set on the inspection policy. */
+    allowAnyPublicHost?: boolean
+    version?: string
+  } = {}) {
     this.allowedHosts = new Set(parseAllowedHosts(options.allowedHosts ?? []))
     this.testOrigins = new Set(parseTestOrigins(options.testOrigins ?? []))
+    this.allowAnyPublicHost = options.allowAnyPublicHost === true
+    this.version = options.version ?? POLICY_VERSION
   }
 
   get configured(): boolean {
-    return this.allowedHosts.size > 0 || this.testOrigins.size > 0
+    return this.allowedHosts.size > 0 || this.testOrigins.size > 0 || this.allowAnyPublicHost
   }
 
   /**
@@ -155,7 +172,9 @@ export class PublicUrlPolicy {
     const host = hostPart.toLowerCase()
     if (IPV4.test(host)) throw new UrlPolicyError('ip_literal')
     checkHostName(host)
-    if (!hostAllowed(host, this.allowedHosts)) throw new UrlPolicyError('destination_not_allowed')
+    if (!this.allowAnyPublicHost && !hostAllowed(host, this.allowedHosts)) {
+      throw new UrlPolicyError('destination_not_allowed')
+    }
     return { url: `https://${host}${path}${query}`, host, testOrigin: false }
   }
 }

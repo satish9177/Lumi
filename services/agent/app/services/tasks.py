@@ -9,7 +9,9 @@ from app.domain.errors import (
     TaskNotCancellableError,
     TaskNotFoundError,
 )
+from app.domain.research import GrantStatus
 from app.domain.task_status import TaskEventType, TaskStatus, can_cancel
+from app.repositories.research import ResearchRepository
 from app.repositories.tasks import TaskEventRecord, TaskRecord, TaskRepository
 
 # A lost compare-and-swap re-reads the task; a handful of attempts is plenty
@@ -61,6 +63,10 @@ class TaskService:
         revision + 1. Cancelling a CANCELLED task is an idempotent no-op (no event,
         same revision). SUCCEEDED and FAILED tasks are rejected. When
         expected_revision is given it must match the current revision.
+
+        Cancelling also withdraws any research scope the task holds, in the
+        same transaction: a cancelled task must not leave a live grant behind,
+        even though a cancelled task already refuses every step.
         """
         for _ in range(_MAX_CANCEL_ATTEMPTS):
             async with self._engine.begin() as connection:
@@ -90,5 +96,30 @@ class TaskService:
                         "to_status": cancelled.status.value,
                     },
                 )
+                research = ResearchRepository(connection)
+                grant = await research.open_grant_for_task(task_id)
+                if grant is not None:
+                    closed = await research.close_grant(
+                        grant_id=grant.id, status=GrantStatus.REVOKED
+                    )
+                    session = await research.open_session_for_task(task_id)
+                    if session is not None:
+                        await research.close_session(session_id=session.id, status="CLOSED")
+                    advanced = await repository.advance_task(
+                        task_id=task_id, expected_revision=cancelled.revision
+                    )
+                    if advanced is None:  # pragma: no cover - this writer holds the row.
+                        raise TaskConcurrencyError(task_id)
+                    await repository.append_event(
+                        task=advanced,
+                        event_type=TaskEventType.TASK_RESEARCH_SCOPE_REVOKED,
+                        payload={
+                            "grant_id": str(grant.id),
+                            "grant_revision": closed.revision if closed else grant.revision,
+                            "grant_status": (closed or grant).status.value,
+                            "reason": "task_cancelled",
+                        },
+                    )
+                    return advanced
                 return cancelled
         raise TaskConcurrencyError(task_id)

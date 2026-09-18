@@ -224,6 +224,10 @@ def browser_worker(
     operation_timeout_seconds: float = 0.0,
     public_hosts: str = "",
     inspection_test_origins: str = "",
+    research_test_origins: str = "",
+    research_hosts: str = "",
+    research_any_public_host: bool = False,
+    research_max_tabs: int = 5,
 ) -> Iterator[WorkerProcess]:
     from app.browser.protocol import WORKER_TOKEN_HEADER
 
@@ -240,6 +244,10 @@ def browser_worker(
         "LUMI_BROWSER_OPERATION_TIMEOUT_SECONDS": str(operation_timeout_seconds),
         "LUMI_BROWSER_PUBLIC_HOSTS": public_hosts,
         "LUMI_BROWSER_INSPECTION_TEST_ORIGINS": inspection_test_origins,
+        "LUMI_BROWSER_RESEARCH_TEST_ORIGINS": research_test_origins,
+        "LUMI_BROWSER_RESEARCH_HOSTS": research_hosts,
+        "LUMI_BROWSER_RESEARCH_ANY_PUBLIC_HOST": "true" if research_any_public_host else "false",
+        "LUMI_BROWSER_RESEARCH_MAX_TABS": str(research_max_tabs),
     }
     with log_path.open("wb") as log:
         process = _spawn(
@@ -299,7 +307,17 @@ def mint_runtime_token() -> str:
 def runtime_environment(database_url: str, token: str) -> dict[str, str]:
     environment = {**os.environ, "DATABASE_URL": database_url, "LUMI_RUNTIME_TOKEN": token}
     # Never inherit a desktop's managed-worker or parent configuration.
-    for key in ("LUMI_BROWSER_SITE_ORIGIN", "LUMI_RUNTIME_PARENT_PID", "LUMI_RUNTIME_READY_FD"):
+    for key in (
+        "LUMI_BROWSER_SITE_ORIGIN",
+        "LUMI_RUNTIME_PARENT_PID",
+        "LUMI_RUNTIME_READY_FD",
+        "LUMI_PUBLIC_INSPECTION_HOSTS",
+        "LUMI_INSPECTION_TEST_ORIGINS",
+        "LUMI_RESEARCH_ANY_PUBLIC_HOST",
+        "LUMI_RESEARCH_HOSTS",
+        "LUMI_RESEARCH_TEST_ORIGINS",
+        "LUMI_RESEARCH_SEARCH_ENDPOINT",
+    ):
         environment.pop(key, None)
     return environment
 

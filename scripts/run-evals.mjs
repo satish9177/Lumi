@@ -109,6 +109,45 @@ const CASES = {
     ['ungrounded answers are refused by the runtime too', py('tests/test_page_inspection_api.py', 'test_an_ungrounded_answer_is_refused')],
     ['stale observation answers are refused', py('tests/test_page_inspection_api.py', 'test_a_repeat_on_the_same_task_is_a_new_action_and_the_old_answer_goes_stale')]
   ],
+  // Milestone 7b: one bounded permission, many public pages, one grounded answer.
+  research: [
+    ['the step vocabulary refuses selectors, scripts and addresses', py('tests/test_research_domain.py', 'test_anything_outside_the_vocabulary_is_refused')],
+    ['a search query cannot carry private data out', py('tests/test_research_domain.py', 'test_a_query_that_could_carry_private_data_out_is_refused')],
+    ['research reaches public hosts but no forbidden destination', py('tests/test_research_domain.py', 'test_research_may_reach_any_public_host_but_no_forbidden_destination')],
+    ['an answer the observations do not support is refused', py('tests/test_research_domain.py', 'test_an_answer_the_observations_do_not_support_is_refused')],
+    ['no step runs before the trusted grant', py('tests/test_research_authorization.py', 'test_a_step_under_a_pending_scope_is_refused')],
+    ['a step authorization is single-use', py('tests/test_research_authorization.py', 'test_a_step_authorization_is_consumed_once_and_never_again')],
+    ['an expired scope authorises nothing', py('tests/test_research_authorization.py', 'test_an_expired_scope_authorises_nothing')],
+    ['a revoked scope cannot be revived', py('tests/test_research_authorization.py', 'test_a_revoked_scope_authorises_nothing_and_cannot_be_revived')],
+    ['the timeline says authorized, never approved', py('tests/test_research_authorization.py', 'test_the_timeline_says_authorized_not_approved')],
+    ['a duplicated planner request executes nothing twice', py('tests/test_research_authorization.py', 'test_replaying_a_request_id_executes_nothing_and_returns_the_stored_step')],
+    ['budgets stop the task', py('tests/test_research_authorization.py', 'test_the_step_budget_stops_the_task')],
+    ['one session serves the task and keeps its history', py('tests/test_research_browser.py', 'test_a_session_is_reused_across_steps_and_keeps_its_history')],
+    ['a link ref is followed without naming an address', py('tests/test_research_browser.py', 'test_a_link_ref_is_followed_without_the_planner_naming_an_address')],
+    ['a stale link ref is refused without a request', py('tests/test_research_browser.py', 'test_a_link_ref_from_a_document_the_tab_has_left_is_refused')],
+    ['a ref the worker never issued is refused', py('tests/test_research_browser.py', 'test_a_ref_the_worker_never_issued_is_refused')],
+    ['the worker applies its own destination policy', py('tests/test_research_browser.py', 'test_the_worker_applies_its_own_destination_policy')],
+    ['hostile pages gain no capability and no channel opens', py('tests/test_research_browser.py', 'test_hostile_page_text_is_only_data_and_every_channel_stays_closed')],
+    ['mutation requests never leave the browser', py('tests/test_research_browser.py', 'test_same_origin_mutation_requests_never_leave_the_browser')],
+    ['a forbidden redirect is never requested', py('tests/test_research_browser.py', 'test_a_redirect_to_a_refused_destination_is_never_requested')],
+    ['tabs are task-owned and bounded', py('tests/test_research_browser.py', 'test_tabs_are_task_owned_bounded_and_never_the_last_one')],
+    ['multi-hop research ends in a grounded answer', py('tests/test_research_ledger.py', 'test_a_granted_research_task_searches_navigates_follows_and_answers')],
+    ['a decoy page cannot ground an answer about the real one', py('tests/test_research_ledger.py', 'test_a_decoy_page_cannot_ground_an_answer_about_the_real_one')],
+    ['an unsupported operation is refused with a stable code', py('tests/test_research_ledger.py', 'test_an_operation_outside_the_vocabulary_is_refused_with_a_stable_code')],
+    ['the budget stops an endless corridor', py('tests/test_research_ledger.py', 'test_the_step_budget_stops_an_endless_corridor')],
+    ['a worker restart makes every semantic ref stale', py('tests/test_research_ledger.py', 'test_a_worker_restart_makes_every_semantic_ref_stale')],
+    ['a runtime crash mid-step is unknown, never repeated', py('tests/test_research_ledger.py', 'test_a_runtime_crash_mid_step_leaves_an_unknown_and_no_blind_repeat')],
+    ['a planner cannot name an address, a selector or a script', ts('src/main/agent/research-planner.test.ts', 'refuses a reply carrying an extra field')],
+    ['an operation that does not exist is refused', ts('src/main/agent/research-planner.test.ts', 'refuses an operation that does not exist')],
+    ['an operation outside the confirmed scope is refused', ts('src/main/agent/research-planner.test.ts', 'refuses an operation the confirmed scope does not list')],
+    ['a persuaded model cannot record an invented figure', ts('src/main/agent/research-answer.test.ts', 'refuses a persuaded model that invents a figure')],
+    ['nothing is searched or opened before the trusted click', ts('src/main/services/agent-research.test.ts', 'is what makes research possible')],
+    ['the loop searches, follows a link and grounds its answer', ts('src/main/services/agent-research.test.ts', 'searches, opens a result, follows a link and records a grounded answer')],
+    ['a budget stops the loop with an honest answer', ts('src/main/services/agent-research.test.ts', 'stops at the step budget')],
+    ['a refused step is re-observed, never repeated', ts('src/main/services/agent-research.test.ts', 're-observes rather than repeating a refused step')],
+    ['an unconfirmed step is reported, never repeated', ts('src/main/services/agent-research.test.ts', 'reports an unconfirmed step instead of repeating it')],
+    ['links reach the desktop as refs and hosts, never addresses', ts('src/main/services/agent-research.test.ts', 'receives refs, labels and hosts for links')]
+  ],
   // The main composer: main decides which single path owns a typed request.
   composer: [
     ['inspection request becomes a card; realtime and open_url never reached', ts('src/renderer/src/composer-routing.test.ts', 'creates the durable inspection and focuses its card')],
@@ -121,7 +160,12 @@ const CASES = {
     ['unreachable router sends nothing anywhere', ts('src/renderer/src/composer-routing.test.ts', 'if main cannot be asked, nothing is sent anywhere')],
     ['a typed agent request needs no voice session', ts('src/renderer/src/composer-routing.test.ts', 'a page inspection is created with no voice session')],
     ['an unhandled request connects voice, then sends once', ts('src/renderer/src/composer-routing.test.ts', 'an unhandled request connects voice first')],
-    ['a voice failure affects only the conversation request', ts('src/renderer/src/composer-routing.test.ts', 'a voice connection failure affects only the conversation request')]
+    ['a voice failure affects only the conversation request', ts('src/renderer/src/composer-routing.test.ts', 'a voice connection failure affects only the conversation request')],
+    ['a research request becomes a permission card, not a realtime turn', ts('src/renderer/src/composer-routing-research.test.ts', 'is claimed by the durable agent and shows its permission card')],
+    ['research searches only after the trusted Allow click', ts('src/renderer/src/composer-routing-research.test.ts', 'searches and answers only after the trusted Allow click')],
+    ['an unconfigured research request is still owned by the agent', ts('src/renderer/src/composer-routing-research.test.ts', 'is still claimed, never passed on, when research is not configured')],
+    ['an ordinary question still reaches realtime', ts('src/renderer/src/composer-routing-research.test.ts', 'goes to the realtime conversation')],
+    ['typed "yes, go ahead" cannot allow research', ts('src/renderer/src/composer-routing-research.test.ts', 'cannot be allowed by typing')]
   ]
 }
 

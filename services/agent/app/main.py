@@ -22,6 +22,8 @@ from app.services.browser_execution import (
     WorkerSource,
 )
 from app.services.parent_watchdog import ParentLiveness, parent_liveness, watch_liveness
+from app.services.research_search import PublicSearchProvider, SearchConfig
+from app.services.research_tasks import ResearchService
 from app.services.recovery import RecoveryService
 from app.services.runtime import register_runtime_generation, runtime_ownership
 from app.services.tasks import TaskService
@@ -32,7 +34,11 @@ def _worker_source(settings: Settings) -> WorkerSource | None:
     external = _worker_config(settings)
     if external is not None:
         return external
-    if settings.browser_site_origin is None and not settings.public_policy.configured:
+    if (
+        settings.browser_site_origin is None
+        and not settings.public_policy.configured
+        and not settings.research_policy.configured
+    ):
         return None
     return ManagedBrowserWorker(
         site_origin=settings.browser_site_origin,
@@ -40,6 +46,10 @@ def _worker_source(settings: Settings) -> WorkerSource | None:
         timeout_seconds=settings.browser_worker_timeout_seconds,
         public_hosts=settings.public_inspection_hosts,
         inspection_test_origins=settings.inspection_test_origins,
+        research_any_public_host=settings.research_any_public_host,
+        research_hosts=settings.research_hosts,
+        research_test_origins=settings.research_test_origins,
+        research_max_tabs=settings.research_max_tabs,
     )
 
 
@@ -116,6 +126,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     runtime_generation=generation.id,
                     worker=worker,
                 )
+                research_service = ResearchService(
+                    engine,
+                    tasks=task_service,
+                    actions=action_service,
+                    runtime_generation=generation.id,
+                    worker=worker,
+                    policy=resolved.research_policy,
+                    search=PublicSearchProvider(
+                        SearchConfig(
+                            endpoint=resolved.research_search_endpoint,
+                            api_key=resolved.research_search_api_key,
+                            header=resolved.research_search_header,
+                            timeout_seconds=resolved.research_search_timeout_seconds,
+                        ),
+                        resolved.research_policy,
+                    ),
+                    grant_ttl_seconds=resolved.research_grant_ttl_seconds,
+                    step_ttl_seconds=resolved.research_step_ttl_seconds,
+                    max_tabs=resolved.research_max_tabs,
+                )
+                app.state.research_service = research_service
+                # A research session belongs to the process that created it.
+                # Sessions a dead runtime left open describe browser contexts
+                # that no longer exist, so every semantic ref they issued has
+                # to stop resolving before anything plans again.
+                await research_service.invalidate_stale_sessions()
                 if resolved.runtime_parent_pid is not None:
                     # Open the stable Windows process handle synchronously. If
                     # Electron is already gone or access fails, startup aborts

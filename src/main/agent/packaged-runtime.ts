@@ -34,6 +34,16 @@ export interface PackagedRuntimeConfig {
   headless: boolean
   /** Milestone 7a: public hosts an approved page inspection may open. Empty: none. */
   publicInspectionHosts: string[]
+  /**
+   * Milestone 7b: allow bounded public research. `true` lets a granted
+   * research task reach any host that is not local, private or reserved --
+   * which is what research needs, and which the installed app must opt into
+   * explicitly. `researchHosts` narrows it to a list instead.
+   */
+  research: boolean
+  researchHosts: string[]
+  /** A search endpoint template containing {query}. Empty: no search. */
+  researchSearchEndpoint: string
 }
 
 export type ConfigResult =
@@ -48,7 +58,7 @@ export function parseRuntimeConfig(value: unknown): ConfigResult {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return { kind: 'invalid', reason: 'not an object' }
   const record = value as Record<string, unknown>
   for (const key of Object.keys(record)) {
-    if (!['databaseUrl', 'clinicSite', 'headless', 'publicInspectionHosts', '$comment'].includes(key)) return { kind: 'invalid', reason: `unknown field ${key}` }
+    if (!['databaseUrl', 'clinicSite', 'headless', 'publicInspectionHosts', 'research', 'researchHosts', 'researchSearchEndpoint', '$comment'].includes(key)) return { kind: 'invalid', reason: `unknown field ${key}` }
   }
   if (typeof record.databaseUrl !== 'string' || !DATABASE_URL.test(record.databaseUrl) || record.databaseUrl.length > 1_000) {
     return { kind: 'invalid', reason: 'databaseUrl must be a postgresql+asyncpg:// URL' }
@@ -76,7 +86,44 @@ export function parseRuntimeConfig(value: unknown): ConfigResult {
       return { kind: 'invalid', reason: 'publicInspectionHosts must be public host names such as github.com' }
     }
   }
-  return { kind: 'ok', config: { databaseUrl: record.databaseUrl, clinicSite, headless: record.headless !== false, publicInspectionHosts } }
+  if (record.research !== undefined && typeof record.research !== 'boolean') {
+    return { kind: 'invalid', reason: 'research must be true or false' }
+  }
+  let researchHosts: string[] = []
+  if (record.researchHosts !== undefined) {
+    if (!Array.isArray(record.researchHosts) || record.researchHosts.some((host) => typeof host !== 'string')) {
+      return { kind: 'invalid', reason: 'researchHosts must be a list of host names' }
+    }
+    try {
+      researchHosts = parseAllowedHosts(record.researchHosts as string[])
+    } catch {
+      return { kind: 'invalid', reason: 'researchHosts must be public host names such as github.com' }
+    }
+  }
+  let researchSearchEndpoint = ''
+  if (record.researchSearchEndpoint !== undefined) {
+    const endpoint = record.researchSearchEndpoint
+    if (
+      typeof endpoint !== 'string' ||
+      !/^https:\/\/[^\s"'\\]{1,1000}$/.test(endpoint) ||
+      endpoint.split('{query}').length !== 2
+    ) {
+      return { kind: 'invalid', reason: 'researchSearchEndpoint must be an https URL containing one {query}' }
+    }
+    researchSearchEndpoint = endpoint
+  }
+  return {
+    kind: 'ok',
+    config: {
+      databaseUrl: record.databaseUrl,
+      clinicSite,
+      headless: record.headless !== false,
+      publicInspectionHosts,
+      research: record.research === true,
+      researchHosts,
+      researchSearchEndpoint
+    }
+  }
 }
 
 export async function readRuntimeConfig(userDataDir: string): Promise<ConfigResult> {

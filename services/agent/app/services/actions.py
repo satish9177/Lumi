@@ -2,7 +2,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Any, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
@@ -42,12 +42,39 @@ from app.repositories.tasks import TaskRecord, TaskRepository
 
 AttemptEvidenceWriter = Callable[[AsyncConnection, AttemptRecord], Awaitable[None]]
 
+
+class ScopedAuthorizer(Protocol):
+    """How a reusable grant funds one step, without this module knowing grants.
+
+    The ledger stays the authority on transitions; the caller stays the
+    authority on what its scope means. `mint` runs only after the action is
+    AUTHORIZED, so the authorization can bind the revision that produced, and
+    `consume` must re-check every binding in the statement that consumes it.
+    """
+
+    def authorization_payload(self) -> dict[str, Any]:
+        """Facts for the `action.authorized` event: grant id, scope digest, ..."""
+        ...
+
+    async def mint(self, connection: AsyncConnection, *, action: ActionRecord) -> uuid.UUID: ...
+
+    async def consume(
+        self,
+        connection: AsyncConnection,
+        *,
+        authorization_id: uuid.UUID,
+        action_revision: int,
+        proposal_digest: str,
+    ) -> bool: ...
+
+
 #: Actions that still hold, or may still use, an approval.
 _OPEN_STATUSES = frozenset(
     {
         ActionStatus.PROPOSED,
         ActionStatus.WAITING_APPROVAL,
         ActionStatus.APPROVED,
+        ActionStatus.AUTHORIZED,
         ActionStatus.EXECUTING,
         ActionStatus.RECONCILING,
     }
@@ -232,7 +259,12 @@ class ActionService:
             return await self._view(connection, created), True
 
     async def _record_proposed(
-        self, connection: AsyncConnection, task: TaskRecord, created: ActionRecord
+        self,
+        connection: AsyncConnection,
+        task: TaskRecord,
+        created: ActionRecord,
+        *,
+        scoped: bool = False,
     ) -> None:
         tasks_repository = TaskRepository(connection)
         # Proposing does not move the task; it only adds to its timeline.
@@ -251,7 +283,12 @@ class ActionService:
                 "action_status": created.status.value,
                 "action_revision": created.revision,
                 "idempotency_key": created.idempotency_key,
-                "requires_approval": requires_approval(created.risk_tier),
+                # A scoped action does not wait for an exact approval; it waits
+                # for a single-use authorization derived from a confirmed
+                # grant. Saying `requires_approval` here would claim the user
+                # is about to review this exact step, which they are not.
+                "requires_approval": False if scoped else requires_approval(created.risk_tier),
+                **({"authorization": "task_grant"} if scoped else {}),
             },
         )
 
@@ -360,6 +397,117 @@ class ActionService:
                 raise ActionConcurrencyError(task_id)
             await self._record_proposed(connection, task, created)
             return await self._view(connection, created)
+
+    async def start_scoped_attempt(
+        self,
+        task_id: uuid.UUID,
+        *,
+        tool_name: str,
+        idempotency_key: str,
+        risk_tier: RiskTier,
+        proposal: dict[str, Any],
+        authorizer: "ScopedAuthorizer",
+    ) -> tuple[ActionView, bool]:
+        """PROPOSED -> AUTHORIZED -> EXECUTING, funded by a scoped grant.
+
+        The Milestone 7b counterpart of `request_approval` + `approve_action` +
+        `start_attempt`, collapsed into one transaction because there is no
+        human in the middle of it: the human already confirmed the scope, and
+        this is a step inside it.
+
+        Every invariant of the exact-approval path is kept:
+
+        * the action is immutable, and its digest is computed here from the
+          proposal the server built -- never handed in;
+        * the authorization is minted only after the action is AUTHORIZED, bound
+          to the revision that transition produced and to that digest;
+        * consuming it re-checks every binding in SQL, so grant expiry,
+          revocation, a superseded revision and a second claim are all decided
+          by the database;
+        * the attempt is durable before anything outside this process is asked
+          to act, and no transaction is open while it acts.
+
+        Returns `(view, created)`. `created` is False when this idempotency key
+        already has an action, which is how a duplicated planner request
+        becomes a no-op instead of a second execution.
+        """
+        digest = compute_digest(proposal)
+        async with self._engine.begin() as connection:
+            repository = ActionRepository(connection)
+            tasks_repository = TaskRepository(connection)
+            task = await self._lock_task(tasks_repository, task_id)
+            self._check_task_open(task)
+
+            created = await repository.insert_action_if_absent(
+                action_id=uuid.uuid4(),
+                task_id=task_id,
+                idempotency_key=idempotency_key,
+                tool_name=tool_name,
+                risk_tier=risk_tier,
+                proposal=proposal,
+                proposal_digest=digest,
+                status=ActionStatus.PROPOSED,
+            )
+            if created is None:
+                existing = await repository.get_action_by_idempotency_key(
+                    task_id=task_id, idempotency_key=idempotency_key
+                )
+                assert existing is not None  # The insert conflicted, so a row exists.
+                if existing.proposal_digest != digest or existing.tool_name != tool_name:
+                    raise ActionProposalConflictError(task_id, idempotency_key, existing.id)
+                return await self._view(connection, existing), False
+
+            await self._record_proposed(connection, task, created, scoped=True)
+            task = await self._reload_task(tasks_repository, task_id)
+            authorized = await self._transition(
+                connection,
+                task=task,
+                action=created,
+                target=ActionStatus.AUTHORIZED,
+                event_type=TaskEventType.ACTION_AUTHORIZED,
+                payload=authorizer.authorization_payload(),
+            )
+            authorization_id = await authorizer.mint(connection, action=authorized)
+            claimed = await authorizer.consume(
+                connection,
+                authorization_id=authorization_id,
+                action_revision=authorized.revision,
+                proposal_digest=authorized.proposal_digest,
+            )
+            if not claimed:
+                raise ApprovalNotUsableError(
+                    authorized.id, "the scoped authorization for this step is not usable"
+                )
+            attempt = await repository.insert_attempt(
+                attempt_id=uuid.uuid4(),
+                action_id=authorized.id,
+                attempt_number=await repository.next_attempt_number(authorized.id),
+                step_authorization_id=authorization_id,
+                runtime_generation=self._runtime_generation,
+            )
+            task = await self._reload_task(tasks_repository, task_id)
+            moved = await self._transition(
+                connection,
+                task=task,
+                action=authorized,
+                target=ActionStatus.EXECUTING,
+                event_type=TaskEventType.ACTION_EXECUTION_STARTED,
+                payload={
+                    "attempt_id": str(attempt.id),
+                    "attempt_number": attempt.attempt_number,
+                    "step_authorization_id": str(authorization_id),
+                    "runtime_generation": str(self._runtime_generation),
+                },
+            )
+            return await self._view(connection, moved), True
+
+    @staticmethod
+    async def _reload_task(repository: TaskRepository, task_id: uuid.UUID) -> TaskRecord:
+        """The task as it stands after an event bumped its revision (lock held)."""
+        task = await repository.get_task(task_id)
+        if task is None:  # pragma: no cover - tasks are never deleted.
+            raise TaskNotFoundError(task_id)
+        return task
 
     async def get_action(self, action_id: uuid.UUID) -> ActionView:
         async with self._engine.connect() as connection:

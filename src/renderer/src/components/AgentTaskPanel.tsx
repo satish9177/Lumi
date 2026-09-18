@@ -9,9 +9,11 @@ import {
   type AgentError,
   type AgentEventView,
   type AgentInspectionView,
+  type AgentResearchView,
   type AgentResult,
   type AgentRuntimeView,
   type AgentSlotView,
+  type AgentTaskSnapshot,
   type AgentTaskView
 } from '../../../shared/agent-contracts'
 import type { VoiceTaskFocus, VoiceTaskOutcome } from '../../../shared/voice-task-contracts'
@@ -24,13 +26,18 @@ import {
   describeInspection,
   describeOutcome,
   describeRecipients,
+  describeResearch,
+  describeResearchProgress,
+  describeScopeEntry,
   formatAppointmentTime,
   formatPrice,
   latestSearchResults,
   mergeEvents,
+  researchSources,
   topicLabel,
   type BookingControl,
-  type InspectionControl
+  type InspectionControl,
+  type ResearchControl
 } from '../agent-task-view'
 import './components.css'
 
@@ -41,6 +48,8 @@ export interface AgentTaskPanelProps {
   focusRequest?: { target: VoiceTaskFocus; serial: number }
   /** A trusted inspection control returned this view; the app may show its outcome in the conversation. */
   onInspectionResult?: (inspection: AgentInspectionView) => void
+  /** A trusted research control finished; the app may show its outcome in the conversation. */
+  onResearchResult?: (research: AgentResearchView) => void
   /** Injectable for tests. */
   pollIntervalMs?: number
 }
@@ -51,6 +60,7 @@ interface TaskState {
   actions: AgentActionView[]
   events: AgentEventView[]
   inspection?: AgentInspectionView
+  research?: AgentResearchView
 }
 
 const RUNTIME_LABELS: Record<AgentRuntimeView['state'], string> = {
@@ -73,7 +83,7 @@ const RUNTIME_LABELS: Record<AgentRuntimeView['state'], string> = {
  * only reads. Every mutation is a button the user pressed, and approval sends
  * only the action id and the revision that was on screen.
  */
-export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResult, pollIntervalMs = 2_000 }: AgentTaskPanelProps) {
+export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResult, onResearchResult, pollIntervalMs = 2_000 }: AgentTaskPanelProps) {
   const [runtime, setRuntime] = useState<AgentRuntimeView>({ state: 'starting' })
   const [state, setState] = useState<TaskState | null>(null)
   const [loaded, setLoaded] = useState(false)
@@ -96,6 +106,7 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
   const [diagnostics, setDiagnostics] = useState<ModelDiagnosticView[]>()
   const [inspectUrl, setInspectUrl] = useState('')
   const [inspectQuestion, setInspectQuestion] = useState('')
+  const [objective, setObjective] = useState('')
 
   stateRef.current = state
 
@@ -133,7 +144,8 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
       task: snapshot.task,
       actions: snapshot.actions,
       events: sameTask && !full ? mergeEvents(current.events, snapshot.events) : mergeEvents([], snapshot.events),
-      ...(snapshot.inspection ? { inspection: snapshot.inspection } : {})
+      ...(snapshot.inspection ? { inspection: snapshot.inspection } : {}),
+      ...(snapshot.research ? { research: snapshot.research } : {})
     }
     stateRef.current = next
     setState(next)
@@ -271,6 +283,57 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
     }
   }
 
+  /** Shows the bounded scope card; nothing is searched or opened until Allow. */
+  async function createResearch(): Promise<void> {
+    const result = await run('research_prepare', () => agent.createResearchTask(objective))
+    if (result?.ok && mounted.current) {
+      setObjective('')
+      await refresh(true)
+      setPendingCardFocus(Date.now())
+    }
+  }
+
+  async function onResearchControl(control: ResearchControl, research: AgentResearchView): Promise<void> {
+    // The grant id and revision that were on screen when the user pressed.
+    const grant = research.grant
+    const report = (result: AgentResult<AgentTaskSnapshot> | undefined): void => {
+      if (result?.ok && mounted.current && result.value.research) onResearchResult?.(result.value.research)
+    }
+    switch (control) {
+      case 'allow_research': {
+        if (!grant) return
+        // Allowing and starting are one press for the user and two calls
+        // here: the scope is confirmed by id and revision first, and only a
+        // confirmed scope can fund a step.
+        report(await run('research_run', async () => {
+          const granted = await agent.grantResearchScope(grant.grantId, grant.revision)
+          if (!granted.ok) return granted
+          const active = granted.value.research?.grant
+          if (!active || active.status !== 'ACTIVE' || active.scopeDigest !== grant.scopeDigest) {
+            return {
+              ok: false,
+              error: {
+                code: 'invalid_response' as const,
+                message: 'The permission Lumi recorded did not match what you reviewed. Nothing was searched or opened.'
+              }
+            }
+          }
+          return agent.runResearch()
+        }))
+        return
+      }
+      case 'run_research':
+        report(await run('research_run', () => agent.runResearch()))
+        return
+      case 'decline_research':
+        if (!grant) return
+        report(await run('research_stop', () => agent.declineResearchScope(grant.grantId, grant.revision)))
+        return
+      case 'stop_research':
+        report(await run('research_stop', () => agent.stopResearch()))
+    }
+  }
+
   async function lookupInfo(): Promise<void> {
     await run('lookup', () => agent.lookupClinicInfo())
   }
@@ -356,7 +419,10 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
   // on screen. Hidden while a booking is open or once the task is closed.
   const isInfoTask = state?.task.kind === 'clinic_info'
   const isInspectionTask = state?.task.kind === 'page_inspection'
-  const shownSlots = isInfoTask || isInspectionTask ? undefined : taskClosed || bookingOpen ? slots : slots ?? (state ? latestSearchResults(state.events) : undefined)
+  const isResearchTask = state?.task.kind === 'public_research'
+  const shownSlots = isInfoTask || isInspectionTask || isResearchTask
+    ? undefined
+    : taskClosed || bookingOpen ? slots : slots ?? (state ? latestSearchResults(state.events) : undefined)
   const profiles = state && isInfoTask ? latestProfiles(state.events) : undefined
 
   return (
@@ -458,18 +524,38 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
           </form>
         )}
 
+        {runtimeReady && loaded && !state && (
+          <form className="agent-section" aria-label="Research public websites" data-testid="agent-research-form"
+            onSubmit={(event) => { event.preventDefault(); void createResearch() }}>
+            <p className="workspace-note">
+              Lumi can search and read public web pages to answer a question, in an isolated browser that is not signed in to anything. You allow it once for the task; nothing is searched or opened before that.
+            </p>
+            <label className="agent-field">
+              What should Lumi find out?
+              <input value={objective} maxLength={500} data-testid="agent-research-objective"
+                placeholder="Find the Lumi repository on GitHub and tell me what it does"
+                onChange={(event) => setObjective(event.target.value)} />
+            </label>
+            <button className="primary-button" type="submit" disabled={!canCreate || !objective.trim()}>
+              Prepare research
+            </button>
+          </form>
+        )}
+
         {state && (
           <>
             <section className="agent-section"
-              aria-label={isInfoTask ? 'Clinic information task' : isInspectionTask ? 'Page inspection task' : 'Booking task'}
+              aria-label={isInfoTask ? 'Clinic information task' : isInspectionTask ? 'Page inspection task' : isResearchTask ? 'Public research task' : 'Booking task'}
               data-testid="agent-task" data-task-kind={state.task.kind}>
-              <p className="eyebrow">{isInfoTask ? 'CLINIC INFO' : isInspectionTask ? 'PAGE INSPECTION' : 'TASK'} · {state.task.status.replaceAll('_', ' ')}</p>
+              <p className="eyebrow">{isInfoTask ? 'CLINIC INFO' : isInspectionTask ? 'PAGE INSPECTION' : isResearchTask ? 'PUBLIC RESEARCH' : 'TASK'} · {state.task.status.replaceAll('_', ' ')}</p>
               <p className="workspace-note" data-testid="agent-task-criteria">
                 {isInfoTask && state.task.infoQuery
                   ? `${state.task.infoQuery.doctor || state.task.infoQuery.specialty} · ${topicLabel(state.task.infoQuery.topic)}`
                   : isInspectionTask && state.task.inspection
                     ? `${state.task.inspection.host} · ${state.task.inspection.question}`
-                    : describeCriteria(state.task.criteria)}
+                    : isResearchTask && state.task.research
+                      ? state.task.research.objective
+                      : describeCriteria(state.task.criteria)}
               </p>
               <div className="actions">
                 {isInfoTask && !taskClosed ? (
@@ -483,7 +569,7 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
                     Show approval card
                   </button>
                 ) : null}
-                {!isInfoTask && !isInspectionTask && !taskClosed && !bookingOpen ? (
+                {!isInfoTask && !isInspectionTask && !isResearchTask && !taskClosed && !bookingOpen ? (
                   <button className="secondary-button" type="button" disabled={!runtimeReady || Boolean(busy)} onClick={() => void search()}>
                     Search appointments
                   </button>
@@ -528,6 +614,20 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
                   busy={busy}
                   taskClosed={taskClosed}
                   onControl={(control) => void onInspectionControl(control, state.inspection!)}
+                />
+              </div>
+            )}
+
+            {state.research && (
+              <div ref={bookingRegion} tabIndex={-1} className="agent-booking-region"
+                data-testid="agent-research-region" data-voice-focus={focusedSerial}>
+                <ResearchCard
+                  research={state.research}
+                  now={now}
+                  disabled={!runtimeReady || Boolean(busy)}
+                  busy={busy}
+                  taskClosed={taskClosed}
+                  onControl={(control) => void onResearchControl(control, state.research!)}
                 />
               </div>
             )}
@@ -785,6 +885,127 @@ function InspectionCard({ inspection, now, disabled, busy, taskClosed, onControl
   )
 }
 
+
+const RESEARCH_CONTROL_LABELS: Record<ResearchControl, string> = {
+  allow_research: 'Allow research',
+  decline_research: 'Cancel',
+  run_research: 'Start researching',
+  stop_research: 'Stop'
+}
+
+/**
+ * The trusted permission, progress and answer card for one public-research
+ * task. Every label and every line is Lumi's own. Page-controlled text appears
+ * only as plain text in labelled fields: the quoted evidence of a verified
+ * answer, and each source's title and address. It never becomes a label, a
+ * control, a line of instructions or a link.
+ */
+function ResearchCard({ research, now, disabled, busy, taskClosed, onControl }: {
+  research: AgentResearchView
+  now: number
+  disabled: boolean
+  busy?: string
+  taskClosed: boolean
+  onControl: (control: ResearchControl) => void
+}) {
+  const described = describeResearch(research, now)
+  const model = taskClosed ? { ...described, controls: [] } : described
+  const scope = research.grant?.scope
+  const answer = research.answer
+  const sources = researchSources(research)
+  return (
+    <article className={`agent-booking-card tone-${model.tone}`} role="group" aria-label={model.title}
+      data-testid="agent-research-card" data-grant-status={research.grant?.status}
+      data-grant-id={research.grant?.grantId} data-grant-revision={research.grant?.revision}
+      data-answer-status={answer?.status} data-stop-reason={answer?.stopReason}>
+      <p className="lifelens-card-eyebrow">PUBLIC RESEARCH</p>
+      <h3 className="lifelens-card-heading" data-testid="agent-research-title">{model.title}</h3>
+      <dl className="agent-booking-details" data-testid="agent-research-goal">
+        <dt>Goal</dt><dd>{research.objective}</dd>
+      </dl>
+      {model.showScope && scope && (
+        <div data-testid="agent-research-scope">
+          <p className="workspace-note">Allowed for this task:</p>
+          <ul className="agent-evidence" data-testid="agent-research-allowed">
+            {scope.allowed.map((entry) => (
+              <li key={entry} data-scope-entry={entry}>✓ {describeScopeEntry(entry, true)}</li>
+            ))}
+          </ul>
+          <p className="workspace-note">Not allowed:</p>
+          <ul className="agent-evidence" data-testid="agent-research-forbidden">
+            {scope.forbidden.map((entry) => (
+              <li key={entry} data-scope-entry={entry}>✗ {describeScopeEntry(entry, false)}</li>
+            ))}
+          </ul>
+          <dl className="agent-booking-details">
+            <dt>Limits</dt>
+            <dd data-testid="agent-research-limits">
+              At most {scope.budgets.maxSteps} steps, {scope.budgets.maxObservations} pages or searches
+              and {scope.budgets.maxTabs} tabs, for up to {Math.round(scope.budgets.maxActiveSeconds / 60)} minutes.
+              {research.grant?.expiresAt ? ` This permission expires at ${new Date(research.grant.expiresAt).toLocaleTimeString()}.` : ''}
+            </dd>
+            <dt>Sent to answer</dt>
+            <dd data-testid="agent-research-disclosure">
+              Up to {scope.maxTextChars.toLocaleString()} characters of the text on those pages, and your goal, go to: {describeRecipients(scope.recipients)}.
+            </dd>
+            {scope.seeds.length > 0 && (
+              <>
+                <dt>Addresses you gave</dt>
+                <dd className="agent-digest">{scope.seeds.join(' · ')}</dd>
+              </>
+            )}
+          </dl>
+        </div>
+      )}
+      {answer && (answer.status === 'answered' || answer.status === 'partial') && (
+        <div data-testid="agent-research-answer">
+          <p><strong>{answer.answer}</strong></p>
+          <p className="workspace-note">Quoted from the pages Lumi read:</p>
+          <ul className="agent-evidence">
+            {answer.evidence.map((item) => (
+              <li key={`${item.observation}-${item.block}-${item.quote}`}><q>{item.quote}</q></li>
+            ))}
+          </ul>
+        </div>
+      )}
+      {model.lines.map((line) => <p key={line}>{line}</p>)}
+      {model.showProgress && (
+        <p className="workspace-note" role="status" data-testid="agent-research-progress">
+          {describeResearchProgress(research)}
+        </p>
+      )}
+      {model.showProgress && sources.length > 0 && (
+        <dl className="agent-booking-details" data-testid="agent-research-sources">
+          <dt>Sources</dt>
+          <dd>
+            <ul className="agent-evidence">
+              {sources.map((source) => (
+                <li key={source.url} data-source-host={source.host}>
+                  <span className="agent-digest">{source.url}</span>
+                  {source.title ? ` — ${source.title}` : ''}
+                </li>
+              ))}
+            </ul>
+          </dd>
+        </dl>
+      )}
+      {model.controls.length > 0 && (
+        <div className="lifelens-confirmation-actions">
+          {model.controls.map((control) => (
+            <button key={control} type="button" disabled={disabled}
+              className={control === 'allow_research' || control === 'run_research'
+                ? 'lifelens-confirm-button' : 'lifelens-dismiss-button'}
+              aria-busy={busy !== undefined || undefined}
+              onClick={() => onControl(control)}>
+              {RESEARCH_CONTROL_LABELS[control]}
+            </button>
+          ))}
+        </div>
+      )}
+    </article>
+  )
+}
+
 function Timeline({ events }: { events: AgentEventView[] }) {
   return (
     <section className="agent-section" aria-label="Task timeline">
@@ -855,6 +1076,9 @@ function busyText(label: string): string {
     case 'inspect_prepare': return 'Preparing the approval card — nothing is opened yet…'
     case 'inspect_execute': return 'Reading the approved page once, then answering from it…'
     case 'inspect_answer': return 'Answering from the saved page — not opening it again…'
+    case 'research_prepare': return 'Preparing the research permission — nothing is searched yet…'
+    case 'research_run': return 'Searching and reading public pages…'
+    case 'research_stop': return 'Stopping — nothing else will be opened…'
     default: return 'Working…'
   }
 }

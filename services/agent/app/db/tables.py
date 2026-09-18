@@ -15,6 +15,7 @@ from sqlalchemy import (
     Uuid,
     false,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -26,6 +27,7 @@ from app.domain.action_status import (
     RiskTier,
 )
 from app.domain.browser_dispatch import BrowserEffect, DispatchStatus
+from app.domain.research import GrantStatus
 from app.domain.task_status import TaskStatus
 
 metadata = MetaData(
@@ -174,8 +176,17 @@ action_attempts = Table(
     Column("action_id", Uuid(), ForeignKey("actions.id", ondelete="RESTRICT"), nullable=False),
     Column("attempt_number", Integer(), nullable=False),
     # The approval this attempt claimed. Unique, so one approval can never fund
-    # two attempts even if application logic slips.
-    Column("approval_id", Uuid(), ForeignKey("approvals.id", ondelete="RESTRICT"), nullable=False),
+    # two attempts even if application logic slips. Null exactly when the
+    # attempt was funded by a scoped step authorization instead (Milestone 7b).
+    Column("approval_id", Uuid(), ForeignKey("approvals.id", ondelete="RESTRICT"), nullable=True),
+    # Milestone 7b: the single-use authorization a research step derived from
+    # the task's grant. Unique for the same reason `approval_id` is.
+    Column(
+        "step_authorization_id",
+        Uuid(),
+        ForeignKey("step_authorizations.id", ondelete="RESTRICT"),
+        nullable=True,
+    ),
     Column(
         "runtime_generation",
         Uuid(),
@@ -190,6 +201,14 @@ action_attempts = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     UniqueConstraint("action_id", "attempt_number"),
     UniqueConstraint("approval_id"),
+    UniqueConstraint("step_authorization_id"),
+    # Every attempt is funded by exactly one authority: an exact approval the
+    # user granted for this proposal, or a single-use step authorization
+    # derived from a confirmed task grant. Never both, never neither.
+    CheckConstraint(
+        "(approval_id IS NULL) <> (step_authorization_id IS NULL)",
+        name="one_authorization",
+    ),
     CheckConstraint("attempt_number >= 1", name="attempt_number_positive"),
     CheckConstraint(f"outcome IS NULL OR outcome IN ({_values(AttemptOutcome)})", name="outcome"),
     # An attempt is unfinished exactly while Lumi does not yet have an outcome.
@@ -252,6 +271,14 @@ browser_dispatches = Table(
     Column("operation", String(64), nullable=False),
     Column("site", String(64), nullable=False),
     Column("effect", String(16), nullable=False),
+    # Milestone 7b: the task-owned browser session this dispatch drove, for a
+    # research step. Null for one-shot work that owns no session.
+    Column(
+        "session_id",
+        Uuid(),
+        ForeignKey("research_sessions.id", ondelete="RESTRICT"),
+        nullable=True,
+    ),
     Column("status", String(32), nullable=False),
     Column("submitted", Boolean(), nullable=False, server_default=false()),
     Column("observation_id", Uuid(), nullable=True),
@@ -350,3 +377,261 @@ Index(
     page_observations.c.created_at,
 )
 Index("ix_page_observations_action_id", page_observations.c.action_id)
+
+
+# ---- Milestone 7b: public web research -------------------------------------
+#
+# Five tables, added to the same ledger rather than beside it. A research step
+# is an ordinary `actions` row with an ordinary `action_attempts` row; what is
+# new is only *where its authority came from*.
+
+GRANT_STATUSES = tuple(status.value for status in GrantStatus)
+
+#: One reusable, scoped authorization per research task, created by a trusted
+#: renderer click. It is task-bound (`task_id`), scope-bound (`scope_digest`),
+#: policy-version-bound, expiring (`expires_at`) and revocable (`revoked_at`).
+#: It authorises operations *inside* its scope; it never authorises an exact
+#: step, and a model can neither create nor widen one -- there is no route,
+#: parameter or code path by which a proposal becomes a grant.
+task_grants = Table(
+    "task_grants",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False),
+    Column("kind", String(32), nullable=False),
+    Column("status", String(16), nullable=False),
+    # Bumped by every mutation; confirm and revoke are compare-and-swap on it,
+    # so a stale trusted click cannot confirm a scope the user did not see.
+    Column("revision", BigInteger(), nullable=False),
+    Column("policy_version", String(40), nullable=False),
+    # The exact scope, immutable after insert (trigger in migration 0005).
+    Column("scope", JSONB(), nullable=False),
+    Column("scope_digest", String(64), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("confirmed_at", DateTime(timezone=True), nullable=True),
+    Column("expires_at", DateTime(timezone=True), nullable=True),
+    Column("revoked_at", DateTime(timezone=True), nullable=True),
+    Column("completed_at", DateTime(timezone=True), nullable=True),
+    # Budget accounting the runtime, not the planner, keeps.
+    Column("first_step_at", DateTime(timezone=True), nullable=True),
+    Column("planner_calls", Integer(), nullable=False, server_default=text("0")),
+    CheckConstraint(
+        "status IN (" + ", ".join(f"'{status}'" for status in GRANT_STATUSES) + ")",
+        name="status",
+    ),
+    CheckConstraint("kind = 'public_research'", name="kind"),
+    CheckConstraint("revision >= 1", name="revision_positive"),
+    CheckConstraint("scope_digest ~ '^[0-9a-f]{64}$'", name="scope_digest_format"),
+    CheckConstraint("jsonb_typeof(scope) = 'object'", name="scope_is_object"),
+    CheckConstraint("planner_calls >= 0", name="planner_calls_positive"),
+    # A grant only authorises while ACTIVE, and only an active grant has both a
+    # confirmation and a window. Nothing can be active without an expiry.
+    CheckConstraint(
+        "(status <> 'PENDING') = (confirmed_at IS NOT NULL)",
+        name="confirmed_when_not_pending",
+    ),
+    CheckConstraint(
+        "status <> 'ACTIVE' OR (expires_at IS NOT NULL AND expires_at > confirmed_at)",
+        name="active_has_window",
+    ),
+    CheckConstraint("(revoked_at IS NOT NULL) = (status = 'REVOKED')", name="revoked_at_set"),
+    CheckConstraint("(completed_at IS NOT NULL) = (status = 'COMPLETED')", name="completed_at_set"),
+)
+
+#: At most one grant per task that is still pending or active, so a task can
+#: never hold two live scopes and a second confirmation cannot widen the first.
+Index(
+    "uq_task_grants_task_id_open",
+    task_grants.c.task_id,
+    unique=True,
+    postgresql_where=task_grants.c.status.in_(("PENDING", "ACTIVE")),
+)
+
+#: One single-use authorization per research step, minted by the runtime only
+#: after checking that the step is inside its grant. Bound to the grant *and*
+#: its revision, the action and its revision, the exact proposal digest, the
+#: policy version and its own expiry. Consumed by exactly one attempt
+#: (`action_attempts.step_authorization_id` is UNIQUE), so a replay cannot fund
+#: a second execution of the same step.
+step_authorizations = Table(
+    "step_authorizations",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("grant_id", Uuid(), ForeignKey("task_grants.id", ondelete="RESTRICT"), nullable=False),
+    Column("grant_revision", BigInteger(), nullable=False),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False),
+    Column("action_id", Uuid(), ForeignKey("actions.id", ondelete="RESTRICT"), nullable=False),
+    Column("action_revision", BigInteger(), nullable=False),
+    Column("proposal_digest", String(64), nullable=False),
+    Column("scope_digest", String(64), nullable=False),
+    Column("policy_version", String(40), nullable=False),
+    Column(
+        "runtime_generation",
+        Uuid(),
+        ForeignKey("runtime_generations.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("consumed_at", DateTime(timezone=True), nullable=True),
+    UniqueConstraint("action_id"),
+    CheckConstraint("grant_revision >= 1", name="grant_revision_positive"),
+    CheckConstraint("action_revision >= 1", name="action_revision_positive"),
+    CheckConstraint(_HEX_DIGEST_FORMAT, name="proposal_digest_format"),
+    CheckConstraint("scope_digest ~ '^[0-9a-f]{64}$'", name="scope_digest_format"),
+    CheckConstraint("expires_at > created_at", name="expires_after_creation"),
+)
+
+Index("ix_step_authorizations_grant_id", step_authorizations.c.grant_id)
+
+RESEARCH_SESSION_STATUSES = ("OPEN", "CLOSED", "STALE")
+
+#: One task-owned public browser context, reused across the task's steps. It is
+#: bound to the worker generation that created it: after a worker or runtime
+#: restart the native context is gone, so the row becomes STALE and every
+#: semantic ref issued under it stops resolving. There is deliberately no
+#: column for cookies, storage state or any imported profile -- an
+#: unauthenticated context is the only kind this milestone can create.
+research_sessions = Table(
+    "research_sessions",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False),
+    Column("grant_id", Uuid(), ForeignKey("task_grants.id", ondelete="RESTRICT"), nullable=False),
+    Column(
+        "worker_generation",
+        Uuid(),
+        ForeignKey("browser_worker_generations.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    Column(
+        "runtime_generation",
+        Uuid(),
+        ForeignKey("runtime_generations.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    Column("status", String(16), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("closed_at", DateTime(timezone=True), nullable=True),
+    CheckConstraint(
+        "status IN (" + ", ".join(f"'{status}'" for status in RESEARCH_SESSION_STATUSES) + ")",
+        name="status",
+    ),
+    CheckConstraint("(closed_at IS NULL) = (status = 'OPEN')", name="closed_with_status"),
+)
+
+Index("ix_research_sessions_task_id", research_sessions.c.task_id)
+
+#: One bounded, hashed observation per research step. `sequence` is allocated
+#: per task and is the model-facing `o<n>` ref. `targets` holds the addresses
+#: those refs resolve to; it is the controller's table and is never sent to a
+#: model. No DOM, no cookies, no storage, no headers, no screenshots.
+research_observations = Table(
+    "research_observations",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False),
+    Column("grant_id", Uuid(), ForeignKey("task_grants.id", ondelete="RESTRICT"), nullable=False),
+    Column("action_id", Uuid(), ForeignKey("actions.id", ondelete="RESTRICT"), nullable=False),
+    Column(
+        "attempt_id", Uuid(), ForeignKey("action_attempts.id", ondelete="RESTRICT"), nullable=False
+    ),
+    Column(
+        "dispatch_id",
+        Uuid(),
+        ForeignKey("browser_dispatches.id", ondelete="RESTRICT"),
+        nullable=True,
+    ),
+    Column(
+        "session_id",
+        Uuid(),
+        ForeignKey("research_sessions.id", ondelete="RESTRICT"),
+        nullable=True,
+    ),
+    Column(
+        "worker_generation",
+        Uuid(),
+        ForeignKey("browser_worker_generations.id", ondelete="RESTRICT"),
+        nullable=True,
+    ),
+    Column("sequence", Integer(), nullable=False),
+    Column("schema_version", Integer(), nullable=False),
+    Column("provenance", String(32), nullable=False),
+    Column("kind", String(16), nullable=False),
+    Column("operation", String(32), nullable=False),
+    Column("tab", String(4), nullable=True),
+    Column("document_epoch", Integer(), nullable=False),
+    Column("query", String(200), nullable=True),
+    Column("requested_url", String(2048), nullable=True),
+    Column("final_url", String(2048), nullable=True),
+    Column("final_host", String(253), nullable=True),
+    Column("title", String(200), nullable=False),
+    Column("settled", Boolean(), nullable=False),
+    Column("truncated", Boolean(), nullable=False),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("projection", JSONB(), nullable=False),
+    Column("targets", JSONB(), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("attempt_id"),
+    UniqueConstraint("task_id", "sequence"),
+    CheckConstraint("schema_version = 1", name="schema_version"),
+    CheckConstraint("provenance = 'untrusted_environment'", name="provenance"),
+    CheckConstraint("sequence >= 1", name="sequence_positive"),
+    CheckConstraint("document_epoch >= 1", name="document_epoch_positive"),
+    CheckConstraint("kind IN ('page', 'search_results', 'tab_state')", name="kind"),
+    CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_format"),
+    CheckConstraint("jsonb_typeof(projection) = 'object'", name="projection_is_object"),
+    CheckConstraint("jsonb_typeof(targets) = 'object'", name="targets_is_object"),
+)
+
+Index(
+    "ix_research_observations_task_id_sequence",
+    research_observations.c.task_id,
+    research_observations.c.sequence,
+)
+
+RESEARCH_ANSWER_STATUSES = ("answered", "partial", "not_found", "not_verified")
+RESEARCH_STOP_REASONS = (
+    "goal_reached",
+    "no_evidence",
+    "budget_exhausted",
+    "blocked",
+    "planner_failed",
+    "user_stopped",
+    "outside_scope",
+)
+
+#: The one grounded answer a research task ends with, written once. Its
+#: evidence references this task's own observations and blocks, verified before
+#: the row exists.
+research_answers = Table(
+    "research_answers",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False),
+    Column("grant_id", Uuid(), ForeignKey("task_grants.id", ondelete="RESTRICT"), nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("stop_reason", String(24), nullable=False),
+    Column("answer", JSONB(), nullable=False),
+    Column("provider", String(16), nullable=False),
+    Column("model", String(64), nullable=False),
+    Column("steps_used", Integer(), nullable=False),
+    Column("observations_used", Integer(), nullable=False),
+    Column("planner_calls", Integer(), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("task_id"),
+    CheckConstraint(
+        "status IN (" + ", ".join(f"'{status}'" for status in RESEARCH_ANSWER_STATUSES) + ")",
+        name="status",
+    ),
+    CheckConstraint(
+        "stop_reason IN (" + ", ".join(f"'{reason}'" for reason in RESEARCH_STOP_REASONS) + ")",
+        name="stop_reason",
+    ),
+    CheckConstraint("jsonb_typeof(answer) = 'object'", name="answer_is_object"),
+    CheckConstraint(
+        "steps_used >= 0 AND observations_used >= 0 AND planner_calls >= 0", name="counters"
+    ),
+)

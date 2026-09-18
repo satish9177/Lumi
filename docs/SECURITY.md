@@ -94,8 +94,28 @@ delimited section, only for providers the user's approval named, and an answer
 is stored only if its quotes and numbers are verifiably on the page. Details
 and limits: [PAGE-INSPECTION.md](PAGE-INSPECTION.md).
 
+## Public web research (Milestone 7b)
+
+Research is disabled unless trusted configuration enables it. The user confirms
+one bounded scope in the trusted UI; each step then consumes a single-use
+authorization derived from that grant, and the runtime checks the step against
+the scope, the budgets and the destination policy before anything happens. A
+planner chooses one member of a closed operation union that has no field for a
+selector, a script, a raw address, an HTTP method, a header or a cookie, and
+observed links reach it as refs and hosts rather than addresses. The browser
+context is task-owned, unauthenticated and disposable, and every semantic ref
+dies with the document that issued it.
+
+Research deliberately reaches hosts no allowlist named, which widens the
+residual DNS-rebinding gap the Milestone 7a guard already documents: the
+destination is checked twice but the connection is not pinned, so this is a
+policy boundary and not a network sandbox. Details and limits:
+[PUBLIC-RESEARCH.md](PUBLIC-RESEARCH.md).
+
 ## Known gaps
 
+- Research has no connection-time egress broker, so its destination policy
+  can be raced by a hostile DNS server (rebinding). See PUBLIC-RESEARCH.md.
 - The packaged build is unsigned. Machines with Smart App Control or WDAC in
   enforcement mode can block unsigned binaries (observed; see PACKAGING.md).
 - Voice narration is steered, not enforced: a live model could still misspeak.

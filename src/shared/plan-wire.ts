@@ -168,6 +168,22 @@ export function clinicQueryFromWire(value: unknown): AgentClinicInfoQuery {
   return query
 }
 
+/**
+ * The objective of a public-research request. One bounded string, and
+ * nothing else: there is no field here for an address, a step, a selector or
+ * a script, so a model can describe what to find out and nothing more.
+ */
+export function researchObjectiveFromWire(value: unknown): string {
+  const args = record(value)
+  onlyKeys(args, ['objective'])
+  const objective = typeof args.objective === 'string' ? args.objective.replace(/\s+/g, ' ').trim() : ''
+  // eslint-disable-next-line no-control-regex
+  if (!objective || objective.length > 500 || /[\x00-\x1f\x7f]/.test(objective)) {
+    throw new PlanWireError('Say what to find out from public web pages.')
+  }
+  return objective
+}
+
 export function preferenceFromWire(value: unknown): PreferenceValue {
   const args = record(value)
   onlyKeys(args, ['key', 'value'])
@@ -261,6 +277,14 @@ export const CLINIC_QUERY_SCHEMA_PROPERTIES = {
   specialty: { type: 'string', enum: [...VOICE_SPECIALTIES] },
   doctor: { type: 'string', maxLength: 60, description: 'A doctor name exactly as the user or Lumi said it, such as "Dr A".' },
   topic: { type: 'string', enum: [...CLINIC_INFO_TOPICS], description: 'What the user wants to know.' }
+} as const
+
+export const RESEARCH_SCHEMA_PROPERTIES = {
+  objective: {
+    type: 'string',
+    maxLength: 500,
+    description: 'What to find out from public web pages, in the user own words. Never a URL Lumi invented, never a selector or a script.'
+  }
 } as const
 
 export const PREFERENCE_SCHEMA_PROPERTIES = {

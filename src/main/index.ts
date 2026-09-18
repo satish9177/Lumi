@@ -65,7 +65,14 @@ import { DemoClinicSite, readRuntimeConfig } from './agent/packaged-runtime'
 import { createModelRouter } from './models/model-config'
 import type { ModelRouter } from './models/model-router'
 import { PageAnswerer } from './agent/page-answer'
-import { PublicUrlPolicy, parseAllowedHosts, parseTestOrigins } from './agent/public-url-policy'
+import { ResearchAnswerer } from './agent/research-answer'
+import { ResearchPlanner } from './agent/research-planner'
+import {
+  PublicUrlPolicy,
+  RESEARCH_POLICY_VERSION,
+  parseAllowedHosts,
+  parseTestOrigins
+} from './agent/public-url-policy'
 import { isTrustedRendererUrl, isTrustedSenderFrame, type RendererLocation } from './services/ipc-sender'
 import { developmentContentSecurityPolicy } from './services/content-security-policy'
 import { AGENT_IPC_CHANNELS, type AgentRuntimeView } from '../shared/agent-contracts'
@@ -103,6 +110,13 @@ let agentRuntime: AgentRuntimeSupervisor | undefined
  * browser worker receive the same lists and enforce them independently.
  */
 let publicInspectionPolicy = new PublicUrlPolicy()
+/**
+ * Milestone 7b destination policy for public research, from main's trusted
+ * configuration only. Empty (no research) until configured. It is a *separate*
+ * policy from inspection's: whatever research allows, Milestone 7a keeps its
+ * own host allowlist.
+ */
+let publicResearchPolicy = new PublicUrlPolicy({ version: RESEARCH_POLICY_VERSION })
 let agentRuntimeShutdownStarted = false
 /** Packaged builds only: why there is no runtime, when there is none. */
 let agentRuntimeUnconfigured = false
@@ -346,9 +360,26 @@ function developmentAgentRuntimeSettings(): AgentRuntimeSettings {
     publicInspectionPolicy = new PublicUrlPolicy({ allowedHosts: hosts, testOrigins })
     settings.publicInspectionHosts = hosts
     settings.inspectionTestOrigins = testOrigins
+    const researchHosts = parseAllowedHosts(process.env.LUMI_RESEARCH_HOSTS ?? '')
+    const researchTestOrigins = parseTestOrigins(process.env.LUMI_RESEARCH_TEST_ORIGINS ?? '')
+    const researchAnyPublicHost = process.env.LUMI_RESEARCH_ANY_PUBLIC_HOST === '1'
+    publicResearchPolicy = new PublicUrlPolicy({
+      allowedHosts: researchHosts,
+      testOrigins: researchTestOrigins,
+      allowAnyPublicHost: researchAnyPublicHost,
+      version: RESEARCH_POLICY_VERSION
+    })
+    if (researchAnyPublicHost) settings.researchAnyPublicHost = true
+    if (researchHosts.length > 0) settings.researchHosts = researchHosts
+    if (researchTestOrigins.length > 0) settings.researchTestOrigins = researchTestOrigins
+    if (process.env.LUMI_RESEARCH_SEARCH_ENDPOINT) {
+      settings.researchSearchEndpoint = process.env.LUMI_RESEARCH_SEARCH_ENDPOINT
+    }
   } catch {
-    // Fail closed: a malformed list disables page inspection entirely.
-    console.error('Lumi page inspection configuration is invalid; page inspection is disabled.')
+    // Fail closed: a malformed list disables page inspection and research.
+    publicInspectionPolicy = new PublicUrlPolicy()
+    publicResearchPolicy = new PublicUrlPolicy({ version: RESEARCH_POLICY_VERSION })
+    console.error('Lumi public browsing configuration is invalid; inspection and research are disabled.')
   }
   return settings
 }
@@ -373,9 +404,17 @@ async function startPackagedAgentRuntime(): Promise<void> {
     browsersPath: paths.browsersPath,
     migrate: true,
     // Packaged builds offer public hosts only; loopback test origins never.
-    publicInspectionHosts: config.config.publicInspectionHosts
+    publicInspectionHosts: config.config.publicInspectionHosts,
+    ...(config.config.research ? { researchAnyPublicHost: true } : {}),
+    ...(config.config.researchHosts.length > 0 ? { researchHosts: config.config.researchHosts } : {}),
+    ...(config.config.researchSearchEndpoint ? { researchSearchEndpoint: config.config.researchSearchEndpoint } : {})
   }
   publicInspectionPolicy = new PublicUrlPolicy({ allowedHosts: config.config.publicInspectionHosts })
+  publicResearchPolicy = new PublicUrlPolicy({
+    allowedHosts: config.config.researchHosts,
+    allowAnyPublicHost: config.config.research,
+    version: RESEARCH_POLICY_VERSION
+  })
   try {
     if (config.config.clinicSite === 'demo') {
       demoClinicSite = new DemoClinicSite(paths.pythonPath, paths.agentRoot)
@@ -1061,6 +1100,11 @@ app.whenReady().then(async () => {
     console.error('Lumi model routing configuration is invalid; typed requests and page answers are disabled.')
   }
   const pageAnswerer = modelRouter ? new PageAnswerer(modelRouter) : undefined
+  // Both research model roles live in main, the only process holding provider
+  // credentials. The planner proposes one step; the runtime decides whether it
+  // is allowed and performs it.
+  const researchPlanner = modelRouter ? new ResearchPlanner(modelRouter) : undefined
+  const researchAnswerer = modelRouter ? new ResearchAnswerer(modelRouter) : undefined
   const agentTasks = new AgentTaskController(
     {
       // Resolved per call: a packaged runtime is created asynchronously.
@@ -1073,6 +1117,11 @@ app.whenReady().then(async () => {
       // Read per call: the packaged configuration is loaded asynchronously.
       get policy() { return publicInspectionPolicy },
       ...(pageAnswerer ? { answerer: pageAnswerer } : {})
+    },
+    {
+      get policy() { return publicResearchPolicy },
+      ...(researchPlanner ? { planner: researchPlanner } : {}),
+      ...(researchAnswerer ? { answerer: researchAnswerer } : {})
     }
   )
   const calendar = trustedCalendarClock({ allowFixedNow: !app.isPackaged })
@@ -1087,6 +1136,7 @@ app.whenReady().then(async () => {
       router: modelRouter,
       controller: voiceTasks,
       inspections: agentTasks,
+      research: agentTasks,
       loadTask: async () => {
         const loaded = await agentTasks.loadActiveTask(0)
         return loaded.ok ? loaded.value : null

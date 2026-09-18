@@ -6,6 +6,9 @@ import type {
   AgentEventView,
   AgentInspectionView,
   AgentReconciliationView,
+  AgentResearchSourceView,
+  AgentResearchStopReason,
+  AgentResearchView,
   AgentSlotView
 } from '../../shared/agent-contracts'
 import { formatCalendarDate, formatPrice } from '../../shared/scripted-voice'
@@ -93,6 +96,9 @@ export function describeBooking(action: AgentActionView, events: readonly AgentE
   const base = { showBookingDetails: true }
   switch (action.status) {
     case 'PROPOSED':
+    // A booking always needs an exact approval; AUTHORIZED belongs to scoped
+    // research steps and never appears on a booking action.
+    case 'AUTHORIZED':
       return {
         ...base, tone: 'approval', eyebrow: 'PREPARED', title: 'Booking prepared',
         lines: ['Lumi has not asked for approval yet. Nothing has been booked.'],
@@ -223,9 +229,17 @@ export function describeEvent(event: AgentEventView): string {
         ? 'Read clinic information (read-only)'
         : `Read clinic information (read-only): ${count} doctor profile${count === 1 ? '' : 's'}`
     }
+    case 'task.research_scope_requested': return 'Research permission prepared — nothing searched yet'
+    case 'task.research_scope_granted': return 'You allowed public research for this task'
+    case 'task.research_scope_revoked': return 'Research permission withdrawn'
+    case 'task.research_answer_recorded':
+      return event.answerStatus === 'answered'
+        ? 'Answer recorded from the pages Lumi read'
+        : 'Recorded: could not verify an answer from the pages Lumi read'
     case 'action.proposed': return 'Booking prepared from the clinic site'
     case 'action.approval_requested': return 'Waiting for your approval'
     case 'action.approved': return 'You approved the booking'
+    case 'action.authorized': return 'Research step authorised by the permission you gave'
     case 'action.rejected':
       if (event.reason === 'criteria_changed') return 'Booking withdrawn: the search changed'
       if (event.reason === 'task_cancelled') return 'Booking withdrawn: task cancelled'
@@ -315,6 +329,23 @@ export function describeOutcome(outcome: VoiceTaskOutcome): string {
       return `Lumi could not do that yet: ${narration.reason.replaceAll('_', ' ')}.${suffix}`
     case 'task_cancelled':
       return 'The task is cancelled. Nothing was booked.'
+    case 'research':
+      switch (narration.state) {
+        case 'permission_required':
+          return 'Nothing was allowed. Review the research card and press Allow research yourself.'
+        case 'awaiting_permission':
+          return 'Prepared a public research task. Nothing is searched or opened until you press Allow research.'
+        case 'researching':
+          return 'Lumi is reading public pages. Progress and sources are on the research card.'
+        case 'answered':
+          return 'The answer and the public pages it came from are on the research card.'
+        case 'not_verified':
+          return 'Lumi could not verify that from the public pages it read. See the research card.'
+        case 'stopped':
+          return 'The research is stopped. Nothing else will be opened.'
+        default:
+          return 'See the research card.'
+      }
     case 'inspection':
       return narration.state === 'approval_required'
         ? `Nothing was approved. Review the card for ${narration.host} and press Approve and inspect yourself.`
@@ -332,6 +363,195 @@ export function describeOutcome(outcome: VoiceTaskOutcome): string {
     default:
       return 'Done. See the task below.'
   }
+}
+
+
+// ---- Milestone 7b: the public research card ------------------------------------------
+
+/**
+ * The research card is built from the persisted scope, the durable progress
+ * and the recorded answer only. Page-controlled text appears in exactly three
+ * places, always as plain text in a labelled field: the quoted evidence of a
+ * verified answer, a source's title, and a source's address. It never supplies
+ * a label, a control, a line of instructions or a clickable link.
+ */
+
+export type ResearchControl = 'allow_research' | 'decline_research' | 'run_research' | 'stop_research'
+
+export interface ResearchCardModel {
+  tone: BookingTone
+  eyebrow: string
+  title: string
+  lines: string[]
+  /** Show the scope: what is allowed, what is not, and the limits. */
+  showScope: boolean
+  showProgress: boolean
+  controls: ResearchControl[]
+}
+
+/** Lumi's own words for each machine-readable scope entry. Never a page's. */
+export const RESEARCH_ALLOWED_LABELS: Record<string, string> = {
+  public_search: 'search the public web',
+  public_https_navigation: 'open public https pages',
+  follow_public_links: 'follow links on those pages',
+  read_page_text: 'read the visible text of those pages',
+  task_owned_tabs: 'open and close its own research tabs'
+}
+
+export const RESEARCH_FORBIDDEN_LABELS: Record<string, string> = {
+  login: 'sign in anywhere',
+  forms_and_typing: 'type into or submit any form',
+  uploads_and_downloads: 'upload or download anything',
+  purchases_and_payments: 'buy anything or make a payment',
+  messages: 'send messages',
+  files: 'read or change your files',
+  private_network: 'reach private or local network addresses',
+  non_get_requests: 'send anything but read requests'
+}
+
+export function describeScopeEntry(entry: string, allowed: boolean): string {
+  const labels = allowed ? RESEARCH_ALLOWED_LABELS : RESEARCH_FORBIDDEN_LABELS
+  return labels[entry] ?? entry.replaceAll('_', ' ')
+}
+
+const RESEARCH_STOP_LINES: Record<AgentResearchStopReason, string> = {
+  goal_reached: 'Lumi found what you asked for.',
+  no_evidence: 'The public pages Lumi could read did not show it.',
+  budget_exhausted: 'Lumi reached the limit for this task and stopped.',
+  blocked: 'Lumi was blocked before it could finish.',
+  planner_failed: 'Lumi could not decide a safe next step.',
+  user_stopped: 'You stopped the research.',
+  outside_scope: 'Finishing this would have needed something research is not allowed to do.'
+}
+
+export function describeResearch(research: AgentResearchView, now: number): ResearchCardModel {
+  const grant = research.grant
+  const answer = research.answer
+  const base = { showScope: false, showProgress: false }
+  if (!grant) {
+    return {
+      ...base, tone: 'neutral', eyebrow: 'RESEARCH', title: 'No research permission yet',
+      lines: ['Nothing has been searched or opened.'], controls: []
+    }
+  }
+  if (answer) {
+    const stopLine = RESEARCH_STOP_LINES[answer.stopReason]
+    if (answer.status === 'answered' || answer.status === 'partial') {
+      return {
+        ...base, showProgress: true, tone: 'success',
+        eyebrow: answer.status === 'answered' ? 'ANSWER FROM PUBLIC PAGES' : 'PARTIAL ANSWER',
+        title: answer.status === 'answered' ? 'Answer from the pages Lumi read' : 'Part of the answer',
+        lines: answer.status === 'answered' ? [] : [stopLine],
+        controls: []
+      }
+    }
+    return {
+      ...base, showProgress: true, tone: 'neutral', eyebrow: 'NOT VERIFIED',
+      title: 'Lumi could not verify that from public pages',
+      lines: [stopLine], controls: []
+    }
+  }
+  switch (grant.status) {
+    case 'PENDING':
+      return {
+        ...base, showScope: true, tone: 'approval', eyebrow: 'NEEDS YOUR PERMISSION',
+        title: 'Allow Lumi to research public websites for this task?',
+        lines: [
+          'Lumi searches and reads public pages in an isolated browser, and stops there.',
+          'It is not signed in to anything, and this permission lasts for this task only.'
+        ],
+        controls: ['decline_research', 'allow_research']
+      }
+    case 'ACTIVE': {
+      const expired = grant.expiresAt !== undefined && Date.parse(grant.expiresAt) <= now
+      if (expired) {
+        return {
+          ...base, showProgress: true, tone: 'neutral', eyebrow: 'PERMISSION EXPIRED',
+          title: 'The research permission expired',
+          lines: ['Nothing else will be opened. Start the request again to continue.'],
+          controls: ['stop_research']
+        }
+      }
+      const running = research.usage.steps > 0
+      if (research.unresolvedStep) {
+        // A step is still in flight, or ended without a result Lumi can stand
+        // behind. Say that plainly rather than showing confident progress.
+        return {
+          ...base, showProgress: research.observations.length > 0, tone: 'neutral',
+          eyebrow: 'STEP UNRESOLVED', title: 'Lumi does not know what its last step did',
+          lines: [
+            'The browser step is still running, or it ended without a result Lumi can stand behind.',
+            'Nothing new will be opened until that is settled. Anything already read is kept below.'
+          ],
+          controls: ['stop_research']
+        }
+      }
+      return {
+        ...base, showScope: true, showProgress: true, tone: running ? 'progress' : 'approval',
+        eyebrow: 'RESEARCHING', title: running ? 'Reading public pages' : 'Ready to research',
+        lines: running
+          ? []
+          : ['Lumi will search, open public pages and read them. It will stop at its limits and tell you what it found.'],
+        controls: running ? ['stop_research'] : ['run_research', 'stop_research']
+      }
+    }
+    case 'REVOKED':
+      return {
+        ...base, showProgress: research.observations.length > 0, tone: 'neutral', eyebrow: 'STOPPED',
+        title: 'Research stopped',
+        lines: ['Nothing else will be opened. Anything Lumi already read is kept below.'],
+        controls: []
+      }
+    case 'EXPIRED':
+      return {
+        ...base, showProgress: research.observations.length > 0, tone: 'neutral',
+        eyebrow: 'PERMISSION EXPIRED', title: 'The research permission expired',
+        lines: ['Nothing else will be opened.'], controls: []
+      }
+    case 'COMPLETED':
+      return {
+        ...base, showProgress: true, tone: 'neutral', eyebrow: 'FINISHED',
+        title: 'Research finished', lines: [], controls: []
+      }
+  }
+}
+
+/** One short progress line, in Lumi's words, from durable counters only. */
+export function describeResearchProgress(research: AgentResearchView): string {
+  const pages = researchPageCount(research)
+  const searches = research.observations.filter((observation) => observation.kind === 'search_results').length
+  const parts: string[] = []
+  if (searches > 0) parts.push(`${searches} search${searches === 1 ? '' : 'es'}`)
+  parts.push(`${pages} page${pages === 1 ? '' : 's'} read`)
+  const budgets = research.grant?.scope.budgets
+  parts.push(`${research.usage.steps}${budgets ? ` of ${budgets.maxSteps}` : ''} step${research.usage.steps === 1 ? '' : 's'}`)
+  return parts.join(' · ')
+}
+
+export function researchPageCount(research: AgentResearchView): number {
+  return new Set(
+    research.observations
+      .filter((observation) => observation.kind === 'page' && observation.finalUrl)
+      .map((observation) => observation.finalUrl)
+  ).size
+}
+
+/** The pages Lumi actually opened, in order: the answer's sources. */
+export function researchSources(research: AgentResearchView): AgentResearchSourceView[] {
+  const sources: AgentResearchSourceView[] = []
+  const seen = new Set<string>()
+  for (const observation of research.observations) {
+    if (observation.kind !== 'page' || !observation.finalUrl || seen.has(observation.finalUrl)) continue
+    seen.add(observation.finalUrl)
+    sources.push({
+      ref: observation.ref,
+      url: observation.finalUrl,
+      host: observation.finalHost ?? '',
+      title: observation.title,
+      observedAt: observation.observedAt
+    })
+  }
+  return sources
 }
 
 export function topicLabel(topic: string): string {
@@ -411,6 +631,7 @@ export function describeInspection(inspection: AgentInspectionView, now: number)
   const base = { showProposal: true }
   switch (inspection.status) {
     case 'PROPOSED':
+    case 'AUTHORIZED':
       return {
         ...base, tone: 'approval', eyebrow: 'PREPARED', title: 'Inspection prepared',
         lines: ['Lumi has not asked for approval yet. Nothing has been opened.'], controls: ['inspect_again', 'reject']

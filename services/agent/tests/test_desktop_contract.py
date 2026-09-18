@@ -10,10 +10,13 @@ from app.api.schemas import (
     CancelBookingTaskResponse,
     ClinicInfoResponse,
     ErrorResponse,
+    ResearchResponse,
+    ResearchStepResponse,
     ReviseBookingCriteriaResponse,
     TaskEventListResponse,
     TaskResponse,
 )
+from app.domain.research import ResearchProposal, ResearchScope
 from app.domain.booking import CHANGED_FACT_FIELDS, BookingProposal, ObservedSlot, changed_facts
 
 APP_ROOT = Path(__file__).resolve().parents[1] / "app"
@@ -43,11 +46,27 @@ def test_examples_are_valid_runtime_payloads() -> None:
     for name in ("action_waiting_approval", "action_succeeded", "action_changed_price", "action_outcome_unknown"):
         action = ActionResponse.model_validate(examples[name])
         BookingProposal.model_validate(action.proposal)
+    for name in ("research_card", "research_active", "research_answered"):
+        research = ResearchResponse.model_validate(examples[name])
+        if research.grant is not None:
+            scope = ResearchScope.model_validate(research.grant.scope)
+            assert scope.digest == research.grant.scope_digest
+    step = ResearchStepResponse.model_validate(examples["research_step"])
+    proposal = ResearchProposal.model_validate(step.action.proposal)
+    # A research step is funded by a scoped authorization, never an approval.
+    assert step.action.approval is None
+    assert proposal.kind == "public_research_step"
+    for attempt in step.action.attempts:
+        assert attempt.approval_id is None
+        assert attempt.step_authorization_id is not None
+    TaskEventListResponse.model_validate(examples["research_events"])
+    ErrorResponse.model_validate(examples["error_research_refused"])
+    ErrorResponse.model_validate(examples["error_research_budget"])
 
 
 def test_every_emitted_error_code_is_declared() -> None:
     sources = (APP_ROOT / "api" / "errors.py").read_text() + (APP_ROOT / "api" / "security.py").read_text()
-    emitted = set(re.findall(r'(?:_simple|_fixed)\(\s*status\.\w+,\s*"([a-z_]+)"', sources))
+    emitted = set(re.findall(r'(?:_simple|_fixed|_reasoned)\(\s*status\.\w+,\s*"([a-z_]+)"', sources))
     emitted |= set(re.findall(r'code="([a-z_]+)"', sources))
     emitted |= set(re.findall(r'_reject\([^)]*?"([a-z_]+)"', sources, flags=re.S))
     assert emitted, "the scan found no codes; the pattern is broken"

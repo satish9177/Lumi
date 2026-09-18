@@ -1,6 +1,11 @@
-import type { AgentInspectionView, AgentResult, TypedRequestRoute } from '../../shared/agent-contracts'
+import type {
+  AgentInspectionView,
+  AgentResearchView,
+  AgentResult,
+  TypedRequestRoute
+} from '../../shared/agent-contracts'
 import type { VoiceTaskOutcome } from '../../shared/voice-task-contracts'
-import { describeInspectionFailure } from './agent-task-view'
+import { describeInspectionFailure, researchPageCount } from './agent-task-view'
 
 /**
  * The main composer's single decision: which path owns a typed request.
@@ -84,6 +89,40 @@ export function describeInspectionForConversation(inspection: AgentInspectionVie
       return `Lumi does not know what was read from ${host}. It will not retry by itself.`
     case 'REJECTED':
       return `You rejected the inspection of ${host}. Nothing was opened.`
+    default:
+      return undefined
+  }
+}
+
+/**
+ * One conversation line for a finished research task, or nothing while it is
+ * still waiting or running. Every word is Lumi's except the verified answer,
+ * which is shown as plain text after an app-authored label. Sources are named
+ * by host, never rendered as links.
+ */
+export function describeResearchForConversation(research: AgentResearchView): string | undefined {
+  const pages = researchPageCount(research)
+  const read = `${pages} public page${pages === 1 ? '' : 's'}`
+  const answer = research.answer
+  if (answer) {
+    if (answer.status === 'answered' || answer.status === 'partial') {
+      const hosts = [...new Set(
+        research.observations
+          .filter((observation) => observation.kind === 'page' && observation.finalHost)
+          .map((observation) => observation.finalHost)
+      )].slice(0, 3).join(', ')
+      const prefix = answer.status === 'answered' ? 'From' : 'Partly, from'
+      return `${prefix} ${read}${hosts ? ` (${hosts})` : ''}: ${answer.answer}`
+    }
+    return `Lumi read ${read} but could not verify an answer to that. The sources are on the research card.`
+  }
+  switch (research.grant?.status) {
+    case 'PENDING':
+      return 'Lumi needs your permission before it searches or opens anything. Review the research card.'
+    case 'REVOKED':
+      return `The research is stopped. Lumi had read ${read}; nothing else will be opened.`
+    case 'EXPIRED':
+      return `The research permission expired. Lumi had read ${read}.`
     default:
       return undefined
   }

@@ -60,6 +60,18 @@ const agentApi: AgentApi = {
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.executeInspection, actionId, expectedRevision),
   answerInspection: (actionId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.answerInspection, actionId),
   inspectPageAgain: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.inspectPageAgain),
+  // Public research. One string the user typed, then two id/revision pairs
+  // from the card that was on screen. `grantResearchScope` is the trusted
+  // click and the only route to an active scope; nothing here can widen one,
+  // and no channel accepts a step, a selector, a script or an address.
+  createResearchTask: (objective: string) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.createResearchTask, objective),
+  grantResearchScope: (grantId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.grantResearchScope, grantId, expectedRevision),
+  declineResearchScope: (grantId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineResearchScope, grantId, expectedRevision),
+  runResearch: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.runResearch),
+  stopResearch: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.stopResearch),
   listPreferences: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.listPreferences),
   forgetPreference: (key: PreferenceKey) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.forgetPreference, key),
   getDiagnostics: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getDiagnostics)

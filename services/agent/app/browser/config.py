@@ -15,7 +15,12 @@ proposal choose where the browser goes.
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from app.domain.public_url import PublicUrlPolicy, parse_allowed_hosts, parse_test_origins
+from app.domain.public_url import (
+    RESEARCH_POLICY_VERSION,
+    PublicUrlPolicy,
+    parse_allowed_hosts,
+    parse_test_origins,
+)
 
 DEFAULT_SITE = "appointment_fixture"
 
@@ -56,6 +61,29 @@ class WorkerSettings(BaseSettings):
     public_hosts: str = Field(default="")
     #: Exact http://127.0.0.1:<port> origins of controlled test pages.
     inspection_test_origins: str = Field(default="")
+    #: Milestone 7b public research. `research_any_public_host` replaces the
+    #: host allowlist with "any name that is not local, private or reserved and
+    #: resolves only to globally routable addresses" -- research cannot know its
+    #: destinations in advance. `research_hosts` narrows it again when
+    #: configuration wants a list, and the test origins exist for fixtures.
+    #: All three empty/false means there is no research capability at all.
+    research_any_public_host: bool = False
+    research_hosts: str = Field(default="")
+    research_test_origins: str = Field(default="")
+    #: How many tabs one research session may own.
+    research_max_tabs: int = Field(default=5, ge=1, le=5)
+
+    @field_validator("research_hosts")
+    @classmethod
+    def _valid_research_hosts(cls, value: str) -> str:
+        parse_allowed_hosts(value)
+        return value
+
+    @field_validator("research_test_origins")
+    @classmethod
+    def _valid_research_test_origins(cls, value: str) -> str:
+        parse_test_origins(value)
+        return value
 
     @field_validator("public_hosts")
     @classmethod
@@ -85,4 +113,15 @@ class WorkerSettings(BaseSettings):
         return PublicUrlPolicy(
             allowed_hosts=parse_allowed_hosts(self.public_hosts),
             test_origins=parse_test_origins(self.inspection_test_origins),
+        )
+
+    @property
+    def research_policy(self) -> PublicUrlPolicy:
+        """The research destination policy. Never the inspection one: M7a keeps
+        its narrow allowlist whatever research is configured to allow."""
+        return PublicUrlPolicy(
+            allowed_hosts=parse_allowed_hosts(self.research_hosts),
+            test_origins=parse_test_origins(self.research_test_origins),
+            version=RESEARCH_POLICY_VERSION,
+            allow_any_public_host=self.research_any_public_host,
         )

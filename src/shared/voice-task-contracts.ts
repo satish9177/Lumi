@@ -231,6 +231,22 @@ export const VOICE_INSPECTION_STATES = [
 ] as const
 export type VoiceInspectionState = typeof VOICE_INSPECTION_STATES[number]
 
+/**
+ * Milestone 7b. What voice may say about a public-research task: a closed
+ * state and nothing from any page. Speech can create the task and point at
+ * the permission card; it can never grant the scope.
+ */
+export const VOICE_RESEARCH_STATES = [
+  'awaiting_permission',
+  'permission_required',
+  'researching',
+  'answered',
+  'not_verified',
+  'stopped',
+  'no_card'
+] as const
+export type VoiceResearchState = typeof VOICE_RESEARCH_STATES[number]
+
 export const VOICE_CLARIFICATIONS = [
   'no_task',
   'task_closed',
@@ -293,6 +309,12 @@ export type VoiceNarration =
    * here, and no state means "approved".
    */
   | { kind: 'inspection'; host: string; state: VoiceInspectionState }
+  /**
+   * Milestone 7b public research. A closed state only: the objective is the
+   * user's own words and the answer stays on the trusted card, so no page
+   * text is ever spoken from here.
+   */
+  | { kind: 'research'; state: VoiceResearchState }
   | { kind: 'preference_saved'; preference: PreferenceValue }
   | { kind: 'refused'; code: AgentErrorCode }
 

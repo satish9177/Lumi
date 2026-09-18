@@ -115,6 +115,7 @@ class BrowserRepository:
         operation: str,
         site: str,
         effect: BrowserEffect,
+        session_id: uuid.UUID | None = None,
     ) -> DispatchRecord:
         """Record the intent to drive a browser, before the browser is driven.
 
@@ -132,6 +133,7 @@ class BrowserRepository:
                 operation=operation,
                 site=site,
                 effect=effect.value,
+                session_id=session_id,
                 status=DispatchStatus.DISPATCHED.value,
                 submitted=False,
             )
