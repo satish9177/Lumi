@@ -79,7 +79,7 @@ uv run pytest tests\test_inspection_acceptance.py
 $env:LUMI_PACKAGED_E2E='1'; uv run pytest tests\test_packaged_app.py
 ```
 
-What each suite proves and how to run the opt-in live provider checks: [docs/EVALS.md](docs/EVALS.md). Latest results: [docs/reviews/milestone-6.md](docs/reviews/milestone-6.md).
+What each suite proves and how to run the opt-in live provider checks: [docs/EVALS.md](docs/EVALS.md). Latest results: [docs/reviews/milestone-7b.md](docs/reviews/milestone-7b.md) (earlier: [milestone-6.md](docs/reviews/milestone-6.md)).
 
 ## Documentation
 
