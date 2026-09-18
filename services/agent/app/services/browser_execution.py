@@ -46,9 +46,10 @@ from app.browser.errors import (
     BrowserWorkerUnavailableError,
     StaleWorkerResultError,
 )
-from app.browser.protocol import DispatchRequest, DispatchResponse
+from app.browser.protocol import DispatchRequest, DispatchResponse, ProfileSessionRequest
 from app.domain.action_status import ActionStatus, AttemptOutcome
 from app.domain.booking import booking_reference, parse_booking_proposal
+from app.domain.browser_profile import BrowserVersions
 from app.domain.browser_dispatch import (
     BrowserEffect,
     DispatchStatus,
@@ -104,6 +105,21 @@ async def open_worker_client(
         runtime_generation=runtime_generation,
         timeout_seconds=timeout,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class WorkerProfileOpen:
+    """What the worker reported after opening a persistent browser profile.
+
+    Note the absence: no path, no directory, no cookie, no storage. The only
+    thing that comes back is which browser opened it and whether this worker
+    holds the exclusive OS handle on the directory.
+    """
+
+    profile_id: uuid.UUID
+    worker_generation: uuid.UUID
+    versions: BrowserVersions
+    lock_held: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,6 +181,62 @@ class BrowserExecutionService:
                     worker_started_at=datetime.fromisoformat(identity.started_at),
                 )
         return identity.worker_generation
+
+    # ---- persistent browser profiles (Milestone 8a S1) ----------------------
+
+    async def open_browser_profile(
+        self, *, profile_id: uuid.UUID, recorded_chromium_build: str | None
+    ) -> "WorkerProfileOpen":
+        """Have the worker open one persistent profile, and report what opened it.
+
+        Deliberately not an execution attempt and not a dispatch: opening a
+        profile touches no site, changes nothing outside the machine, and has
+        nothing to reconcile. It never reaches the action ledger.
+
+        The request carries an id and the build the database last recorded. It
+        carries no path -- the worker derives the directory from the id -- and
+        the response carries none either.
+        """
+        client = await self._client()
+        try:
+            worker_generation = await self._bind_worker(client)
+            answer = await client.open_profile(
+                ProfileSessionRequest(
+                    profile_id=profile_id,
+                    runtime_generation=self._runtime_generation,
+                    expected_worker_generation=worker_generation,
+                    recorded_chromium_build=recorded_chromium_build,
+                )
+            )
+        finally:
+            await client.aclose()
+        return WorkerProfileOpen(
+            profile_id=answer.profile_id,
+            worker_generation=answer.worker_generation,
+            versions=BrowserVersions(
+                chromium_build=answer.chromium_build or "",
+                playwright_version=answer.playwright_version or "",
+                app_version="",
+            ),
+            lock_held=answer.lock_held,
+        )
+
+    async def close_browser_profile(
+        self, *, profile_id: uuid.UUID, worker_generation: uuid.UUID
+    ) -> bool:
+        """Close the persistent context and release its exclusive OS handle."""
+        client = await self._client()
+        try:
+            answer = await client.close_profile(
+                ProfileSessionRequest(
+                    profile_id=profile_id,
+                    runtime_generation=self._runtime_generation,
+                    expected_worker_generation=worker_generation,
+                )
+            )
+        finally:
+            await client.aclose()
+        return answer.status == "CLOSED"
 
     # ---- execution ----------------------------------------------------------
 

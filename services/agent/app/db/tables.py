@@ -27,6 +27,7 @@ from app.domain.action_status import (
     RiskTier,
 )
 from app.domain.browser_dispatch import BrowserEffect, DispatchStatus
+from app.domain.browser_profile import ProfileStatus
 from app.domain.research import GrantStatus
 from app.domain.task_status import TaskStatus
 
@@ -50,7 +51,8 @@ def _values(
     | type[AttemptOutcome]
     | type[RiskTier]
     | type[DispatchStatus]
-    | type[BrowserEffect],
+    | type[BrowserEffect]
+    | type[ProfileStatus],
 ) -> str:
     return ", ".join(f"'{member.value}'" for member in members)
 
@@ -634,4 +636,112 @@ research_answers = Table(
     CheckConstraint(
         "steps_used >= 0 AND observations_used >= 0 AND planner_calls >= 0", name="counters"
     ),
+)
+
+
+# ---- Milestone 8a S1: persistent browser profiles ---------------------------
+#
+# One row per Lumi-managed Chromium profile. The row is the profile's *identity
+# and lifecycle*; its contents are Chromium's and stay in the profile
+# directory. Read the right-hand column of this table as a promise:
+#
+#   stored here                     | never stored anywhere outside the profile
+#   --------------------------------|------------------------------------------
+#   id, label, site, allowed_origins| cookies of any kind
+#   status, revision                | access, refresh, bearer or CSRF tokens
+#   chromium/playwright/app version | localStorage, sessionStorage, IndexedDB
+#   lease generation and expiry     | Chromium's credential database
+#   revoke_epoch                    | the profile directory path
+#   account fingerprint *hashes*    | the raw account identity string
+#
+# There is deliberately **no** column for a path, a cookie, a token or a
+# storage blob, and no migration adds one later without this comment changing.
+
+PROFILE_STATUSES = tuple(status.value for status in ProfileStatus)
+
+browser_profiles = Table(
+    "browser_profiles",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    # Shown to a person; bounded and sanitised by `canonical_label`. It is not
+    # unique, is not a key, and never becomes a filesystem path component.
+    Column("label", String(60), nullable=False),
+    # The registrable domain (eTLD+1) from the pinned Public Suffix List.
+    # Immutable after insert, enforced by a trigger: a profile holding site A's
+    # session cookies must never start calling itself site B.
+    Column("site", String(253), nullable=False),
+    # The origins this profile may ever be navigated to. Derived from `site` at
+    # creation and frozen with it.
+    Column("allowed_origins", JSONB(), nullable=False),
+    Column("status", String(16), nullable=False),
+    # Compare-and-swap target for every mutation, as everywhere else.
+    Column("revision", BigInteger(), nullable=False),
+    # What last opened the directory. A Chromium profile is forward-compatible
+    # only, so an older build refuses rather than risking corruption.
+    Column("chromium_build", String(64), nullable=True),
+    Column("playwright_version", String(32), nullable=True),
+    Column("app_version", String(32), nullable=True),
+    # The authoritative "one owner at a time" lease. Generation-bound and
+    # expiring; the OS file handle in the profile directory is the independent
+    # backstop that catches a second Lumi install with its own database.
+    Column(
+        "lease_runtime_generation",
+        Uuid(),
+        ForeignKey("runtime_generations.id", ondelete="RESTRICT"),
+        nullable=True,
+    ),
+    Column("lease_expires_at", DateTime(timezone=True), nullable=True),
+    # Bumped when the account behind the profile is found to have changed.
+    # S2/S3 will bump it; S1 only creates the column and starts it at 0.
+    Column("revoke_epoch", BigInteger(), nullable=False, server_default=text("0")),
+    # Hashes, never the identity string, and never defaulted to a fake value:
+    # NULL means "not observed", and NULL must never satisfy a bound grant.
+    # S1 adds the columns and writes neither -- observation is S2/S3's.
+    Column("account_fingerprint", String(64), nullable=True),
+    Column("account_label_hash", String(64), nullable=True),
+    Column("last_login_completed_at", DateTime(timezone=True), nullable=True),
+    Column("last_observed_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("deleted_at", DateTime(timezone=True), nullable=True),
+    CheckConstraint(
+        "status IN (" + ", ".join(f"'{status}'" for status in PROFILE_STATUSES) + ")",
+        name="status",
+    ),
+    CheckConstraint("revision >= 1", name="revision_positive"),
+    CheckConstraint("revoke_epoch >= 0", name="revoke_epoch_positive"),
+    CheckConstraint("length(label) BETWEEN 1 AND 60", name="label_length"),
+    # A site is a registrable domain: at least two ASCII labels, lower case.
+    CheckConstraint(
+        r"site ~ '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$'",
+        name="site_format",
+    ),
+    CheckConstraint("jsonb_typeof(allowed_origins) = 'array'", name="allowed_origins_is_array"),
+    CheckConstraint("(deleted_at IS NOT NULL) = (status = 'DELETED')", name="deleted_at_set"),
+    # A deleted profile holds no lease, and a lease always has an expiry.
+    CheckConstraint(
+        "(lease_runtime_generation IS NULL) = (lease_expires_at IS NULL)", name="lease_complete"
+    ),
+    CheckConstraint(
+        "status <> 'DELETED' OR lease_runtime_generation IS NULL", name="deleted_holds_no_lease"
+    ),
+    CheckConstraint(
+        "account_fingerprint IS NULL OR account_fingerprint ~ '^[0-9a-f]{64}$'",
+        name="account_fingerprint_format",
+    ),
+    CheckConstraint(
+        "account_label_hash IS NULL OR account_label_hash ~ '^[0-9a-f]{64}$'",
+        name="account_label_hash_format",
+    ),
+)
+
+#: One live profile per site. A second profile for `github.com` while the first
+#: is alive would mean two directories holding the same site's cookies, and
+#: "delete this profile" would stop being a meaningful action. Deleted rows are
+#: excluded so the site becomes available again after a delete.
+Index(
+    "uq_browser_profiles_site_live",
+    browser_profiles.c.site,
+    unique=True,
+    postgresql_where=browser_profiles.c.status != ProfileStatus.DELETED.value,
 )

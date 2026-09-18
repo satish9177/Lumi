@@ -17,6 +17,11 @@ import re
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.browser.profile_paths import (
+    PROFILE_ROOT_VARIABLE,
+    ProfilePaths,
+    resolve_profile_paths,
+)
 from app.domain.public_url import (
     BROKER_POLICY_VERSION,
     RESEARCH_POLICY_VERSION,
@@ -77,6 +82,15 @@ class WorkerSettings(BaseSettings):
     research_test_origins: str = Field(default="")
     #: How many tabs one research session may own.
     research_max_tabs: int = Field(default=5, ge=1, le=5)
+    #: Milestone 8a S1 persistent profiles. This is a *base directory* and
+    #: nothing else -- the worker appends the profile UUID itself, so no caller
+    #: names a path. Empty (the default) means `%LOCALAPPDATA%\Lumi\
+    #: browser-profiles`, which is what a packaged install uses; tests set it to
+    #: a temporary directory. It never arrives in a request.
+    profile_root: str = Field(default="")
+    #: Lumi's own version, recorded on a profile row alongside the Chromium and
+    #: Playwright versions that last opened it.
+    app_version: str = Field(default="0.1.0", max_length=32)
 
     @field_validator("research_hosts")
     @classmethod
@@ -112,6 +126,18 @@ class WorkerSettings(BaseSettings):
     @property
     def origins(self) -> dict[str, str]:
         return _parse_origins(self.allowed_origins)
+
+    @property
+    def profile_paths(self) -> ProfilePaths:
+        """Where persistent profiles live for this worker process.
+
+        Resolved from this process's own environment -- `LUMI_BROWSER_PROFILE_
+        ROOT` when trusted configuration set one, `%LOCALAPPDATA%` otherwise --
+        and never from a dispatch, a session request or anything a page could
+        influence.
+        """
+        environment = {PROFILE_ROOT_VARIABLE: self.profile_root} if self.profile_root else None
+        return resolve_profile_paths(environment)
 
     @property
     def public_policy(self) -> PublicUrlPolicy:

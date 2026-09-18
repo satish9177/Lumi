@@ -636,15 +636,36 @@ MANAGED_CHROMIUM_ARGS: tuple[str, ...] = (
 )
 
 
+#: Which Chromium distribution Playwright launches. `"chromium"` means **full
+#: Chromium** -- `chrome.exe` -- in both headed and headless mode, using
+#: Chromium's own new headless implementation rather than the separate
+#: `chrome-headless-shell` binary Playwright otherwise prefers for
+#: `headless=True`.
+#:
+#: Milestone 8a needs this, and it is a packaging fact as much as a launch
+#: option. Manual sign-in (S2) needs a visible window, which the headless shell
+#: cannot provide, so `scripts/build-agent-runtime.mjs` bundles full Chromium
+#: and **not** the shell (`playwright install --no-shell chromium`). Without the
+#: channel, `launch(headless=True)` looks for
+#: `chromium_headless_shell-<revision>` and fails outright in a packaged build.
+#:
+#: Setting it here rather than at each call site means development and the
+#: packaged build launch the *same binary*, so "it worked on my machine" cannot
+#: mean "my machine had the other browser in its cache".
+MANAGED_CHROMIUM_CHANNEL = "chromium"
+
+
 def managed_launch_options(broker: EgressBroker, *, headless: bool) -> dict[str, object]:
     """Exactly how the managed browser is launched. Asserted by a test.
 
     Every field here is load-bearing. `proxy.server` makes the broker the route;
     `proxy.bypass` carries `<-loopback>`, without which Chromium reaches
     `http://127.0.0.1:...` directly and the broker is decorative; the credential
-    stops any other local process using the listener as an open proxy.
+    stops any other local process using the listener as an open proxy; and
+    `channel` pins which Chromium binary is launched, in both modes.
     """
     return {
+        "channel": MANAGED_CHROMIUM_CHANNEL,
         "headless": headless,
         "proxy": broker.proxy_settings(),
         "args": list(MANAGED_CHROMIUM_ARGS),
@@ -653,6 +674,7 @@ def managed_launch_options(broker: EgressBroker, *, headless: bool) -> dict[str,
 
 __all__ = [
     "MANAGED_CHROMIUM_ARGS",
+    "MANAGED_CHROMIUM_CHANNEL",
     "PUBLIC_PORT",
     "BrokerCounters",
     "BrokerCredential",

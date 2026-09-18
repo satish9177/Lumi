@@ -21,6 +21,7 @@ import pytest
 from app.browser.config import WorkerSettings
 from app.browser.egress_broker import (
     MANAGED_CHROMIUM_ARGS,
+    MANAGED_CHROMIUM_CHANNEL,
     BrokerMode,
     EgressBroker,
     managed_launch_options,
@@ -539,6 +540,12 @@ async def test_managed_launch_options_force_loopback_through_the_broker(
     assert proxy["password"] == harness.broker.credential.password
     assert options["args"] == list(MANAGED_CHROMIUM_ARGS)
     assert "--disable-quic" in MANAGED_CHROMIUM_ARGS
+    # Milestone 8a S1: one Chromium distribution, pinned here rather than at
+    # each call site. Without the channel, `headless=True` looks for the
+    # separate `chrome-headless-shell` binary, which the packaged build no
+    # longer carries -- so development and the packaged app would launch
+    # different browsers, and only one of them would be tested.
+    assert options["channel"] == MANAGED_CHROMIUM_CHANNEL == "chromium"
 
 
 def test_production_wiring_dials_directly_and_terminates_no_tls() -> None:

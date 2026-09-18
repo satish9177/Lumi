@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import Row, func, insert, null, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.db.tables import browser_dispatches, browser_worker_generations
@@ -81,16 +82,36 @@ class BrowserRepository:
         runtime_generation: uuid.UUID,
         worker_started_at: datetime,
     ) -> WorkerGenerationRecord:
-        result = await self._connection.execute(
-            insert(browser_worker_generations)
+        """Record a worker generation, once, whoever gets there first.
+
+        Callers read before they write, so two concurrent bindings to the same
+        worker both see "not registered yet" and both insert. Registering a
+        generation is idempotent by nature -- the row is the worker's identity,
+        not a claim on anything -- so the conflict is resolved here rather than
+        being raised at a caller who has nothing useful to do with it. Without
+        `ON CONFLICT`, the loser of that race got a 500 from a duplicate key,
+        which is what a concurrent second execution used to return instead of
+        the `409` its own state deserved.
+        """
+        statement = (
+            pg_insert(browser_worker_generations)
             .values(
                 id=worker_generation,
                 runtime_generation=runtime_generation,
                 worker_started_at=worker_started_at,
             )
+            .on_conflict_do_nothing(index_elements=[browser_worker_generations.c.id])
             .returning(*browser_worker_generations.c)
         )
-        return _generation(result.one())
+        row = (await self._connection.execute(statement)).one_or_none()
+        if row is not None:
+            return _generation(row)
+        # Somebody else registered it in the same instant. Their row is the
+        # same identity as ours, so read it back rather than inventing one.
+        existing = await self.get_worker_generation(worker_generation)
+        if existing is None:  # pragma: no cover - the insert conflicted on it
+            raise RuntimeError("the worker generation vanished after a conflict")
+        return existing
 
     async def get_worker_generation(
         self, worker_generation: uuid.UUID

@@ -11,10 +11,14 @@ from app.api.schemas import (
     ActionResponse,
     BookingSearchResponse,
     BookingSlotResponse,
+    BrowserProfileListResponse,
+    BrowserProfileResponse,
     BrowserDispatchListResponse,
     BrowserDispatchResponse,
     CancelBookingTaskResponse,
     CancelTaskBody,
+    CreateBrowserProfileBody,
+    DeleteBrowserProfileBody,
     ClinicInfoResponse,
     ConfirmResearchGrantBody,
     DoctorProfileResponse,
@@ -62,6 +66,8 @@ from app.domain.research import (
     ResearchStepEnvelope,
     parse_step,
 )
+from app.domain.browser_profile import BrowserContextKind
+from app.services.browser_profiles import BrowserProfileService
 from app.services.page_inspection import PageInspectionService
 from app.services.page_inspection import validate_request as validate_inspection_request
 from app.services.research_tasks import ResearchService
@@ -765,3 +771,122 @@ async def record_page_answer(
         model=body.model,
     )
     return InspectionResponse.build(view.action, view.observation)
+
+
+# --- Persistent browser profiles (Milestone 8a S1) ---------------------------
+#
+# Three fixed routes, each with its own contract, in the same style as every
+# other capability here. Deliberately **not** one `manageProfile(action, json)`
+# endpoint: a single route taking a verb and a JSON blob is how a narrow
+# capability quietly becomes a wide one.
+#
+# What no route here accepts, from any caller, at any time:
+#
+#     profilePath   userDataDir   cookieFile   storageState   browserExecutablePath
+#
+# The profile directory is derived from the profile id inside the runtime and
+# the worker, and it appears in no request and no response. S1 exposes the
+# backend contract only; there is no renderer IPC, no card and no login flow,
+# because those are S2.
+
+
+def get_browser_profile_service(request: Request) -> BrowserProfileService:
+    service: BrowserProfileService = request.app.state.browser_profile_service
+    return service
+
+
+BrowserProfileServiceDep = Annotated[
+    BrowserProfileService, Depends(get_browser_profile_service)
+]
+
+
+@router.get(
+    "/browser-profiles",
+    response_model=BrowserProfileListResponse,
+    summary="Lumi-managed browser profiles, by opaque id (internal)",
+)
+async def list_browser_profiles(
+    service: BrowserProfileServiceDep,
+) -> BrowserProfileListResponse:
+    profiles = await service.list_profiles()
+    return BrowserProfileListResponse(
+        profiles=[BrowserProfileResponse.from_profile(profile) for profile in profiles]
+    )
+
+
+@router.post(
+    "/browser-profiles",
+    status_code=status.HTTP_201_CREATED,
+    response_model=BrowserProfileResponse,
+    responses=_CONFLICT,
+    summary="Create one profile bound to one registrable domain (internal)",
+)
+async def create_browser_profile(
+    body: CreateBrowserProfileBody, service: BrowserProfileServiceDep
+) -> BrowserProfileResponse:
+    """The site is canonicalised through the pinned Public Suffix List, and the
+    binding is immutable from here on -- in the service and in the database."""
+    profile = await service.create_profile(site=body.site, label=body.label)
+    return BrowserProfileResponse.from_profile(profile)
+
+
+@router.get(
+    "/browser-profiles/{profile_id}",
+    response_model=BrowserProfileResponse,
+    responses=_CONFLICT,
+    summary="One profile's identity and lifecycle (internal)",
+)
+async def get_browser_profile(
+    profile_id: uuid.UUID, service: BrowserProfileServiceDep
+) -> BrowserProfileResponse:
+    return BrowserProfileResponse.from_profile(await service.get_profile(profile_id))
+
+
+@router.post(
+    "/browser-profiles/{profile_id}/open",
+    response_model=BrowserProfileResponse,
+    responses={**_CONFLICT, **_UNAVAILABLE},
+    summary="Lease the profile and open its persistent context (internal)",
+)
+async def open_browser_profile(
+    profile_id: uuid.UUID, service: BrowserProfileServiceDep
+) -> BrowserProfileResponse:
+    """Opening is not signing in. The profile gets a browser and a lease; S1
+    navigates nowhere, observes nothing and never reports anyone as signed in."""
+    opened = await service.open_profile(
+        profile_id, kind=BrowserContextKind.AUTHENTICATED_PROFILE
+    )
+    return BrowserProfileResponse.from_profile(opened.profile)
+
+
+@router.post(
+    "/browser-profiles/{profile_id}/close",
+    response_model=BrowserProfileResponse,
+    responses={**_CONFLICT, **_UNAVAILABLE},
+    summary="Close the persistent context and drop the lease (internal)",
+)
+async def close_browser_profile(
+    profile_id: uuid.UUID, service: BrowserProfileServiceDep
+) -> BrowserProfileResponse:
+    await service.close_profile(profile_id)
+    return BrowserProfileResponse.from_profile(await service.get_profile(profile_id))
+
+
+@router.post(
+    "/browser-profiles/{profile_id}/delete",
+    response_model=BrowserProfileResponse,
+    responses=_CONFLICT,
+    summary="Remove the local profile directory (never a website logout)",
+)
+async def delete_browser_profile(
+    profile_id: uuid.UUID,
+    service: BrowserProfileServiceDep,
+    body: Annotated[DeleteBrowserProfileBody | None, Body()] = None,
+) -> BrowserProfileResponse:
+    """Removes the sign-in data Lumi stored on this computer. It does **not**
+    sign the user out on the website: no request of any kind is made to it."""
+    deleted = await service.delete_profile(
+        profile_id,
+        expected_revision=body.expected_revision if body is not None else None,
+    )
+    return BrowserProfileResponse.from_profile(deleted)

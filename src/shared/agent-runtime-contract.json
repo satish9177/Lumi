@@ -113,6 +113,7 @@
     "booking_slot_unavailable",
     "browser_execution_not_supported",
     "browser_observation_failed",
+    "browser_profile_refused",
     "browser_worker_not_configured",
     "browser_worker_unavailable",
     "concurrent_modification",

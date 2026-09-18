@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.domain.action_status import ActionStatus, ApprovalStatus, AttemptOutcome, RiskTier
 from app.domain.booking_criteria import BookingCriteria
 from app.domain.browser_dispatch import BrowserEffect, DispatchStatus
+from app.domain.browser_profile import BrowserProfile, ProfileStatus
 from app.domain.digest import canonical_json
 from app.domain.page_observation import (
     DisclosureSpec,
@@ -794,6 +795,100 @@ class RecordResearchAnswerBody(BaseModel):
     provider: Literal["openai", "gemini", "deepseek", "scripted"]
     model: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
     planner_calls: int = Field(default=0, ge=0, le=1_000)
+
+
+# ---- Milestone 8a S1: persistent browser profiles ---------------------------
+
+
+class BrowserProfileResponse(BaseModel):
+    """One profile, as the trusted controller describes it.
+
+    This model is the boundary. Read it as the list of everything that may
+    leave the runtime about a profile, and note what is missing and will stay
+    missing: **no directory path, no `userDataDir`, no cookie file, no
+    `storageState`, no browser executable path, no token, and no raw account
+    identity.** The account fields are hashes or `null`; `null` means "not
+    observed" and is never treated as a sign that anybody is signed in.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    label: str
+    site: str
+    allowed_origins: list[str]
+    status: ProfileStatus
+    revision: int
+    #: Which browser last opened it. Support and version checks, nothing more.
+    chromium_build: str | None
+    playwright_version: str | None
+    app_version: str | None
+    #: Whether *some* runtime generation currently holds the lease. The
+    #: generation id itself is internal.
+    leased: bool
+    lease_expires_at: datetime | None
+    revoke_epoch: int
+    account_fingerprint: str | None
+    account_label_hash: str | None
+    last_login_completed_at: datetime | None
+    last_observed_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    deleted_at: datetime | None
+
+    @classmethod
+    def from_profile(cls, profile: BrowserProfile) -> "BrowserProfileResponse":
+        return cls(
+            id=profile.id,
+            label=profile.label,
+            site=profile.site,
+            allowed_origins=list(profile.allowed_origins),
+            status=profile.status,
+            revision=profile.revision,
+            chromium_build=profile.chromium_build,
+            playwright_version=profile.playwright_version,
+            app_version=profile.app_version,
+            leased=profile.lease_runtime_generation is not None,
+            lease_expires_at=profile.lease_expires_at,
+            revoke_epoch=profile.revoke_epoch,
+            account_fingerprint=profile.account_fingerprint,
+            account_label_hash=profile.account_label_hash,
+            last_login_completed_at=profile.last_login_completed_at,
+            last_observed_at=profile.last_observed_at,
+            created_at=profile.created_at,
+            updated_at=profile.updated_at,
+            deleted_at=profile.deleted_at,
+        )
+
+
+class BrowserProfileListResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profiles: list[BrowserProfileResponse]
+
+
+class CreateBrowserProfileBody(BaseModel):
+    """Create one profile for one site.
+
+    `site` is a host name or a URL the *trusted* caller supplied; it is
+    canonicalised to a registrable domain through the pinned Public Suffix List
+    before anything is written. There is no `profilePath`, no `userDataDir`, no
+    `browserExecutablePath` and no `storageState` field here, and adding one
+    would be a boundary change, not a convenience.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    site: str = Field(min_length=1, max_length=253)
+    label: str = Field(min_length=1, max_length=60)
+
+
+class DeleteBrowserProfileBody(BaseModel):
+    """Remove the local profile directory. Never a website logout."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int | None = Field(default=None, ge=1)
 
 
 class HealthResponse(BaseModel):

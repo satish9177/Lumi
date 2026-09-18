@@ -186,6 +186,47 @@ class PublicSiteControl:
         pytest.fail(f"the fixture never saw a request for {path}: {self.hits()}")
 
 
+@contextmanager
+def account_fixture_site(log_path: Path, port: int | None = None) -> Iterator[Process]:
+    """The Milestone 8a S1 session fixture.
+
+    It stays up across worker and runtime restarts on purpose: its session
+    table lives in the fixture process, so if the fixture restarted, "signed
+    in" would be impossible for reasons that have nothing to do with the
+    profile. Keeping it up makes the browser's own persistence the only
+    explanation.
+    """
+    chosen = port if port is not None else free_port()
+    base_url = f"http://127.0.0.1:{chosen}"
+    with log_path.open("wb") as log:
+        process = _spawn(
+            ["-m", "evals.sites.account_fixture.server", "--port", str(chosen), "--log-level", "warning"],
+            {**os.environ},
+            log,
+        )
+        try:
+            _wait_until_ready(process, f"{base_url}/__eval__/state", log_path)
+            yield Process(process, base_url, log_path)
+        finally:
+            kill(process)
+
+
+class AccountSiteControl:
+    """The account fixture's test control plane. Never used on Lumi's behalf."""
+
+    def __init__(self, base_url: str) -> None:
+        self.base_url = base_url
+
+    def reset(self) -> None:
+        httpx.post(f"{self.base_url}/__eval__/reset", timeout=10).raise_for_status()
+
+    def state(self) -> dict[str, Any]:
+        response = httpx.get(f"{self.base_url}/__eval__/state", timeout=10)
+        response.raise_for_status()
+        body: dict[str, Any] = response.json()
+        return body
+
+
 # ---- the browser worker -----------------------------------------------------
 
 
@@ -228,6 +269,7 @@ def browser_worker(
     research_hosts: str = "",
     research_any_public_host: bool = False,
     research_max_tabs: int = 5,
+    profile_root: str = "",
 ) -> Iterator[WorkerProcess]:
     from app.browser.protocol import WORKER_TOKEN_HEADER
 
@@ -248,6 +290,10 @@ def browser_worker(
         "LUMI_BROWSER_RESEARCH_HOSTS": research_hosts,
         "LUMI_BROWSER_RESEARCH_ANY_PUBLIC_HOST": "true" if research_any_public_host else "false",
         "LUMI_BROWSER_RESEARCH_MAX_TABS": str(research_max_tabs),
+        # A base directory, never a profile path. Tests point it at a temporary
+        # directory so a suite never writes into the developer's real
+        # %LOCALAPPDATA%\Lumirowser-profiles.
+        "LUMI_BROWSER_PROFILE_ROOT": profile_root,
     }
     with log_path.open("wb") as log:
         process = _spawn(

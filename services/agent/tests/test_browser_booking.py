@@ -16,6 +16,7 @@ A test that only checked the action's status would pass for an agent that booked
 twice and noticed once.
 """
 
+import json
 import uuid
 from collections.abc import Iterator
 from typing import Any
@@ -584,9 +585,16 @@ def test_the_worker_reads_the_credential_from_the_documented_header(
 def test_the_worker_exposes_no_generic_automation_endpoints(worker: WorkerProcess) -> None:
     """There is no evaluate/javascript/click-anything surface to find.
 
-    The session routes are lifecycle only: they open and close a task-owned
-    browser context. Neither takes a URL, an operation, a selector or a script,
-    and neither drives a page.
+    The session and profile routes are lifecycle only: they open and close a
+    browser context. None takes a URL, an operation, a selector or a script,
+    and none drives a page.
+
+    The Milestone 8a S1 profile routes are held to the same standard, and to
+    one more: their request body carries **no path**. The worker derives the
+    profile directory from the id, so `profilePath`, `userDataDir`,
+    `cookieFile`, `storageState` and `browserExecutablePath` are not fields
+    anything upstream could set — which this asserts from the published schema
+    rather than from the source.
     """
     import httpx
 
@@ -594,6 +602,8 @@ def test_the_worker_exposes_no_generic_automation_endpoints(worker: WorkerProces
     assert sorted(schema["paths"]) == [
         "/health",
         "/v1/dispatch",
+        "/v1/profiles/close",
+        "/v1/profiles/open",
         "/v1/sessions/close",
         "/v1/sessions/open",
     ]
@@ -605,6 +615,41 @@ def test_the_worker_exposes_no_generic_automation_endpoints(worker: WorkerProces
             "runtime_generation",
             "expected_worker_generation",
         }
+    for path in ("/v1/profiles/open", "/v1/profiles/close"):
+        body = schema["paths"][path]["post"]["requestBody"]["content"]["application/json"]
+        reference = body["schema"]["$ref"].rsplit("/", 1)[-1]
+        assert set(schema["components"]["schemas"][reference]["properties"]) == {
+            "profile_id",
+            "runtime_generation",
+            "expected_worker_generation",
+            "recorded_chromium_build",
+        }
+    # And no *field* anywhere in the worker's published contract could carry a
+    # filesystem path or a serialised credential. Field names only: the
+    # descriptions explain at length what is deliberately absent, and must be
+    # able to name what they exclude.
+    fields = {
+        name.lower()
+        for component in schema["components"]["schemas"].values()
+        for name in component.get("properties", {})
+    }
+    for forbidden in (
+        "profilepath",
+        "profile_path",
+        "path",
+        "userdatadir",
+        "user_data_dir",
+        "cookiefile",
+        "cookie_file",
+        "cookies",
+        "storagestate",
+        "storage_state",
+        "executablepath",
+        "executable_path",
+        "executable",
+        "directory",
+    ):
+        assert forbidden not in fields, f"{forbidden!r} is a field in the worker's contract"
 
 
 def test_the_worker_refuses_input_that_does_not_match_the_operation(

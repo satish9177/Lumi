@@ -1,2 +1,3 @@
 # Generated contract compared byte-for-byte by tests on both sides.
 src/shared/agent-runtime-contract.json text eol=lf
+services/agent/app/data/public_suffix_list.dat text eol=lf

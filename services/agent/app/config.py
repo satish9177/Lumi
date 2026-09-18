@@ -6,6 +6,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import ArgumentError
 
+from app.browser.profile_paths import (
+    PROFILE_ROOT_VARIABLE,
+    ProfilePathError,
+    ProfilePaths,
+    resolve_profile_paths,
+)
+from app.domain.browser_profile import DEFAULT_LEASE_TTL_SECONDS
 from app.domain.public_url import (
     RESEARCH_POLICY_VERSION,
     PublicUrlPolicy,
@@ -180,6 +187,46 @@ class Settings(DatabaseSettings):
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9-]{0,63}", value):
             raise ValueError("LUMI_RESEARCH_SEARCH_HEADER must be a plain header name")
         return value
+
+    # --- Milestone 8a S1 persistent browser profiles ----------------------
+    #
+    # A *base* directory, never a profile path: the runtime and the worker each
+    # append the profile UUID themselves, so nothing a caller supplies ever
+    # becomes a path component. Empty (the default) means
+    # `%LOCALAPPDATA%\Lumirowser-profiles`, which is what a packaged install
+    # uses; the test suite points it at a temporary directory.
+    browser_profile_root: str = Field(default="", validation_alias="LUMI_BROWSER_PROFILE_ROOT")
+    #: How long one runtime generation holds a profile lease before another may
+    #: reclaim it -- and then only when the OS-level handle is also free.
+    browser_profile_lease_ttl_seconds: int = Field(
+        default=DEFAULT_LEASE_TTL_SECONDS,
+        ge=30,
+        le=3_600,
+        validation_alias="LUMI_BROWSER_PROFILE_LEASE_TTL_SECONDS",
+    )
+    #: Recorded on a profile row alongside the Chromium and Playwright versions
+    #: that last opened it, so a support question can be answered from metadata.
+    app_version: str = Field(default="0.1.0", max_length=32, validation_alias="LUMI_APP_VERSION")
+
+    @property
+    def profile_paths(self) -> ProfilePaths | None:
+        """Where persistent profiles live for this runtime process.
+
+        Resolved from this process's own environment, exactly as the worker
+        resolves its own copy, and never from a request or a model. `None`
+        means "resolve it when a profile operation actually needs it", so a
+        machine without `%LOCALAPPDATA%` fails that operation rather than
+        refusing to start the runtime at all.
+        """
+        environment = (
+            {PROFILE_ROOT_VARIABLE: self.browser_profile_root}
+            if self.browser_profile_root
+            else None
+        )
+        try:
+            return resolve_profile_paths(environment)
+        except ProfilePathError:
+            return None
 
     @property
     def research_policy(self) -> PublicUrlPolicy:

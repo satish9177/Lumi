@@ -55,6 +55,19 @@ function copyTree(from, to) {
   })
 }
 
+/** Bytes on disk under a directory. Reported so a size claim is measured. */
+function measureTree(directory) {
+  if (!existsSync(directory)) return 0
+  let total = 0
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name)
+    total += entry.isDirectory() ? measureTree(path) : statSync(path).size
+  }
+  return total
+}
+
+const megabytes = (bytes) => Math.round((bytes / 1_048_576) * 10) / 10
+
 function digestTree(directory) {
   const hash = createHash('sha256')
   const walk = (current) => {
@@ -102,26 +115,101 @@ cpSync(join(AGENT, 'evals', '__init__.py'), join(agentOut, 'evals', '__init__.py
 copyTree(join(AGENT, 'evals', 'sites'), join(agentOut, 'evals', 'sites'))
 
 // 4. Chromium for the isolated worker, inside the bundle.
+//
+// Milestone 8a S1 changed *which* browser this is. Until S0 the bundle carried
+// `chromium-headless-shell` only, because the worker ran headless and nothing
+// needed a window. A manual sign-in (S2) does need one, so the bundle now
+// carries **full Chromium and not the shell** — one binary, one revision, one
+// version matrix, used headless for M7a/M7b and headed later for sign-in.
+//
+// `--no-shell` is what makes that "instead of" rather than "as well as":
+// `playwright install chromium` would install the shell too, and shipping both
+// would mean ~270 MB of a binary nothing launches. The launch side matches:
+// `managed_launch_options` passes `channel: "chromium"`, without which
+// `launch(headless=True)` looks for `chromium_headless_shell-<revision>` and
+// fails in a packaged build that does not have it.
+const BROWSER_SPEC = ['--no-shell', 'chromium']
+let browserSummary = 'not bundled'
 if (!skipBrowsers) {
-  // The worker runs headless, so the headless shell (plus its Windows helper)
-  // is all it needs. Revisions matching this Playwright version are copied
-  // from the local cache when present; otherwise they are downloaded.
-  step('bundling Chromium for the browser worker')
+  step('bundling full Chromium for the browser worker')
   const target = join(OUT, 'ms-playwright')
-  const dryRun = run(python, ['-m', 'playwright', 'install', '--dry-run', 'chromium-headless-shell'], {
+  const dryRun = run(python, ['-m', 'playwright', 'install', '--dry-run', ...BROWSER_SPEC], {
     cwd: agentOut, env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: '' }
   })
   const locations = [...dryRun.matchAll(/Install location:\s+(.+)/g)].map((match) => match[1].trim())
   if (locations.length === 0) throw new Error('Could not determine the Chromium revision to bundle.')
+  // Refuse to ship the headless shell even if a future Playwright starts
+  // listing it under `--no-shell`: two browsers is a version matrix nobody
+  // verified, and the packaged worker would have no way to say which it used.
+  const shell = locations.find((location) => /headless_shell/i.test(location))
+  if (shell) throw new Error(`The headless shell must not be bundled: ${shell}`)
   const missing = locations.filter((location) => !existsSync(location))
   if (missing.length === 0) {
     for (const location of locations) copyTree(location, join(target, location.split(/[\\/]/).pop()))
   } else {
     step(`downloading ${missing.length} missing browser component(s)`)
-    run(python, ['-m', 'playwright', 'install', 'chromium-headless-shell'], {
+    run(python, ['-m', 'playwright', 'install', ...BROWSER_SPEC], {
       cwd: agentOut, env: { ...process.env, PLAYWRIGHT_BROWSERS_PATH: target }
     })
   }
+  // The packaged worker must find its browser from the bundle alone, with no
+  // developer cache to fall back on. A revision directory that is not there is
+  // a build failure, not a run-time surprise on somebody else's machine.
+  const bundled = readdirSync(target, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort()
+  const chromium = bundled.find((name) => /^chromium-\d+$/.test(name))
+  if (!chromium) throw new Error(`No full Chromium revision in the bundle: ${bundled.join(', ')}`)
+  if (bundled.some((name) => /headless_shell/i.test(name))) {
+    throw new Error('The headless shell reached the bundle.')
+  }
+  const executable = join(target, chromium, 'chrome-win64', 'chrome.exe')
+  if (!existsSync(executable)) throw new Error(`Bundled Chromium has no chrome.exe: ${executable}`)
+  browserSummary = { kind: 'chromium', revision: chromium, components: bundled }
+  // And it actually launches from the bundle, through the same channel the
+  // worker uses, with nothing but the bundle on PLAYWRIGHT_BROWSERS_PATH.
+  step('verifying the bundled Chromium launches headless from the bundle alone')
+  const launched = run(python, ['-c', [
+    'import asyncio',
+    'from playwright.async_api import async_playwright',
+    'async def main():',
+    '    async with async_playwright() as p:',
+    '        b = await p.chromium.launch(channel="chromium", headless=True)',
+    '        print(b.version)',
+    '        await b.close()',
+    'asyncio.run(main())'
+  ].join('\n')], {
+    cwd: agentOut,
+    env: {
+      SystemRoot: process.env.SystemRoot ?? 'C:\\Windows',
+      TEMP: process.env.TEMP ?? 'C:\\Windows\\Temp',
+      PYTHONDONTWRITEBYTECODE: '1',
+      PYTHONUTF8: '1',
+      PLAYWRIGHT_BROWSERS_PATH: target
+    }
+  })
+  browserSummary.version = launched.split('\n').pop().trim()
+  step(`bundled Chromium ${browserSummary.version} (${chromium})`)
+}
+
+// 4b. A browser profile directory must never reach an artifact.
+//
+// Impossible by construction — profiles live under %LOCALAPPDATA% — but a
+// future change that relocated the base "just for a test" would otherwise be
+// discovered by a user finding their session cookies inside an installer.
+step('checking that no browser profile directory is in the bundle')
+const profileDirectories = []
+const findProfiles = (directory) => {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    if (entry.name === 'browser-profiles') profileDirectories.push(join(directory, entry.name))
+    else findProfiles(join(directory, entry.name))
+  }
+}
+findProfiles(OUT)
+if (profileDirectories.length > 0) {
+  throw new Error(`A browser-profiles directory reached the runtime bundle: ${profileDirectories.join(', ')}`)
 }
 
 // 5. Byte-compile once, so an installed copy never needs to write beside itself.
@@ -145,12 +233,38 @@ if (walkNames(agentOut).some((name) => name === '.env' || name.startsWith('.env.
   throw new Error('A .env file reached the runtime bundle.')
 }
 
+// Enough to answer a support or version question from the bundle alone: which
+// browser, which revision, which Playwright, and which Public Suffix List
+// decided the site boundaries a profile was bound with. Deliberately **no**
+// profile id and no path: the manifest ships inside the installer, and a
+// profile is neither built nor bundled.
+const publicSuffix = JSON.parse(run(python, ['-c', [
+  'import json',
+  'from app.domain.public_suffix import (',
+  '    PUBLIC_SUFFIX_COMMIT, PUBLIC_SUFFIX_DIGEST, PUBLIC_SUFFIX_SOURCE, PUBLIC_SUFFIX_VERSION,',
+  '    public_suffix_list)',
+  'psl = public_suffix_list()',
+  'print(json.dumps({',
+  '    "version": PUBLIC_SUFFIX_VERSION, "commit": PUBLIC_SUFFIX_COMMIT,',
+  '    "digest": PUBLIC_SUFFIX_DIGEST, "source": PUBLIC_SUFFIX_SOURCE,',
+  '    "rules": len(psl.rules) + len(psl.wildcards) + len(psl.exceptions)}))'
+].join('\n')], { cwd: agentOut, env: bare }))
+
 const manifest = {
-  version: 1,
+  version: 2,
   builtAt: new Date().toISOString(),
   python: run(python, ['-c', 'import sys; print(sys.version.split()[0])'], { env: bare }),
   playwright: run(python, ['-c', 'import importlib.metadata as m; print(m.version("playwright"))'], { env: bare }),
   browsers: skipBrowsers ? 'not bundled' : 'chromium',
+  browser: browserSummary,
+  publicSuffixList: publicSuffix,
+  // Measured, never estimated: the S1 report quotes these numbers.
+  sizeMegabytes: {
+    total: megabytes(measureTree(OUT)),
+    python: megabytes(measureTree(join(OUT, 'python'))),
+    agent: megabytes(measureTree(agentOut)),
+    browser: megabytes(measureTree(join(OUT, 'ms-playwright')))
+  },
   lockDigest: createHash('sha256').update(readFileSync(join(AGENT, 'uv.lock'))).digest('hex'),
   agentDigest: digestTree(agentOut)
 }

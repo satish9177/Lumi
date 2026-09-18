@@ -33,6 +33,8 @@ from app.browser.protocol import (
     WORKER_TOKEN_HEADER,
     DispatchRequest,
     DispatchResponse,
+    ProfileSessionRequest,
+    ProfileSessionResponse,
     SessionRequest,
     SessionResponse,
     WorkerErrorBody,
@@ -118,6 +120,37 @@ class BrowserWorkerClient:
             )
         if answer.session_id != request.session_id:
             raise StaleWorkerResultError("it answers a different session")
+        if answer.worker_generation != request.expected_worker_generation:
+            raise StaleWorkerResultError("it came from a different worker generation")
+        return answer
+
+    async def open_profile(self, request: ProfileSessionRequest) -> ProfileSessionResponse:
+        """Ask the worker to open one persistent, Lumi-managed profile."""
+        return await self._profile_call("/v1/profiles/open", request)
+
+    async def close_profile(self, request: ProfileSessionRequest) -> ProfileSessionResponse:
+        """Close the persistent context and release its exclusive OS handle."""
+        return await self._profile_call("/v1/profiles/close", request)
+
+    async def _profile_call(
+        self, path: str, request: ProfileSessionRequest
+    ) -> ProfileSessionResponse:
+        try:
+            response = await self._client.post(path, json=request.model_dump(mode="json"))
+        except httpx.ConnectError:
+            raise BrowserWorkerUnavailableError("the worker refused the connection")
+        except httpx.HTTPError as error:
+            raise BrowserWorkerLostResponseError(type(error).__name__)
+        if response.status_code >= 400:
+            raise _rejection(response)
+        try:
+            answer = ProfileSessionResponse.model_validate(response.json())
+        except (ValueError, ValidationError) as error:
+            raise BrowserWorkerLostResponseError(
+                f"the worker returned an unreadable result ({type(error).__name__})"
+            )
+        if answer.profile_id != request.profile_id:
+            raise StaleWorkerResultError("it answers a different profile")
         if answer.worker_generation != request.expected_worker_generation:
             raise StaleWorkerResultError("it came from a different worker generation")
         return answer

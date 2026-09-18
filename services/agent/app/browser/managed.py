@@ -62,6 +62,7 @@ def worker_environment(
     public_hosts: str = "", inspection_test_origins: str = "",
     research_any_public_host: bool = False, research_hosts: str = "",
     research_test_origins: str = "", research_max_tabs: int = 5,
+    profile_root: str = "", app_version: str = "",
     source: dict[str, str] | None = None,
 ) -> dict[str, str]:
     inherited = os.environ if source is None else source
@@ -79,7 +80,14 @@ def worker_environment(
         LUMI_BROWSER_RESEARCH_HOSTS=research_hosts,
         LUMI_BROWSER_RESEARCH_TEST_ORIGINS=research_test_origins,
         LUMI_BROWSER_RESEARCH_MAX_TABS=str(research_max_tabs),
+        # A *base* directory for persistent profiles, not a profile path: the
+        # worker appends the profile UUID itself. Empty means the worker
+        # derives `%LOCALAPPDATA%\Lumi\browser-profiles` from the LOCALAPPDATA
+        # it already inherits.
+        LUMI_BROWSER_PROFILE_ROOT=profile_root,
     )
+    if app_version:
+        environment["LUMI_BROWSER_APP_VERSION"] = app_version
     return environment
 
 
@@ -102,6 +110,8 @@ class ManagedBrowserWorker:
         research_hosts: str = "",
         research_test_origins: str = "",
         research_max_tabs: int = 5,
+        profile_root: str = "",
+        app_version: str = "",
         startup_timeout_seconds: float = 60.0,
         maximum_starts: int = 4,
         spawn: Callable[[list[str], dict[str, str]], subprocess.Popen[bytes]] | None = None,
@@ -113,6 +123,8 @@ class ManagedBrowserWorker:
         self._research_hosts = research_hosts
         self._research_test_origins = research_test_origins
         self._research_max_tabs = research_max_tabs
+        self._profile_root = profile_root
+        self._app_version = app_version
         self._headless = headless
         self._timeout_seconds = timeout_seconds
         self._startup_timeout = startup_timeout_seconds
@@ -164,6 +176,8 @@ class ManagedBrowserWorker:
             research_hosts=self._research_hosts,
             research_test_origins=self._research_test_origins,
             research_max_tabs=self._research_max_tabs,
+            profile_root=self._profile_root,
+            app_version=self._app_version,
         )
         try:
             process = self._spawn(arguments, environment)

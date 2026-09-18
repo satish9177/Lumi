@@ -105,6 +105,10 @@ ERROR_CODES = (
     "booking_slot_unavailable",
     "browser_execution_not_supported",
     "browser_observation_failed",
+    # Milestone 8a S1. Declared here because the runtime can emit it; no
+    # Electron code path reaches a browser-profile route yet, and the trusted
+    # UI that will is S2's.
+    "browser_profile_refused",
     "browser_worker_not_configured",
     "browser_worker_unavailable",
     "concurrent_modification",

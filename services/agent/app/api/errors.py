@@ -13,6 +13,7 @@ from app.browser.errors import (
 from app.domain.booking import BookingProposalError
 from app.domain.page_observation import AnswerNotGroundedError
 from app.domain.research import AnswerNotGroundedError as ResearchAnswerNotGroundedError
+from app.domain.browser_profile import ProfileRefusal
 from app.domain.research import ResearchRefusal
 from app.services.research_search import SearchFailedError
 from app.domain.errors import (
@@ -328,6 +329,18 @@ def register_error_handlers(app: FastAPI) -> None:
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "research_step_refused",
             "That research step was refused.",
+            "code",
+        ),
+    )
+    app.add_exception_handler(
+        ProfileRefusal,
+        # One stable code, one machine-readable reason, and never a path: a
+        # profile refusal must not be the thing that tells a caller where the
+        # profile directory is, or whether one exists.
+        _reasoned(
+            status.HTTP_409_CONFLICT,
+            "browser_profile_refused",
+            "That browser profile operation was refused.",
             "code",
         ),
     )

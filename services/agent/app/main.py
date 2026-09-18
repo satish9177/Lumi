@@ -16,6 +16,7 @@ from app.services.booking_preparation import BookingPreparationService
 from app.services.booking_tasks import BookingTaskService
 from app.services.clinic_info import ClinicInfoService
 from app.services.page_inspection import PageInspectionService
+from app.services.browser_profiles import BrowserProfileService
 from app.services.browser_execution import (
     BrowserExecutionService,
     BrowserWorkerConfig,
@@ -42,6 +43,8 @@ def _worker_source(settings: Settings) -> WorkerSource | None:
         return None
     return ManagedBrowserWorker(
         site_origin=settings.browser_site_origin,
+        profile_root=settings.browser_profile_root,
+        app_version=settings.app_version,
         headless=settings.browser_headless,
         timeout_seconds=settings.browser_worker_timeout_seconds,
         public_hosts=settings.public_inspection_hosts,
@@ -107,6 +110,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     worker=worker,
                     public_policy=resolved.public_policy,
                 )
+                app.state.browser_profile_service = BrowserProfileService(
+                    engine,
+                    runtime_generation=generation.id,
+                    browser=app.state.browser_execution_service,
+                    paths=resolved.profile_paths,
+                    lease_ttl_seconds=resolved.browser_profile_lease_ttl_seconds,
+                )
                 app.state.page_inspection_service = PageInspectionService(
                     engine,
                     tasks=task_service,
@@ -152,6 +162,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 # that no longer exist, so every semantic ref they issued has
                 # to stop resolving before anything plans again.
                 await research_service.invalidate_stale_sessions()
+                # A profile lease held by a generation that is gone describes a
+                # browser nobody owns. Clearing them here is the database half
+                # of stale-lease recovery; the exclusive OS handle on the
+                # directory is the half that still refuses if something is
+                # genuinely using it.
+                await app.state.browser_profile_service.release_stale_leases()
                 if resolved.runtime_parent_pid is not None:
                     # Open the stable Windows process handle synchronously. If
                     # Electron is already gone or access fails, startup aborts

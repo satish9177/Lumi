@@ -29,6 +29,12 @@ cache/
 *.pem
 *.key
 
+# Persistent browser profiles. They live under %LOCALAPPDATA% by design and
+# should never appear here at all -- this rule exists so that a developer who
+# points LUMI_BROWSER_PROFILE_ROOT at the checkout cannot commit a directory
+# full of live session cookies. The build fails if one reaches dist/ as well.
+browser-profiles/
+
 # Python agent runtime
 .venv/
 __pycache__/

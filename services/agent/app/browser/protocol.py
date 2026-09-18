@@ -48,6 +48,8 @@ __all__ = [
     "DispatchResponse",
     "LookupStatus",
     "OperationStatus",
+    "ProfileSessionRequest",
+    "ProfileSessionResponse",
     "SessionRequest",
     "SessionResponse",
     "WorkerErrorBody",
@@ -122,6 +124,50 @@ class SessionResponse(BaseModel):
     worker_generation: uuid.UUID
     status: Literal["OPEN", "CLOSED", "NOT_FOUND"]
     open_tabs: list[str] = Field(default_factory=list)
+
+
+class ProfileSessionRequest(BaseModel):
+    """Open or close one persistent browser profile (Milestone 8a S1).
+
+    Note what this request does **not** carry, and cannot be made to carry:
+
+    * **No path.** The worker derives the profile directory from the id with
+      `app/browser/profile_paths.py`, from its own configured base. A path is
+      not a field here, so the runtime cannot name one and neither can anything
+      upstream of it.
+    * **No executable path, no `storageState`, no cookie file, no profile
+      contents of any kind.**
+    * **No site scope.** S1 opens a profile; it navigates nowhere. Origin scope
+      belongs to the S3 grant, and adding it here before there is an operation
+      to bound would be a field with no enforcement behind it.
+
+    `recorded_chromium_build` is what the *database* believes last opened this
+    profile. The worker compares it with its own build and refuses a downgrade
+    before touching the directory.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: uuid.UUID
+    runtime_generation: uuid.UUID
+    expected_worker_generation: uuid.UUID
+    recorded_chromium_build: str | None = Field(default=None, max_length=64)
+
+
+class ProfileSessionResponse(BaseModel):
+    """What the worker did with the profile, and which browser it used."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: uuid.UUID
+    worker_generation: uuid.UUID
+    status: Literal["OPEN", "CLOSED", "NOT_FOUND"]
+    #: The build that opened it, so the runtime can record version progression.
+    #: Absent when nothing was opened.
+    chromium_build: str | None = Field(default=None, max_length=64)
+    playwright_version: str | None = Field(default=None, max_length=32)
+    #: Whether this worker holds the exclusive OS handle on the directory.
+    lock_held: bool = False
 
 
 class WorkerIdentity(BaseModel):

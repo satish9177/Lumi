@@ -43,11 +43,18 @@ from pydantic import ValidationError
 from app.browser.config import WorkerSettings
 from app.browser.egress_broker import EgressBroker, managed_launch_options
 from app.browser.network_guard import PublicNetworkGuard
+from app.browser.profile_session import (
+    ProfileSessionError,
+    ProfileSessionStore,
+    worker_versions,
+)
 from app.browser.protocol import (
     WORKER_TOKEN_HEADER,
     DispatchRequest,
     DispatchResponse,
     OperationStatus,
+    ProfileSessionRequest,
+    ProfileSessionResponse,
     SessionRequest,
     SessionResponse,
     WorkerErrorBody,
@@ -62,6 +69,7 @@ from app.browser.registry import (
 )
 from app.browser.research_session import ResearchBrowserSession, SessionError, SessionStore
 from app.browser.session import BrowserSession, WorkerGeneration, token_matches
+from app.domain.browser_profile import BrowserVersions
 from app.domain.page_observation import PUBLIC_WEB_SITE
 from app.domain.public_url import PublicUrlPolicy
 from app.domain.research import PUBLIC_RESEARCH_SITE
@@ -144,10 +152,16 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
         )
         app.state.generation = generation
         app.state.broker = broker
+        app.state.playwright = playwright
         app.state.browser = browser
         app.state.ledger = DispatchLedger()
         # One active research task at a time, as this milestone intends.
         app.state.sessions = SessionStore(limit=1)
+        # Milestone 8a S1: one persistent, Lumi-managed profile at a time. It
+        # is a *separate* store from `sessions` on purpose -- a research session
+        # and an authenticated profile are different kinds of context and one
+        # must never be substituted for the other.
+        app.state.profiles = ProfileSessionStore(limit=1)
         logger.info(
             "browser worker ready",
             extra={
@@ -157,11 +171,17 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
                 "sites": sorted(resolved.origins),
                 "operations": registry.names(),
                 "research_enabled": research_policy.configured,
+                "chromium_build": browser.version,
             },
         )
         try:
             yield
         finally:
+            profiles: ProfileSessionStore = app.state.profiles
+            # Persistent contexts close first: each owns its own Chromium
+            # process and an exclusive handle on a directory, and both have to
+            # be let go before the worker exits or the next start is refused.
+            await profiles.close_all()
             sessions: SessionStore = app.state.sessions
             await sessions.close_all()
             await browser.close()
@@ -274,6 +294,113 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
         return JSONResponse(
             content=SessionResponse(
                 session_id=body.session_id,
+                worker_generation=generation.id,
+                status="CLOSED" if closed else "NOT_FOUND",
+            ).model_dump(mode="json")
+        )
+
+    @app.post("/v1/profiles/open")
+    async def open_profile(
+        request: Request, body: ProfileSessionRequest, token: str = credential
+    ) -> Response:
+        """Open the persistent context for one Lumi-managed profile.
+
+        The request carries an id and a recorded Chromium build. The directory
+        it resolves to is this worker's business alone, and the answer never
+        names it.
+        """
+        refusal = _authenticate(token)
+        if refusal is not None:
+            return refusal
+        generation: WorkerGeneration = request.app.state.generation
+        if body.expected_worker_generation != generation.id:
+            return _error(
+                status.HTTP_409_CONFLICT,
+                "stale_worker_generation",
+                "This profile was addressed to a different worker generation.",
+                generation.id,
+            )
+        browser: Browser = request.app.state.browser
+        current = worker_versions(
+            browser,
+            playwright_version=_playwright_version(),
+            app_version=resolved.app_version,
+        )
+        recorded = (
+            BrowserVersions(
+                chromium_build=body.recorded_chromium_build,
+                playwright_version="",
+                app_version="",
+            )
+            if body.recorded_chromium_build
+            else None
+        )
+        profiles: ProfileSessionStore = request.app.state.profiles
+        try:
+            session = await profiles.open(
+                playwright=request.app.state.playwright,
+                broker=request.app.state.broker,
+                paths=resolved.profile_paths,
+                profile_id=body.profile_id,
+                recorded=recorded,
+                current=current,
+                headless=resolved.headless,
+                timeout_seconds=resolved.operation_timeout_seconds or 30.0,
+            )
+        except ProfileSessionError as error:
+            # A downgrade refusal and a contended lock are both 409: the
+            # profile exists and is fine, this worker may simply not open it.
+            return _error(
+                status.HTTP_409_CONFLICT,
+                error.code,
+                "That browser profile could not be opened.",
+                generation.id,
+            )
+        except (PlaywrightError, OSError):
+            logger.warning(
+                "a persistent profile failed to open",
+                extra={"profile_id": str(body.profile_id)},
+            )
+            return _error(
+                status.HTTP_409_CONFLICT,
+                "profile_open_failed",
+                "That browser profile could not be opened.",
+                generation.id,
+            )
+        return JSONResponse(
+            content=ProfileSessionResponse(
+                profile_id=session.profile_id,
+                worker_generation=generation.id,
+                status="OPEN",
+                chromium_build=session.versions.chromium_build,
+                playwright_version=session.versions.playwright_version,
+                lock_held=session.lock.held,
+            ).model_dump(mode="json")
+        )
+
+    @app.post("/v1/profiles/close")
+    async def close_profile(
+        request: Request, body: ProfileSessionRequest, token: str = credential
+    ) -> Response:
+        """Close the persistent context and release its exclusive handle.
+
+        Closing a profile belonging to a previous worker generation is a no-op
+        rather than a conflict: that context died with the process that held
+        it, and so did its lock.
+        """
+        refusal = _authenticate(token)
+        if refusal is not None:
+            return refusal
+        generation: WorkerGeneration = request.app.state.generation
+        profiles: ProfileSessionStore = request.app.state.profiles
+        closed = (
+            await profiles.close(body.profile_id)
+            if body.expected_worker_generation == generation.id
+            else False
+        )
+        return JSONResponse(
+            content=ProfileSessionResponse(
+                profile_id=body.profile_id,
                 worker_generation=generation.id,
                 status="CLOSED" if closed else "NOT_FOUND",
             ).model_dump(mode="json")
@@ -568,6 +695,20 @@ async def _run(
         duration_ms=duration_ms,
         submitted=operation_context.submitted,
     )
+
+
+def _playwright_version() -> str:
+    """The installed Playwright version, recorded on a profile row.
+
+    Looked up rather than hard-coded, so an upgrade that changes the Chromium a
+    profile was written by is visible in the profile's own metadata.
+    """
+    try:
+        import importlib.metadata
+
+        return importlib.metadata.version("playwright")
+    except Exception:  # pragma: no cover - metadata is present in every build.
+        return "unknown"
 
 
 def _site_names(

