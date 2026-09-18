@@ -13,7 +13,11 @@ under them worth building on.
 | Starting SHA (code) | `a49ebdf61accf3179951352257e12901d0a95f75` (M7b) |
 | Starting SHA (docs) | `8a4d294` |
 | Architecture review | `docs/plans/milestone-8.md` §6, §18, §23, §26, §27 |
-| Final SHA | `__FINAL_SHA__` |
+| Final SHA (implementation) | `3726e20bd26c3d1af7bd9fcbe50e5e17f9badc25` |
+| Final SHA (documentation) | `cfb694373ca23e032fe3e0241d2248bf5522173d`, then one correction commit finalising this report |
+
+Every result below was measured on `3726e20`. The documentation commits that
+follow it change no code.
 
 ---
 
@@ -344,9 +348,9 @@ browser's connections are" is true, and that is the claim made.
 
 ## 16. Deterministic test results
 
-New: `tests/test_egress_broker.py` (**__BROKER_UNIT__ passed**) and
-`tests/test_egress_broker_browser.py` (**__BROKER_BROWSER__ passed**, real
-Chromium, marker `browser`).
+New: `tests/test_egress_broker.py` (**48 passed**) and
+`tests/test_egress_broker_browser.py` (**12 passed**, real Chromium, marker
+`browser`).
 
 | # | Required | Where | Result |
 |---|---|---|---|
@@ -368,10 +372,10 @@ Chromium, marker `browser`).
 | 16 | Broker crash means no direct fallback | `test_a_dead_broker_does_not_fall_back_to_direct_networking`, `test_a_dead_broker_also_stops_the_guards_own_fetches`, `test_a_closed_broker_accepts_nothing` | pass |
 | 17 | Stale broker generation not reused | `test_a_credential_from_another_broker_generation_is_refused` | pass |
 | 18 | Frozen broker produces no upstream DNS query | `test_frozen_refuses_without_performing_an_upstream_dns_lookup`, `test_a_frozen_broker_stops_browser_traffic_without_resolving` | pass |
-| 19 | M7b multi-hop research still succeeds | `tests/test_research_browser.py` | __M7B__ passed |
+| 19 | M7b multi-hop research still succeeds | `tests/test_research_browser.py` | 43 passed |
 | 20 | M7b hostile / stale / budget / recovery suites unchanged | `test_research_authorization.py`, `test_research_ledger.py`, `test_research_domain.py` | pass, unmodified |
-| 21 | M7a regression | `tests/test_public_page_worker.py`, `tests/test_network_guard_methods.py` | __M7A__ passed |
-| 22 | Booking regression | `tests/test_browser_booking.py` | __BOOKING__ passed |
+| 21 | M7a regression | `tests/test_public_page_worker.py`, `tests/test_network_guard_methods.py` | 39 passed (38 before S0 added the resolution-cache test) |
+| 22 | Booking regression | `tests/test_browser_booking.py` | 27 passed |
 
 Also covered, beyond the required list: unauthenticated clients get `407`
 without a lookup; DNS failure refuses rather than guesses; several public
@@ -387,11 +391,11 @@ Every fixture is local. No external site is required for security acceptance.
 |---|---|
 | `npm.cmd run typecheck` | pass |
 | `npm.cmd run build` | pass |
-| `npm.cmd test` | __VITEST__ |
-| `uv run pytest` | __PYTEST__ |
+| `npm.cmd test` | **1956 passed, 1 failed, 22 skipped** (3 failed files) — the three known environment baselines, unchanged |
+| `uv run pytest` | **828 passed, 16 skipped**, exit 0 (M7b baseline: 765 passed, 16 skipped) |
 | `uv run mypy` | pass, 125 source files |
-| `npm.cmd run eval` | __EVAL__ |
-| Electron acceptance (`LUMI_ELECTRON_E2E=1`) | __ELECTRON__ |
+| `npm.cmd run eval` | **118/118** deterministic eval cases |
+| Electron acceptance (`LUMI_ELECTRON_E2E=1`) | **15/15**, one file at a time: `test_electron_acceptance` 2, `test_voice_acceptance` 3, `test_m6_acceptance` 5, `test_inspection_acceptance` 5 |
 
 As in M7b, the Python runs set `LUMI_PUBLIC_INSPECTION_HOSTS=""` (without it the
 developer `.env` leaks into `test_booking_preparation.py`, a pre-existing
@@ -413,7 +417,42 @@ way.
 
 ## 17. Real-web smoke
 
-__SMOKE__
+`uv run python -m scripts.research_smoke` — the same opt-in, read-only M7b
+script, unchanged, now with every connection carried by the broker. One session,
+three addresses, one reused tab.
+
+| Address | Result |
+|---|---|
+| `github.com/satish9177/Lumi` | **OK.** Epoch 5, 120 blocks (6,807 chars, truncated), 25 of 125 links. Title and README text read. |
+| `docs.python.org/3/library/asyncio-task.html` | **OK.** Epoch 7, 120 blocks (3,030 chars), 25 of 31 links. |
+| `leetcode.com/problems/two-sum/` | **HTTP 403**, `page_http_error`, `FAILED_BEFORE_EFFECT`. Re-observing the tab showed the Cloudflare interstitial ("Performing security verification", Ray ID printed by the page). Epoch 10. |
+
+Identical to the M7b record in every field, including the epoch progression
+5 → 7 → 10, so the broker changed the path the bytes take and nothing a task
+sees. The LeetCode 403 is reported as the site answered it; **no bypass was
+attempted, and none exists** — no CAPTCHA solver, no stealth mode, no attempt to
+look like a human browser.
+
+**Whether each connection was brokered.** Structurally, yes, and it is not an
+inference: the browser is launched with `--proxy-server` and
+`--proxy-bypass-list=<-loopback>`, which is asserted against the real Chromium
+process command line, and the deterministic suite shows that a destination the
+broker refuses is never contacted. Three pages loading at all is therefore three
+pages loaded through the broker.
+
+**The optional per-address probe was not obtained.** A scratch script was written
+to print the broker's own counters — the literal addresses dialled per host — for
+these same three URLs. It ran for over ten minutes with its stdout file-buffered,
+produced no usable output, and was terminated. No orphaned broker, Chromium, `uv`
+or `node` process remained. It was optional, it is not part of S0 acceptance, and
+nothing in this report depends on it: the dial-address binding is proven
+deterministically in `tests/test_egress_broker.py`, where the address asked for
+is asserted directly and the forbidden endpoint's connection count is asserted to
+be zero.
+
+**R, and it belongs here:** a real-site run demonstrates *usability*, never
+*enforcement*. Lumi cannot see a real server's counters. Every security claim in
+this report rests on the local deterministic fixtures, not on these three pages.
 
 ---
 
