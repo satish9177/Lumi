@@ -17,7 +17,7 @@ material inside.
 | Starting SHA | `01e66ee2d49b9faa9271e7044a01878082b70fdc` (M8-0 / S0 complete) |
 | Architecture review | `docs/plans/milestone-8.md` §§7, 17, 23, 26, 27 |
 | Final SHA (implementation) | `24fd1dd7976c7ae8c2ae785a5f008c32fee3fc37` |
-| Final SHA (documentation) | the commit that follows, plus one correction commit recording its own SHA |
+| Final SHA (documentation) | `865f53c262049b65fe41789e93d3441e52721dc3`, then this correction commit recording that SHA |
 | Migration | `0005` → `0006` |
 
 **Commit structure.** Implementation and packaging are one commit rather than
