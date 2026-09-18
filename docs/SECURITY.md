@@ -132,6 +132,93 @@ sandbox, and not all of Lumi's traffic. Details and the full residual list:
 [PUBLIC-RESEARCH.md](PUBLIC-RESEARCH.md) and
 [reviews/milestone-8-s0.md](reviews/milestone-8-s0.md).
 
+## Persistent browser profiles (Milestone 8a S1)
+
+S1 adds a durable primitive and **no new user-visible capability**: Lumi can
+create, open, lease and delete a persistent Chromium profile. There is still no
+login flow, no authenticated page reading and no form interaction.
+
+**The invariant, which is the reason a persistent profile is defensible at
+all:** Lumi may *operate* a profile, but it must never extract or serialise the
+authentication material inside it.
+
+| Lumi owns | The browser owns |
+| --- | --- |
+| profile id, label, site (eTLD+1), allowed origins | every cookie, of any kind |
+| status, revision, Chromium/Playwright/app version | access, refresh, bearer and CSRF tokens |
+| the one-owner lease and its expiry | `localStorage`, `sessionStorage`, IndexedDB |
+| `revoke_epoch`, account fingerprint *hashes* | Chromium's `Login Data` and `Cookies` |
+| the profile directory path, derived and never transported | anything a model could replay |
+
+There is no `storage_state`, no `context.cookies()`, no `add_cookies`, no cookie
+or storage export, and no read of any file Chromium wrote inside the profile.
+That is enforced by `tests/test_no_credential_extraction.py`, which scans Lumi's
+own `app/`, `evals/` and `tests/` for call-shaped patterns, for page script that
+reaches storage, and for Chromium's own profile filenames — and which is itself
+tested against planted violations.
+
+**Where a profile lives, and what its path may say.**
+`%LOCALAPPDATA%\Lumi\browser-profiles\<profile-uuid>` — local, never roaming;
+outside the install directory, the repository and `dist/`; and named by an
+opaque UUID, so a directory listing does not disclose which accounts the user
+holds. The site association is a database row. The path is derived from the id
+inside the runtime and the worker and crosses **no** boundary: it is not in any
+API response, worker request, log record, diagnostic or model prompt, and no
+renderer, main-process or model input may name a `profilePath`, `userDataDir`,
+`cookieFile`, `storageState` or `browserExecutablePath`.
+
+**Windows permissions, stated plainly.** `%LOCALAPPDATA%` is already
+user-scoped, and on creation Lumi drops the directory's inherited ACL entries
+and grants the current user explicitly. That is the whole claim. Chromium
+encrypts `Cookies` and `Login Data` with a DPAPI key bound to **the same user**,
+so any process running as that user can decrypt the profile. Same-user malware
+is outside Lumi's security boundary and no ACL changes that. Treat the profile
+directory as secret material, because that is what it is.
+
+**One profile, one site.** A profile is bound to exactly one registrable domain,
+decided at creation from a pinned Public Suffix List snapshot (bundled, digest
+checked on load and recorded in the packaged manifest; never fetched at run
+time). The binding is immutable afterwards — there is no operation that
+re-points a profile at another site, and a database trigger refuses one too.
+Changing sites means deleting the profile and creating another.
+
+**One owner at a time,** through two independent layers. The authoritative
+lease is a `browser_profiles` row taken by a conditional `UPDATE`, bound to a
+runtime generation and expiring. The backstop is an exclusive OS file handle the
+worker holds inside the profile directory, which covers two Lumi installations
+pointed at different databases and a lease that looks stale but is not. A stale
+lease is reclaimed **only** when the OS handle is also free; when something
+holds it the answer is a refusal, not a guess that the other owner is dead.
+Chromium's own `SingletonLock` is neither relied on nor deleted.
+
+**Version safety.** The build that last opened a profile is recorded. A newer
+Chromium opens it and updates the metadata; an older one is **refused**
+(`profile_browser_downgrade_refused`) before the directory is touched, and
+nothing is deleted or repaired — a Chromium profile is forward-compatible only.
+
+**Crash behaviour.** Session restore is never enabled and the crash-restore
+bubble is suppressed, so after an unclean shutdown the profile opens with no
+tabs. S1 does not implement authenticated task continuation, and claims none.
+
+**Deleting is local.** Deleting a profile removes the directory Lumi created and
+marks the row `DELETED`. It makes **no network request of any kind** — no logout
+endpoint, no session revocation, no "sign out everywhere" — which is why the
+trusted wording is *"This removes the sign-in data stored by Lumi on this
+computer. It does not sign you out on the website."* It is ordinary application
+deletion, not forensic erasure.
+
+**Still brokered, still bounded.** Every persistent context is launched through
+the S0 egress broker with the same proxy, credential, `<-loopback>` bypass and
+QUIC-disabling arguments. Service workers stay blocked, downloads are refused,
+and no browser permission is granted. Profile lifecycle involves **zero model
+and zero provider calls**.
+
+**Research sessions stay separate.** An M7b research session is an
+unauthenticated, disposable context with no `user_data_dir`; an authenticated
+profile is persistent and bound to one site. The two kinds refuse each other
+rather than falling back, and the research code has no route to a profile at
+all.
+
 ## Known gaps
 
 - The broker constrains Chromium, not its host process. A compromised browser
@@ -142,7 +229,21 @@ sandbox, and not all of Lumi's traffic. Details and the full residual list:
   still signal data through a DNS label. Only the freeze closes that.
 - `wss:` and `https:` are the same `CONNECT` at the broker, so WebSocket
   blocking remains a Playwright-level control in the network guard.
-- The packaged build is unsigned. Machines with Smart App Control or WDAC in
-  enforcement mode can block unsigned binaries (observed; see PACKAGING.md).
+- **A persistent profile is an impersonation artefact, and same-user isolation
+  does not exist.** Any process running as the user can decrypt it. This is the
+  largest new risk M8a introduces and nothing in the design removes it.
+- **The packaged build is unsigned**, and unsigned distribution combined with a
+  real session cookie is materially worse than unsigned plus a disposable
+  context. **Authenticode signing is a release gate before M8a reaches a real
+  user account**, not a documentation note. M7b's packaged acceptance
+  substituted the stock Electron executable to get past Smart App Control, which
+  disables asar integrity validation; that workaround is **development-only** and
+  is not acceptable for a build holding real session data. Machines with Smart
+  App Control or WDAC in enforcement mode can block unsigned binaries (observed;
+  see PACKAGING.md).
+- The bundled Public Suffix List snapshot ages. A suffix delegated after the
+  pinned version is classified by the old rules until the next Lumi release.
+- Profile deletion is ordinary unlinking. It does not defeat a journalling
+  filesystem, an SSD's wear levelling, a shadow copy or a backup.
 - Voice narration is steered, not enforced: a live model could still misspeak.
   The card and timeline remain the authority.

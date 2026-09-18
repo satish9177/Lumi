@@ -178,6 +178,16 @@ worker or runtime restart takes it away, the `research_sessions` row becomes
 authoritative browser state before it may continue; `observe` on a fresh tab
 honestly reports that the tab holds no page yet.
 
+**Research is not affected by Milestone 8a's persistent profiles.** S1 added a
+second, separate kind of browser context — a persistent, Lumi-managed profile
+bound to one site — and the two refuse each other rather than falling back. A
+research session is still created with no `user_data_dir`, and the research code
+has no route to a profile at all: separate worker endpoints, separate stores in
+the worker, and a `BrowserContextKind` that a dispatch has to match. A public
+research task can never resolve an authenticated profile, and an authenticated
+profile can never be substituted for a research session. No M7b grant or
+authorization semantics changed because profiles exist.
+
 ## Network policy (`public-research-v1`)
 
 The same three layers as Milestone 7a, with layer 2 replaced:
