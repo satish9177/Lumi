@@ -879,7 +879,11 @@ previously flaky test now pass.
    Chromium's DPAPI key is bound to that user. This is the single largest new
    risk M8a introduces and no part of this design removes it.
 2. **Unsigned distribution plus real session data** is materially worse than
-   unsigned plus a disposable context. See §24.
+   unsigned plus a disposable context. See §23. The bundled browser is unsigned
+   too: Playwright's Chrome for Testing builds carry no Authenticode signature,
+   which §17 records as a correction to the plan's assumption. That is not new
+   in S1 — the headless shell was unsigned as well — but the binary is larger
+   and S2 will run it with a visible window.
 3. **The bundled PSL snapshot ages.** A newly delegated suffix is misclassified
    until the next release.
 4. **Deletion is ordinary unlinking**, not forensic erasure. Shadow copies,
