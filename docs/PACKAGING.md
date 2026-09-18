@@ -80,6 +80,24 @@ All children are started from fixed paths with fixed arguments, no shell,
 | `clinicSite` | `demo` (default), `none`, or `http://127.0.0.1:<port>` |
 | `headless` | `true` (default). Headed mode needs full Chromium, which is not bundled. |
 
+### The egress broker and the bundled browser
+
+Milestone 8 S0 routes every managed-browser connection through a loopback
+egress broker inside the worker process (see
+[SECURITY.md](SECURITY.md)). It adds **no packaging change**: the broker is
+Python, it binds an ephemeral loopback port at worker start, and it needs no
+new binary, no certificate store entry and no configuration file. It was
+verified against the binary this bundle actually ships — Playwright launches
+`chrome-headless-shell.exe` from `chromium_headless_shell-<revision>` for
+`headless=True`, and the broker tests run on that.
+
+**M8a prerequisite, recorded here rather than acted on:** manual sign-in needs a
+visible window, and `scripts/build-agent-runtime.mjs` bundles only
+`chromium-headless-shell`. Full Chromium must be bundled before M8a can ship
+(roughly +150–200 MB; measure before committing), and the headless shell should
+be dropped rather than shipping two browser builds. S0 does not need it and does
+not do it.
+
 Provider keys for voice and text models are read from the user's environment
 by Electron main, exactly as in development (see [PROVIDERS.md](PROVIDERS.md)).
 Nothing secret is bundled.

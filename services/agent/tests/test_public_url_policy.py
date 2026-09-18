@@ -11,6 +11,7 @@ from app.domain.public_url import (
     UrlPolicyError,
     address_is_public,
     ensure_public_resolution,
+    resolve_public_addresses,
     parse_allowed_hosts,
     parse_test_origins,
 )
@@ -169,3 +170,26 @@ async def test_public_resolution_passes_and_test_origins_skip_dns() -> None:
 
     await ensure_public_resolution(POLICY.check("https://github.com/"), public)
     await ensure_public_resolution(POLICY.check("http://127.0.0.1:8811/x"), never)
+
+
+async def test_resolve_public_addresses_hands_the_dialler_exactly_what_it_checked() -> None:
+    """Milestone 8's broker connects to one of these, so the list is the contract."""
+
+    async def both(_: str) -> list[str]:
+        return ["140.82.112.3", "2606:50c0:8000::153"]
+
+    assert await resolve_public_addresses("github.com", both) == [
+        "140.82.112.3",
+        "2606:50c0:8000::153",
+    ]
+
+
+async def test_resolve_public_addresses_refuses_a_mixed_answer_in_full() -> None:
+    """Never "keep the public one and drop the rest": that is the hostile shape."""
+
+    async def mixed(_: str) -> list[str]:
+        return ["140.82.112.3", "192.168.1.10"]
+
+    with pytest.raises(UrlPolicyError) as refused:
+        await resolve_public_addresses("github.com", mixed)
+    assert refused.value.code == "non_public_address"

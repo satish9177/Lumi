@@ -12,10 +12,13 @@ configuration. A proposal that carried a URL would let whoever wrote the
 proposal choose where the browser goes.
 """
 
+import re
+
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.domain.public_url import (
+    BROKER_POLICY_VERSION,
     RESEARCH_POLICY_VERSION,
     PublicUrlPolicy,
     parse_allowed_hosts,
@@ -23,6 +26,8 @@ from app.domain.public_url import (
 )
 
 DEFAULT_SITE = "appointment_fixture"
+#: The shape of a local fixture origin, mirrored from `parse_test_origins`.
+_TEST_ORIGIN_SHAPE = re.compile(r"http://127\.0\.0\.1:[0-9]{1,5}")
 
 
 def _parse_origins(raw: str) -> dict[str, str]:
@@ -114,6 +119,38 @@ class WorkerSettings(BaseSettings):
             allowed_hosts=parse_allowed_hosts(self.public_hosts),
             test_origins=parse_test_origins(self.inspection_test_origins),
         )
+
+    @property
+    def broker_origins(self) -> frozenset[str]:
+        """Local fixture origins the egress broker may dial without resolving.
+
+        Exactly the `http://127.0.0.1:<port>` origins trusted configuration
+        named -- the appointment fixture, the inspection fixture, the research
+        fixture. They are the only destinations reachable over plaintext and the
+        only ones that skip resolution, because there is no name to resolve and
+        the address is already literal. Anything else, including a configured
+        origin that is not loopback, takes the resolve-check-pin path.
+        """
+        candidates = {
+            *self.origins.values(),
+            *parse_test_origins(self.inspection_test_origins),
+            *parse_test_origins(self.research_test_origins),
+        }
+        return frozenset(
+            origin for origin in candidates if _TEST_ORIGIN_SHAPE.fullmatch(origin.rstrip("/"))
+        )
+
+    @property
+    def broker_policy(self) -> PublicUrlPolicy:
+        """The broker's own destination policy: shape and address, not scope.
+
+        Scope -- *which* public host this task may read -- belongs to the
+        runtime's grant and the context's network guard, and a CONNECT tunnel
+        does not even carry a path to judge. The broker answers the narrower
+        question of whether a socket may be opened at all, so it allows any host
+        that passes layer 1 and resolves solely to globally routable addresses.
+        """
+        return PublicUrlPolicy(version=BROKER_POLICY_VERSION, allow_any_public_host=True)
 
     @property
     def research_policy(self) -> PublicUrlPolicy:

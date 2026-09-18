@@ -44,6 +44,10 @@ POLICY_VERSION = "public-url-v1"
 #: allowlist replaced by "any host that is not local, reserved or private".
 #: A distinct version string so a grant records which rules authorised it.
 RESEARCH_POLICY_VERSION = "public-research-v1"
+#: Milestone 8 S0: the egress broker's own destination policy. Shape and address
+#: only -- the broker decides whether a socket may be opened, never which host a
+#: task is in scope to read, which stays with the grant and the network guard.
+BROKER_POLICY_VERSION = "egress-broker-v1"
 MAX_URL_LENGTH = 2_048
 MAX_ALLOWED_HOSTS = 64
 
@@ -248,17 +252,36 @@ async def system_resolver(host: str) -> list[str]:
     return [str(record[4][0]) for record in records]
 
 
-async def ensure_public_resolution(
-    checked: CheckedUrl, resolver: Resolver = system_resolver, timeout_seconds: float = 5.0
-) -> None:
-    """Every address the host resolves to must be public, or nothing is sent."""
-    if checked.test_origin:
-        return
+async def resolve_public_addresses(
+    host: str, resolver: Resolver = system_resolver, timeout_seconds: float = 5.0
+) -> list[str]:
+    """Resolve `host`, and return the addresses only if **every** one is public.
+
+    Fail-closed in both directions. An empty or failed lookup is `dns_failed`; a
+    host that resolves to any non-public address is `non_public_address` *in
+    full*, never "use the public ones and ignore the rest" -- a mixed answer is
+    how a rebinding resolver offers a private address while looking innocent.
+
+    The list matters to the caller that connects: Milestone 8's egress broker
+    dials one of exactly these addresses, so the address that passed the check
+    is the address on the wire. `ensure_public_resolution` is the same check for
+    callers that only need the verdict.
+    """
     try:
-        addresses = await asyncio.wait_for(resolver(checked.host), timeout=timeout_seconds)
+        addresses = await asyncio.wait_for(resolver(host), timeout=timeout_seconds)
     except (OSError, TimeoutError, UnicodeError):
         raise UrlPolicyError("dns_failed") from None
     if not addresses:
         raise UrlPolicyError("dns_failed")
     if not all(address_is_public(address) for address in addresses):
         raise UrlPolicyError("non_public_address")
+    return list(addresses)
+
+
+async def ensure_public_resolution(
+    checked: CheckedUrl, resolver: Resolver = system_resolver, timeout_seconds: float = 5.0
+) -> None:
+    """Every address the host resolves to must be public, or nothing is sent."""
+    if checked.test_origin:
+        return
+    await resolve_public_addresses(checked.host, resolver, timeout_seconds)

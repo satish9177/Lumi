@@ -26,7 +26,7 @@ from app.browser.operations.public_page import InspectPageInput, inspect_public_
 from app.browser.protocol import OperationStatus
 from app.browser.registry import OperationContext
 from app.domain.page_observation import PageObservation
-from app.domain.public_url import PublicUrlPolicy
+from app.domain.public_url import PublicUrlPolicy, UrlPolicyError
 from evals.sites.public_pages import PROFILE, create_site
 
 pytestmark = [pytest.mark.browser]
@@ -36,6 +36,41 @@ MUTATIONS = ("POST", "PUT", "PATCH", "DELETE")
 
 def test_only_get_and_head_are_permitted() -> None:
     assert ALLOWED_METHODS == frozenset({"GET", "HEAD"})
+
+
+async def test_the_guard_re_checks_every_success_and_remembers_only_refusals() -> None:
+    """Milestone 8 S0 removed the success cache. This is why it had to go.
+
+    Through M7b the guard remembered a host's resolution *verdict* for the
+    lifetime of the context, so one good answer stood in for every later request
+    to that host while the connection was made again each time. Now that the
+    broker resolves and dials, this layer is defence in depth -- and defence in
+    depth must not look stronger than it is.
+
+    The guard's destination check is reached directly here because there is no
+    other way to count resolver calls without a browser in the way.
+    """
+    calls: Counter[str] = Counter()
+
+    async def resolver(host: str) -> list[str]:
+        calls[host] += 1
+        return ["140.82.112.3"] if host.startswith("public") else ["127.0.0.1"]
+
+    guard = PublicNetworkGuard(
+        PublicUrlPolicy(allow_any_public_host=True), resolver=resolver
+    )
+
+    await guard._checked_destination("https://public-host.com/a")
+    await guard._checked_destination("https://public-host.com/b")
+    assert calls["public-host.com"] == 2
+
+    for _ in range(3):
+        with pytest.raises(UrlPolicyError) as refused:
+            await guard._checked_destination("https://private-host.com/a")
+        assert refused.value.code == "non_public_address"
+    # The refusal is remembered: a host that resolved privately does not get a
+    # fresh chance on every subresource.
+    assert calls["private-host.com"] == 1
 
 
 @pytest.fixture(scope="module")

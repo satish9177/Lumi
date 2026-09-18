@@ -181,7 +181,9 @@ channel.
 
 `public-research-v1` keeps all three layers of the M7a policy — shape, scope,
 DNS resolution — and replaces only the trusted host allowlist with "any name
-that resolves solely to globally routable addresses". M7a's own policy
+that resolves solely to globally routable addresses". The resolution layer as
+shipped in M7b remembered a host's verdict for the lifetime of the context; see
+§17 for the correction and for what Milestone 8 S0 changed. M7a's own policy
 (`public-url-v1`) keeps its allowlist unchanged. Refused: localhost, loopback,
 RFC1918, link-local, multicast and reserved ranges, IPv6 loopback/private/
 link-local, cloud metadata endpoints, `file:`, `data:`, `javascript:`,
@@ -285,12 +287,18 @@ There is no LeetCode-specific adapter, and no site-specific adapter of any kind.
 
 ## 17. Known limitations
 
-* **Not a network sandbox.** Resolution happens in the policy and again inside
-  Playwright's driver, so a hostile DNS server can still race the two
-  (rebinding). M7a narrows that with a host allowlist; research cannot, because
-  it does not know its destinations. A connection-time egress broker that
-  resolves and pins the address it dials is unbuilt. "Lumi cannot reach private
-  addresses" is a policy at two checkpoints, not a guarantee.
+* **Not a network sandbox.** *(Corrected, and since closed — see
+  [milestone-8-s0.md](milestone-8-s0.md).)* As shipped in M7b, resolution
+  happened in the policy and again inside Playwright's driver, so a hostile DNS
+  server could race the two (rebinding). The wording elsewhere in this document
+  implied a fresh application-level DNS check before every request; that was not
+  accurate. `PublicNetworkGuard` cached a host's resolution **verdict** for the
+  lifetime of the context (`self._resolutions`), so a *successful* resolution
+  was reused for later requests to that host while the connection was made
+  again each time. M7a narrowed this with a host allowlist; research could not,
+  because it does not know its destinations. Milestone 8 S0 added the
+  connection-time egress broker, removed the success cache, and made the
+  connecting component the one that resolves and checks.
 * **`READ_ONLY` is narrow.** It means Lumi issues no intentional mutation. A
   `GET` can still be logged, counted or acted on by a server.
 * **Popup closing has a narrow race.** The guard suspends popup-closing for the

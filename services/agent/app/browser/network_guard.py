@@ -28,15 +28,27 @@ and fail-closed:
   server-side effects (a site can count or log a GET); it means Lumi issues no
   intentional mutation operation.
 
-What it does not do, stated plainly: it is not an egress proxy. Resolution
-happens here and again inside Playwright's driver, so a hostile DNS server can
-still race the two (rebinding). Milestone 7a narrows that gap with a trusted
-host allowlist. Milestone 7b research does *not* have that allowlist -- it
-cannot, because a research task does not know its destinations in advance -- so
-the residual rebinding gap is real and is documented rather than papered over.
-A connection-time egress broker that resolves and pins the address it dials is
-still unbuilt; until it exists, "Lumi cannot reach private addresses" is a
-policy enforced at two checkpoints, not a network sandbox.
+What it does not do, stated plainly: **it is not where the connection is made.**
+The guard checks a destination and then asks Playwright's driver to fetch it,
+and before Milestone 8 that driver resolved the name again for itself -- so a
+hostile resolver could answer once for the check and again for the connection
+(DNS rebinding). Worse, the guard used to cache a host's resolution verdict for
+the lifetime of the context, so the *second* request to a host was checked
+against a remembered answer while the connection was made afresh.
+
+Milestone 8 S0 moves the connection itself behind `app.browser.egress_broker`.
+The broker resolves the name, requires every address to be globally routable,
+and opens the socket to an address from that one resolution. That is what closes
+rebinding, and it is why the cache is gone from here: this layer's resolution is
+now defence in depth, so it must not be *stronger-looking* than it is. Refusals
+are still remembered -- a host that resolved to a private address does not get a
+fresh chance on every subresource -- and successes are re-checked every time.
+
+The division of labour is deliberate. The broker owns the destination address,
+because it is the component that dials. The guard owns everything a CONNECT
+tunnel cannot show the broker: URL shape and scope, resource type, method, the
+per-hop redirect decision, response size and document content type. Both layers
+stay; neither is a substitute for the other.
 """
 
 import asyncio
@@ -79,7 +91,12 @@ class PublicNetworkGuard:
         self._policy = policy
         self._resolver = resolver
         self._timeout_ms = request_timeout_seconds * 1_000
-        self._resolutions: dict[str, UrlPolicyError | None] = {}
+        #: Hosts that have already failed the resolution check, and why. Only
+        #: refusals are remembered. A success is re-checked on every request,
+        #: because remembering one would let a single good answer stand in for
+        #: connections it never covered -- and the connection is the broker's,
+        #: not this layer's.
+        self._refusals: dict[str, UrlPolicyError] = {}
         #: Every page this guard owns. One for a Milestone 7a inspection; up to
         #: the tab budget for a Milestone 7b research session, all in the same
         #: context and all routed through this one guard.
@@ -166,17 +183,14 @@ class PublicNetworkGuard:
 
     async def _checked_destination(self, url: str) -> None:
         checked = self._policy.check(url)
-        if checked.host in self._resolutions:
-            cached = self._resolutions[checked.host]
-            if cached is not None:
-                raise cached
-            return
+        refused = self._refusals.get(checked.host)
+        if refused is not None:
+            raise refused
         try:
             await ensure_public_resolution(checked, self._resolver)
         except UrlPolicyError as error:
-            self._resolutions[checked.host] = error
+            self._refusals[checked.host] = error
             raise
-        self._resolutions[checked.host] = None
 
     async def _handle(self, route: Route) -> None:
         request = route.request

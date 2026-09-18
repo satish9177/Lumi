@@ -41,6 +41,7 @@ from playwright.async_api import async_playwright
 from pydantic import ValidationError
 
 from app.browser.config import WorkerSettings
+from app.browser.egress_broker import EgressBroker, managed_launch_options
 from app.browser.network_guard import PublicNetworkGuard
 from app.browser.protocol import (
     WORKER_TOKEN_HEADER,
@@ -129,9 +130,20 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         generation = WorkerGeneration.mint()
+        # The broker binds before Chromium launches, because Chromium is
+        # launched pointing at it. Its credential and port are minted here and
+        # die with this process, so a credential a replaced worker handed out
+        # cannot be presented to its successor.
+        broker = EgressBroker(
+            resolved.broker_policy, configured_origins=resolved.broker_origins
+        )
+        await broker.start()
         playwright: Playwright = await async_playwright().start()
-        browser: Browser = await playwright.chromium.launch(headless=resolved.headless)
+        browser: Browser = await playwright.chromium.launch(
+            **managed_launch_options(broker, headless=resolved.headless)  # type: ignore[arg-type]
+        )
         app.state.generation = generation
+        app.state.broker = broker
         app.state.browser = browser
         app.state.ledger = DispatchLedger()
         # One active research task at a time, as this milestone intends.
@@ -140,6 +152,7 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
             "browser worker ready",
             extra={
                 "worker_generation": str(generation.id),
+                "broker_generation": str(broker.generation),
                 "headless": resolved.headless,
                 "sites": sorted(resolved.origins),
                 "operations": registry.names(),
@@ -153,6 +166,9 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
             await sessions.close_all()
             await browser.close()
             await playwright.stop()
+            # After the broker closes there is no egress path at all, which is
+            # the intended failure mode: never a fall back to direct networking.
+            await broker.aclose()
 
     app = FastAPI(title="Lumi Browser Worker", version="0.3.0", lifespan=lifespan)
     app.state.settings = resolved
