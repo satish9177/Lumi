@@ -829,3 +829,7 @@ authority. Milestone 6 adds front doors and inputs around them; see
 
 No migration was added: new data lives in the existing `tasks.request` JSONB
 and `task_events`, so the schema head is still `0003`.
+
+## Memory and classification for authenticated tasks (M8a S3)
+
+`authenticated_read` tasks are classified `account_private`. Episodic memory refuses them, the public research context builder never sees their evidence, and diagnostics carry stable codes and counts only. Evidence lives in `authenticated_observations` / `authenticated_answers` (no raw URLs) and is purged with the task or the profile.

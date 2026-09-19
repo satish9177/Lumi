@@ -317,6 +317,92 @@ read one takeover's status. No method takes a hostname, URL, path,
 executable, credential or browser argument, and there is deliberately no way
 for the renderer to create a profile at all.
 
+## Authenticated account reading (Milestone 8a S3)
+
+The honest name for the capability is **`account_scoped_read`**: Lumi issues
+only `GET` and `HEAD` requests, to one site, in a browser carrying the user's
+session for that site. Lumi performs no intentional change. **The website may
+still record the visit** -- mark something as read, update "last active", extend
+a session, count analytics, write account activity -- and Lumi can neither
+prevent nor reliably detect that. It is never described as read-only,
+no-effect or invisible, and the trusted card says so *before* the Allow button.
+The registry names the effect `ACCOUNT_READ`, deliberately not `READ_ONLY`, and
+a fixture endpoint that increments `read_count` on `GET` proves the wording
+honest (`test_authenticated_service_browser.py`).
+
+**Authority.** An `authenticated_read` grant (the existing `task_grants` and
+`step_authorizations`, no second framework) is immutable and bound to one
+profile, one site, one account fingerprint, the profile's `revoke_epoch`, exactly
+one provider, `GET`/`HEAD`, and budgets no larger than M7b's. Only a trusted
+renderer click confirms it; the confirming statement also checks, in SQL, that
+the profile is still `AUTHENTICATED`, at the same epoch and fingerprint. Every
+step consumes a single-use authorization whose `UPDATE` re-checks the same
+profile conditions -- there is no `SELECT`, decide, `UPDATE` window. Steps are
+recorded `AUTHORIZED`, never `APPROVED`.
+
+**Before any text is projected, in this order, inside the worker:** the tab is
+on a real document inside the profile's site; the credential-surface detector
+runs (bounded counts); the account identity is derived, hashed at once and
+compared with the grant's fingerprint; only then is text read, **redacted line
+by line**, split and bounded. A credential surface returns signals only. A
+missing identity is `account_identity_unknown`; a different one is
+`account_changed`, which bumps the profile epoch, clears its fingerprint,
+returns it to `NEEDS_LOGIN`, revokes its open grants and pauses the task.
+Session expiry is `login_required` and leaves the epoch alone, so the same
+account may resume the same grant. All four pauses (`left_site_scope` is the
+fourth) are decided by code; no planner or provider is consulted, and the
+page text never leaves the worker.
+
+**Account identity has no site-agnostic signal.** The S3 design spike
+concluded that ordinary pages offer no stable, site-agnostic account identity
+that can be read without cookies/storage, a per-site adapter or a guessing
+heuristic. The only reviewed signal is the fixture's `data-lumi-account-id`. On
+a real site it is absent, so the fingerprint is unknown, a task cannot start
+and the safe rule `unknown -> refuse` holds. This is why real-account reading
+does not work yet, and it is intended.
+
+**Network.** The agent-read guard is not the takeover guard. It allows `GET`
+and `HEAD` only; refuses every other method, WebSocket, download, popup and
+non-document top-level navigation outside the profile's registrable site
+(`left_site_scope`, refused before it is contacted; redirects are decided per
+hop from the `Location` header, never followed by the browser); allows public
+third-party subresources (the broker still refuses private, loopback,
+link-local and metadata addresses); and keeps QUIC off. An authenticated link
+can be a capability, so links are never mirrored anywhere: the worker holds
+each address for one document epoch, the runtime persists only refs, redacted
+labels and hosts, and there is no URL column in any S3 table.
+
+**Private data.** Account-private text goes to exactly one provider, named by
+the grant and chosen from a list main built from its own configuration. The two
+model classes that carry it (`authenticated_planning`, `authenticated_answer`)
+make `ModelRouter` refuse to run without the grant's recipient rule, refuse an
+image, and stop after the first provider attempted -- a failure, a timeout or
+an answer that fails grounding ends the run with `model_unavailable`; there is
+no second company and no second model. No authenticated screenshot exists
+(`max_vision_calls` is the literal `0`). Identifier redaction (email, phone,
+Luhn-valid card, nine-plus digit runs) happens in the worker before the text is
+returned, hashed, stored or sent; the runtime refuses any observation that
+still contains an identifier-shaped run. **Redaction is a reduction in
+exposure, not anonymisation**: names, usernames and short numbers are
+untouched, and patterns over- and under-match. Grounding runs on the redacted
+text the provider received.
+
+**Classification firewall.** Evidence and answers live in `authenticated_observations`
+and `authenticated_answers`, whose `classification` is a `CHECK` that admits one
+value; nothing is written to `research_*`. The context builder excludes an
+authenticated task from every other prompt, episodic memory refuses
+`account_private` summaries, diagnostics carry closed fields only, and a
+planted-marker test proves the marker reaches the approved provider, the private
+tables and nothing else. Deleting a profile removes its evidence and revokes its
+grants; task evidence cascades with the task.
+
+**Residual limits.** The website may record every read (above). A lost read is
+`OUTCOME_UNKNOWN`, never retried, and only a fresh `observe` may follow. The
+redactor and the credential detector are heuristics. The account-identity signal
+exists only for the fixture. The real-account acceptance pass in the M8 plan was
+**deliberately not performed**: the build is unsigned, and Authenticode remains a
+release gate before any real personal account is used.
+
 ## Known gaps
 
 - The broker constrains Chromium, not its host process. A compromised browser

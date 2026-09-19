@@ -421,3 +421,5 @@ browser, and nothing solves a challenge. The document epoch moved 5 -> 7 -> 10
 across those steps in one reused session, which is the other thing this script
 shows: the browser persists, and every ref is bound to the document that issued
 it.
+
+**Account reading is separate (M8a S3).** Authenticated account reading uses its own grant kind, tables, task classes and classification (`account_private`). Public research queries filter on `public_research` grants; account-private content never enters research context.

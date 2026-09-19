@@ -227,3 +227,5 @@ Do not disable Smart App Control or WDAC to run an unsigned build; sign it.
 - The bundled demo clinic site is the deterministic test fixture; no real
   clinic website is supported.
 - Only Windows x64 is packaged.
+
+**M8a S3 packaging note.** Authenticated reading adds no new binary: it uses the bundled full Chromium and the S0 broker. Profiles live under the user data directory (`LUMI_BROWSER_PROFILE_ROOT`), not in the bundle. No new packaged-build run was performed for S3.

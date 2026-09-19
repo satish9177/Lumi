@@ -154,3 +154,7 @@ the real `OpenAIRealtimeProvider` code.
   instruction update; Lumi works around both as described above.
 - The live checks prove the pipeline with synthetic speech, not recognition
   quality on real accents, noise or long conversations.
+
+## Authenticated account reading (Milestone 8a S3)
+
+The two private task classes, `authenticated_planning` and `authenticated_answer`, route to exactly one provider named by the grant's recipient id, chosen by trusted main-process configuration, never by the model or renderer. A permit is mandatory (`recipient_required` otherwise), images are forbidden, there is zero failover, and routing stops after the first attempted provider, including on `invalid_output`. If that provider is unavailable the task stops; the private page is not sent elsewhere. Redaction hides identifiers but is not anonymisation.

@@ -1798,3 +1798,7 @@ strictly better, and every later slice depends on it.
 11. **Is the roadmap's M8 wording correct?** No. Re-scope it: `local_form_draft`
     rather than "bounded form preparation", and "several unadapted **simple**
     form layouts" rather than "several unadapted form layouts".
+
+---
+
+**Status (20 September 2026): M8a S3 implemented** - see `docs/reviews/milestone-8-s3.md`. M8a is complete; the real-GitHub manual pass was deferred by design (Authenticode release gate) and S3 acceptance used synthetic accounts only. **M8b (S4-S6) has not started.**
