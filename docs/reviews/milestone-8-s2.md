@@ -11,7 +11,7 @@ Implementation report. Branch `lumi-agent-v2`.
 | Starting SHA | `6961e7d0e176b9af2b5944e9c8fbefd6135dfd74` (M8a S1 complete, including the documentation correction) |
 | Architecture review | `docs/plans/milestone-8.md` §§8, 22b, 27 (S2 exit criteria) |
 | Final SHA (implementation) | `48e9484` (`feat(agent): add manual login takeover (M8a S2)`, 52 files) |
-| Final SHA (documentation) | this commit's own hash cannot be included in its own content — recorded in a short follow-up correction commit, matching M8a S1's `2cf7651` precedent |
+| Final SHA (documentation) | `11b535d0002bab321dbef6603eaa94a8aa5bb9fe`, then this correction commit recording that SHA |
 | Migration | `0006` → `0007` |
 
 **Commit structure.** Two commits: `48e9484` (`feat(agent): add manual login
