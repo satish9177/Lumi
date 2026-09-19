@@ -45,6 +45,21 @@ EXPECTED_OPERATIONS = {
     "research_scroll",
     "research_history",
     "research_tab",
+    # Milestone 8a S3: the five ACCOUNT_READ operations, in the persistent
+    # profile's own read session. No search, no scroll-by-key, no click.
+    "authenticated_navigate",
+    "authenticated_observe",
+    "authenticated_reveal",
+    "authenticated_history",
+    "authenticated_tab",
+}
+
+AUTHENTICATED_OPERATIONS = {
+    "authenticated_navigate",
+    "authenticated_observe",
+    "authenticated_reveal",
+    "authenticated_history",
+    "authenticated_tab",
 }
 
 RESEARCH_OPERATIONS = {
@@ -146,7 +161,9 @@ def test_the_public_page_operation_is_read_only_and_never_retried_without_approv
     others = [
         REGISTRY.get(name)
         for name in REGISTRY.names()
-        if name != "inspect_public_page" and name not in RESEARCH_OPERATIONS
+        if name != "inspect_public_page"
+        and name not in RESEARCH_OPERATIONS
+        and name not in AUTHENTICATED_OPERATIONS
     ]
     assert all(op is not None and op.target is OperationTarget.REVIEWED_SITE for op in others)
 

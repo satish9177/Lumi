@@ -72,6 +72,20 @@ const agentApi: AgentApi = {
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineResearchScope, grantId, expectedRevision),
   runResearch: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.runResearch),
   stopResearch: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.stopResearch),
+  // Authenticated account reading. The user's question, an opaque profile id
+  // and one provider id main itself offered; then an id/revision pair from the
+  // card on screen. `grantAuthenticatedScope` is the trusted click and the only
+  // route to an active scope. No channel accepts a URL, a selector, a cookie, a
+  // profile path, page content, a step, a scope or a free-form provider name.
+  getAuthenticatedOptions: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getAuthenticatedOptions),
+  createAuthenticatedTask: (objective: string, profileId: string, recipientId: string) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.createAuthenticatedTask, objective, profileId, recipientId),
+  grantAuthenticatedScope: (grantId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.grantAuthenticatedScope, grantId, expectedRevision),
+  declineAuthenticatedScope: (grantId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineAuthenticatedScope, grantId, expectedRevision),
+  runAuthenticated: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.runAuthenticated),
+  stopAuthenticated: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.stopAuthenticated),
   listPreferences: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.listPreferences),
   forgetPreference: (key: PreferenceKey) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.forgetPreference, key),
   getDiagnostics: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getDiagnostics),

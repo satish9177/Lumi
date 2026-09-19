@@ -24,7 +24,7 @@ that could return one.
 import uuid
 from datetime import timedelta
 
-from sqlalchemy import Row, and_, delete, func, insert, or_, select, update
+from sqlalchemy import Row, and_, case, delete, func, insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.db.tables import browser_profiles
@@ -271,6 +271,20 @@ class BrowserProfileRepository:
         }
         if account_fingerprint is not None:
             values["account_fingerprint"] = account_fingerprint
+            # Milestone 8a S3: signing in as a *different* account than the one
+            # on record voids every grant bound to the old one, atomically with
+            # the row change. The consuming statement compares fingerprints as
+            # well; this makes the epoch say so.
+            values["revoke_epoch"] = browser_profiles.c.revoke_epoch + case(
+                (
+                    and_(
+                        browser_profiles.c.account_fingerprint.is_not(None),
+                        browser_profiles.c.account_fingerprint != account_fingerprint,
+                    ),
+                    1,
+                ),
+                else_=0,
+            )
         result = await self._connection.execute(
             update(browser_profiles)
             .where(
@@ -278,6 +292,55 @@ class BrowserProfileRepository:
                 browser_profiles.c.status.in_(_LIVE),
             )
             .values(**values)
+            .returning(*browser_profiles.c)
+        )
+        row = result.one_or_none()
+        return _profile(row) if row is not None else None
+
+    async def invalidate_account(self, *, profile_id: uuid.UUID) -> BrowserProfile | None:
+        """The browser is signed in as somebody the profile does not describe.
+
+        `revoke_epoch` goes up (every grant bound to the old epoch is unusable
+        from this statement on), the status goes back to `NEEDS_LOGIN`, and the
+        recorded fingerprint is cleared: it described an account the session no
+        longer is. Only the S2 human flow can record a new one.
+        """
+        result = await self._connection.execute(
+            update(browser_profiles)
+            .where(
+                browser_profiles.c.id == profile_id,
+                browser_profiles.c.status.in_(_LIVE),
+            )
+            .values(
+                status=ProfileStatus.NEEDS_LOGIN.value,
+                account_fingerprint=None,
+                revoke_epoch=browser_profiles.c.revoke_epoch + 1,
+                revision=browser_profiles.c.revision + 1,
+                updated_at=func.now(),
+            )
+            .returning(*browser_profiles.c)
+        )
+        row = result.one_or_none()
+        return _profile(row) if row is not None else None
+
+    async def mark_needs_login(self, *, profile_id: uuid.UUID) -> BrowserProfile | None:
+        """The session ended (a login surface appeared during an agent read).
+
+        The epoch is *not* bumped: signing back in as the same account should
+        let the same grant continue, if its own window and budgets still hold.
+        The fingerprint check is what stops a different account inheriting it.
+        """
+        result = await self._connection.execute(
+            update(browser_profiles)
+            .where(
+                browser_profiles.c.id == profile_id,
+                browser_profiles.c.status == ProfileStatus.AUTHENTICATED.value,
+            )
+            .values(
+                status=ProfileStatus.NEEDS_LOGIN.value,
+                revision=browser_profiles.c.revision + 1,
+                updated_at=func.now(),
+            )
             .returning(*browser_profiles.c)
         )
         row = result.one_or_none()
@@ -310,6 +373,9 @@ class BrowserProfileRepository:
                 lease_runtime_generation=None,
                 lease_expires_at=None,
                 deleted_at=func.now(),
+                # A deleted profile authorises nothing: bump the epoch so any
+                # grant still bound to it is unusable from this statement on.
+                revoke_epoch=browser_profiles.c.revoke_epoch + 1,
                 revision=browser_profiles.c.revision + 1,
                 updated_at=func.now(),
             )

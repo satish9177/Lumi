@@ -6,6 +6,8 @@ import {
   CLINIC_INFO_TOPICS,
   UNRESOLVED_ACTION_STATUSES,
   type AgentActionView,
+  type AgentAuthenticatedOptions,
+  type AgentAuthenticatedView,
   type AgentBookingCriteria,
   type AgentClinicInfoQuery,
   type AgentDisclosureRecipient,
@@ -26,6 +28,10 @@ import {
 } from './agent-runtime-supervisor'
 import type { AnswerOutcome, PageObservationDetail } from '../agent/page-answer'
 import type { ResearchAnswerOutcome } from '../agent/research-answer'
+import type { AuthenticatedAnswerOutcome } from '../agent/authenticated-answer'
+import type {
+  AuthenticatedDecision, AuthenticatedPlanOutcome, AuthenticatedStepChoice
+} from '../agent/authenticated-planner'
 import type { ResearchDecision, ResearchPlanOutcome, ResearchStepChoice } from '../agent/research-planner'
 import { PublicUrlPolicy, UrlPolicyError, describeRefusal } from '../agent/public-url-policy'
 import {
@@ -40,6 +46,8 @@ import {
   parseClinicInfo,
   parseCriteriaRevision,
   parseEventPage,
+  parseAuthenticated,
+  parseAuthenticatedStep,
   parseResearch,
   parseResearchStep,
   parseSearch,
@@ -47,6 +55,8 @@ import {
   projectRuntimeError,
   type CriteriaRevision,
   type InspectionDetail,
+  type AuthenticatedDetail,
+  type AuthenticatedStepOutcome,
   type ResearchDetail,
   type ResearchStepOutcome,
   type TaskCancellation
@@ -341,6 +351,49 @@ export interface ResearchSupport {
 
 type AgentResearchViewInput = ResearchDetail['view']
 
+/**
+ * What main needs to offer authenticated account reading (Milestone 8a S3): the
+ * bounded planner and the answer step. Both are **pinned to one recipient per
+ * call** -- the recipient comes from the confirmed grant and nowhere else -- and
+ * neither has a failover path.
+ */
+export interface AuthenticatedSupport {
+  planner?: {
+    recipients(): AgentDisclosureRecipient[]
+    next(input: {
+      objective: string
+      view: AgentAuthenticatedView
+      taskId: string
+      recipient: AgentDisclosureRecipient
+    }): Promise<AuthenticatedPlanOutcome>
+  }
+  answerer?: {
+    recipients(): AgentDisclosureRecipient[]
+    answer(input: {
+      objective: string
+      view: AgentAuthenticatedView
+      recipient: AgentDisclosureRecipient
+      stopReason: AgentResearchStopReason
+      taskId: string
+    }): Promise<AuthenticatedAnswerOutcome>
+  }
+}
+
+/**
+ * How many refused steps an authenticated loop absorbs by re-observing before
+ * it stops. Smaller than public research's: this is somebody's account.
+ */
+const AUTHENTICATED_MAX_REFUSALS = 2
+
+export function parseAuthenticatedObjective(value: unknown): string {
+  const objective = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : ''
+  // eslint-disable-next-line no-control-regex
+  if (!objective || objective.length > MAX_OBJECTIVE || /[\x00-\x1f\x7f]/.test(objective)) {
+    fail('invalid_request', 'Ask a question about your account in up to 500 characters.')
+  }
+  return objective
+}
+
 export function parseInspectionQuestion(value: unknown): string {
   const question = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : ''
   // eslint-disable-next-line no-control-regex
@@ -373,7 +426,8 @@ export class AgentTaskController {
     private readonly runtime: RuntimeRequester,
     private readonly store: ActiveTaskStore,
     private readonly inspection?: PageInspectionSupport,
-    private readonly research?: ResearchSupport
+    private readonly research?: ResearchSupport,
+    private readonly authenticated?: AuthenticatedSupport
   ) {}
 
   // ---- plumbing ------------------------------------------------------------
@@ -439,6 +493,12 @@ export class AgentTaskController {
       if (loaded.generation !== generation) fail('runtime_restarted', 'The agent runtime restarted while loading. Showing the latest saved state.')
       research = loaded.detail.view
     }
+    let authenticated: AgentAuthenticatedView | undefined
+    if (task.kind === 'authenticated_read') {
+      const loaded = await this.loadAuthenticated(taskId)
+      if (loaded.generation !== generation) fail('runtime_restarted', 'The agent runtime restarted while loading. Showing the latest saved state.')
+      authenticated = loaded.detail.view
+    }
     const events: AgentEventView[] = []
     let cursor = afterSequence
     for (let page = 0; ; page += 1) {
@@ -469,7 +529,8 @@ export class AgentTaskController {
       actions,
       events,
       ...(inspection ? { inspection } : {}),
-      ...(research ? { research } : {})
+      ...(research ? { research } : {}),
+      ...(authenticated ? { authenticated } : {})
     }
   }
 
@@ -671,6 +732,16 @@ export class AgentTaskController {
   async closeActiveTask(): Promise<AgentResult<null>> {
     return this.exclusive('task', async () => {
       await this.assertNoUnresolvedAction()
+      // Closing an account-reading task releases its browser: the scope is
+      // withdrawn (best effort) so a sign-in window can open this profile again.
+      const activeId = await this.store.read()
+      if (activeId) {
+        const active = await this.snapshot(activeId, 0).catch(() => undefined)
+        if (active?.task.kind === 'authenticated_read' && active.authenticated?.grant &&
+            (active.authenticated.grant.status === 'ACTIVE' || active.authenticated.grant.status === 'PENDING')) {
+          await this.call('POST', `/tasks/${activeId}/authenticated/revoke`, { reason: 'user_stopped' }, TIMEOUTS.write).catch(() => undefined)
+        }
+      }
       await this.store.clear()
       return null
     })
@@ -1197,6 +1268,338 @@ export class AgentTaskController {
     }, TIMEOUTS.write)
     const recorded = parseResearch(reply.body)
     if (recorded.view.taskId !== taskId || !recorded.view.answer) throw new WireError('research.answer')
+    return await this.snapshot(taskId, 0)
+  }
+
+
+  // ---- authenticated account reading (Milestone 8a S3) -----------------------------
+  //
+  // Main owns the planner, so main owns this loop -- and, exactly as for public
+  // research, it may not decide whether a step is allowed: every iteration
+  // submits one step to the runtime, which checks it against the scope the user
+  // confirmed. What is new here is what main may *not* choose at all:
+  //
+  //  * **The provider.** It is read from the confirmed grant, once, and passed to
+  //    every model call. There is no code path that names another.
+  //  * **Whether to continue after a pause.** A credential surface, a different
+  //    account, an unknown account or a departure from the site each end the run
+  //    in deterministic code. The planner is not consulted and no provider is
+  //    called.
+
+  private requireAuthenticated(): AuthenticatedSupport {
+    if (!this.authenticated || !this.authenticated.planner || !this.authenticated.answerer) {
+      fail('authenticated_unavailable', 'No AI provider is configured for reading your account, so Lumi will not start. Nothing was opened.')
+    }
+    return this.authenticated
+  }
+
+  /** The providers the trusted UI may offer: those that could both plan and answer. */
+  private authenticatedRecipients(support: AuthenticatedSupport): AgentDisclosureRecipient[] {
+    const answering = new Set(support.answerer?.recipients() ?? [])
+    const recipients = (support.planner?.recipients() ?? []).filter((recipient) => answering.has(recipient))
+    if (recipients.length === 0) {
+      fail('authenticated_unavailable', 'No AI provider is configured for reading your account, so Lumi will not start. Nothing was opened.')
+    }
+    return recipients
+  }
+
+  async getAuthenticatedOptions(): Promise<AgentResult<AgentAuthenticatedOptions>> {
+    try {
+      return { ok: true, value: { recipients: this.authenticatedRecipients(this.requireAuthenticated()) } }
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+  }
+
+  private async loadAuthenticated(taskId: string): Promise<{ detail: AuthenticatedDetail; generation: string }> {
+    const reply = await this.call('GET', `/tasks/${taskId}/authenticated`, undefined, TIMEOUTS.read)
+    const detail = parseAuthenticated(reply.body)
+    if (detail.view.taskId !== taskId) throw new WireError('authenticated.task_id')
+    return { detail, generation: reply.generation }
+  }
+
+  /**
+   * Create an authenticated-read task and show its trusted disclosure card.
+   * Nothing is opened, navigated or read, and nothing leaves this computer: the
+   * scope authorises work only after the trusted Allow click, a separate IPC
+   * channel that no voice command, typed sentence or model reaches.
+   *
+   * `recipientId` must be one of the ids main itself offered. Anything else --
+   * a name, a URL, a provider that is not configured -- is refused before the
+   * runtime is contacted.
+   */
+  async createAuthenticatedTask(
+    objectiveValue: unknown, profileIdValue: unknown, recipientIdValue: unknown, origin?: TaskOrigin
+  ): Promise<AgentResult<AgentTaskSnapshot>> {
+    let objective: string
+    let profileId: string
+    let recipient: AgentDisclosureRecipient
+    let provenance: Record<string, string>
+    try {
+      const support = this.requireAuthenticated()
+      const offered = this.authenticatedRecipients(support)
+      objective = parseAuthenticatedObjective(objectiveValue)
+      if (typeof profileIdValue !== 'string' || !UUID.test(profileIdValue)) fail('invalid_request', 'Choose one of your signed-in profiles.')
+      profileId = profileIdValue
+      if (typeof recipientIdValue !== 'string' || !(offered as readonly string[]).includes(recipientIdValue)) {
+        fail('invalid_request', 'Choose one of the AI providers Lumi offered.')
+      }
+      recipient = recipientIdValue as AgentDisclosureRecipient
+      provenance = originFields(origin, objective)
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    return this.exclusive('task', async () => {
+      if (origin) {
+        const activeId = await this.store.read()
+        if (activeId) {
+          const active = await this.snapshot(activeId, 0).catch(() => undefined)
+          if (active && (active.task.requestId === origin.turnId || active.task.voiceTurnId === origin.turnId)) return active
+        }
+      }
+      await this.assertNoUnresolvedAction()
+      const request = {
+        type: 'authenticated_read',
+        classification: 'account_private',
+        ...provenance,
+        objective,
+        profile_id: profileId
+      }
+      const reply = await this.call('POST', '/tasks', { request }, TIMEOUTS.write)
+      const task = parseTask(reply.body)
+      if (task.kind !== 'authenticated_read' || task.authenticated?.objective !== objective) {
+        throw new WireError('authenticated.task')
+      }
+      const prepared = await this.call('POST', `/tasks/${task.taskId}/authenticated/prepare`, { recipient }, TIMEOUTS.write)
+      if (parseAuthenticated(prepared.body).view.taskId !== task.taskId) throw new WireError('authenticated.prepare')
+      await this.store.write(task.taskId)
+      return await this.snapshot(task.taskId, 0)
+    })
+  }
+
+  /**
+   * The trusted click. Confirms exactly the scope that was on screen, by id and
+   * revision. There is no other route to an active scope.
+   */
+  grantAuthenticatedScope(grantId: unknown, expectedRevision: unknown): Promise<AgentResult<AgentTaskSnapshot>> {
+    return this.authenticatedScopeMutation(grantId, expectedRevision, 'grant')
+  }
+
+  /** Decline the card. Nothing was opened and nothing left this computer. */
+  declineAuthenticatedScope(grantId: unknown, expectedRevision: unknown): Promise<AgentResult<AgentTaskSnapshot>> {
+    return this.authenticatedScopeMutation(grantId, expectedRevision, 'decline')
+  }
+
+  private async authenticatedScopeMutation(
+    grantIdValue: unknown, revisionValue: unknown, kind: 'grant' | 'decline'
+  ): Promise<AgentResult<AgentTaskSnapshot>> {
+    let grantId: string
+    let expectedRevision: number
+    try {
+      grantId = parseActionId(grantIdValue)
+      expectedRevision = parseExpectedRevision(revisionValue)
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    return this.exclusive('authenticated', async () => {
+      const taskId = await this.activeTaskId()
+      const { detail } = await this.loadAuthenticated(taskId)
+      const grant = detail.view.grant
+      if (!grant || grant.grantId !== grantId) {
+        fail('not_found', 'That account-reading permission does not belong to the current task.')
+      }
+      if (grant.revision !== expectedRevision) {
+        throw new AgentRequestError({
+          code: 'stale_revision',
+          message: 'The account-reading permission changed since you reviewed it. Review the current card.',
+          currentRevision: grant.revision
+        })
+      }
+      const body = kind === 'grant'
+        ? { grant_id: grantId, expected_revision: expectedRevision }
+        : { grant_id: grantId, expected_revision: expectedRevision, reason: 'user_declined' as const }
+      const reply = await this.call('POST', `/tasks/${taskId}/authenticated/${kind === 'grant' ? 'grant' : 'revoke'}`, body, TIMEOUTS.write)
+      const updated = parseAuthenticated(reply.body)
+      if (updated.view.taskId !== taskId) throw new WireError(`authenticated.${kind}`)
+      return await this.snapshot(taskId, 0)
+    })
+  }
+
+  /** Stop now: withdraw the scope, release the browser, keep the (redacted) evidence. */
+  async stopAuthenticated(): Promise<AgentResult<AgentTaskSnapshot>> {
+    return this.exclusive('authenticated', async () => {
+      const taskId = await this.activeTaskId()
+      const reply = await this.call('POST', `/tasks/${taskId}/authenticated/revoke`, { reason: 'user_stopped' }, TIMEOUTS.write)
+      const updated = parseAuthenticated(reply.body)
+      if (updated.view.taskId !== taskId) throw new WireError('authenticated.revoke')
+      return await this.snapshot(taskId, 0)
+    })
+  }
+
+  /**
+   * Run the bounded account-reading loop under the active scope.
+   *
+   * One planner call, one step, one redacted observation, then plan again -- and
+   * every exit is explicit: the goal, a budget, a refusal, a deterministic pause,
+   * or an approved provider that could not answer. Nothing here retries a step,
+   * and no exit sends account text to anybody but the grant's recipient.
+   */
+  async runAuthenticated(): Promise<AgentResult<AgentTaskSnapshot>> {
+    let support: AuthenticatedSupport
+    try {
+      support = this.requireAuthenticated()
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    return this.exclusive('authenticated', async () => {
+      const taskId = await this.activeTaskId()
+      let { detail } = await this.loadAuthenticated(taskId)
+      if (detail.task.kind !== 'authenticated_read') fail('invalid_request', 'That step does not apply to this kind of task.')
+      if (detail.view.answer) return await this.snapshot(taskId, 0)
+      const grant = detail.view.grant
+      if (!grant || grant.status !== 'ACTIVE') {
+        fail('authenticated_not_granted', 'Allow account reading on the card first. Nothing has been opened.')
+      }
+      if (grant.expiresAt && Date.parse(grant.expiresAt) <= Date.now()) {
+        fail('authenticated_not_granted', 'That account-reading permission has expired. Nothing was opened.')
+      }
+      // The provider is the grant's and only the grant's. If it is no longer
+      // configured the run stops here; it is never replaced by another.
+      const recipient = grant.scope.recipient
+      const planners = support.planner!.recipients()
+      const answerers = support.answerer!.recipients()
+      if (!planners.includes(recipient) || !answerers.includes(recipient)) {
+        fail('model_unavailable', 'The AI provider you approved is not available. Lumi stopped and did not send your account pages to another provider.')
+      }
+      const objective = detail.view.objective
+      const budgets = grant.scope.budgets
+      const started = Date.now()
+      let plannerCalls = detail.view.usage.plannerCalls
+      let refusals = 0
+      let forced: AuthenticatedStepChoice | undefined
+
+      for (let iteration = 0; ; iteration += 1) {
+        const view = detail.view
+        if (view.pauseReason) return await this.snapshot(taskId, 0)
+        const overBudget = iteration >= budgets.maxSteps + 1 ||
+          view.usage.steps >= budgets.maxSteps ||
+          view.usage.observations >= budgets.maxObservations ||
+          plannerCalls >= budgets.maxPlannerCalls ||
+          (Date.now() - started) / 1_000 > budgets.maxActiveSeconds
+        if (overBudget) return await this.finishAuthenticated(taskId, support, recipient, 'budget_exhausted', plannerCalls)
+
+        let step: AuthenticatedStepChoice
+        if (forced) {
+          step = forced
+          forced = undefined
+        } else {
+          plannerCalls += 1
+          let decision: AuthenticatedDecision
+          try {
+            decision = (await support.planner!.next({ objective, view, taskId, recipient })).decision
+          } catch {
+            // The approved provider failed, or answered outside the contract.
+            // Stop: the account pages are not sent anywhere else.
+            fail('model_unavailable', 'The AI provider you approved could not plan the next step. Lumi stopped and did not send your account pages to another provider.')
+          }
+          if (decision.kind === 'finish') return await this.finishAuthenticated(taskId, support, recipient, 'goal_reached', plannerCalls)
+          if (decision.kind === 'stop') return await this.finishAuthenticated(taskId, support, recipient, decision.stopReason, plannerCalls)
+          step = decision.step
+        }
+
+        let outcome: AuthenticatedStepOutcome
+        try {
+          outcome = await this.submitAuthenticatedStep(taskId, step, plannerCalls)
+        } catch (error) {
+          const agentError = toAgentError(error)
+          if (agentError.code === 'authenticated_budget_exhausted') {
+            return await this.finishAuthenticated(taskId, support, recipient, 'budget_exhausted', plannerCalls)
+          }
+          if (agentError.code === 'authenticated_refused' && refusals < AUTHENTICATED_MAX_REFUSALS) {
+            refusals += 1
+            forced = { operation: 'observe', tab: 't1' }
+            ;({ detail } = await this.loadAuthenticated(taskId))
+            continue
+          }
+          if (agentError.code === 'authenticated_refused' || agentError.code === 'authenticated_in_flight' ||
+              agentError.code === 'authenticated_unavailable' || agentError.code === 'authenticated_not_granted') {
+            // The permission stopped being usable (an account change bumps the
+            // epoch), or the profile needs a person. Report the state; ask no model.
+            if (agentError.code === 'authenticated_unavailable' || agentError.code === 'authenticated_not_granted') {
+              return await this.snapshot(taskId, 0)
+            }
+            return await this.finishAuthenticated(taskId, support, recipient, 'blocked', plannerCalls)
+          }
+          throw error
+        }
+        detail = { view: outcome.view, task: outcome.task }
+        // A deterministic pause: no planner, no provider, no answer.
+        if (outcome.pauseReason) return await this.snapshot(taskId, 0)
+        if (outcome.outcome !== 'SUCCEEDED') {
+          refusals += 1
+          if (refusals > AUTHENTICATED_MAX_REFUSALS) {
+            return await this.finishAuthenticated(taskId, support, recipient, 'blocked', plannerCalls)
+          }
+          // A lost read may have reached the site. Look; do not repeat.
+          forced = { operation: 'observe', tab: 't1' }
+        }
+      }
+    })
+  }
+
+  private async submitAuthenticatedStep(
+    taskId: string, step: AuthenticatedStepChoice, plannerCalls: number
+  ): Promise<AuthenticatedStepOutcome> {
+    const requestId = `req_${randomUUID().replaceAll('-', '')}`
+    const reply = await this.call('POST', `/tasks/${taskId}/authenticated/steps`, {
+      request_id: requestId,
+      step,
+      planner_calls: plannerCalls
+    }, TIMEOUTS.execute)
+    const outcome = parseAuthenticatedStep(reply.body)
+    if (outcome.view.taskId !== taskId) throw new WireError('authenticated.step')
+    return outcome
+  }
+
+  /**
+   * Compose one grounded answer from the collected redacted observations and
+   * record it. The account is never opened again, and the answer goes to the
+   * grant's recipient only.
+   */
+  private async finishAuthenticated(
+    taskId: string,
+    support: AuthenticatedSupport,
+    recipient: AgentDisclosureRecipient,
+    stopReason: AgentResearchStopReason,
+    plannerCalls: number
+  ): Promise<AgentTaskSnapshot> {
+    const { detail } = await this.loadAuthenticated(taskId)
+    if (detail.view.answer) return await this.snapshot(taskId, 0)
+    const outcome = await support.answerer!.answer({
+      objective: detail.view.objective,
+      view: detail.view,
+      recipient,
+      stopReason,
+      taskId
+    })
+    if (outcome.kind === 'unavailable') {
+      // The evidence is durable. Nothing was sent to another provider and
+      // nothing is recorded, so the answer can be composed later.
+      fail('model_unavailable', 'Lumi read your account pages, but the AI provider you approved is not available. It did not send them to another provider.')
+    }
+    const reply = await this.call('POST', `/tasks/${taskId}/authenticated/answer`, {
+      answer: {
+        status: outcome.answer.status,
+        stop_reason: outcome.answer.stopReason,
+        answer: outcome.answer.answer,
+        evidence: outcome.answer.evidence
+      },
+      provider: outcome.provider,
+      model: outcome.model,
+      planner_calls: plannerCalls
+    }, TIMEOUTS.write)
+    const recorded = parseAuthenticated(reply.body)
+    if (recorded.view.taskId !== taskId || !recorded.view.answer) throw new WireError('authenticated.answer')
     return await this.snapshot(taskId, 0)
   }
 

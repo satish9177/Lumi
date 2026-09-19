@@ -83,6 +83,12 @@ class DispatchRequest(BaseModel):
     #: worker refuses a session id it has never opened rather than creating
     #: one, so a task can never be handed a browser with no history.
     session_id: uuid.UUID | None = None
+    #: Milestone 8a S3: the persistent profile an authenticated step runs in.
+    #: A *different* kind of id from `session_id`, on purpose. The worker
+    #: refuses a research session id where a profile is expected and a profile
+    #: id where a research session is expected; neither ever stands in for the
+    #: other.
+    profile_id: uuid.UUID | None = None
     #: Validated against the operation's input model by the worker. It is never
     #: passed to the browser as-is.
     input: dict[str, Any] = Field(default_factory=dict)

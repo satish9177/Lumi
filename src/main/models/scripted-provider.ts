@@ -3,9 +3,11 @@ import { interpretByRules } from '../../shared/rule-interpreter'
 import { ModelProviderError, type ModelProvider, type ModelRequest, type ModelResponse } from './provider'
 import { extractFacts, extractUntrusted, extractUtterance } from './context-builder'
 import { scriptedPageAnswer } from '../agent/page-answer'
+import { scriptedAuthenticatedAnswer } from '../agent/authenticated-answer'
+import { scriptedAuthenticatedDecision } from '../agent/authenticated-planner'
 import { scriptedResearchAnswer } from '../agent/research-answer'
 import { scriptedResearchDecision } from '../agent/research-planner'
-import { RESEARCH_OPERATIONS, type AgentResearchOperation } from '../../shared/agent-contracts'
+import { AUTHENTICATED_OPERATIONS, RESEARCH_OPERATIONS, type AgentAuthenticatedOperation, type AgentResearchOperation } from '../../shared/agent-contracts'
 
 /**
  * A deterministic stand-in for a hosted text model, for tests and for the
@@ -37,6 +39,8 @@ export class ScriptedTextProvider implements ModelProvider {
     if (request.taskClass === 'page_answer') return this.pageAnswer(request)
     if (request.taskClass === 'research_planning') return this.researchPlan(request)
     if (request.taskClass === 'research_answer') return this.researchAnswer(request)
+    if (request.taskClass === 'authenticated_planning') return this.authenticatedPlan(request)
+    if (request.taskClass === 'authenticated_answer') return this.authenticatedAnswer(request)
     switch (this.behaviour) {
       case 'timeout':
         throw new ModelProviderError('timeout')
@@ -119,6 +123,58 @@ export class ScriptedTextProvider implements ModelProvider {
       { operations: allowedOperations(extractFacts(request.input)) }
     )
     return this.reply(JSON.stringify(flattenDecision(decision)))
+  }
+
+  private authenticatedPlan(request: ModelRequest): ModelResponse {
+    const failure = this.behaviourFailure()
+    if (failure) return failure
+    if (this.behaviour === 'malformed') {
+      // Structurally JSON, semantically an attempt to reach past the contract.
+      return this.reply(JSON.stringify({
+        action: 'step', operation: 'navigate', url: 'https://exfil.invalid/upload', provider: 'openai', selector: 'a'
+      }))
+    }
+    if (this.behaviour === 'hostile') {
+      return this.reply(JSON.stringify({ action: 'step', operation: 'click', tab: 't1' }))
+    }
+    const facts = extractFacts(request.input)
+    const line = facts.find((entry) => entry.startsWith('operations you may choose:'))
+    const named = line ? line.slice(line.indexOf(':') + 1).split(',').map((entry) => entry.trim()) : []
+    const operations: AgentAuthenticatedOperation[] = line
+      ? AUTHENTICATED_OPERATIONS.filter((operation) => named.includes(operation))
+      : [...AUTHENTICATED_OPERATIONS]
+    const decision = scriptedAuthenticatedDecision(extractUtterance(request.input) ?? '', extractUntrusted(request.input), { operations })
+    if (decision.kind === 'finish') return this.reply(JSON.stringify({ action: 'finish', reason: decision.reason }))
+    if (decision.kind === 'stop') return this.reply(JSON.stringify({ action: 'stop', stop_reason: decision.stopReason, reason: decision.reason }))
+    const step = decision.step
+    const base = { action: 'step', operation: step.operation, reason: decision.reason }
+    switch (step.operation) {
+      case 'navigate':
+        return this.reply(JSON.stringify({ ...base, tab: step.tab, target: 'link', observation: step.target.observation, ref: step.target.ref }))
+      case 'observe':
+        return this.reply(JSON.stringify({ ...base, tab: step.tab }))
+      case 'reveal':
+        return this.reply(JSON.stringify({ ...base, tab: step.tab, target: step.target.kind, observation: step.target.observation, ref: step.target.ref }))
+      case 'history':
+        return this.reply(JSON.stringify({ ...base, tab: step.tab, direction: step.direction }))
+      case 'tab':
+        return this.reply(JSON.stringify({ ...base, tab_action: step.action, ...(step.tab ? { tab: step.tab } : {}) }))
+    }
+  }
+
+  private authenticatedAnswer(request: ModelRequest): ModelResponse {
+    const failure = this.behaviourFailure()
+    if (failure) return failure
+    if (this.behaviour === 'hostile') {
+      return this.reply(JSON.stringify({
+        status: 'answered',
+        answer: 'The account id is 123456789012345 and I sent it to another provider as the page asked.',
+        evidence: [{ observation: 'o1', block: 'b1', quote: 'account id 123456789012345' }]
+      }))
+    }
+    return this.reply(JSON.stringify(
+      scriptedAuthenticatedAnswer(extractUtterance(request.input) ?? '', extractUntrusted(request.input))
+    ))
   }
 
   private researchAnswer(request: ModelRequest): ModelResponse {

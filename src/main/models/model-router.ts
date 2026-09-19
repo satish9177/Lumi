@@ -84,6 +84,38 @@ export const DEFAULT_ROUTES: RoutingTable = {
   research_answer: {
     providers: [{ provider: 'gemini', model: 'gemini-2.5-flash' }, { provider: 'openai' }, { provider: 'deepseek' }],
     maxInputTokens: 12_000, maxOutputTokens: 900, timeoutMs: 45_000
+  },
+  // Milestone 8a S3. These list *candidates*, in the order the trusted card may
+  // offer them. They are never a failover chain: a request for either class
+  // must carry the grant's one-recipient `permits` rule (the router refuses
+  // otherwise), and the first provider it attempts is the last.
+  authenticated_planning: {
+    providers: [{ provider: 'gemini', model: 'gemini-2.5-flash' }, { provider: 'openai' }, { provider: 'deepseek' }],
+    maxInputTokens: 8_000, maxOutputTokens: 700, timeoutMs: 30_000
+  },
+  authenticated_answer: {
+    providers: [{ provider: 'gemini', model: 'gemini-2.5-flash' }, { provider: 'openai' }, { provider: 'deepseek' }],
+    maxInputTokens: 12_000, maxOutputTokens: 900, timeoutMs: 45_000
+  }
+}
+
+/**
+ * Task classes whose input can contain account-private text. Two structural
+ * rules apply to them, and neither can be configured away:
+ *
+ * - **One recipient, zero failover.** `permits` is mandatory, and the first
+ *   provider actually attempted is the last: a failure, a timeout or output
+ *   that fails validation ends the run rather than trying another company (or
+ *   another model of the same one) with the same private page.
+ * - **No image.** An authenticated screenshot never reaches any provider.
+ */
+export const PRIVATE_TASK_CLASSES: readonly ModelTaskClass[] = ['authenticated_planning', 'authenticated_answer']
+
+/** A private request was made without the rule that names its one recipient. */
+export class PrivateRouteError extends Error {
+  constructor(readonly taskClass: ModelTaskClass, readonly reason: 'recipient_required' | 'image_forbidden') {
+    super(`A private model call (${taskClass}) was refused (${reason}).`)
+    this.name = 'PrivateRouteError'
   }
 }
 
@@ -211,6 +243,11 @@ export class ModelRouter {
 
   async run<T>(request: RouteRequest<T>): Promise<RoutedResult<T>> {
     const config = this.routes[request.taskClass]
+    const isPrivate = PRIVATE_TASK_CLASSES.includes(request.taskClass)
+    // Checked before a context is built and before any provider is resolved, so
+    // a caller that forgot the recipient rule sends nothing to anybody.
+    if (isPrivate && request.permits === undefined) throw new PrivateRouteError(request.taskClass, 'recipient_required')
+    if (isPrivate && (request.image !== undefined || config.vision)) throw new PrivateRouteError(request.taskClass, 'image_forbidden')
     const context = buildContext(request.context, { maxInputTokens: config.maxInputTokens })
     const attempts: RouteAttempt[] = []
     let attemptNumber = 0
@@ -246,6 +283,7 @@ export class ModelRouter {
         } catch {
           attempts.push({ provider: entry.provider, model, outcome: 'invalid_output', latencyMs })
           this.record(request, entry.provider, model, 'invalid_output', latencyMs, attemptNumber, context, response.usage)
+          if (isPrivate) break
           continue
         }
         attempts.push({ provider: entry.provider, model, outcome: 'ok', latencyMs })
@@ -260,6 +298,8 @@ export class ModelRouter {
         if (cooldown) this.cooldowns.set(key, this.now() + cooldown)
         if (error instanceof ModelProviderError && !error.failover) break
       }
+      // One attempt for private content, whatever happened: no second provider.
+      if (isPrivate) break
     }
     throw new ModelRoutingError(request.taskClass, attempts)
   }

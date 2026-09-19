@@ -291,3 +291,70 @@ class ResearchAnswerAlreadyRecordedError(Exception):
     def __init__(self, task_id: uuid.UUID) -> None:
         super().__init__(f"Task {task_id} already has a recorded research answer.")
         self.task_id = task_id
+
+
+# ---- Milestone 8a S3: authenticated account reading ----------------------------
+
+
+class AuthenticatedReadNotConfiguredError(Exception):
+    """No browser worker is attached, so there is no authenticated capability."""
+
+    def __init__(self) -> None:
+        super().__init__("Authenticated account reading is not configured.")
+
+
+class AuthenticatedProfileUnavailableError(Exception):
+    """The profile cannot be read right now, for a stable, deterministic reason.
+
+    Raised *before* any browser is opened: Lumi never opens the browser to "see
+    what happens". `code` is one of `profile_not_found`, `profile_deleted`,
+    `profile_not_authenticated`, `account_fingerprint_unknown`,
+    `profile_takeover_active`, `profile_in_use`, `login_required`,
+    `account_changed`.
+    """
+
+    def __init__(self, code: str) -> None:
+        super().__init__(f"The account profile cannot be read ({code}).")
+        self.code = code
+
+
+class AuthenticatedGrantNotFoundError(Exception):
+    def __init__(self, task_id: uuid.UUID) -> None:
+        super().__init__(f"Task {task_id} has no account-reading scope to work under.")
+        self.task_id = task_id
+
+
+class AuthenticatedGrantNotUsableError(Exception):
+    """The scope exists but authorises nothing right now. Never revived."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(f"The account-reading scope cannot be used: {reason}.")
+        self.reason = reason
+
+
+class AuthenticatedStepRefusedError(Exception):
+    """A step deterministic policy refused. `code` is stable and safe to show."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(f"The account-reading step was refused ({code}).")
+        self.code = code
+
+
+class AuthenticatedBudgetExhaustedError(Exception):
+    def __init__(self, limit: str) -> None:
+        super().__init__(f"The account-reading budget is exhausted ({limit}).")
+        self.limit = limit
+
+
+class AuthenticatedStepInFlightError(Exception):
+    """One operation at a time. A second request is refused, never queued."""
+
+    def __init__(self, action_id: uuid.UUID) -> None:
+        super().__init__(f"Account-reading step {action_id} has not finished yet.")
+        self.action_id = action_id
+
+
+class AuthenticatedAnswerAlreadyRecordedError(Exception):
+    def __init__(self, task_id: uuid.UUID) -> None:
+        super().__init__(f"Task {task_id} already has a recorded account answer.")
+        self.task_id = task_id

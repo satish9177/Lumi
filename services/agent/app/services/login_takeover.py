@@ -109,6 +109,10 @@ class LoginTakeoverService:
         if existing is not None:
             raise TakeoverRefusal("login_attempt_already_open")
 
+        # Milestone 8a S3: an agent read left open on this profile is closed
+        # first. A takeover is the human's interval and always wins; nothing
+        # automated may be running while somebody signs in.
+        await self._profiles.release_read_open(profile_id)
         opened = await self._profiles.open_profile(
             profile_id, kind=BrowserContextKind.AUTHENTICATED_PROFILE, headed=True
         )

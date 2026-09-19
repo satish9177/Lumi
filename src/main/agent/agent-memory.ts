@@ -37,6 +37,14 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // App-authored summaries only: letters, digits, basic punctuation and ₹.
 const SAFE_SUMMARY = /^[\p{L}\p{N} .,:;()/'₹+–-]{1,240}$/u
 
+/**
+ * How private the material behind a summary is. `account_private` material --
+ * anything read through a signed-in account -- is never summarised into memory:
+ * a paraphrase does not declassify it, and a summary is exactly what a later,
+ * unrelated prompt would quote.
+ */
+export type EpisodeClassification = 'public' | 'account_private'
+
 export interface EpisodeView {
   taskId: string
   kind: 'booking_search' | 'booking_outcome' | 'clinic_info'
@@ -112,8 +120,14 @@ export interface PreferenceMemory {
   preferences(): Promise<AgentPreferenceView[]>
   remember(preference: PreferenceValue, turnId: string): Promise<AgentPreferenceView>
   forget(key: PreferenceKey): Promise<AgentPreferenceView[]>
-  recordEpisode(episode: Omit<EpisodeView, 'recordedAt' | 'provenance'> & { sequence: number }): Promise<void>
+  recordEpisode(episode: EpisodeInput): Promise<void>
   episodes(): Promise<EpisodeView[]>
+}
+
+export type EpisodeInput = Omit<EpisodeView, 'recordedAt' | 'provenance'> & {
+  sequence: number
+  /** Omitted means `public`. `account_private` is refused, unconditionally. */
+  classification?: EpisodeClassification
 }
 
 export class AgentMemoryStore implements PreferenceMemory {
@@ -186,7 +200,9 @@ export class AgentMemoryStore implements PreferenceMemory {
     })
   }
 
-  recordEpisode(episode: Omit<EpisodeView, 'recordedAt' | 'provenance'> & { sequence: number }): Promise<void> {
+  recordEpisode(episode: EpisodeInput): Promise<void> {
+    // Refused before anything is queued, sanitised, read or written.
+    if (episode.classification === 'account_private') return Promise.resolve()
     return this.serial(async () => {
       const summary = sanitizeSummary(episode.summary)
       if (!summary || !UUID.test(episode.taskId)) return
@@ -232,7 +248,8 @@ export class EphemeralMemory implements PreferenceMemory {
     return [...this.items]
   }
 
-  async recordEpisode(episode: Omit<EpisodeView, 'recordedAt' | 'provenance'> & { sequence: number }): Promise<void> {
+  async recordEpisode(episode: EpisodeInput): Promise<void> {
+    if (episode.classification === 'account_private') return
     const view: EpisodeView = {
       taskId: episode.taskId, kind: episode.kind, summary: sanitizeSummary(episode.summary),
       recordedAt: new Date(this.now()).toISOString(),

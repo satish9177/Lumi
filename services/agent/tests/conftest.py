@@ -31,7 +31,8 @@ class _TestEnvironment(BaseSettings):
 
 
 TRUNCATE_ALL = (
-    "TRUNCATE research_answers, research_observations, page_observations, browser_dispatches, "
+    "TRUNCATE authenticated_answers, authenticated_observations, research_answers, "
+    "research_observations, page_observations, browser_dispatches, "
     "research_sessions, step_authorizations, task_grants, login_attempts, browser_profiles, "
     "browser_worker_generations, action_attempts, approvals, "
     "actions, runtime_generations, task_events, tasks RESTART IDENTITY"

@@ -51,6 +51,15 @@ from app.api.schemas import (
     TaskEventResponse,
     TaskResponse,
 )
+from app.api.authenticated_schemas import (
+    AuthenticatedResponse,
+    AuthenticatedStepResponse,
+    ConfirmAuthenticatedGrantBody,
+    ExecuteAuthenticatedStepBody,
+    PrepareAuthenticatedBody,
+    RecordAuthenticatedAnswerBody,
+    RevokeAuthenticatedGrantBody,
+)
 from app.db.engine import ping_database
 from app.domain.booking_criteria import BookingCriteria, InvalidBookingCriteriaError
 from app.services.actions import ActionService
@@ -65,6 +74,13 @@ from app.services.clinic_info import (
 from app.domain.errors import BrowserObservationError, DestinationNotAllowedError
 from app.domain.page_observation import PAGE_INSPECTION_TASK_TYPE
 from app.domain.public_url import UrlPolicyError
+from app.domain.authenticated import (
+    AUTHENTICATED_READ_TASK_TYPE,
+    AuthenticatedStepEnvelope,
+    parse_authenticated_step,
+)
+from app.services.authenticated_read import AuthenticatedReadService
+from app.services.authenticated_read import validate_request as validate_authenticated_request
 from app.domain.research import (
     PUBLIC_RESEARCH_TASK_TYPE,
     ResearchRefusal,
@@ -157,6 +173,18 @@ async def create_task(
             validate_research_request(request)
         except (ResearchRefusal, ValueError):
             raise RequestValidationError([]) from None
+    if request.get("type") == AUTHENTICATED_READ_TASK_TYPE:
+        # An authenticated task is never stored without an objective, a profile
+        # and the `account_private` classification. The scope card is a
+        # separate, explicit step after this.
+        try:
+            _, profile_id = validate_authenticated_request(request)
+        except (ResearchRefusal, ValueError):
+            raise RequestValidationError([]) from None
+        # The profile is checked here, before any task exists, and nothing is
+        # opened: a profile that cannot be read never leaves a task behind.
+        authenticated: AuthenticatedReadService = http_request.app.state.authenticated_read_service
+        await authenticated.check_profile(profile_id)
     if request.get("type") == PAGE_INSPECTION_TASK_TYPE:
         inspection: PageInspectionService = http_request.app.state.page_inspection_service
         try:
@@ -778,6 +806,128 @@ async def record_page_answer(
         model=body.model,
     )
     return InspectionResponse.build(view.action, view.observation)
+
+
+# --- Authenticated account reading (Milestone 8a S3) ---------------------------
+#
+# Six routes, shaped exactly like the public-research ones -- and, as there, one
+# of them is different: `authenticated/grant` is the trusted click, and it is the
+# *only* way a scope becomes usable. `authenticated/steps` takes one member of a
+# closed operation union plus a request id; it has no field for a URL, a
+# selector, a script, a method, a header, a cookie, a key, text to type or a
+# provider. Nothing here returns a URL, a cookie or an account identity.
+
+
+def get_authenticated_read_service(request: Request) -> AuthenticatedReadService:
+    service: AuthenticatedReadService = request.app.state.authenticated_read_service
+    return service
+
+
+AuthenticatedServiceDep = Annotated[
+    AuthenticatedReadService, Depends(get_authenticated_read_service)
+]
+
+
+@router.get(
+    "/tasks/{task_id}/authenticated",
+    response_model=AuthenticatedResponse,
+    responses=_NOT_FOUND,
+    summary="The authenticated task, its scope, its redacted observations and its answer",
+)
+async def get_authenticated(
+    task_id: uuid.UUID, service: AuthenticatedServiceDep
+) -> AuthenticatedResponse:
+    return AuthenticatedResponse.from_view(await service.describe(task_id))
+
+
+@router.post(
+    "/tasks/{task_id}/authenticated/prepare",
+    status_code=status.HTTP_201_CREATED,
+    response_model=AuthenticatedResponse,
+    responses={**_NOT_FOUND, **_CONFLICT, **_UNAVAILABLE},
+    summary="Build the bounded account-reading scope and open its card (grants nothing)",
+)
+async def prepare_authenticated(
+    task_id: uuid.UUID, body: PrepareAuthenticatedBody, service: AuthenticatedServiceDep
+) -> AuthenticatedResponse:
+    """Checks the profile deterministically and opens no browser."""
+    return AuthenticatedResponse.from_view(await service.prepare(task_id, recipient=body.recipient))
+
+
+@router.post(
+    "/tasks/{task_id}/authenticated/grant",
+    response_model=AuthenticatedResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Confirm the account-reading scope shown on the trusted card",
+)
+async def grant_authenticated_scope(
+    task_id: uuid.UUID, body: ConfirmAuthenticatedGrantBody, service: AuthenticatedServiceDep
+) -> AuthenticatedResponse:
+    """Grants the stored scope by reference; no scope payload is accepted."""
+    view = await service.confirm(
+        task_id, grant_id=body.grant_id, expected_revision=body.expected_revision
+    )
+    return AuthenticatedResponse.from_view(view)
+
+
+@router.post(
+    "/tasks/{task_id}/authenticated/revoke",
+    response_model=AuthenticatedResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Withdraw the account-reading scope and release the browser",
+)
+async def revoke_authenticated_scope(
+    task_id: uuid.UUID, body: RevokeAuthenticatedGrantBody, service: AuthenticatedServiceDep
+) -> AuthenticatedResponse:
+    view = await service.revoke(
+        task_id,
+        reason=body.reason,
+        grant_id=body.grant_id,
+        expected_revision=body.expected_revision,
+    )
+    return AuthenticatedResponse.from_view(view)
+
+
+@router.post(
+    "/tasks/{task_id}/authenticated/steps",
+    status_code=status.HTTP_201_CREATED,
+    response_model=AuthenticatedStepResponse,
+    responses={**_NOT_FOUND, **_CONFLICT, **_UNAVAILABLE},
+    summary="Execute exactly one authorised account-reading operation (internal)",
+)
+async def execute_authenticated_step(
+    task_id: uuid.UUID, body: ExecuteAuthenticatedStepBody, service: AuthenticatedServiceDep
+) -> AuthenticatedStepResponse:
+    """One step, checked against the task's grant before anything happens.
+
+    The step is parsed by the closed operation union first, so an operation or a
+    key outside the reviewed vocabulary is refused here and never reaches the
+    grant check, the ledger or the browser."""
+    envelope = AuthenticatedStepEnvelope(
+        request_id=body.request_id,
+        step=parse_authenticated_step(body.step),
+        planner_calls=body.planner_calls,
+    )
+    return AuthenticatedStepResponse.from_result(await service.execute_step(task_id, envelope))
+
+
+@router.post(
+    "/tasks/{task_id}/authenticated/answer",
+    response_model=AuthenticatedResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Record the one grounded account answer and close the scope",
+)
+async def record_authenticated_answer(
+    task_id: uuid.UUID, body: RecordAuthenticatedAnswerBody, service: AuthenticatedServiceDep
+) -> AuthenticatedResponse:
+    view = await service.record_answer(
+        task_id,
+        answer=body.answer,
+        provider=body.provider,
+        model=body.model,
+        planner_calls=body.planner_calls,
+    )
+    return AuthenticatedResponse.from_view(view)
 
 
 # --- Persistent browser profiles (Milestone 8a S1) ---------------------------

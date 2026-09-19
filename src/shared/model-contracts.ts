@@ -19,7 +19,14 @@ export const MODEL_TASK_CLASSES = [
   /** Milestone 7b: choose the one next bounded public-research step. */
   'research_planning',
   /** Milestone 7b: answer the research objective from collected observations. */
-  'research_answer'
+  'research_answer',
+  /**
+   * Milestone 8a S3: plan and answer from *account-private* observations. These two
+   * classes never fail over: the caller must name the one approved recipient, and a
+   * router asked to run them without that rule refuses before any provider is called.
+   */
+  'authenticated_planning',
+  'authenticated_answer'
 ] as const
 export type ModelTaskClass = typeof MODEL_TASK_CLASSES[number]
 

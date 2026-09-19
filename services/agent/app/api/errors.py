@@ -16,8 +16,17 @@ from app.domain.research import AnswerNotGroundedError as ResearchAnswerNotGroun
 from app.domain.browser_profile import ProfileRefusal
 from app.domain.login_takeover import TakeoverRefusal
 from app.domain.research import ResearchRefusal
+from app.domain.authenticated import AuthenticatedRefusal
 from app.services.research_search import SearchFailedError
 from app.domain.errors import (
+    AuthenticatedAnswerAlreadyRecordedError,
+    AuthenticatedBudgetExhaustedError,
+    AuthenticatedGrantNotFoundError,
+    AuthenticatedGrantNotUsableError,
+    AuthenticatedProfileUnavailableError,
+    AuthenticatedReadNotConfiguredError,
+    AuthenticatedStepInFlightError,
+    AuthenticatedStepRefusedError,
     BookingCriteriaError,
     BookingCriteriaMismatchError,
     TaskAlreadyBookedError,
@@ -415,6 +424,86 @@ def register_error_handlers(app: FastAPI) -> None:
             "research_search_failed",
             "The public search could not be completed.",
             "code",
+        ),
+    )
+    # --- Milestone 8a S3 authenticated account reading --------------------
+    # Stable codes and reasons only: never page text, a title, a URL, a
+    # profile path, an account identity or a provider's words.
+    app.add_exception_handler(
+        AuthenticatedReadNotConfiguredError,
+        _fixed(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "authenticated_not_configured",
+            "Authenticated account reading is not configured.",
+        ),
+    )
+    app.add_exception_handler(
+        AuthenticatedProfileUnavailableError,
+        _reasoned(
+            status.HTTP_409_CONFLICT,
+            "authenticated_profile_unavailable",
+            "That account profile cannot be read right now.",
+            "code",
+        ),
+    )
+    app.add_exception_handler(
+        AuthenticatedGrantNotFoundError,
+        _fixed(
+            status.HTTP_404_NOT_FOUND,
+            "authenticated_grant_not_found",
+            "There is no account-reading scope for that task.",
+        ),
+    )
+    app.add_exception_handler(
+        AuthenticatedGrantNotUsableError,
+        _reasoned(
+            status.HTTP_409_CONFLICT,
+            "authenticated_grant_not_usable",
+            "That account-reading scope does not authorise anything right now.",
+            "reason",
+        ),
+    )
+    app.add_exception_handler(
+        AuthenticatedStepRefusedError,
+        _reasoned(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "authenticated_step_refused",
+            "That account-reading step was refused.",
+            "code",
+        ),
+    )
+    app.add_exception_handler(
+        AuthenticatedRefusal,
+        _reasoned(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "authenticated_step_refused",
+            "That account-reading input was refused.",
+            "code",
+        ),
+    )
+    app.add_exception_handler(
+        AuthenticatedBudgetExhaustedError,
+        _reasoned(
+            status.HTTP_409_CONFLICT,
+            "authenticated_budget_exhausted",
+            "This account-reading task has reached one of its limits.",
+            "limit",
+        ),
+    )
+    app.add_exception_handler(
+        AuthenticatedStepInFlightError,
+        _fixed(
+            status.HTTP_409_CONFLICT,
+            "authenticated_step_in_flight",
+            "An account-reading step for this task has not finished yet.",
+        ),
+    )
+    app.add_exception_handler(
+        AuthenticatedAnswerAlreadyRecordedError,
+        _fixed(
+            status.HTTP_409_CONFLICT,
+            "authenticated_answer_already_recorded",
+            "This account-reading task already has a recorded answer.",
         ),
     )
     app.add_exception_handler(StaleTaskRevisionError, _stale_task_revision)

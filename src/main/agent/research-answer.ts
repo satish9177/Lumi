@@ -91,8 +91,17 @@ function numbers(value: string): Set<string> {
 }
 
 /** Identical in effect to `verify_research_grounding` in the runtime. */
+/**
+ * What grounding needs to see: observations with a ref and text blocks. Public
+ * research and account-private reading share this one rule, so a change to it
+ * changes both -- which is the point.
+ */
+export interface GroundingView {
+  observations: ReadonlyArray<{ ref: string; blocks: ReadonlyArray<{ id: string; text: string }> }>
+}
+
 export function verifyResearchGrounding(
-  view: Pick<AgentResearchView, 'observations'>,
+  view: GroundingView,
   answer: Pick<GroundedResearchAnswer, 'status' | 'answer' | 'evidence'>
 ): void {
   if ((answer.status === 'answered' || answer.status === 'partial') && answer.evidence.length === 0) {
@@ -129,8 +138,9 @@ function plain(value: unknown, maximum: number): string {
 /** Strictly parse model output against this task's evidence. */
 export function parseResearchAnswer(
   text: string,
-  view: Pick<AgentResearchView, 'observations'>,
-  stopReason: AgentResearchStopReason
+  view: GroundingView,
+  stopReason: AgentResearchStopReason,
+  notVerifiedText: string = NOT_VERIFIED_TEXT
 ): GroundedResearchAnswer {
   let value: unknown
   try {
@@ -171,7 +181,7 @@ export function parseResearchAnswer(
   // Only a verified answer keeps model prose. Anything else is said in Lumi's
   // own words, so page content cannot speak through a "not found".
   return parsed.status === 'not_found'
-    ? { ...parsed, answer: NOT_VERIFIED_TEXT, evidence }
+    ? { ...parsed, answer: notVerifiedText, evidence }
     : parsed
 }
 

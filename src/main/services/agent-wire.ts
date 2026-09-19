@@ -2,6 +2,9 @@ import {
   ACTION_STATUSES,
   APPROVAL_STATUSES,
   ATTEMPT_OUTCOMES,
+  AUTHENTICATED_OPERATIONS,
+  AUTHENTICATED_PAUSE_REASONS,
+  BROWSER_PROFILE_STATUSES,
   BOOKING_DAYS,
   CHANGED_FACT_FIELDS,
   CLINIC_INFO_TOPICS,
@@ -21,6 +24,15 @@ import {
   type AgentAttemptOutcome,
   type AgentAttemptResultView,
   type AgentAttemptView,
+  type AgentAuthenticatedAnswerView,
+  type AgentAuthenticatedBudgets,
+  type AgentAuthenticatedGrantView,
+  type AgentAuthenticatedObservationView,
+  type AgentAuthenticatedPauseReason,
+  type AgentAuthenticatedProfileView,
+  type AgentAuthenticatedRequestView,
+  type AgentAuthenticatedScopeView,
+  type AgentAuthenticatedView,
   type AgentBookingCriteria,
   type AgentBookingView,
   type AgentChangedFact,
@@ -254,7 +266,8 @@ export function parseTask(value: unknown): AgentTaskView {
   const request = record(task.request, 'task.request')
   if (
     request.type !== 'appointment_booking' && request.type !== 'clinic_info' &&
-    request.type !== 'page_inspection' && request.type !== 'public_research'
+    request.type !== 'page_inspection' && request.type !== 'public_research' &&
+    request.type !== 'authenticated_read'
   ) {
     throw new WireError('task.type')
   }
@@ -263,6 +276,7 @@ export function parseTask(value: unknown): AgentTaskView {
   if (kind === 'clinic_info' && !infoQuery) throw new WireError('task.info_query')
   const inspection = kind === 'page_inspection' ? parseInspectionRequest(request) : undefined
   const research = kind === 'public_research' ? parseResearchRequest(request) : undefined
+  const authenticated = kind === 'authenticated_read' ? parseAuthenticatedRequest(request) : undefined
   return {
     taskId: uuid(task.id, 'task.id'),
     status: member(TASK_STATUSES, task.status, 'task.status'),
@@ -273,6 +287,7 @@ export function parseTask(value: unknown): AgentTaskView {
     ...(infoQuery ? { infoQuery } : {}),
     ...(inspection ? { inspection } : {}),
     ...(research ? { research } : {}),
+    ...(authenticated ? { authenticated } : {}),
     ...(typeof request.voice_turn_id === 'string' && TURN_ID.test(request.voice_turn_id)
       ? { voiceTurnId: request.voice_turn_id }
       : {}),
@@ -1093,7 +1108,298 @@ export function parseResearchStep(value: unknown): ResearchStepOutcome {
   }
 }
 
+// ---- Milestone 8a S3: authenticated account reading -------------------------------
+//
+// Notice what is *not* parsed here, and what is refused if it appears: an
+// address. The runtime never sends one (the worker keeps every target in its own
+// memory), so a `url` or `href` field on a link is a wire violation, not a value
+// to ignore. Nor is the account fingerprint or the profile's revoke epoch sent:
+// main has no use for them.
+
+const AUTHENTICATED_SCOPE_KEYS = new Set([
+  'policy_version', 'site', 'allowed_origins', 'allowed_operations', 'methods', 'classification',
+  'allowed', 'forbidden', 'website_side_effects_possible', 'disclosure', 'budgets'
+])
+const SITE_NAME = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/
+const REDACTION_KIND = /^[a-z]{3,12}$/
+
+/** The objective and profile an authenticated task was created with. */
+export function parseAuthenticatedRequest(request: Json): AgentAuthenticatedRequestView {
+  if (request.classification !== 'account_private') throw new WireError('task.classification')
+  return {
+    objective: text(request.objective, 'task.objective', undefined, MAX_OBJECTIVE),
+    profileId: uuid(request.profile_id, 'task.profile_id'),
+    classification: 'account_private'
+  }
+}
+
+function parseAuthenticatedBudgets(value: unknown): AgentAuthenticatedBudgets {
+  const budgets = record(value, 'authenticated.budgets')
+  // Structurally zero. A scope that claims otherwise is not presented at all.
+  if (budgets.max_vision_calls !== 0) throw new WireError('budgets.max_vision')
+  return {
+    maxSteps: integer(budgets.max_steps, 'budgets.max_steps', 1, 12),
+    maxObservations: integer(budgets.max_observations, 'budgets.max_observations', 1, 12),
+    maxPlannerCalls: integer(budgets.max_planner_calls, 'budgets.max_planner_calls', 1, 12),
+    maxAnswerCalls: integer(budgets.max_answer_calls, 'budgets.max_answer_calls', 1, 2),
+    maxTabs: integer(budgets.max_tabs, 'budgets.max_tabs', 1, 3),
+    maxActiveSeconds: integer(budgets.max_active_seconds, 'budgets.max_active_seconds', 10, 300),
+    maxVisionCalls: 0
+  }
+}
+
+function parseAuthenticatedScope(value: unknown): AgentAuthenticatedScopeView {
+  const scope = record(value, 'authenticated.scope')
+  if (Object.keys(scope).some((key) => !AUTHENTICATED_SCOPE_KEYS.has(key))) {
+    throw new WireError('authenticated.scope.fields')
+  }
+  if (scope.classification !== 'account_private') throw new WireError('authenticated.scope.classification')
+  if (scope.website_side_effects_possible !== true) throw new WireError('authenticated.scope.side_effects')
+  if (!Array.isArray(scope.allowed_operations) || scope.allowed_operations.length === 0 || scope.allowed_operations.length > 5) {
+    throw new WireError('authenticated.scope.operations')
+  }
+  if (!Array.isArray(scope.methods) || scope.methods.length === 0 || scope.methods.length > 2) {
+    throw new WireError('authenticated.scope.methods')
+  }
+  const disclosure = record(scope.disclosure, 'authenticated.disclosure')
+  if (disclosure.identifiers_reduced !== true || disclosure.failover !== 'none') {
+    throw new WireError('authenticated.disclosure.terms')
+  }
+  return {
+    policyVersion: text(scope.policy_version, 'authenticated.policy_version', POLICY_VERSION_PATTERN, 40),
+    site: text(scope.site, 'authenticated.site', SITE_NAME, 253),
+    allowedOperations: scope.allowed_operations.map((operation) =>
+      member(AUTHENTICATED_OPERATIONS, operation, 'authenticated.operation')),
+    allowed: labels(scope.allowed, 'authenticated.scope.allowed'),
+    forbidden: labels(scope.forbidden, 'authenticated.scope.forbidden'),
+    methods: scope.methods.map((method) => text(method, 'authenticated.method', HTTP_READ_METHOD, 4)),
+    websiteSideEffectsPossible: true,
+    recipient: member(DISCLOSURE_RECIPIENTS, disclosure.recipient, 'authenticated.recipient'),
+    maxTextChars: integer(disclosure.max_text_chars, 'authenticated.max_text_chars', 1, 4_000),
+    maxBlocks: integer(disclosure.max_blocks, 'authenticated.max_blocks', 1, 60),
+    budgets: parseAuthenticatedBudgets(scope.budgets)
+  }
+}
+
+function parseAuthenticatedGrant(value: unknown, taskId: string): AgentAuthenticatedGrantView | undefined {
+  if (value === null || value === undefined) return undefined
+  const grant = record(value, 'authenticated.grant')
+  if (uuid(grant.task_id, 'grant.task_id') !== taskId) throw new WireError('grant.task_id')
+  const scope = parseAuthenticatedScope(grant.scope)
+  const confirmedAt = nullableInstant(grant.confirmed_at, 'grant.confirmed_at')
+  const expiresAt = nullableInstant(grant.expires_at, 'grant.expires_at')
+  const status = member(GRANT_STATUSES, grant.status, 'grant.status')
+  if (status === 'ACTIVE' && !expiresAt) throw new WireError('grant.expires_at')
+  if (status !== 'PENDING' && !confirmedAt) throw new WireError('grant.confirmed_at')
+  return {
+    grantId: uuid(grant.id, 'grant.id'),
+    status,
+    revision: integer(grant.revision, 'grant.revision', 1),
+    scopeDigest: text(grant.scope_digest, 'grant.scope_digest', DIGEST, 64),
+    scope,
+    createdAt: instant(grant.created_at, 'grant.created_at'),
+    ...(confirmedAt ? { confirmedAt } : {}),
+    ...(expiresAt ? { expiresAt } : {})
+  }
+}
+
+function parseAuthenticatedProfile(value: unknown): AgentAuthenticatedProfileView | undefined {
+  if (value === null || value === undefined) return undefined
+  const profile = record(value, 'authenticated.profile')
+  return {
+    profileId: uuid(profile.id, 'profile.id'),
+    label: text(profile.label, 'profile.label', undefined, 60),
+    site: text(profile.site, 'profile.site', SITE_NAME, 253),
+    status: member(BROWSER_PROFILE_STATUSES, profile.status, 'profile.status')
+  }
+}
+
+function parseAuthenticatedObservation(value: unknown, taskId: string): AgentAuthenticatedObservationView {
+  const raw = record(value, 'authenticated.observation')
+  if (uuid(raw.task_id, 'observation.task_id') !== taskId) throw new WireError('observation.task_id')
+  if (raw.provenance !== 'untrusted_environment' || raw.schema_version !== 1) throw new WireError('observation.provenance')
+  if (raw.classification !== 'account_private') throw new WireError('observation.classification')
+  if (!Array.isArray(raw.blocks) || raw.blocks.length > 60) throw new WireError('observation.blocks')
+  if (!Array.isArray(raw.links) || raw.links.length > 25) throw new WireError('observation.links')
+  if (!Array.isArray(raw.open_tabs) || raw.open_tabs.length > 3) throw new WireError('observation.tabs')
+  if (typeof raw.settled !== 'boolean' || typeof raw.truncated !== 'boolean') throw new WireError('observation.flags')
+  const kind = raw.kind
+  if (kind !== 'page' && kind !== 'tab_state') throw new WireError('observation.kind')
+  const sequence = integer(raw.sequence, 'observation.sequence', 1, 10_000)
+  const ref = text(raw.ref, 'observation.ref', RESEARCH_REF, 5)
+  if (ref !== `o${sequence}`) throw new WireError('observation.ref')
+  const blocks = raw.blocks.map((item, index) => {
+    const block = record(item, 'observation.block')
+    const id = text(block.id, 'block.id', BLOCK_ID, 4)
+    if (id !== `b${index + 1}`) throw new WireError('block.order')
+    return { id, text: pageText(block.text, 'block.text', 500) }
+  })
+  const links = raw.links.map((item, index) => {
+    const link = record(item, 'observation.link')
+    const id = text(link.id, 'link.id', RESEARCH_LINK_REF, 3)
+    if (id !== `l${index + 1}`) throw new WireError('link.order')
+    // An address here would be a private capability crossing the boundary.
+    if ('url' in link || 'href' in link) throw new WireError('link.url_present')
+    return {
+      ref: id,
+      text: pageText(link.text, 'link.text', 120, true),
+      host: text(link.host, 'link.host', HOST, 253)
+    }
+  })
+  const redactionsRaw = record(raw.redactions, 'observation.redactions')
+  const redactions: Record<string, number> = {}
+  for (const [name, count] of Object.entries(redactionsRaw)) {
+    if (!REDACTION_KIND.test(name)) throw new WireError('observation.redaction')
+    redactions[name] = integer(count, 'observation.redaction.count', 0, 100_000)
+  }
+  const tab = raw.tab === null || raw.tab === undefined ? undefined : text(raw.tab, 'observation.tab', TAB_REF, 2)
+  const host = raw.host === null || raw.host === undefined ? undefined : text(raw.host, 'observation.host', HOST, 253)
+  return {
+    observationId: uuid(raw.id, 'observation.id'),
+    ref,
+    sequence,
+    kind,
+    operation: member(AUTHENTICATED_OPERATIONS, raw.operation, 'observation.operation'),
+    ...(tab ? { tab } : {}),
+    documentEpoch: integer(raw.document_epoch, 'observation.document_epoch', 1, 10_000),
+    ...(host ? { host } : {}),
+    title: pageText(raw.title, 'observation.title', 200, true),
+    settled: raw.settled,
+    truncated: raw.truncated,
+    observedAt: instant(raw.observed_at, 'observation.observed_at'),
+    contentHash: text(raw.content_hash, 'observation.content_hash', DIGEST, 64),
+    blocks,
+    links,
+    openTabs: raw.open_tabs.map((entry) => text(entry, 'observation.tab', TAB_REF, 2)),
+    redactions
+  }
+}
+
+function parseAuthenticatedAnswer(value: unknown): AgentAuthenticatedAnswerView | undefined {
+  if (value === null || value === undefined) return undefined
+  const answer = record(value, 'authenticated.answer')
+  if (answer.classification !== 'account_private') throw new WireError('answer.classification')
+  if (!Array.isArray(answer.evidence) || answer.evidence.length > 6) throw new WireError('answer.evidence')
+  return {
+    classification: 'account_private',
+    profileId: uuid(answer.profile_id, 'answer.profile_id'),
+    status: member(RESEARCH_ANSWER_STATUSES, answer.status, 'answer.status'),
+    stopReason: member(RESEARCH_STOP_REASONS, answer.stop_reason, 'answer.stop_reason'),
+    answer: text(answer.answer, 'answer.answer', undefined, MAX_RESEARCH_ANSWER),
+    evidence: answer.evidence.map((item) => {
+      const entry = record(item, 'answer.evidence')
+      return {
+        observation: text(entry.observation, 'evidence.observation', RESEARCH_REF, 5),
+        block: text(entry.block, 'evidence.block', BLOCK_ID, 4),
+        quote: text(entry.quote, 'evidence.quote', undefined, 300)
+      }
+    }),
+    provider: member(DISCLOSURE_RECIPIENTS, answer.provider, 'answer.provider'),
+    model: text(answer.model, 'answer.model', MODEL_NAME, 64),
+    stepsUsed: integer(answer.steps_used, 'answer.steps_used', 0, 1_000),
+    observationsUsed: integer(answer.observations_used, 'answer.observations_used', 0, 1_000),
+    plannerCalls: integer(answer.planner_calls, 'answer.planner_calls', 0, 1_000),
+    createdAt: instant(answer.created_at, 'answer.created_at')
+  }
+}
+
+export interface AuthenticatedDetail {
+  view: AgentAuthenticatedView
+  task: AgentTaskView
+}
+
+/** `GET /tasks/{id}/authenticated`, and the body of every account-reading mutation. */
+export function parseAuthenticated(value: unknown): AuthenticatedDetail {
+  const body = record(value, 'authenticated')
+  const task = parseTask(body.task)
+  if (task.kind !== 'authenticated_read') throw new WireError('authenticated.task_kind')
+  if (body.classification !== 'account_private') throw new WireError('authenticated.classification')
+  const usage = record(body.usage, 'authenticated.usage')
+  if (!Array.isArray(body.observations) || body.observations.length > 100) throw new WireError('authenticated.observations')
+  if (typeof body.unresolved_step !== 'boolean') throw new WireError('authenticated.unresolved_step')
+  const observations = body.observations.map((item) => parseAuthenticatedObservation(item, task.taskId))
+  let previous = 0
+  for (const observation of observations) {
+    if (observation.sequence <= previous) throw new WireError('authenticated.observation_order')
+    previous = observation.sequence
+  }
+  const grant = parseAuthenticatedGrant(body.grant, task.taskId)
+  const profile = parseAuthenticatedProfile(body.profile)
+  const answer = parseAuthenticatedAnswer(body.answer)
+  const pauseReason = body.pause_reason === null || body.pause_reason === undefined
+    ? undefined
+    : member(AUTHENTICATED_PAUSE_REASONS, body.pause_reason, 'authenticated.pause_reason')
+  return {
+    task,
+    view: {
+      taskId: task.taskId,
+      objective: text(body.objective, 'authenticated.objective', undefined, MAX_OBJECTIVE),
+      classification: 'account_private',
+      ...(profile ? { profile } : {}),
+      ...(grant ? { grant } : {}),
+      observations,
+      ...(answer ? { answer } : {}),
+      usage: {
+        steps: integer(usage.steps, 'usage.steps', 0, 10_000),
+        observations: integer(usage.observations, 'usage.observations', 0, 10_000),
+        plannerCalls: integer(usage.planner_calls, 'usage.planner_calls', 0, 10_000),
+        activeSeconds: decimal(usage.active_seconds, 'usage.active_seconds'),
+        tabs: integer(usage.tabs, 'usage.tabs', 0, 3)
+      },
+      ...(pauseReason ? { pauseReason } : {}),
+      unresolvedStep: body.unresolved_step
+    }
+  }
+}
+
+export interface AuthenticatedStepOutcome extends AuthenticatedDetail {
+  observation?: AgentAuthenticatedObservationView
+  outcome: AgentAttemptOutcome
+  errorCode?: string
+  pauseReason?: AgentAuthenticatedPauseReason
+  replayed: boolean
+}
+
+/** `POST /tasks/{id}/authenticated/steps`: what one step established. */
+export function parseAuthenticatedStep(value: unknown): AuthenticatedStepOutcome {
+  const body = record(value, 'authenticated.step')
+  const { view, task } = parseAuthenticated(body.authenticated)
+  const action = record(body.action, 'authenticated.step.action')
+  if (typeof action.tool_name !== 'string' || !action.tool_name.startsWith('authenticated_')) {
+    throw new WireError('authenticated.step.tool_name')
+  }
+  if (typeof body.replayed !== 'boolean') throw new WireError('authenticated.step.replayed')
+  const observation = body.observation === null || body.observation === undefined
+    ? undefined
+    : parseAuthenticatedObservation(body.observation, view.taskId)
+  const errorCode = optional(() => text(body.error_code, 'authenticated.step.error_code', CODE, 64))
+  const pauseReason = body.pause_reason === null || body.pause_reason === undefined
+    ? undefined
+    : member(AUTHENTICATED_PAUSE_REASONS, body.pause_reason, 'authenticated.step.pause_reason')
+  return {
+    view,
+    task,
+    ...(observation ? { observation } : {}),
+    outcome: member(ATTEMPT_OUTCOMES, body.outcome, 'authenticated.step.outcome'),
+    ...(errorCode ? { errorCode } : {}),
+    ...(pauseReason ? { pauseReason } : {}),
+    replayed: body.replayed
+  }
+}
+
 // ---- errors ----------------------------------------------------------------
+
+/** What each deterministic "profile cannot be read" reason tells the user to do. */
+const AUTHENTICATED_PROFILE_MESSAGES: Record<string, string> = {
+  profile_not_found: 'That account profile no longer exists. Nothing was opened.',
+  profile_deleted: 'That account profile was deleted. Nothing was opened.',
+  profile_not_authenticated: 'You are not signed in through this profile. Use "Sign in manually", then ask again. Nothing was opened.',
+  login_required: 'The website asked you to sign in again. Use "Sign in manually", then ask again. Nothing was sent to an AI.',
+  account_fingerprint_unknown: 'Lumi cannot tell which account this profile is signed in to, so it will not read it. Nothing was opened.',
+  account_changed: 'The account signed in through this profile changed. Sign in again and review a new permission card.',
+  profile_takeover_active: 'A sign-in window is open for this profile. Finish or cancel it first.',
+  profile_in_use: 'This profile is in use by another Lumi window. Nothing was opened.'
+}
 
 const ERROR_MAP: Record<string, { code: AgentError['code']; message: string }> = {
   task_not_found: { code: 'not_found', message: 'That task no longer exists.' },
@@ -1133,6 +1439,14 @@ const ERROR_MAP: Record<string, { code: AgentError['code']; message: string }> =
   research_answer_already_recorded: { code: 'invalid_transition', message: 'This research task already has an answer.' },
   research_answer_not_grounded: { code: 'answer_unavailable', message: 'Lumi refused an answer the pages it read did not support.' },
   research_search_failed: { code: 'research_unavailable', message: 'The public search could not be completed. Nothing else was opened.' },
+  authenticated_not_configured: { code: 'authenticated_unavailable', message: 'Account reading is not set up on this computer. Nothing was opened.' },
+  authenticated_profile_unavailable: { code: 'authenticated_unavailable', message: 'That account profile cannot be read right now. Nothing was opened.' },
+  authenticated_grant_not_found: { code: 'authenticated_not_granted', message: 'That account-reading task has no permission to work under. Start it again.' },
+  authenticated_grant_not_usable: { code: 'authenticated_not_granted', message: 'That account-reading permission is no longer usable. Nothing was opened or sent.' },
+  authenticated_step_refused: { code: 'authenticated_refused', message: 'Lumi refused that account-reading step.' },
+  authenticated_budget_exhausted: { code: 'authenticated_budget_exhausted', message: 'This account-reading task reached one of its limits and stopped.' },
+  authenticated_step_in_flight: { code: 'authenticated_in_flight', message: 'Lumi is still finishing the previous account-reading step.' },
+  authenticated_answer_already_recorded: { code: 'invalid_transition', message: 'This account-reading task already has an answer.' },
   invalid_request: { code: 'invalid_request', message: 'Lumi refused an invalid request.' }
 }
 
@@ -1147,6 +1461,9 @@ export function projectRuntimeError(status: number, value: unknown): AgentError 
   if (typeof current === 'number' && Number.isSafeInteger(current) && current >= 1) error.currentRevision = current
   if (runtimeCode === 'destination_not_allowed' && typeof body?.reason === 'string' && CODE.test(body.reason)) {
     error.message = describeRefusal(body.reason)
+  }
+  if (runtimeCode === 'authenticated_profile_unavailable' && typeof body?.reason === 'string') {
+    error.message = AUTHENTICATED_PROFILE_MESSAGES[body.reason] ?? error.message
   }
   return error
 }

@@ -1,15 +1,21 @@
-"""SQL for research grants, step authorizations, sessions, observations and the
-final answer. Callers own the transaction, as everywhere else in this layer.
+"""SQL for authenticated-read grants, step authorizations, evidence and answers.
 
-Two statements here are load-bearing rather than convenient:
+Callers own the transaction, as everywhere else in this layer. This is the
+authenticated twin of `ResearchRepository`, kept separate for the same reason
+the tables are: a query over public research evidence must not be able to reach
+account-private rows, and the reverse.
 
-* `confirm_grant` and `revoke_grant` are compare-and-swap on the grant
-  revision, so a stale trusted click cannot confirm a scope the user did not
-  see, and a revocation cannot be lost to a concurrent write.
-* `consume_step_authorization` re-checks *every* binding -- grant status, grant
-  revision, action revision, proposal digest, scope digest, policy version and
-  its own expiry -- inside the statement that consumes it. The database, not an
-  earlier read, decides whether a step may execute.
+Two statements are load-bearing:
+
+* `confirm_grant` is a compare-and-swap that also checks, **inside the
+  statement**, that the profile the scope was shown for is still the profile the
+  user saw: still `AUTHENTICATED`, still at the same `revoke_epoch`, still
+  carrying the same account fingerprint. A trusted click that arrives after the
+  account changed cannot activate a scope for an account nobody reviewed.
+* `consume_step_authorization` re-checks every binding the research variant
+  does **and** the same profile conditions, in the one `UPDATE` that consumes
+  the authorization. There is no `SELECT`, decide, `UPDATE` window: the database
+  decides whether a step may execute at the instant it executes.
 """
 
 import uuid
@@ -17,36 +23,42 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import Row, and_, func, insert, or_, select, update
+from sqlalchemy import Row, and_, delete, func, insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from app.db.tables import (
     actions,
-    research_answers,
-    research_observations,
-    research_sessions,
+    authenticated_answers,
+    authenticated_observations,
+    browser_profiles,
     step_authorizations,
     task_grants,
 )
-from app.domain.research import (
-    RESEARCH_TOOL_NAMES,
-    GrantStatus,
-    ResearchAnswer,
-    ResearchObservation,
-    ResearchScope,
+from app.domain.authenticated import (
+    AUTHENTICATED_TOOL_NAMES,
+    AuthenticatedAnswer,
+    AuthenticatedObservation,
+    AuthenticatedReadScope,
 )
+from app.domain.browser_profile import ProfileStatus
+from app.domain.research import GrantStatus
+from app.repositories.research import StepAuthorizationRecord, _authorization
+
+KIND = "authenticated_read"
+_OPEN = [GrantStatus.PENDING.value, GrantStatus.ACTIVE.value]
 
 
 @dataclass(frozen=True, slots=True)
-class GrantRecord:
+class AuthenticatedGrantRecord:
     id: uuid.UUID
     task_id: uuid.UUID
-    kind: str
     status: GrantStatus
     revision: int
     policy_version: str
-    scope: ResearchScope
+    scope: AuthenticatedReadScope
     scope_digest: str
+    profile_id: uuid.UUID
+    profile_revoke_epoch: int
     created_at: datetime
     updated_at: datetime
     confirmed_at: datetime | None
@@ -56,49 +68,21 @@ class GrantRecord:
     first_step_at: datetime | None
     planner_calls: int
 
-
-@dataclass(frozen=True, slots=True)
-class StepAuthorizationRecord:
-    id: uuid.UUID
-    grant_id: uuid.UUID
-    grant_revision: int
-    task_id: uuid.UUID
-    action_id: uuid.UUID
-    action_revision: int
-    proposal_digest: str
-    scope_digest: str
-    policy_version: str
-    runtime_generation: uuid.UUID
-    created_at: datetime
-    expires_at: datetime
-    consumed_at: datetime | None
+    @property
+    def kind(self) -> str:
+        return KIND
 
 
 @dataclass(frozen=True, slots=True)
-class SessionRecord:
-    id: uuid.UUID
+class AuthenticatedObservationRecord:
+    observation: AuthenticatedObservation
     task_id: uuid.UUID
     grant_id: uuid.UUID
-    worker_generation: uuid.UUID
-    runtime_generation: uuid.UUID
-    status: str
-    created_at: datetime
-    closed_at: datetime | None
-
-
-@dataclass(frozen=True, slots=True)
-class ObservationRecord:
-    observation: ResearchObservation
-    task_id: uuid.UUID
-    grant_id: uuid.UUID
+    profile_id: uuid.UUID
     action_id: uuid.UUID
     attempt_id: uuid.UUID
     dispatch_id: uuid.UUID | None
-    session_id: uuid.UUID | None
     worker_generation: uuid.UUID | None
-    #: ref -> the address it resolves to. The controller's table; never sent to
-    #: a model, and never rendered as a link by the UI.
-    targets: dict[str, str]
     created_at: datetime
 
     @property
@@ -107,11 +91,13 @@ class ObservationRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class AnswerRecord:
+class AuthenticatedAnswerRecord:
     id: uuid.UUID
     task_id: uuid.UUID
     grant_id: uuid.UUID
-    answer: ResearchAnswer
+    profile_id: uuid.UUID
+    classification: str
+    answer: AuthenticatedAnswer
     provider: str
     model: str
     steps_used: int
@@ -120,16 +106,17 @@ class AnswerRecord:
     created_at: datetime
 
 
-def _grant(row: Row[Any]) -> GrantRecord:
-    return GrantRecord(
+def _grant(row: Row[Any]) -> AuthenticatedGrantRecord:
+    return AuthenticatedGrantRecord(
         id=row.id,
         task_id=row.task_id,
-        kind=row.kind,
         status=GrantStatus(row.status),
         revision=row.revision,
         policy_version=row.policy_version,
-        scope=ResearchScope.model_validate(row.scope),
+        scope=AuthenticatedReadScope.model_validate(row.scope),
         scope_digest=row.scope_digest,
+        profile_id=row.profile_id,
+        profile_revoke_epoch=row.profile_revoke_epoch,
         created_at=row.created_at,
         updated_at=row.updated_at,
         confirmed_at=row.confirmed_at,
@@ -141,86 +128,53 @@ def _grant(row: Row[Any]) -> GrantRecord:
     )
 
 
-def _authorization(row: Row[Any]) -> StepAuthorizationRecord:
-    return StepAuthorizationRecord(
-        id=row.id,
-        grant_id=row.grant_id,
-        grant_revision=row.grant_revision,
-        task_id=row.task_id,
-        action_id=row.action_id,
-        action_revision=row.action_revision,
-        proposal_digest=row.proposal_digest,
-        scope_digest=row.scope_digest,
-        policy_version=row.policy_version,
-        runtime_generation=row.runtime_generation,
-        created_at=row.created_at,
-        expires_at=row.expires_at,
-        consumed_at=row.consumed_at,
-    )
-
-
-def _session(row: Row[Any]) -> SessionRecord:
-    return SessionRecord(
-        id=row.id,
-        task_id=row.task_id,
-        grant_id=row.grant_id,
-        worker_generation=row.worker_generation,
-        runtime_generation=row.runtime_generation,
-        status=row.status,
-        created_at=row.created_at,
-        closed_at=row.closed_at,
-    )
-
-
-def _observation(row: Row[Any]) -> ObservationRecord:
+def _observation(row: Row[Any]) -> AuthenticatedObservationRecord:
     projection: dict[str, Any] = row.projection
-    observation = ResearchObservation(
+    observation = AuthenticatedObservation(
         schema_version=row.schema_version,
         observation_id=row.id,
         provenance=row.provenance,
+        classification=row.classification,
         kind=row.kind,
         operation=row.operation,
         sequence=row.sequence,
-        session_id=row.session_id,
+        profile_id=row.profile_id,
         tab=row.tab,
         document_epoch=row.document_epoch,
-        query=row.query,
-        requested_url=row.requested_url,
-        final_url=row.final_url,
-        final_host=row.final_host,
-        redirects=projection["redirects"],
+        host=row.host,
         title=row.title,
         settled=row.settled,
         truncated=row.truncated,
         observed_at=row.observed_at,
         blocks=projection["blocks"],
         links=projection["links"],
-        results=projection["results"],
         open_tabs=projection["open_tabs"],
         total_text_chars=projection["total_text_chars"],
         total_link_count=projection["total_link_count"],
+        redactions=projection["redactions"],
         content_hash=row.content_hash,
     )
-    return ObservationRecord(
+    return AuthenticatedObservationRecord(
         observation=observation,
         task_id=row.task_id,
         grant_id=row.grant_id,
+        profile_id=row.profile_id,
         action_id=row.action_id,
         attempt_id=row.attempt_id,
         dispatch_id=row.dispatch_id,
-        session_id=row.session_id,
         worker_generation=row.worker_generation,
-        targets=dict(row.targets),
         created_at=row.created_at,
     )
 
 
-def _answer(row: Row[Any]) -> AnswerRecord:
-    return AnswerRecord(
+def _answer(row: Row[Any]) -> AuthenticatedAnswerRecord:
+    return AuthenticatedAnswerRecord(
         id=row.id,
         task_id=row.task_id,
         grant_id=row.grant_id,
-        answer=ResearchAnswer.model_validate(row.answer),
+        profile_id=row.profile_id,
+        classification=row.classification,
+        answer=AuthenticatedAnswer.model_validate(row.answer),
         provider=row.provider,
         model=row.model,
         steps_used=row.steps_used,
@@ -230,62 +184,75 @@ def _answer(row: Row[Any]) -> AnswerRecord:
     )
 
 
-_OPEN = [GrantStatus.PENDING.value, GrantStatus.ACTIVE.value]
+def _profile_still_matches_grant() -> Any:
+    """The profile is the one the user saw: same epoch, same account, signed in.
+
+    Written once and used by both the confirming and the consuming statement,
+    so the two can never disagree about what "still the same account" means.
+    """
+    return (
+        select(browser_profiles.c.id)
+        .where(
+            browser_profiles.c.id == task_grants.c.profile_id,
+            browser_profiles.c.status == ProfileStatus.AUTHENTICATED.value,
+            browser_profiles.c.revoke_epoch == task_grants.c.profile_revoke_epoch,
+            browser_profiles.c.account_fingerprint
+            == task_grants.c.scope["account_fingerprint"].astext,
+        )
+        .exists()
+    )
 
 
-class ResearchRepository:
+class AuthenticatedRepository:
     def __init__(self, connection: AsyncConnection) -> None:
         self._connection = connection
 
     # ---- grants -------------------------------------------------------------
 
     async def insert_grant(
-        self, *, grant_id: uuid.UUID, task_id: uuid.UUID, scope: ResearchScope
-    ) -> GrantRecord:
+        self, *, grant_id: uuid.UUID, task_id: uuid.UUID, scope: AuthenticatedReadScope
+    ) -> AuthenticatedGrantRecord:
         """A PENDING grant: the card's contents. It authorises nothing at all."""
         result = await self._connection.execute(
             insert(task_grants)
             .values(
                 id=grant_id,
                 task_id=task_id,
-                kind=scope.kind,
+                kind=KIND,
                 status=GrantStatus.PENDING.value,
                 revision=1,
                 policy_version=scope.policy_version,
                 scope=scope.model_dump(mode="json"),
                 scope_digest=scope.digest,
+                profile_id=scope.profile_id,
+                profile_revoke_epoch=scope.profile_revoke_epoch,
             )
             .returning(*task_grants.c)
         )
         return _grant(result.one())
 
-    async def get_grant(self, grant_id: uuid.UUID) -> GrantRecord | None:
+    async def get_grant(self, grant_id: uuid.UUID) -> AuthenticatedGrantRecord | None:
         result = await self._connection.execute(
-            select(task_grants).where(
-                task_grants.c.id == grant_id, task_grants.c.kind == "public_research"
-            )
+            select(task_grants).where(task_grants.c.id == grant_id, task_grants.c.kind == KIND)
         )
         row = result.one_or_none()
         return _grant(row) if row is not None else None
 
-    async def open_grant_for_task(self, task_id: uuid.UUID) -> GrantRecord | None:
-        """The one PENDING or ACTIVE grant, if any (a partial unique index)."""
+    async def open_grant_for_task(self, task_id: uuid.UUID) -> AuthenticatedGrantRecord | None:
         result = await self._connection.execute(
             select(task_grants).where(
                 task_grants.c.task_id == task_id,
-                # Milestone 8a S3: an account-reading grant is never parsed as a
-                # research scope, and never handled by research code.
-                task_grants.c.kind == "public_research",
+                task_grants.c.kind == KIND,
                 task_grants.c.status.in_(_OPEN),
             )
         )
         row = result.one_or_none()
         return _grant(row) if row is not None else None
 
-    async def latest_grant_for_task(self, task_id: uuid.UUID) -> GrantRecord | None:
+    async def latest_grant_for_task(self, task_id: uuid.UUID) -> AuthenticatedGrantRecord | None:
         result = await self._connection.execute(
             select(task_grants)
-            .where(task_grants.c.task_id == task_id, task_grants.c.kind == "public_research")
+            .where(task_grants.c.task_id == task_id, task_grants.c.kind == KIND)
             .order_by(task_grants.c.created_at.desc(), task_grants.c.id)
             .limit(1)
         )
@@ -294,15 +261,17 @@ class ResearchRepository:
 
     async def confirm_grant(
         self, *, grant_id: uuid.UUID, expected_revision: int, scope_digest: str, ttl: timedelta
-    ) -> GrantRecord | None:
-        """PENDING -> ACTIVE. The trusted click, bound to what it showed."""
+    ) -> AuthenticatedGrantRecord | None:
+        """PENDING -> ACTIVE, only for the profile state the card showed."""
         result = await self._connection.execute(
             update(task_grants)
             .where(
                 task_grants.c.id == grant_id,
+                task_grants.c.kind == KIND,
                 task_grants.c.revision == expected_revision,
                 task_grants.c.status == GrantStatus.PENDING.value,
                 task_grants.c.scope_digest == scope_digest,
+                _profile_still_matches_grant(),
             )
             .values(
                 status=GrantStatus.ACTIVE.value,
@@ -322,31 +291,56 @@ class ResearchRepository:
         grant_id: uuid.UUID,
         status: GrantStatus,
         expected_revision: int | None = None,
-    ) -> GrantRecord | None:
+    ) -> AuthenticatedGrantRecord | None:
         """Withdraw or complete a grant. Never reversible (trigger-enforced)."""
         if status not in (GrantStatus.REVOKED, GrantStatus.EXPIRED, GrantStatus.COMPLETED):
             raise ValueError("close_grant only closes a grant")
-        conditions = [task_grants.c.id == grant_id, task_grants.c.status.in_(_OPEN)]
+        conditions = [
+            task_grants.c.id == grant_id,
+            task_grants.c.kind == KIND,
+            task_grants.c.status.in_(_OPEN),
+        ]
         if expected_revision is not None:
             conditions.append(task_grants.c.revision == expected_revision)
         values: dict[str, Any] = {
             "status": status.value,
             "revision": task_grants.c.revision + 1,
             "updated_at": func.now(),
+            "confirmed_at": func.coalesce(task_grants.c.confirmed_at, func.now()),
         }
         if status is GrantStatus.REVOKED:
             values["revoked_at"] = func.now()
         if status is GrantStatus.COMPLETED:
             values["completed_at"] = func.now()
-        # A never-confirmed grant that is withdrawn still needs `confirmed_at`
-        # to satisfy the "not pending implies confirmed" CHECK; record the
-        # moment it stopped being reviewable rather than inventing a consent.
-        values["confirmed_at"] = func.coalesce(task_grants.c.confirmed_at, func.now())
         result = await self._connection.execute(
             update(task_grants).where(*conditions).values(**values).returning(*task_grants.c)
         )
         row = result.one_or_none()
         return _grant(row) if row is not None else None
+
+    async def revoke_open_grants_for_profile(self, profile_id: uuid.UUID) -> int:
+        """Close every PENDING or ACTIVE grant bound to a profile.
+
+        Used when the profile's account changes or the profile is deleted. The
+        epoch bump already makes those grants unusable; closing them as well
+        makes the state say so.
+        """
+        result = await self._connection.execute(
+            update(task_grants)
+            .where(
+                task_grants.c.profile_id == profile_id,
+                task_grants.c.kind == KIND,
+                task_grants.c.status.in_(_OPEN),
+            )
+            .values(
+                status=GrantStatus.REVOKED.value,
+                revision=task_grants.c.revision + 1,
+                revoked_at=func.now(),
+                confirmed_at=func.coalesce(task_grants.c.confirmed_at, func.now()),
+                updated_at=func.now(),
+            )
+        )
+        return result.rowcount or 0
 
     async def grant_is_expired(self, grant_id: uuid.UUID) -> bool:
         """Ask the database, not the application clock."""
@@ -363,11 +357,14 @@ class ResearchRepository:
 
     async def record_step_start(
         self, *, grant_id: uuid.UUID, planner_calls: int
-    ) -> GrantRecord | None:
-        """Stamp the first step (active-time budget) and the planner-call high water mark."""
+    ) -> AuthenticatedGrantRecord | None:
         result = await self._connection.execute(
             update(task_grants)
-            .where(task_grants.c.id == grant_id, task_grants.c.status == GrantStatus.ACTIVE.value)
+            .where(
+                task_grants.c.id == grant_id,
+                task_grants.c.kind == KIND,
+                task_grants.c.status == GrantStatus.ACTIVE.value,
+            )
             .values(
                 first_step_at=func.coalesce(task_grants.c.first_step_at, func.now()),
                 planner_calls=func.greatest(task_grants.c.planner_calls, planner_calls),
@@ -379,7 +376,6 @@ class ResearchRepository:
         return _grant(row) if row is not None else None
 
     async def active_seconds(self, grant_id: uuid.UUID) -> float:
-        """How long this grant has been executing steps, by the database clock."""
         value = await self._connection.scalar(
             select(
                 func.coalesce(
@@ -398,7 +394,7 @@ class ResearchRepository:
         self,
         *,
         authorization_id: uuid.UUID,
-        grant: GrantRecord,
+        grant: AuthenticatedGrantRecord,
         task_id: uuid.UUID,
         action_id: uuid.UUID,
         action_revision: int,
@@ -425,24 +421,6 @@ class ResearchRepository:
         )
         return _authorization(result.one())
 
-    async def get_step_authorization(
-        self, authorization_id: uuid.UUID
-    ) -> StepAuthorizationRecord | None:
-        result = await self._connection.execute(
-            select(step_authorizations).where(step_authorizations.c.id == authorization_id)
-        )
-        row = result.one_or_none()
-        return _authorization(row) if row is not None else None
-
-    async def authorization_for_action(
-        self, action_id: uuid.UUID
-    ) -> StepAuthorizationRecord | None:
-        result = await self._connection.execute(
-            select(step_authorizations).where(step_authorizations.c.action_id == action_id)
-        )
-        row = result.one_or_none()
-        return _authorization(row) if row is not None else None
-
     async def consume_step_authorization(
         self,
         *,
@@ -453,24 +431,23 @@ class ResearchRepository:
     ) -> StepAuthorizationRecord | None:
         """Consume it, or return None if it may not be used right now.
 
-        Single-use, and every binding is re-checked here: the grant must still
-        be ACTIVE, unexpired and at the revision the authorization was minted
-        against; the action must still be at its bound revision with the bound
-        proposal digest; the authorization must be unconsumed, unexpired, and
-        belong to this runtime process.
+        Everything the research variant checks -- ACTIVE, unexpired grant at
+        the revision it was minted against, the bound action revision and
+        proposal digest, an unconsumed, unexpired authorization of this runtime
+        -- plus: the grant is an `authenticated_read` grant, and its profile is
+        `AUTHENTICATED` at exactly the revoke epoch and account fingerprint the
+        grant was confirmed against.
         """
         grant = (
             select(task_grants.c.id)
             .where(
                 task_grants.c.id == step_authorizations.c.grant_id,
-                # A public-research authorization is only ever funded by a
-                # public-research grant. An `authenticated_read` grant has its
-                # own consuming statement, with the profile conditions.
-                task_grants.c.kind == "public_research",
+                task_grants.c.kind == KIND,
                 task_grants.c.status == GrantStatus.ACTIVE.value,
                 task_grants.c.revision == step_authorizations.c.grant_revision,
                 task_grants.c.scope_digest == step_authorizations.c.scope_digest,
                 or_(task_grants.c.expires_at.is_(None), task_grants.c.expires_at > func.now()),
+                _profile_still_matches_grant(),
             )
             .exists()
         )
@@ -491,77 +468,12 @@ class ResearchRepository:
         row = result.one_or_none()
         return _authorization(row) if row is not None else None
 
-    # ---- sessions -----------------------------------------------------------
-
-    async def insert_session(
-        self,
-        *,
-        session_id: uuid.UUID,
-        task_id: uuid.UUID,
-        grant_id: uuid.UUID,
-        worker_generation: uuid.UUID,
-        runtime_generation: uuid.UUID,
-    ) -> SessionRecord:
-        result = await self._connection.execute(
-            insert(research_sessions)
-            .values(
-                id=session_id,
-                task_id=task_id,
-                grant_id=grant_id,
-                worker_generation=worker_generation,
-                runtime_generation=runtime_generation,
-                status="OPEN",
-            )
-            .returning(*research_sessions.c)
-        )
-        return _session(result.one())
-
-    async def open_session_for_task(self, task_id: uuid.UUID) -> SessionRecord | None:
-        result = await self._connection.execute(
-            select(research_sessions)
-            .where(research_sessions.c.task_id == task_id, research_sessions.c.status == "OPEN")
-            .order_by(research_sessions.c.created_at.desc(), research_sessions.c.id)
-            .limit(1)
-        )
-        row = result.one_or_none()
-        return _session(row) if row is not None else None
-
-    async def close_session(self, *, session_id: uuid.UUID, status: str) -> SessionRecord | None:
-        if status not in ("CLOSED", "STALE"):
-            raise ValueError("a session closes as CLOSED or STALE")
-        result = await self._connection.execute(
-            update(research_sessions)
-            .where(research_sessions.c.id == session_id, research_sessions.c.status == "OPEN")
-            .values(status=status, closed_at=func.now())
-            .returning(*research_sessions.c)
-        )
-        row = result.one_or_none()
-        return _session(row) if row is not None else None
-
-    async def stale_sessions_from_other_generations(
-        self, current_generation: uuid.UUID
-    ) -> list[SessionRecord]:
-        """Open sessions a previous runtime process left behind.
-
-        Their native browser contexts are gone with that process, so every
-        semantic ref they issued has to stop resolving.
-        """
-        result = await self._connection.execute(
-            select(research_sessions)
-            .where(
-                research_sessions.c.status == "OPEN",
-                research_sessions.c.runtime_generation != current_generation,
-            )
-            .order_by(research_sessions.c.created_at, research_sessions.c.id)
-        )
-        return [_session(row) for row in result]
-
-    # ---- observations -------------------------------------------------------
+    # ---- evidence -----------------------------------------------------------
 
     async def next_sequence(self, task_id: uuid.UUID) -> int:
         highest = await self._connection.scalar(
-            select(func.max(research_observations.c.sequence)).where(
-                research_observations.c.task_id == task_id
+            select(func.max(authenticated_observations.c.sequence)).where(
+                authenticated_observations.c.task_id == task_id
             )
         )
         return int(highest or 0) + 1
@@ -569,98 +481,100 @@ class ResearchRepository:
     async def insert_observation(
         self,
         *,
-        observation: ResearchObservation,
+        observation: AuthenticatedObservation,
         task_id: uuid.UUID,
         grant_id: uuid.UUID,
         action_id: uuid.UUID,
         attempt_id: uuid.UUID,
         dispatch_id: uuid.UUID | None,
-        session_id: uuid.UUID | None,
         worker_generation: uuid.UUID | None,
-        targets: dict[str, str],
-    ) -> ObservationRecord:
+    ) -> AuthenticatedObservationRecord:
         dumped = observation.model_dump(mode="json")
         result = await self._connection.execute(
-            insert(research_observations)
+            insert(authenticated_observations)
             .values(
                 id=observation.observation_id,
                 task_id=task_id,
                 grant_id=grant_id,
+                profile_id=observation.profile_id,
                 action_id=action_id,
                 attempt_id=attempt_id,
                 dispatch_id=dispatch_id,
-                session_id=session_id,
                 worker_generation=worker_generation,
                 sequence=observation.sequence,
                 schema_version=observation.schema_version,
+                classification=observation.classification,
                 provenance=observation.provenance,
                 kind=observation.kind,
                 operation=observation.operation.value,
                 tab=observation.tab,
                 document_epoch=observation.document_epoch,
-                query=observation.query,
-                requested_url=observation.requested_url,
-                final_url=observation.final_url,
-                final_host=observation.final_host,
+                host=observation.host,
                 title=observation.title,
                 settled=observation.settled,
                 truncated=observation.truncated,
                 observed_at=observation.observed_at,
                 content_hash=observation.content_hash,
                 projection={
-                    "redirects": dumped["redirects"],
                     "blocks": dumped["blocks"],
                     "links": dumped["links"],
-                    "results": dumped["results"],
                     "open_tabs": dumped["open_tabs"],
                     "total_text_chars": dumped["total_text_chars"],
                     "total_link_count": dumped["total_link_count"],
+                    "redactions": dumped["redactions"],
                 },
-                targets=targets,
             )
-            .returning(*research_observations.c)
+            .returning(*authenticated_observations.c)
         )
         return _observation(result.one())
 
     async def list_observations(
         self, task_id: uuid.UUID, *, limit: int = 100
-    ) -> list[ObservationRecord]:
+    ) -> list[AuthenticatedObservationRecord]:
         result = await self._connection.execute(
-            select(research_observations)
-            .where(research_observations.c.task_id == task_id)
-            .order_by(research_observations.c.sequence)
+            select(authenticated_observations)
+            .where(authenticated_observations.c.task_id == task_id)
+            .order_by(authenticated_observations.c.sequence)
             .limit(limit)
         )
         return [_observation(row) for row in result]
 
     async def observation_by_sequence(
         self, *, task_id: uuid.UUID, sequence: int
-    ) -> ObservationRecord | None:
+    ) -> AuthenticatedObservationRecord | None:
         result = await self._connection.execute(
-            select(research_observations).where(
-                research_observations.c.task_id == task_id,
-                research_observations.c.sequence == sequence,
+            select(authenticated_observations).where(
+                authenticated_observations.c.task_id == task_id,
+                authenticated_observations.c.sequence == sequence,
             )
         )
         row = result.one_or_none()
         return _observation(row) if row is not None else None
 
-    async def count_observations(self, task_id: uuid.UUID) -> int:
-        value = await self._connection.scalar(
-            select(func.count())
-            .select_from(research_observations)
-            .where(research_observations.c.task_id == task_id)
-        )
-        return int(value or 0)
-
     async def count_steps(self, task_id: uuid.UUID) -> int:
-        """Research actions recorded for this task, executed or not."""
+        """Authenticated actions recorded for this task, executed or not."""
         value = await self._connection.scalar(
             select(func.count())
             .select_from(actions)
-            .where(actions.c.task_id == task_id, actions.c.tool_name.in_(RESEARCH_TOOL_NAMES))
+            .where(actions.c.task_id == task_id, actions.c.tool_name.in_(AUTHENTICATED_TOOL_NAMES))
         )
         return int(value or 0)
+
+    async def delete_evidence_for_task(self, task_id: uuid.UUID) -> int:
+        removed = 0
+        for table in (authenticated_answers, authenticated_observations):
+            result = await self._connection.execute(delete(table).where(table.c.task_id == task_id))
+            removed += result.rowcount or 0
+        return removed
+
+    async def delete_evidence_for_profile(self, profile_id: uuid.UUID) -> int:
+        removed = 0
+        for table in (authenticated_answers, authenticated_observations):
+            result = await self._connection.execute(
+                delete(table).where(table.c.profile_id == profile_id)
+            )
+            removed += result.rowcount or 0
+        return removed
 
     # ---- the answer ---------------------------------------------------------
 
@@ -670,19 +584,22 @@ class ResearchRepository:
         answer_id: uuid.UUID,
         task_id: uuid.UUID,
         grant_id: uuid.UUID,
-        answer: ResearchAnswer,
+        profile_id: uuid.UUID,
+        answer: AuthenticatedAnswer,
         provider: str,
         model: str,
         steps_used: int,
         observations_used: int,
         planner_calls: int,
-    ) -> AnswerRecord:
+    ) -> AuthenticatedAnswerRecord:
         result = await self._connection.execute(
-            insert(research_answers)
+            insert(authenticated_answers)
             .values(
                 id=answer_id,
                 task_id=task_id,
                 grant_id=grant_id,
+                profile_id=profile_id,
+                classification="account_private",
                 status=answer.status,
                 stop_reason=answer.stop_reason,
                 answer=answer.model_dump(mode="json"),
@@ -692,13 +609,22 @@ class ResearchRepository:
                 observations_used=observations_used,
                 planner_calls=planner_calls,
             )
-            .returning(*research_answers.c)
+            .returning(*authenticated_answers.c)
         )
         return _answer(result.one())
 
-    async def get_answer(self, task_id: uuid.UUID) -> AnswerRecord | None:
+    async def get_answer(self, task_id: uuid.UUID) -> AuthenticatedAnswerRecord | None:
         result = await self._connection.execute(
-            select(research_answers).where(research_answers.c.task_id == task_id)
+            select(authenticated_answers).where(authenticated_answers.c.task_id == task_id)
         )
         row = result.one_or_none()
         return _answer(row) if row is not None else None
+
+
+__all__ = [
+    "KIND",
+    "AuthenticatedAnswerRecord",
+    "AuthenticatedGrantRecord",
+    "AuthenticatedObservationRecord",
+    "AuthenticatedRepository",
+]

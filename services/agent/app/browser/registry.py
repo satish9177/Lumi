@@ -33,6 +33,7 @@ from playwright.async_api import Page
 from pydantic import BaseModel
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime only.
+    from app.browser.authenticated_session import AuthenticatedReadSession
     from app.browser.research_session import ResearchBrowserSession
 
 from app.browser.network_guard import PublicNetworkGuard
@@ -71,6 +72,11 @@ class OperationTarget(StrEnum):
     #: destination comes from a semantic ref the worker itself issued (or from
     #: an address the user typed), and is checked by the same policy and guard.
     RESEARCH_SESSION = "RESEARCH_SESSION"
+    #: Milestone 8a S3: a step inside the one persistent, Lumi-managed profile
+    #: for one site, carrying the user's session. Structurally separate from
+    #: `RESEARCH_SESSION`: a dispatch names exactly one kind of context, and the
+    #: worker refuses an id of the other kind rather than falling back to it.
+    AUTHENTICATED_SESSION = "AUTHENTICATED_SESSION"
 
 
 class Reconciliation(StrEnum):
@@ -104,6 +110,9 @@ class OperationContext:
     #: RESEARCH_SESSION operations only: the task-owned session this step runs
     #: in, which owns its own policy, guard, tabs and ref tables.
     research_session: "ResearchBrowserSession | None" = None
+    #: AUTHENTICATED_SESSION operations only: the read session of the one open
+    #: persistent profile this step runs in.
+    authenticated_session: "AuthenticatedReadSession | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,6 +176,33 @@ class OperationRegistry:
                     f"public-page operation {operation.name!r} must be read-only and must "
                     "not be retried without a new approval"
                 )
+            if (
+                operation.effect is Effect.ACCOUNT_READ
+                and operation.target is not OperationTarget.AUTHENTICATED_SESSION
+            ):
+                raise ValueError(
+                    f"account-read operation {operation.name!r} may only target an "
+                    "authenticated session"
+                )
+            if operation.target is OperationTarget.AUTHENTICATED_SESSION and (
+                operation.effect is not Effect.ACCOUNT_READ
+                or operation.retry is not RetryPolicy.OBSERVE_THEN_REPLAN
+            ):
+                raise ValueError(
+                    f"authenticated operation {operation.name!r} must be an account read and "
+                    "must be recovered by re-observing rather than by repeating itself"
+                )
+            if (
+                operation.target is OperationTarget.AUTHENTICATED_SESSION
+                and operation.reconciliation is not Reconciliation.NOT_REQUIRED
+            ):
+                # There is no authoritative verifier for "did this site record
+                # my visit". A booking-style reconciliation path reachable from
+                # here would claim to establish something nothing can.
+                raise ValueError(
+                    f"authenticated operation {operation.name!r} must not declare a "
+                    "reconciliation strategy"
+                )
             if operation.target is OperationTarget.RESEARCH_SESSION and (
                 operation.effect is not Effect.READ_ONLY
                 or operation.retry is not RetryPolicy.OBSERVE_THEN_REPLAN
@@ -200,8 +236,11 @@ def build_registry() -> OperationRegistry:
     adds five read-only research operations that run in a task-owned session.
     """
     from app.browser.adapters import appointment_fixture
-    from app.browser.operations import public_page, research
+    from app.browser.operations import authenticated, public_page, research
 
     return OperationRegistry(
-        appointment_fixture.OPERATIONS + public_page.OPERATIONS + research.OPERATIONS
+        appointment_fixture.OPERATIONS
+        + public_page.OPERATIONS
+        + research.OPERATIONS
+        + authenticated.OPERATIONS
     )

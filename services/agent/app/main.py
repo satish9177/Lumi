@@ -13,6 +13,7 @@ from app.db.engine import create_database_engine, ping_database
 from app.db.migrations import verify_schema_is_current
 from app.browser.managed import ManagedBrowserWorker
 from app.services.actions import ActionService
+from app.services.authenticated_read import AuthenticatedReadService
 from app.services.booking_preparation import BookingPreparationService
 from app.services.booking_tasks import BookingTaskService
 from app.services.clinic_info import ClinicInfoService
@@ -186,6 +187,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     max_tabs=resolved.research_max_tabs,
                 )
                 app.state.research_service = research_service
+                # Milestone 8a S3. Reads through the *same* profile service S1
+                # and S2 use: one lease, one directory, one open at a time.
+                app.state.authenticated_read_service = AuthenticatedReadService(
+                    engine,
+                    tasks=task_service,
+                    actions=action_service,
+                    runtime_generation=generation.id,
+                    worker=worker,
+                    profiles=app.state.browser_profile_service,
+                    grant_ttl_seconds=resolved.authenticated_grant_ttl_seconds,
+                    step_ttl_seconds=resolved.authenticated_step_ttl_seconds,
+                    max_tabs=resolved.authenticated_max_tabs,
+                )
                 # A research session belongs to the process that created it.
                 # Sessions a dead runtime left open describe browser contexts
                 # that no longer exist, so every semantic ref they issued has

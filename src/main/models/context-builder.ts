@@ -194,7 +194,13 @@ export function buildContext(input: ContextInput, budget: { maxInputTokens: numb
     add('untrusted_observation', `${header}${kept.join('\n')}${note}${footer}`, true, truncated)
   }
 
-  if (input.task) {
+  // Milestone 8a S3: an account-private task is never part of another request's
+  // context. Its answer and evidence are private to that task's own planner and
+  // answer calls (which build their sections explicitly, for their one approved
+  // recipient), so nothing about it can reach a prompt for an unrelated request.
+  if (input.task && input.task.task.kind === 'authenticated_read') {
+    sections.push({ name: 'task_state', tokens: 0, included: false, truncated: false })
+  } else if (input.task) {
     add('task_state', `CURRENT TASK (durable record):\n${describeTaskState(input.task)}`)
     const recent = input.task.events.slice(-MAX_EVENTS).reverse().map(describeEvent)
     if (recent.length > 0) add('recent_events', `RECENT TIMELINE (newest first):\n${recent.join('\n')}`)

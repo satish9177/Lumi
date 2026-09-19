@@ -16,6 +16,13 @@ class BrowserEffect(StrEnum):
 
     #: Reads a page. Changes nothing anywhere. Always safe to repeat.
     READ_ONLY = "READ_ONLY"
+    #: Milestone 8a S3, user-facing name `account_scoped_read`. GET and HEAD
+    #: only, to one site, in a browser carrying the user's session for it.
+    #: Lumi performs no intentional change -- but the website may still record
+    #: the visit (mark something read, update "last active", extend a session,
+    #: write account activity), and Lumi can neither prevent nor detect that.
+    #: Deliberately **not** `READ_ONLY`, because that word promises the opposite.
+    ACCOUNT_READ = "ACCOUNT_READ"
     #: Navigates and fills fields. Browser-local state only; the site is not
     #: asked to do anything.
     PREPARE = "PREPARE"

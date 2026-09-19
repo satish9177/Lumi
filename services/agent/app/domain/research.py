@@ -44,7 +44,8 @@ import unicodedata
 import uuid
 from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Any, Literal, Self
+from collections.abc import Mapping
+from typing import Annotated, Any, Literal, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -663,8 +664,18 @@ def _numbers(value: str) -> set[str]:
     }
 
 
+class BlockSource(Protocol):
+    """Anything that can say which text block a ref names.
+
+    Public research observations and account-private observations share one
+    grounding rule, so the check is written once against this shape.
+    """
+
+    def block(self, block_id: str) -> TextBlock | None: ...
+
+
 def verify_research_grounding(
-    observations: dict[str, ResearchObservation], answer: ResearchAnswer
+    observations: Mapping[str, BlockSource], answer: ResearchAnswer
 ) -> None:
     """Refuse an answer the collected observations do not support.
 
@@ -728,6 +739,7 @@ __all__ = [
     "RESEARCH_TOOL_NAMES",
     "TOOL_NAMES",
     "AnswerNotGroundedError",
+    "BlockSource",
     "GrantStatus",
     "HistoryStep",
     "LinkTarget",

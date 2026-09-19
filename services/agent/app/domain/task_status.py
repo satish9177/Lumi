@@ -47,6 +47,14 @@ class TaskEventType(StrEnum):
     TASK_RESEARCH_SCOPE_GRANTED = "task.research_scope_granted"
     TASK_RESEARCH_SCOPE_REVOKED = "task.research_scope_revoked"
     TASK_RESEARCH_ANSWER_RECORDED = "task.research_answer_recorded"
+    #: Milestone 8a S3 authenticated account reading. Ids, reasons and counts
+    #: only -- never page text, an answer, an address or an identity.
+    TASK_AUTHENTICATED_SCOPE_REQUESTED = "task.authenticated_scope_requested"
+    TASK_AUTHENTICATED_SCOPE_GRANTED = "task.authenticated_scope_granted"
+    TASK_AUTHENTICATED_SCOPE_REVOKED = "task.authenticated_scope_revoked"
+    TASK_AUTHENTICATED_ANSWER_RECORDED = "task.authenticated_answer_recorded"
+    TASK_AUTHENTICATED_PAUSED = "task.authenticated_paused"
+    TASK_AUTHENTICATED_RESUMED = "task.authenticated_resumed"
     ACTION_PROPOSED = "action.proposed"
     ACTION_APPROVAL_REQUESTED = "action.approval_requested"
     ACTION_APPROVED = "action.approved"

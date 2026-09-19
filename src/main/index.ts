@@ -67,6 +67,8 @@ import { DemoClinicSite, readRuntimeConfig } from './agent/packaged-runtime'
 import { createModelRouter } from './models/model-config'
 import type { ModelRouter } from './models/model-router'
 import { PageAnswerer } from './agent/page-answer'
+import { AuthenticatedAnswerer } from './agent/authenticated-answer'
+import { AuthenticatedPlanner } from './agent/authenticated-planner'
 import { ResearchAnswerer } from './agent/research-answer'
 import { ResearchPlanner } from './agent/research-planner'
 import {
@@ -1141,6 +1143,11 @@ app.whenReady().then(async () => {
   // is allowed and performs it.
   const researchPlanner = modelRouter ? new ResearchPlanner(modelRouter) : undefined
   const researchAnswerer = modelRouter ? new ResearchAnswerer(modelRouter) : undefined
+  // Milestone 8a S3. The same shape, with one difference that is the point: the
+  // recipient of every call comes from the confirmed grant, and the router
+  // refuses to run these classes without it.
+  const authenticatedPlanner = modelRouter ? new AuthenticatedPlanner(modelRouter) : undefined
+  const authenticatedAnswerer = modelRouter ? new AuthenticatedAnswerer(modelRouter) : undefined
   const agentTasks = new AgentTaskController(
     {
       // Resolved per call: a packaged runtime is created asynchronously.
@@ -1158,6 +1165,10 @@ app.whenReady().then(async () => {
       get policy() { return publicResearchPolicy },
       ...(researchPlanner ? { planner: researchPlanner } : {}),
       ...(researchAnswerer ? { answerer: researchAnswerer } : {})
+    },
+    {
+      ...(authenticatedPlanner ? { planner: authenticatedPlanner } : {}),
+      ...(authenticatedAnswerer ? { answerer: authenticatedAnswerer } : {})
     }
   )
   const browserProfiles = new BrowserProfileController({

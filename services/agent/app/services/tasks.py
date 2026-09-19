@@ -11,6 +11,7 @@ from app.domain.errors import (
 )
 from app.domain.research import GrantStatus
 from app.domain.task_status import TaskEventType, TaskStatus, can_cancel
+from app.repositories.authenticated import AuthenticatedRepository
 from app.repositories.research import ResearchRepository
 from app.repositories.tasks import TaskEventRecord, TaskRecord, TaskRepository
 
@@ -121,5 +122,33 @@ class TaskService:
                         },
                     )
                     return advanced
+                # Milestone 8a S3: a cancelled task must not leave an
+                # account-reading grant behind either. Its evidence is kept
+                # (the user may still read what was found), and the profile's
+                # browser is released by the desktop's stop path.
+                authenticated = AuthenticatedRepository(connection)
+                account_grant = await authenticated.open_grant_for_task(task_id)
+                if account_grant is not None:
+                    closed_account = await authenticated.close_grant(
+                        grant_id=account_grant.id, status=GrantStatus.REVOKED
+                    )
+                    advanced_account = await repository.advance_task(
+                        task_id=task_id, expected_revision=cancelled.revision
+                    )
+                    if advanced_account is None:  # pragma: no cover - this writer holds the row.
+                        raise TaskConcurrencyError(task_id)
+                    await repository.append_event(
+                        task=advanced_account,
+                        event_type=TaskEventType.TASK_AUTHENTICATED_SCOPE_REVOKED,
+                        payload={
+                            "grant_id": str(account_grant.id),
+                            "grant_revision": (
+                                closed_account.revision if closed_account else account_grant.revision
+                            ),
+                            "grant_status": (closed_account or account_grant).status.value,
+                            "reason": "task_cancelled",
+                        },
+                    )
+                    return advanced_account
                 return cancelled
         raise TaskConcurrencyError(task_id)

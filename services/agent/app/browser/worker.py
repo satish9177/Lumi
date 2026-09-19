@@ -40,6 +40,7 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 from pydantic import ValidationError
 
+from app.browser.authenticated_session import AuthenticatedReadSession
 from app.browser.config import WorkerSettings
 from app.browser.egress_broker import EgressBroker, managed_launch_options
 from app.browser.network_guard import PublicNetworkGuard
@@ -73,9 +74,10 @@ from app.browser.registry import (
 )
 from app.browser.research_session import ResearchBrowserSession, SessionError, SessionStore
 from app.browser.session import BrowserSession, WorkerGeneration, token_matches
+from app.domain.authenticated import AUTHENTICATED_READ_SITE
 from app.domain.browser_profile import BrowserVersions
 from app.domain.page_observation import PUBLIC_WEB_SITE
-from app.domain.public_url import PublicUrlPolicy
+from app.domain.public_url import PublicUrlPolicy, parse_test_origins
 from app.domain.research import PUBLIC_RESEARCH_SITE
 
 logger = logging.getLogger("lumi.browser.worker")
@@ -523,8 +525,76 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
                 generation.id,
             )
 
+        # Milestone 8a S3: a research session and an authenticated profile are
+        # different kinds of context, named by different fields. A dispatch may
+        # carry the one its operation targets and nothing else, so neither id
+        # can be passed where the other is expected.
+        if operation.target is not OperationTarget.AUTHENTICATED_SESSION and body.profile_id is not None:
+            return _error(
+                status.HTTP_409_CONFLICT,
+                "session_kind_mismatch",
+                "A profile id was supplied to an operation that does not run in a profile.",
+                generation.id,
+            )
+        if operation.target is OperationTarget.AUTHENTICATED_SESSION and body.session_id is not None:
+            return _error(
+                status.HTTP_409_CONFLICT,
+                "session_kind_mismatch",
+                "A research session id was supplied to an authenticated operation.",
+                generation.id,
+            )
+
         research_session: ResearchBrowserSession | None = None
-        if operation.target is OperationTarget.RESEARCH_SESSION:
+        authenticated_session: AuthenticatedReadSession | None = None
+        if operation.target is OperationTarget.AUTHENTICATED_SESSION:
+            # No origin and no profile creation here: the profile must already
+            # be open in this worker generation, headless and free of any
+            # takeover, and its site is pinned by the first step that names it.
+            if body.site != AUTHENTICATED_READ_SITE:
+                return _error(
+                    status.HTTP_403_FORBIDDEN,
+                    "site_not_allowed",
+                    "Authenticated reading is not addressed to this worker.",
+                    generation.id,
+                )
+            if body.action_id is None or body.attempt_id is None:
+                return _error(
+                    status.HTTP_400_BAD_REQUEST,
+                    "attempt_required",
+                    "An authenticated operation requires a persisted execution attempt.",
+                    generation.id,
+                )
+            if body.profile_id is None:
+                return _error(
+                    status.HTTP_400_BAD_REQUEST,
+                    "profile_required",
+                    "An authenticated operation requires a profile.",
+                    generation.id,
+                )
+            site = body.input.get("site")
+            if not isinstance(site, str):
+                return _error(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    "invalid_operation_input",
+                    "An authenticated operation names its profile's site.",
+                    generation.id,
+                )
+            profiles: ProfileSessionStore = request.app.state.profiles
+            try:
+                authenticated_session = await profiles.read_session(
+                    body.profile_id,
+                    site=site,
+                    test_origins=parse_test_origins(resolved.auth_test_origins),
+                )
+            except ProfileSessionError as error:
+                return _error(
+                    status.HTTP_409_CONFLICT,
+                    error.code,
+                    "That profile is not available for reading.",
+                    generation.id,
+                )
+            origin = ""
+        elif operation.target is OperationTarget.RESEARCH_SESSION:
             # No origin and no session creation here: the session must already
             # exist in this worker generation, and the destination comes from a
             # ref this worker issued or an address the user typed.
@@ -649,6 +719,7 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
                 timeout_seconds=resolved.operation_timeout_seconds or operation.timeout_seconds,
                 public_policy=public_policy,
                 research_session=research_session,
+                authenticated_session=authenticated_session,
             )
         except BaseException:
             ledger.release(body.dispatch_id)
@@ -670,6 +741,7 @@ async def _run(
     timeout_seconds: float,
     public_policy: PublicUrlPolicy | None = None,
     research_session: ResearchBrowserSession | None = None,
+    authenticated_session: AuthenticatedReadSession | None = None,
 ) -> DispatchResponse:
     """Drive one operation in its own browser context, and classify the result.
 
@@ -692,8 +764,22 @@ async def _run(
     guard: PublicNetworkGuard | None = None
     #: A research step runs in the task's own long-lived context, so this
     #: dispatch must neither create one nor close one when it finishes.
-    owns_context = operation.target is not OperationTarget.RESEARCH_SESSION
-    if operation.target is OperationTarget.RESEARCH_SESSION and research_session is not None:
+    owns_context = operation.target not in (
+        OperationTarget.RESEARCH_SESSION,
+        OperationTarget.AUTHENTICATED_SESSION,
+    )
+    if operation.target is OperationTarget.AUTHENTICATED_SESSION and authenticated_session is not None:
+        # The profile's own persistent context. A dispatch neither creates nor
+        # closes it: it belongs to the profile's owner, and closing it would
+        # end the user's session state along with the step.
+        context = authenticated_session.context
+        active = authenticated_session.active
+        page = (
+            authenticated_session.tabs[active].page
+            if active is not None and active in authenticated_session.tabs
+            else await context.new_page()
+        )
+    elif operation.target is OperationTarget.RESEARCH_SESSION and research_session is not None:
         context = research_session.context
         active = research_session.active
         page = (
@@ -725,6 +811,7 @@ async def _run(
         public_policy=public_policy if guard is not None else None,
         network_guard=guard,
         research_session=research_session,
+        authenticated_session=authenticated_session,
     )
 
     status_value = OperationStatus.OUTCOME_UNKNOWN
@@ -760,6 +847,7 @@ async def _run(
             "worker_generation": str(generation.id),
             "browser_session_id": str(session.id),
             "research_session_id": str(research_session.id) if research_session else None,
+            "profile_id": str(authenticated_session.profile_id) if authenticated_session else None,
             "dispatch_id": str(body.dispatch_id),
             "operation": operation.name,
             "effect": operation.effect.value,

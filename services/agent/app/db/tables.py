@@ -420,11 +420,28 @@ task_grants = Table(
     # Budget accounting the runtime, not the planner, keeps.
     Column("first_step_at", DateTime(timezone=True), nullable=True),
     Column("planner_calls", Integer(), nullable=False, server_default=text("0")),
+    # Milestone 8a S3. The profile an `authenticated_read` grant is bound to,
+    # and the value that profile's `revoke_epoch` had when the scope was shown.
+    # Both null for public research, both required for an authenticated read
+    # (`profile_binding`), and immutable after insert like `scope`.
+    Column(
+        "profile_id",
+        Uuid(),
+        ForeignKey("browser_profiles.id", ondelete="RESTRICT"),
+        nullable=True,
+    ),
+    Column("profile_revoke_epoch", BigInteger(), nullable=True),
     CheckConstraint(
         "status IN (" + ", ".join(f"'{status}'" for status in GRANT_STATUSES) + ")",
         name="status",
     ),
-    CheckConstraint("kind = 'public_research'", name="kind"),
+    CheckConstraint("kind IN ('public_research', 'authenticated_read')", name="kind"),
+    CheckConstraint(
+        "((kind = 'authenticated_read') = (profile_id IS NOT NULL)) "
+        "AND ((profile_id IS NULL) = (profile_revoke_epoch IS NULL)) "
+        "AND (profile_revoke_epoch IS NULL OR profile_revoke_epoch >= 0)",
+        name="profile_binding",
+    ),
     CheckConstraint("revision >= 1", name="revision_positive"),
     CheckConstraint("scope_digest ~ '^[0-9a-f]{64}$'", name="scope_digest_format"),
     CheckConstraint("jsonb_typeof(scope) = 'object'", name="scope_is_object"),
@@ -445,6 +462,8 @@ task_grants = Table(
 
 #: At most one grant per task that is still pending or active, so a task can
 #: never hold two live scopes and a second confirmation cannot widen the first.
+Index("ix_task_grants_profile_id", task_grants.c.profile_id)
+
 Index(
     "uq_task_grants_task_id_open",
     task_grants.c.task_id,
@@ -813,3 +832,112 @@ Index(
     postgresql_where=login_attempts.c.status.in_(_OPEN_LOGIN_ATTEMPT_STATUSES),
 )
 Index("ix_login_attempts_profile_id_started_at", login_attempts.c.profile_id, login_attempts.c.started_at)
+
+
+# ---- Milestone 8a S3: account-private evidence -------------------------------
+#
+# Deliberately separate from `research_observations` and `research_answers`.
+# `classification` is a CHECK that admits exactly one value, so the boundary is
+# a property of the table and not of a WHERE clause somebody might forget. There
+# is **no URL column**: an authenticated link can be a capability, so the
+# address a ref means lives only in the worker's memory for one document epoch.
+# Everything textual here is the *redacted* projection the provider received.
+
+AUTHENTICATED_ANSWER_STATUSES = RESEARCH_ANSWER_STATUSES
+
+authenticated_observations = Table(
+    "authenticated_observations",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False),
+    Column("grant_id", Uuid(), ForeignKey("task_grants.id", ondelete="RESTRICT"), nullable=False),
+    Column(
+        "profile_id", Uuid(), ForeignKey("browser_profiles.id", ondelete="CASCADE"), nullable=False
+    ),
+    Column("action_id", Uuid(), ForeignKey("actions.id", ondelete="RESTRICT"), nullable=False),
+    Column(
+        "attempt_id", Uuid(), ForeignKey("action_attempts.id", ondelete="RESTRICT"), nullable=False
+    ),
+    Column(
+        "dispatch_id",
+        Uuid(),
+        ForeignKey("browser_dispatches.id", ondelete="RESTRICT"),
+        nullable=True,
+    ),
+    Column(
+        "worker_generation",
+        Uuid(),
+        ForeignKey("browser_worker_generations.id", ondelete="RESTRICT"),
+        nullable=True,
+    ),
+    Column("sequence", Integer(), nullable=False),
+    Column("schema_version", Integer(), nullable=False),
+    Column("classification", String(16), nullable=False),
+    Column("provenance", String(32), nullable=False),
+    Column("kind", String(16), nullable=False),
+    Column("operation", String(32), nullable=False),
+    Column("tab", String(4), nullable=True),
+    Column("document_epoch", Integer(), nullable=False),
+    Column("host", String(253), nullable=True),
+    Column("title", String(200), nullable=False),
+    Column("settled", Boolean(), nullable=False),
+    Column("truncated", Boolean(), nullable=False),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+    Column("content_hash", String(64), nullable=False),
+    Column("projection", JSONB(), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("attempt_id"),
+    UniqueConstraint("task_id", "sequence"),
+    CheckConstraint("schema_version = 1", name="schema_version"),
+    CheckConstraint("classification = 'account_private'", name="classification"),
+    CheckConstraint("provenance = 'untrusted_environment'", name="provenance"),
+    CheckConstraint("sequence >= 1", name="sequence_positive"),
+    CheckConstraint("document_epoch >= 1", name="document_epoch_positive"),
+    CheckConstraint("kind IN ('page', 'tab_state')", name="kind"),
+    CheckConstraint("content_hash ~ '^[0-9a-f]{64}$'", name="content_hash_format"),
+    CheckConstraint("jsonb_typeof(projection) = 'object'", name="projection_is_object"),
+)
+
+Index(
+    "ix_authenticated_observations_task_id_sequence",
+    authenticated_observations.c.task_id,
+    authenticated_observations.c.sequence,
+)
+Index("ix_authenticated_observations_profile_id", authenticated_observations.c.profile_id)
+
+authenticated_answers = Table(
+    "authenticated_answers",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False),
+    Column("grant_id", Uuid(), ForeignKey("task_grants.id", ondelete="RESTRICT"), nullable=False),
+    Column(
+        "profile_id", Uuid(), ForeignKey("browser_profiles.id", ondelete="CASCADE"), nullable=False
+    ),
+    Column("classification", String(16), nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("stop_reason", String(24), nullable=False),
+    Column("answer", JSONB(), nullable=False),
+    Column("provider", String(16), nullable=False),
+    Column("model", String(64), nullable=False),
+    Column("steps_used", Integer(), nullable=False),
+    Column("observations_used", Integer(), nullable=False),
+    Column("planner_calls", Integer(), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("task_id"),
+    CheckConstraint("classification = 'account_private'", name="classification"),
+    CheckConstraint(
+        "status IN (" + ", ".join(f"'{status}'" for status in AUTHENTICATED_ANSWER_STATUSES) + ")",
+        name="status",
+    ),
+    CheckConstraint(
+        "stop_reason IN (" + ", ".join(f"'{reason}'" for reason in RESEARCH_STOP_REASONS) + ")",
+        name="stop_reason",
+    ),
+    CheckConstraint("jsonb_typeof(answer) = 'object'", name="answer_is_object"),
+    CheckConstraint(
+        "steps_used >= 0 AND observations_used >= 0 AND planner_calls >= 0", name="counters"
+    ),
+)
+
+Index("ix_authenticated_answers_profile_id", authenticated_answers.c.profile_id)

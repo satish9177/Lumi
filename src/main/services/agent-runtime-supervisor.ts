@@ -120,6 +120,14 @@ const ALLOWED_ROUTES: ReadonlyArray<{ method: RuntimeMethod; pattern: RegExp }> 
     method: 'POST',
     pattern: new RegExp(`^/tasks/${UUID_PART}/research/(prepare|grant|revoke|steps|answer)$`)
   },
+  // Milestone 8a S3: authenticated account reading. Six routes, every segment an
+  // opaque id or one of six fixed words. `grant` is the trusted click; `steps`
+  // takes one closed-union step; none takes or returns an address.
+  { method: 'GET', pattern: new RegExp(`^/tasks/${UUID_PART}/authenticated$`) },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/tasks/${UUID_PART}/authenticated/(prepare|grant|revoke|steps|answer)$`)
+  },
   { method: 'GET', pattern: new RegExp(`^/actions/${UUID_PART}$`) },
   {
     method: 'POST',

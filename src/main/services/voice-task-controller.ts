@@ -857,7 +857,9 @@ export class VoiceTaskController {
     if (!this.memory || !snapshot) return
     try {
       await this.memory.recordEpisode({
-        taskId: snapshot.task.taskId, kind, summary, sequence: snapshot.task.lastEventSequence
+        taskId: snapshot.task.taskId, kind, summary, sequence: snapshot.task.lastEventSequence,
+        // Milestone 8a S3: nothing read through a signed-in account is summarised.
+        classification: snapshot.task.kind === 'authenticated_read' ? 'account_private' : 'public'
       })
     } catch {
       // Memory is a convenience; the durable timeline is the record.

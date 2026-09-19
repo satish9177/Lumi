@@ -152,6 +152,19 @@ class Settings(DatabaseSettings):
     research_max_tabs: int = Field(
         default=5, ge=1, le=5, validation_alias="LUMI_RESEARCH_MAX_TABS"
     )
+    #: Milestone 8a S3 authenticated reading. Smaller than research on purpose:
+    #: a confirmed scope lasts ten minutes at most, a step authorization is
+    #: minted and consumed inside one request, and an account read never has
+    #: more than three tabs.
+    authenticated_grant_ttl_seconds: int = Field(
+        default=600, ge=30, le=1_800, validation_alias="LUMI_AUTHENTICATED_GRANT_TTL_SECONDS"
+    )
+    authenticated_step_ttl_seconds: int = Field(
+        default=120, ge=5, le=600, validation_alias="LUMI_AUTHENTICATED_STEP_TTL_SECONDS"
+    )
+    authenticated_max_tabs: int = Field(
+        default=3, ge=1, le=3, validation_alias="LUMI_AUTHENTICATED_MAX_TABS"
+    )
     #: How long one confirmed research scope authorises steps for. Ten minutes
     #: initially; configurable because it is a tuning value, not an invariant.
     research_grant_ttl_seconds: int = Field(

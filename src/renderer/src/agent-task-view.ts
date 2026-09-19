@@ -3,6 +3,8 @@ import type {
   AgentBookingCriteria,
   AgentChangedFact,
   AgentDisclosureRecipient,
+  AgentAuthenticatedPauseReason,
+  AgentAuthenticatedView,
   AgentEventView,
   AgentInspectionView,
   AgentReconciliationView,
@@ -236,6 +238,15 @@ export function describeEvent(event: AgentEventView): string {
       return event.answerStatus === 'answered'
         ? 'Answer recorded from the pages Lumi read'
         : 'Recorded: could not verify an answer from the pages Lumi read'
+    case 'task.authenticated_scope_requested': return 'Account-reading permission prepared — nothing opened yet'
+    case 'task.authenticated_scope_granted': return 'You allowed account reading for this question'
+    case 'task.authenticated_scope_revoked': return 'Account-reading permission withdrawn'
+    case 'task.authenticated_answer_recorded':
+      return event.answerStatus === 'answered'
+        ? 'Answer recorded from your account pages'
+        : 'Recorded: could not verify an answer from your account pages'
+    case 'task.authenticated_paused': return 'Paused — Lumi stopped and sent nothing further to an AI'
+    case 'task.authenticated_resumed': return 'Resumed'
     case 'action.proposed': return 'Booking prepared from the clinic site'
     case 'action.approval_requested': return 'Waiting for your approval'
     case 'action.approved': return 'You approved the booking'
@@ -552,6 +563,239 @@ export function researchSources(research: AgentResearchView): AgentResearchSourc
     })
   }
   return sources
+}
+
+// ---- Milestone 8a S3: the authenticated account-reading card -------------------------
+
+/**
+ * The disclosure card for reading a signed-in account. Every word on it is
+ * Lumi's own, written here, and it is built only from the persisted scope and
+ * the trusted profile record: never from a page, an observation, a model or a
+ * renderer payload. The profile *label* is the user's own text and the site is
+ * the profile's bound registrable domain; neither is website content.
+ *
+ * The honest name for what this does is `account_scoped_read`. It is never
+ * described as read-only, invisible or free of effects: the card says, before
+ * the Allow button, that a visit can change website state.
+ */
+
+export type AuthenticatedControl =
+  | 'allow_account_reading'
+  | 'decline_account_reading'
+  | 'run_account_reading'
+  | 'stop_account_reading'
+
+export interface AuthenticatedCardModel {
+  tone: BookingTone
+  eyebrow: string
+  title: string
+  lines: string[]
+  /** Show the full disclosure: only while the permission is waiting for a click. */
+  showDisclosure: boolean
+  showProgress: boolean
+  controls: AuthenticatedControl[]
+}
+
+/** The disclosure, section by section, for the trusted card. Pure text. */
+export interface AuthenticatedDisclosure {
+  heading: string
+  profileLabel: string
+  site: string
+  mayDo: string[]
+  mayNot: string[]
+  /** Shown before Allow, never after: a page visit is not invisible. */
+  sideEffectNotice: string
+  sideEffectExamples: string
+  sent: string[]
+  provider: string
+  failoverNotice: string
+}
+
+const AUTH_MAY_DO = (site: string): string[] => [
+  `read pages on ${site}`,
+  `follow links within ${site}`,
+  'open and close its own account-reading tabs'
+]
+
+const AUTH_MAY_NOT = (site: string): string[] => [
+  'sign in for you',
+  'ask for your password or one-time code',
+  'type into forms',
+  'submit anything',
+  `leave ${site}`,
+  'upload or download files',
+  'buy, send, post or message anything'
+]
+
+/** `github.com` -> `GITHUB`. The site name, never a page's title. */
+export function siteHeadline(site: string): string {
+  return (site.split('.')[0] || site).toUpperCase()
+}
+
+export function describeAuthenticatedDisclosure(view: AgentAuthenticatedView): AuthenticatedDisclosure | undefined {
+  const scope = view.grant?.scope
+  const profile = view.profile
+  if (!scope || !profile) return undefined
+  return {
+    heading: `READ YOUR ${siteHeadline(scope.site)} ACCOUNT`,
+    profileLabel: profile.label,
+    site: scope.site,
+    mayDo: AUTH_MAY_DO(scope.site),
+    mayNot: AUTH_MAY_NOT(scope.site),
+    sideEffectNotice:
+      'Reading an account page may change website state, such as marking something as read, updating "last active", extending your session, or recording the visit.',
+    sideEffectExamples:
+      'Reading an account page is not invisible to the website. A page visit may mark something as read, update "last active", extend your session, or appear in account activity. Lumi cannot prevent that.',
+    sent: [
+      'your question',
+      `up to ${scope.maxTextChars.toLocaleString('en-US')} characters from account pages`,
+      'with email addresses, phone numbers and long numbers hidden first. That reduces what is sent; it does not make it anonymous.'
+    ],
+    provider: RECIPIENT_LABELS[scope.recipient],
+    failoverNotice:
+      'If that provider is unavailable, Lumi stops. It does not send the private page to another provider.'
+  }
+}
+
+const AUTH_PAUSE_LINES: Record<AgentAuthenticatedPauseReason, { title: string; lines: string[] }> = {
+  login_required: {
+    title: 'The website asked you to sign in again',
+    lines: [
+      'Lumi paused and sent nothing from that page to an AI.',
+      'Use "Sign in manually" for this profile, then ask again.'
+    ]
+  },
+  account_changed: {
+    title: 'A different account is signed in',
+    lines: [
+      'Lumi paused and sent nothing from that page to an AI. Your earlier permission no longer applies.',
+      'Sign in again with "Sign in manually", then review a new permission card.'
+    ]
+  },
+  account_identity_unknown: {
+    title: 'Lumi cannot tell which account this is',
+    lines: [
+      'Lumi paused and sent nothing from that page to an AI.',
+      'It only reads a page when it can confirm the account is the one you allowed.'
+    ]
+  },
+  left_site_scope: {
+    title: 'The page tried to leave the site',
+    lines: [
+      'Lumi stopped. It did not open the other address, and it did not hand it to anything else.'
+    ]
+  }
+}
+
+const AUTH_STOP_LINES: Record<AgentResearchStopReason, string> = {
+  goal_reached: 'Lumi found what you asked for.',
+  no_evidence: 'The account pages Lumi could read did not show it.',
+  budget_exhausted: 'Lumi reached the limit for this task and stopped.',
+  blocked: 'Lumi was blocked before it could finish.',
+  planner_failed: 'Lumi could not decide a safe next step.',
+  user_stopped: 'You stopped the account reading.',
+  outside_scope: 'Finishing this would have needed something account reading is not allowed to do.'
+}
+
+export function describeAuthenticated(view: AgentAuthenticatedView, now: number): AuthenticatedCardModel {
+  const grant = view.grant
+  const answer = view.answer
+  const base = { showDisclosure: false, showProgress: false }
+  if (!grant) {
+    return {
+      ...base, tone: 'neutral', eyebrow: 'ACCOUNT', title: 'No account-reading permission yet',
+      lines: ['Nothing has been opened.'], controls: []
+    }
+  }
+  if (answer) {
+    const stopLine = AUTH_STOP_LINES[answer.stopReason]
+    if (answer.status === 'answered' || answer.status === 'partial') {
+      return {
+        ...base, showProgress: true, tone: 'success',
+        eyebrow: answer.status === 'answered' ? 'ANSWER FROM YOUR ACCOUNT' : 'PARTIAL ANSWER',
+        title: answer.status === 'answered' ? 'Answer from the account pages Lumi read' : 'Part of the answer',
+        lines: answer.status === 'answered' ? [] : [stopLine], controls: []
+      }
+    }
+    return {
+      ...base, showProgress: true, tone: 'neutral', eyebrow: 'NOT VERIFIED',
+      title: 'Lumi could not verify that from your account pages', lines: [stopLine], controls: []
+    }
+  }
+  if (view.pauseReason) {
+    const pause = AUTH_PAUSE_LINES[view.pauseReason]
+    return {
+      ...base, showProgress: view.observations.length > 0, tone: 'uncertain', eyebrow: 'PAUSED',
+      title: pause.title, lines: pause.lines, controls: ['stop_account_reading']
+    }
+  }
+  switch (grant.status) {
+    case 'PENDING':
+      return {
+        ...base, showDisclosure: true, tone: 'approval', eyebrow: 'NEEDS YOUR PERMISSION',
+        title: 'Allow Lumi to read this account for this question?',
+        lines: [], controls: ['decline_account_reading', 'allow_account_reading']
+      }
+    case 'ACTIVE': {
+      if (grant.expiresAt !== undefined && Date.parse(grant.expiresAt) <= now) {
+        return {
+          ...base, showProgress: true, tone: 'neutral', eyebrow: 'PERMISSION EXPIRED',
+          title: 'The account-reading permission expired',
+          lines: ['Nothing else will be opened. Ask again to review a new permission card.'],
+          controls: ['stop_account_reading']
+        }
+      }
+      if (view.unresolvedStep) {
+        return {
+          ...base, showProgress: view.observations.length > 0, tone: 'neutral',
+          eyebrow: 'STEP UNRESOLVED', title: 'Lumi does not know what its last step did',
+          lines: [
+            'A page visit may have reached the website, and Lumi cannot tell whether it recorded it.',
+            'Lumi will look at the page again before doing anything else. It does not repeat the step.'
+          ],
+          controls: ['run_account_reading', 'stop_account_reading']
+        }
+      }
+      const running = view.usage.steps > 0
+      return {
+        ...base, showProgress: true, tone: running ? 'progress' : 'approval',
+        eyebrow: 'READING', title: running ? 'Reading your account pages' : 'Ready to read',
+        lines: running ? [] : ['Lumi will open pages on the site you allowed, one at a time, and answer from what they show.'],
+        controls: running ? ['run_account_reading', 'stop_account_reading'] : ['run_account_reading', 'stop_account_reading']
+      }
+    }
+    case 'REVOKED':
+      return {
+        ...base, showProgress: view.observations.length > 0, tone: 'neutral', eyebrow: 'STOPPED',
+        title: 'Account reading stopped',
+        lines: ['Nothing else will be opened. Nothing was sent to an AI after you stopped.'], controls: []
+      }
+    case 'EXPIRED':
+      return {
+        ...base, showProgress: view.observations.length > 0, tone: 'neutral',
+        eyebrow: 'PERMISSION EXPIRED', title: 'The account-reading permission expired',
+        lines: ['Nothing else will be opened.'], controls: []
+      }
+    case 'COMPLETED':
+      return {
+        ...base, showProgress: true, tone: 'neutral', eyebrow: 'FINISHED',
+        title: 'Account reading finished', lines: [], controls: []
+      }
+  }
+}
+
+/** One short progress line, in Lumi's words, from durable counters only. */
+export function describeAuthenticatedProgress(view: AgentAuthenticatedView): string {
+  const pages = view.observations.filter((observation) => observation.kind === 'page').length
+  const budgets = view.grant?.scope.budgets
+  return `${pages} page${pages === 1 ? '' : 's'} read · ${view.usage.steps}${budgets ? ` of ${budgets.maxSteps}` : ''} step${view.usage.steps === 1 ? '' : 's'}`
+}
+
+/** How many identifiers were hidden before sending, across everything read. */
+export function authenticatedRedactionCount(view: AgentAuthenticatedView): number {
+  return view.observations.reduce(
+    (total, observation) => total + Object.values(observation.redactions).reduce((sum, count) => sum + count, 0), 0
+  )
 }
 
 export function topicLabel(topic: string): string {

@@ -113,6 +113,29 @@ describe('runtime route allowlist', () => {
     for (const [method, path] of refused) expect(isAllowedRuntimeRoute(method, path), path).toBe(false)
   })
 
+  it('allows exactly the six authenticated routes and nothing beside them (Milestone 8a S3)', () => {
+    const allowed: Array<['GET' | 'POST', string]> = [
+      ['GET', '/tasks/' + TASK + '/authenticated'],
+      ['POST', '/tasks/' + TASK + '/authenticated/prepare'],
+      ['POST', '/tasks/' + TASK + '/authenticated/grant'],
+      ['POST', '/tasks/' + TASK + '/authenticated/revoke'],
+      ['POST', '/tasks/' + TASK + '/authenticated/steps'],
+      ['POST', '/tasks/' + TASK + '/authenticated/answer']
+    ]
+    for (const [method, path] of allowed) expect(isAllowedRuntimeRoute(method, path), path).toBe(true)
+    const refused: Array<['GET' | 'POST', string]> = [
+      ['GET', '/tasks/' + TASK + '/authenticated/steps'],
+      ['POST', '/tasks/' + TASK + '/authenticated'],
+      ['POST', '/tasks/' + TASK + '/authenticated/grant/extra'],
+      ['POST', '/tasks/' + TASK + '/authenticated/scope'],
+      ['POST', '/tasks/' + TASK + '/authenticated/observations'],
+      ['POST', '/tasks/' + TASK + '/authenticated/steps?url=https://evil.example'],
+      ['POST', '/tasks/x/authenticated/grant'],
+      ['POST', '/tasks/' + TASK + '/authenticated/../research/grant/../../authenticated/steps']
+    ]
+    for (const [method, path] of refused) expect(isAllowedRuntimeRoute(method, path), path).toBe(false)
+  })
+
   it('validates runtime settings before they reach the child environment', () => {
     expect(validateRuntimeSettings({ browserSiteOrigin: 'http://127.0.0.1:8801' })).toEqual({
       LUMI_BROWSER_SITE_ORIGIN: 'http://127.0.0.1:8801', LUMI_BROWSER_HEADLESS: 'true'

@@ -71,6 +71,7 @@ from app.domain.browser_profile import (
     canonical_label,
     canonical_site,
 )
+from app.repositories.authenticated import AuthenticatedRepository
 from app.repositories.profiles import BrowserProfileRepository
 from app.services.browser_execution import BrowserExecutionService, WorkerProfileOpen
 
@@ -230,6 +231,20 @@ class BrowserProfileService:
             raise ProfileRefusal("profile_deleted")
         return updated
 
+    async def release_read_open(self, profile_id: uuid.UUID) -> bool:
+        """Close a *headless* (agent-read) open of this profile, if there is one.
+
+        Milestone 8a S3. A human takeover always wins: it is the trusted,
+        user-initiated interval, and no agent read may coexist with it. Called
+        by the takeover start before it opens the headed window, so a read that
+        was left open cannot make the takeover refuse -- and cannot be running
+        while the human signs in.
+        """
+        state = self._open.get(profile_id)
+        if state is None or state.headed:
+            return False
+        return await self.close_profile(profile_id)
+
     async def close_profile(self, profile_id: uuid.UUID) -> bool:
         """Close the context and drop the lease. Idempotent."""
         state = self._open.pop(profile_id, None)
@@ -361,6 +376,15 @@ class BrowserProfileService:
             )
         if deleted is None:
             raise ProfileRefusal("profile_delete_refused")
+        # Milestone 8a S3. The epoch already moved (a deleted profile authorises
+        # nothing). Close the grants so their state says so, and remove the
+        # account-private evidence and answers that were read through it: with
+        # the profile gone there is nothing left they could legitimately be
+        # shown against, and they must not linger as orphaned private data.
+        async with self._engine.begin() as connection:
+            account = AuthenticatedRepository(connection)
+            await account.revoke_open_grants_for_profile(profile_id)
+            await account.delete_evidence_for_profile(profile_id)
 
         lock = ProfileLock.for_profile(self._paths, profile_id)
         try:

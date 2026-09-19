@@ -132,6 +132,19 @@ export function registerAgentIpc({
   handle(AGENT_IPC_CHANNELS.declineResearchScope, (grantId, revision) => controller.declineResearchScope(grantId, revision))
   handle(AGENT_IPC_CHANNELS.runResearch, () => controller.runResearch())
   handle(AGENT_IPC_CHANNELS.stopResearch, () => controller.stopResearch())
+  // Authenticated account reading. `grantAuthenticatedScope` is the trusted
+  // click: it names the grant on screen and the revision that was shown, and it
+  // is the only channel that can make account reading possible. There is
+  // deliberately no channel that submits a step, a scope, a URL or a provider
+  // name, and none of these six is reachable from voice: `VoiceTaskBackend` is
+  // a narrow pick that does not include them (see voice-task-controller.ts).
+  handle(AGENT_IPC_CHANNELS.getAuthenticatedOptions, () => controller.getAuthenticatedOptions())
+  handle(AGENT_IPC_CHANNELS.createAuthenticatedTask, (objective, profileId, recipientId) =>
+    controller.createAuthenticatedTask(objective, profileId, recipientId))
+  handle(AGENT_IPC_CHANNELS.grantAuthenticatedScope, (grantId, revision) => controller.grantAuthenticatedScope(grantId, revision))
+  handle(AGENT_IPC_CHANNELS.declineAuthenticatedScope, (grantId, revision) => controller.declineAuthenticatedScope(grantId, revision))
+  handle(AGENT_IPC_CHANNELS.runAuthenticated, () => controller.runAuthenticated())
+  handle(AGENT_IPC_CHANNELS.stopAuthenticated, () => controller.stopAuthenticated())
   handle(AGENT_IPC_CHANNELS.listPreferences, async (): Promise<AgentResult<AgentPreferenceView[]>> => {
     if (!memory) return { ok: true, value: [] }
     try {

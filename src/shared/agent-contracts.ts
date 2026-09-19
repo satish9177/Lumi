@@ -60,6 +60,8 @@ export type AgentChangedFactField = typeof CHANGED_FACT_FIELDS[number]
 export const TASK_EVENT_TYPES = [
   'task.created', 'task.cancelled', 'task.criteria_updated', 'task.search_completed', 'task.info_lookup_completed', 'task.page_answer_recorded',
   'task.research_scope_requested', 'task.research_scope_granted', 'task.research_scope_revoked', 'task.research_answer_recorded',
+  'task.authenticated_scope_requested', 'task.authenticated_scope_granted', 'task.authenticated_scope_revoked',
+  'task.authenticated_answer_recorded', 'task.authenticated_paused', 'task.authenticated_resumed',
   'action.proposed', 'action.approval_requested',
   'action.approved', 'action.authorized', 'action.rejected', 'action.execution_started', 'action.succeeded',
   'action.failed', 'action.outcome_unknown', 'action.reconciliation_started', 'action.reconciled'
@@ -91,7 +93,7 @@ export interface AgentBookingCriteria {
   dateTo?: string
 }
 
-export const TASK_KINDS = ['appointment_booking', 'clinic_info', 'page_inspection', 'public_research'] as const
+export const TASK_KINDS = ['appointment_booking', 'clinic_info', 'page_inspection', 'public_research', 'authenticated_read'] as const
 export type AgentTaskKind = typeof TASK_KINDS[number]
 
 export const CLINIC_INFO_TOPICS = ['overview', 'hours', 'fee', 'languages', 'address', 'walk_ins'] as const
@@ -132,6 +134,8 @@ export interface AgentTaskView {
   inspection?: AgentInspectionRequestView
   /** Set for `public_research` tasks: the objective the user typed. */
   research?: AgentResearchRequestView
+  /** Set for `authenticated_read` tasks: the objective and the profile it reads. */
+  authenticated?: AgentAuthenticatedRequestView
   /** The completed voice turn that created this task, if any. */
   voiceTurnId?: string
   /** The typed request that created this task, if any. */
@@ -538,8 +542,166 @@ export interface AgentTaskSnapshot {
   inspection?: AgentInspectionView
   /** `public_research` tasks: the scope, the observations and the answer. */
   research?: AgentResearchView
+  /** `authenticated_read` tasks: the scope, the redacted observations and the answer. */
+  authenticated?: AgentAuthenticatedView
   /** Events strictly after the requested sequence, ordered, without gaps. */
   events: AgentEventView[]
+}
+
+
+// ---- Milestone 8a S3: authenticated account reading --------------------------------
+//
+// The honest name for the capability is `account_scoped_read`: Lumi issues only
+// GET and HEAD requests, to one site, in a browser carrying the user's session
+// for that site. Lumi performs no intentional change -- but the website may
+// still record the visit, mark something as read, update "last active", extend
+// a session or write account activity, and Lumi can neither prevent nor detect
+// that. It is never described as read-only, invisible or free of effects.
+//
+// Nothing here carries a URL, a cookie, a header, a profile path, an account
+// identity or an address of any kind. Every string in an observation is the
+// *redacted* projection the one approved provider received.
+
+export const AUTHENTICATED_OPERATIONS = ['navigate', 'observe', 'reveal', 'tab', 'history'] as const
+export type AgentAuthenticatedOperation = typeof AUTHENTICATED_OPERATIONS[number]
+
+/** Why an authenticated task stopped and needs a human. Set by code, never by a model. */
+export const AUTHENTICATED_PAUSE_REASONS = [
+  'login_required', 'account_changed', 'account_identity_unknown', 'left_site_scope'
+] as const
+export type AgentAuthenticatedPauseReason = typeof AUTHENTICATED_PAUSE_REASONS[number]
+
+export interface AgentAuthenticatedRequestView {
+  objective: string
+  profileId: string
+  /** Always `account_private`. A task that says otherwise is not parsed. */
+  classification: 'account_private'
+}
+
+export interface AgentAuthenticatedBudgets {
+  maxSteps: number
+  maxObservations: number
+  maxPlannerCalls: number
+  maxAnswerCalls: number
+  maxTabs: number
+  maxActiveSeconds: number
+  /** Structurally zero: no authenticated screenshot ever reaches a provider. */
+  maxVisionCalls: 0
+}
+
+export interface AgentAuthenticatedScopeView {
+  policyVersion: string
+  site: string
+  allowedOperations: AgentAuthenticatedOperation[]
+  allowed: string[]
+  forbidden: string[]
+  methods: string[]
+  /** Always true, and the card says so before the Allow button. */
+  websiteSideEffectsPossible: true
+  /** Exactly one provider. The card names it; nothing else may receive the text. */
+  recipient: AgentDisclosureRecipient
+  maxTextChars: number
+  maxBlocks: number
+  budgets: AgentAuthenticatedBudgets
+}
+
+export interface AgentAuthenticatedGrantView {
+  grantId: string
+  status: AgentGrantStatus
+  revision: number
+  scopeDigest: string
+  scope: AgentAuthenticatedScopeView
+  createdAt: string
+  confirmedAt?: string
+  expiresAt?: string
+}
+
+/** Trusted, controller-authored profile facts. The label is the user's own. */
+export interface AgentAuthenticatedProfileView {
+  profileId: string
+  label: string
+  site: string
+  status: AgentBrowserProfileStatus
+}
+
+export interface AgentAuthenticatedBlockView {
+  id: string
+  text: string
+}
+
+export interface AgentAuthenticatedLinkView {
+  ref: string
+  text: string
+  host: string
+}
+
+/** One redacted observation. Untrusted data: never a label, a control or an instruction. */
+export interface AgentAuthenticatedObservationView {
+  observationId: string
+  ref: string
+  sequence: number
+  kind: 'page' | 'tab_state'
+  operation: AgentAuthenticatedOperation
+  tab?: string
+  documentEpoch: number
+  host?: string
+  title: string
+  settled: boolean
+  truncated: boolean
+  observedAt: string
+  contentHash: string
+  blocks: AgentAuthenticatedBlockView[]
+  links: AgentAuthenticatedLinkView[]
+  openTabs: string[]
+  /** How many identifiers were reduced before sending, by kind. Counts only. */
+  redactions: Record<string, number>
+}
+
+export interface AgentAuthenticatedAnswerView {
+  classification: 'account_private'
+  profileId: string
+  status: AgentResearchAnswerStatus
+  stopReason: AgentResearchStopReason
+  answer: string
+  evidence: AgentResearchEvidenceView[]
+  provider: AgentDisclosureRecipient
+  model: string
+  stepsUsed: number
+  observationsUsed: number
+  plannerCalls: number
+  createdAt: string
+}
+
+export interface AgentAuthenticatedUsageView {
+  steps: number
+  observations: number
+  plannerCalls: number
+  activeSeconds: number
+  tabs: number
+}
+
+export interface AgentAuthenticatedView {
+  taskId: string
+  objective: string
+  classification: 'account_private'
+  profile?: AgentAuthenticatedProfileView
+  grant?: AgentAuthenticatedGrantView
+  observations: AgentAuthenticatedObservationView[]
+  answer?: AgentAuthenticatedAnswerView
+  usage: AgentAuthenticatedUsageView
+  pauseReason?: AgentAuthenticatedPauseReason
+  /** A step has no outcome Lumi can stand behind; only a fresh observation may follow. */
+  unresolvedStep: boolean
+}
+
+/**
+ * The providers the trusted UI may offer for one authenticated task. Built by
+ * main from its own configuration and returned as stable ids: the renderer
+ * chooses among them and can return nothing else -- not a free-form name, and
+ * never a URL.
+ */
+export interface AgentAuthenticatedOptions {
+  recipients: AgentDisclosureRecipient[]
 }
 
 /**
@@ -652,6 +814,14 @@ export const AGENT_ERROR_CODES = [
   'research_refused',
   'research_budget_exhausted',
   'research_in_flight',
+  // Milestone 8a S3: authenticated account reading.
+  'authenticated_unavailable',
+  'authenticated_not_granted',
+  'authenticated_refused',
+  'authenticated_budget_exhausted',
+  'authenticated_in_flight',
+  // The one approved AI provider could not be reached. Lumi stopped; it never tries another.
+  'model_unavailable',
   // Milestone 8a S1/S2: a browser-profile or login-takeover operation was
   // refused. One code for both server-side families; the message already
   // names the specific reason.
@@ -742,6 +912,30 @@ export interface AgentApi {
   runResearch: () => Promise<AgentResult<AgentTaskSnapshot>>
   /** Stop now: withdraw the scope, drop the browser session, keep the evidence. */
   stopResearch: () => Promise<AgentResult<AgentTaskSnapshot>>
+  /**
+   * Milestone 8a S3. Read-only: the providers the trusted UI may offer for an
+   * authenticated task, as stable ids from main's own configuration.
+   */
+  getAuthenticatedOptions: () => Promise<AgentResult<AgentAuthenticatedOptions>>
+  /**
+   * Create an authenticated-read task and show its trusted disclosure card.
+   * Carries the user's question, an opaque profile id and one recipient id from
+   * `getAuthenticatedOptions` -- never a URL, a cookie, a path, page content or
+   * a free-form provider name. Opens no browser and reads nothing.
+   */
+  createAuthenticatedTask: (objective: string, profileId: string, recipientId: string) => Promise<AgentResult<AgentTaskSnapshot>>
+  /**
+   * The trusted click: allow exactly the scope on screen, by grant id and the
+   * revision that was shown. The only way account reading becomes possible.
+   * No voice command, typed sentence or model output reaches it.
+   */
+  grantAuthenticatedScope: (grantId: string, expectedRevision: number) => Promise<AgentResult<AgentTaskSnapshot>>
+  /** Decline the card. Nothing was opened and nothing left this computer. */
+  declineAuthenticatedScope: (grantId: string, expectedRevision: number) => Promise<AgentResult<AgentTaskSnapshot>>
+  /** Run the bounded account-reading loop under the active scope. */
+  runAuthenticated: () => Promise<AgentResult<AgentTaskSnapshot>>
+  /** Stop now: withdraw the scope and release the browser. */
+  stopAuthenticated: () => Promise<AgentResult<AgentTaskSnapshot>>
   listPreferences: () => Promise<AgentResult<AgentPreferenceView[]>>
   forgetPreference: (key: PreferenceKey) => Promise<AgentResult<AgentPreferenceView[]>>
   /** Redacted model/controller diagnostics. Empty in packaged builds unless enabled. */
@@ -812,6 +1006,12 @@ export const AGENT_IPC_CHANNELS = {
   declineResearchScope: 'lifelens:agent:decline-research-scope',
   runResearch: 'lifelens:agent:run-research',
   stopResearch: 'lifelens:agent:stop-research',
+  getAuthenticatedOptions: 'lifelens:agent:get-authenticated-options',
+  createAuthenticatedTask: 'lifelens:agent:create-authenticated-task',
+  grantAuthenticatedScope: 'lifelens:agent:grant-authenticated-scope',
+  declineAuthenticatedScope: 'lifelens:agent:decline-authenticated-scope',
+  runAuthenticated: 'lifelens:agent:run-authenticated',
+  stopAuthenticated: 'lifelens:agent:stop-authenticated',
   listPreferences: 'lifelens:agent:list-preferences',
   forgetPreference: 'lifelens:agent:forget-preference',
   getDiagnostics: 'lifelens:agent:get-diagnostics',

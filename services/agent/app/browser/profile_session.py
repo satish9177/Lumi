@@ -52,6 +52,7 @@ from playwright.async_api import (
     Playwright,
 )
 
+from app.browser.authenticated_session import AuthenticatedReadSession
 from app.browser.credential_signals import account_fingerprint, detect_credential_surface
 from app.browser.egress_broker import EgressBroker, managed_launch_options
 from app.browser.profile_lock import ProfileLock, ProfileLockUnavailableError
@@ -121,6 +122,12 @@ class PersistentProfileSession:
     #: on the context for the duration. Neither is ever read for its text.
     takeover_page: Page | None = field(default=None, repr=False)
     takeover_guard: TakeoverNetworkGuard | None = field(default=None, repr=False)
+    #: Milestone 8a S3. The agent's read session (its guard, tabs and target
+    #: tables) on this profile's context, created lazily by the first
+    #: authenticated dispatch. Mutually exclusive with a takeover: a takeover is
+    #: headed and human-driven, a read is headless and Lumi-driven, and the two
+    #: are never opened on one context.
+    read_session: AuthenticatedReadSession | None = field(default=None, repr=False)
 
     async def close(self) -> None:
         try:
@@ -295,6 +302,37 @@ class ProfileSessionStore:
     def __len__(self) -> int:
         return len(self._sessions)
 
+    # -- authenticated reading (Milestone 8a S3) -----------------------------
+
+    async def read_session(
+        self,
+        profile_id: uuid.UUID,
+        *,
+        site: str,
+        test_origins: frozenset[str] = frozenset(),
+    ) -> AuthenticatedReadSession:
+        """The profile's read session, created on first use and pinned to `site`.
+
+        Refused while a takeover holds the profile, and refused for a second
+        site: a profile is bound to one, and a dispatch that names another is
+        a confusion, not a request.
+        """
+        session = self._sessions.get(profile_id)
+        if session is None:
+            raise ProfileSessionError("unknown_profile_session")
+        if session.takeover_guard is not None or session.takeover_page is not None:
+            raise ProfileSessionError("profile_takeover_active")
+        if session.read_session is None:
+            session.read_session = await AuthenticatedReadSession.open(
+                profile_id=profile_id,
+                site=site,
+                context=session.context,
+                test_origins=test_origins,
+            )
+        elif session.read_session.site != site:
+            raise ProfileSessionError("profile_site_mismatch")
+        return session.read_session
+
     # -- manual login takeover (Milestone 8a S2) -----------------------------
 
     async def start_takeover(
@@ -317,6 +355,8 @@ class ProfileSessionStore:
             return "PROFILE_NOT_OPEN"
         if session.headless:
             raise ProfileSessionError("profile_not_headed")
+        if session.read_session is not None:
+            raise ProfileSessionError("profile_read_session_active")
         pages = session.context.pages
         page = pages[0] if pages else await session.context.new_page()
         guard = TakeoverNetworkGuard()

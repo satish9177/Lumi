@@ -4,6 +4,9 @@ import {
   TERMINAL_TASK_STATUSES,
   type AgentActionView,
   type AgentApi,
+  type AgentAuthenticatedView,
+  type AgentBrowserProfileView,
+  type AgentDisclosureRecipient,
   type AgentDoctorProfileView,
   type AgentBookingCriteria,
   type AgentError,
@@ -21,6 +24,10 @@ import type { AgentPreferenceView, ModelDiagnosticView } from '../../../shared/m
 import {
   currentBooking,
   describeBooking,
+  authenticatedRedactionCount,
+  describeAuthenticated,
+  describeAuthenticatedDisclosure,
+  describeAuthenticatedProgress,
   describeCriteria,
   describeEvent,
   describeInspection,
@@ -33,8 +40,10 @@ import {
   formatPrice,
   latestSearchResults,
   mergeEvents,
+  RECIPIENT_LABELS,
   researchSources,
   topicLabel,
+  type AuthenticatedControl,
   type BookingControl,
   type InspectionControl,
   type ResearchControl
@@ -50,6 +59,8 @@ export interface AgentTaskPanelProps {
   onInspectionResult?: (inspection: AgentInspectionView) => void
   /** A trusted research control finished; the app may show its outcome in the conversation. */
   onResearchResult?: (research: AgentResearchView) => void
+  /** A trusted account-reading control finished; the app may show its outcome in the conversation. */
+  onAuthenticatedResult?: (authenticated: AgentAuthenticatedView) => void
   /** Injectable for tests. */
   pollIntervalMs?: number
 }
@@ -61,6 +72,7 @@ interface TaskState {
   events: AgentEventView[]
   inspection?: AgentInspectionView
   research?: AgentResearchView
+  authenticated?: AgentAuthenticatedView
 }
 
 const RUNTIME_LABELS: Record<AgentRuntimeView['state'], string> = {
@@ -83,7 +95,7 @@ const RUNTIME_LABELS: Record<AgentRuntimeView['state'], string> = {
  * only reads. Every mutation is a button the user pressed, and approval sends
  * only the action id and the revision that was on screen.
  */
-export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResult, onResearchResult, pollIntervalMs = 2_000 }: AgentTaskPanelProps) {
+export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResult, onResearchResult, onAuthenticatedResult, pollIntervalMs = 2_000 }: AgentTaskPanelProps) {
   const [runtime, setRuntime] = useState<AgentRuntimeView>({ state: 'starting' })
   const [state, setState] = useState<TaskState | null>(null)
   const [loaded, setLoaded] = useState(false)
@@ -107,6 +119,11 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
   const [inspectUrl, setInspectUrl] = useState('')
   const [inspectQuestion, setInspectQuestion] = useState('')
   const [objective, setObjective] = useState('')
+  const [authenticatedProfiles, setAuthenticatedProfiles] = useState<AgentBrowserProfileView[]>([])
+  const [authenticatedRecipients, setAuthenticatedRecipients] = useState<AgentDisclosureRecipient[]>([])
+  const [authenticatedProfile, setAuthenticatedProfile] = useState('')
+  const [authenticatedRecipient, setAuthenticatedRecipient] = useState('')
+  const [authenticatedQuestion, setAuthenticatedQuestion] = useState('')
 
   stateRef.current = state
 
@@ -145,7 +162,8 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
       actions: snapshot.actions,
       events: sameTask && !full ? mergeEvents(current.events, snapshot.events) : mergeEvents([], snapshot.events),
       ...(snapshot.inspection ? { inspection: snapshot.inspection } : {}),
-      ...(snapshot.research ? { research: snapshot.research } : {})
+      ...(snapshot.research ? { research: snapshot.research } : {}),
+      ...(snapshot.authenticated ? { authenticated: snapshot.authenticated } : {})
     }
     stateRef.current = next
     setState(next)
@@ -222,6 +240,24 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
   useEffect(() => {
     if (runtime.state === 'running') void loadPreferences()
   }, [runtime.state, loadPreferences])
+
+  // Read-only. The signed-in profiles and the providers main is willing to
+  // offer, for the selectors on the account-reading form. Neither list is
+  // ever sent back except as an opaque id chosen from it.
+  useEffect(() => {
+    if (runtime.state !== 'running') return
+    let active = true
+    void Promise.all([agent.listBrowserProfiles(), agent.getAuthenticatedOptions()]).then(([profiles, options]) => {
+      if (!active || !mounted.current) return
+      const signedIn = profiles.ok ? profiles.value.filter((profile) => profile.status === 'AUTHENTICATED' && !profile.activeTakeover) : []
+      const recipients = options.ok ? options.value.recipients : []
+      setAuthenticatedProfiles(signedIn)
+      setAuthenticatedRecipients(recipients)
+      setAuthenticatedProfile((current) => (signedIn.some((profile) => profile.profileId === current) ? current : signedIn[0]?.profileId ?? ''))
+      setAuthenticatedRecipient((current) => ((recipients as readonly string[]).includes(current) ? current : recipients[0] ?? ''))
+    })
+    return () => { active = false }
+  }, [runtime.state, agent, state === null])
 
   /**
    * A typed request. Main interprets it into the same bounded plan voice
@@ -334,6 +370,58 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
     }
   }
 
+  /** Shows the trusted disclosure card; nothing is opened until Allow. */
+  async function createAuthenticated(): Promise<void> {
+    const result = await run('authenticated_prepare', () =>
+      agent.createAuthenticatedTask(authenticatedQuestion, authenticatedProfile, authenticatedRecipient))
+    if (result?.ok && mounted.current) {
+      setAuthenticatedQuestion('')
+      await refresh(true)
+      setPendingCardFocus(Date.now())
+    }
+  }
+
+  async function onAuthenticatedControl(control: AuthenticatedControl, authenticated: AgentAuthenticatedView): Promise<void> {
+    // The grant id and revision that were on screen when the user pressed.
+    const grant = authenticated.grant
+    const report = (result: AgentResult<AgentTaskSnapshot> | undefined): void => {
+      if (result?.ok && mounted.current && result.value.authenticated) onAuthenticatedResult?.(result.value.authenticated)
+    }
+    switch (control) {
+      case 'allow_account_reading': {
+        if (!grant) return
+        // Allowing and starting are one press for the user and two calls
+        // here: the scope is confirmed by id and revision first, and only a
+        // confirmed scope can fund a step.
+        report(await run('authenticated_run', async () => {
+          const granted = await agent.grantAuthenticatedScope(grant.grantId, grant.revision)
+          if (!granted.ok) return granted
+          const active = granted.value.authenticated?.grant
+          if (!active || active.status !== 'ACTIVE' || active.scopeDigest !== grant.scopeDigest) {
+            return {
+              ok: false,
+              error: {
+                code: 'invalid_response' as const,
+                message: 'The permission Lumi recorded did not match what you reviewed. Nothing was opened or sent.'
+              }
+            }
+          }
+          return agent.runAuthenticated()
+        }))
+        return
+      }
+      case 'run_account_reading':
+        report(await run('authenticated_run', () => agent.runAuthenticated()))
+        return
+      case 'decline_account_reading':
+        if (!grant) return
+        report(await run('authenticated_stop', () => agent.declineAuthenticatedScope(grant.grantId, grant.revision)))
+        return
+      case 'stop_account_reading':
+        report(await run('authenticated_stop', () => agent.stopAuthenticated()))
+    }
+  }
+
   async function lookupInfo(): Promise<void> {
     await run('lookup', () => agent.lookupClinicInfo())
   }
@@ -420,7 +508,8 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
   const isInfoTask = state?.task.kind === 'clinic_info'
   const isInspectionTask = state?.task.kind === 'page_inspection'
   const isResearchTask = state?.task.kind === 'public_research'
-  const shownSlots = isInfoTask || isInspectionTask || isResearchTask
+  const isAuthenticatedTask = state?.task.kind === 'authenticated_read'
+  const shownSlots = isInfoTask || isInspectionTask || isResearchTask || isAuthenticatedTask
     ? undefined
     : taskClosed || bookingOpen ? slots : slots ?? (state ? latestSearchResults(state.events) : undefined)
   const profiles = state && isInfoTask ? latestProfiles(state.events) : undefined
@@ -524,6 +613,43 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
           </form>
         )}
 
+        {runtimeReady && loaded && !state && authenticatedProfiles.length > 0 && authenticatedRecipients.length > 0 && (
+          <form className="agent-section" aria-label="Ask about a signed-in account" data-testid="agent-authenticated-form"
+            onSubmit={(event) => { event.preventDefault(); void createAuthenticated() }}>
+            <p className="workspace-note">
+              Lumi can read a website you signed in to through a Lumi profile and answer a question about your account. You review exactly what it may do and which AI provider receives the text before anything is opened.
+            </p>
+            <label className="agent-field">
+              Signed-in profile
+              <select value={authenticatedProfile} data-testid="agent-authenticated-profile-select"
+                onChange={(event) => setAuthenticatedProfile(event.target.value)}>
+                {authenticatedProfiles.map((profile) => (
+                  <option key={profile.profileId} value={profile.profileId}>{profile.label} — {profile.site}</option>
+                ))}
+              </select>
+            </label>
+            <label className="agent-field">
+              Question about your account
+              <input value={authenticatedQuestion} maxLength={500} data-testid="agent-authenticated-question"
+                placeholder="Which of my repositories are private?"
+                onChange={(event) => setAuthenticatedQuestion(event.target.value)} />
+            </label>
+            <label className="agent-field">
+              AI provider that may receive the text
+              <select value={authenticatedRecipient} data-testid="agent-authenticated-recipient-select"
+                onChange={(event) => setAuthenticatedRecipient(event.target.value)}>
+                {authenticatedRecipients.map((recipient) => (
+                  <option key={recipient} value={recipient}>{RECIPIENT_LABELS[recipient]}</option>
+                ))}
+              </select>
+            </label>
+            <button className="primary-button" type="submit"
+              disabled={!canCreate || !authenticatedQuestion.trim() || !authenticatedProfile || !authenticatedRecipient}>
+              Prepare account reading
+            </button>
+          </form>
+        )}
+
         {runtimeReady && loaded && !state && (
           <form className="agent-section" aria-label="Research public websites" data-testid="agent-research-form"
             onSubmit={(event) => { event.preventDefault(); void createResearch() }}>
@@ -545,9 +671,9 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
         {state && (
           <>
             <section className="agent-section"
-              aria-label={isInfoTask ? 'Clinic information task' : isInspectionTask ? 'Page inspection task' : isResearchTask ? 'Public research task' : 'Booking task'}
+              aria-label={isInfoTask ? 'Clinic information task' : isInspectionTask ? 'Page inspection task' : isResearchTask ? 'Public research task' : isAuthenticatedTask ? 'Account reading task' : 'Booking task'}
               data-testid="agent-task" data-task-kind={state.task.kind}>
-              <p className="eyebrow">{isInfoTask ? 'CLINIC INFO' : isInspectionTask ? 'PAGE INSPECTION' : isResearchTask ? 'PUBLIC RESEARCH' : 'TASK'} · {state.task.status.replaceAll('_', ' ')}</p>
+              <p className="eyebrow">{isInfoTask ? 'CLINIC INFO' : isInspectionTask ? 'PAGE INSPECTION' : isResearchTask ? 'PUBLIC RESEARCH' : isAuthenticatedTask ? 'ACCOUNT READING' : 'TASK'} · {state.task.status.replaceAll('_', ' ')}</p>
               <p className="workspace-note" data-testid="agent-task-criteria">
                 {isInfoTask && state.task.infoQuery
                   ? `${state.task.infoQuery.doctor || state.task.infoQuery.specialty} · ${topicLabel(state.task.infoQuery.topic)}`
@@ -555,7 +681,9 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
                     ? `${state.task.inspection.host} · ${state.task.inspection.question}`
                     : isResearchTask && state.task.research
                       ? state.task.research.objective
-                      : describeCriteria(state.task.criteria)}
+                      : isAuthenticatedTask && state.task.authenticated
+                        ? state.task.authenticated.objective
+                        : describeCriteria(state.task.criteria)}
               </p>
               <div className="actions">
                 {isInfoTask && !taskClosed ? (
@@ -569,7 +697,7 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
                     Show approval card
                   </button>
                 ) : null}
-                {!isInfoTask && !isInspectionTask && !isResearchTask && !taskClosed && !bookingOpen ? (
+                {!isInfoTask && !isInspectionTask && !isResearchTask && !isAuthenticatedTask && !taskClosed && !bookingOpen ? (
                   <button className="secondary-button" type="button" disabled={!runtimeReady || Boolean(busy)} onClick={() => void search()}>
                     Search appointments
                   </button>
@@ -628,6 +756,20 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
                   busy={busy}
                   taskClosed={taskClosed}
                   onControl={(control) => void onResearchControl(control, state.research!)}
+                />
+              </div>
+            )}
+
+            {state.authenticated && (
+              <div ref={bookingRegion} tabIndex={-1} className="agent-booking-region"
+                data-testid="agent-authenticated-region" data-voice-focus={focusedSerial}>
+                <AuthenticatedCard
+                  authenticated={state.authenticated}
+                  now={now}
+                  disabled={!runtimeReady || Boolean(busy)}
+                  busy={busy}
+                  taskClosed={taskClosed}
+                  onControl={(control) => void onAuthenticatedControl(control, state.authenticated!)}
                 />
               </div>
             )}
@@ -1006,6 +1148,119 @@ function ResearchCard({ research, now, disabled, busy, taskClosed, onControl }: 
   )
 }
 
+const AUTHENTICATED_CONTROL_LABELS: Record<AuthenticatedControl, string> = {
+  allow_account_reading: 'Allow',
+  decline_account_reading: 'Cancel',
+  run_account_reading: 'Continue reading',
+  stop_account_reading: 'Stop'
+}
+
+/**
+ * The trusted disclosure, progress and answer card for one authenticated
+ * account-reading task. Every label and every line is Lumi's own, written in
+ * `agent-task-view.ts`. Account text appears in exactly one place, as plain
+ * text in a labelled field: the quoted evidence of a verified answer -- the
+ * redacted text the provider received, never the original. It never becomes a
+ * label, a control, a line of instructions or a link.
+ */
+function AuthenticatedCard({ authenticated, now, disabled, busy, taskClosed, onControl }: {
+  authenticated: AgentAuthenticatedView
+  now: number
+  disabled: boolean
+  busy?: string
+  taskClosed: boolean
+  onControl: (control: AuthenticatedControl) => void
+}) {
+  const described = describeAuthenticated(authenticated, now)
+  const model = taskClosed ? { ...described, controls: [] } : described
+  const disclosure = model.showDisclosure ? describeAuthenticatedDisclosure(authenticated) : undefined
+  const answer = authenticated.answer
+  return (
+    <article className={`agent-booking-card tone-${model.tone}`} role="group" aria-label={model.title}
+      data-testid="agent-authenticated-card" data-grant-status={authenticated.grant?.status}
+      data-grant-id={authenticated.grant?.grantId} data-grant-revision={authenticated.grant?.revision}
+      data-answer-status={answer?.status} data-pause-reason={authenticated.pauseReason}>
+      <p className="lifelens-card-eyebrow" data-testid="agent-authenticated-eyebrow">
+        {disclosure ? disclosure.heading : 'YOUR ACCOUNT'}
+      </p>
+      <h3 className="lifelens-card-heading" data-testid="agent-authenticated-title">{model.title}</h3>
+      <dl className="agent-booking-details" data-testid="agent-authenticated-goal">
+        <dt>Question</dt><dd>{authenticated.objective}</dd>
+        {authenticated.profile && (
+          <>
+            <dt>Profile</dt><dd data-testid="agent-authenticated-profile">{authenticated.profile.label}</dd>
+            <dt>Site</dt><dd data-testid="agent-authenticated-site">{authenticated.profile.site}</dd>
+          </>
+        )}
+      </dl>
+      {disclosure && (
+        <div data-testid="agent-authenticated-disclosure">
+          <p className="workspace-note">Lumi may:</p>
+          <ul className="agent-evidence" data-testid="agent-authenticated-may">
+            {disclosure.mayDo.map((entry) => <li key={entry}>✓ {entry}</li>)}
+          </ul>
+          <p className="workspace-note">Lumi may not:</p>
+          <ul className="agent-evidence" data-testid="agent-authenticated-may-not">
+            {disclosure.mayNot.map((entry) => <li key={entry}>✗ {entry}</li>)}
+          </ul>
+          <p data-testid="agent-authenticated-side-effects"><strong>{disclosure.sideEffectNotice}</strong></p>
+          <p className="workspace-note">{disclosure.sideEffectExamples}</p>
+          <dl className="agent-booking-details">
+            <dt>Sent to the AI</dt>
+            <dd data-testid="agent-authenticated-sent">
+              <ul className="agent-evidence">
+                {disclosure.sent.map((entry) => <li key={entry}>{entry}</li>)}
+              </ul>
+            </dd>
+            <dt>AI provider</dt>
+            <dd data-testid="agent-authenticated-provider">{disclosure.provider}</dd>
+          </dl>
+          <p className="workspace-note" data-testid="agent-authenticated-failover">{disclosure.failoverNotice}</p>
+          {authenticated.grant?.expiresAt === undefined && (
+            <p className="workspace-note">This permission lasts for this question only.</p>
+          )}
+        </div>
+      )}
+      {answer && (answer.status === 'answered' || answer.status === 'partial') && (
+        <div data-testid="agent-authenticated-answer">
+          <p><strong>{answer.answer}</strong></p>
+          <p className="workspace-note">Quoted from your account pages, with identifiers hidden:</p>
+          <ul className="agent-evidence">
+            {answer.evidence.map((item) => (
+              <li key={`${item.observation}-${item.block}-${item.quote}`}><q>{item.quote}</q></li>
+            ))}
+          </ul>
+          <p className="workspace-note" data-testid="agent-authenticated-answer-provider">
+            Sent to {RECIPIENT_LABELS[answer.provider]} only.
+          </p>
+        </div>
+      )}
+      {model.lines.map((line) => <p key={line}>{line}</p>)}
+      {model.showProgress && (
+        <p className="workspace-note" role="status" data-testid="agent-authenticated-progress">
+          {describeAuthenticatedProgress(authenticated)}
+          {authenticatedRedactionCount(authenticated) > 0
+            ? ` · ${authenticatedRedactionCount(authenticated)} identifier${authenticatedRedactionCount(authenticated) === 1 ? '' : 's'} hidden before sending`
+            : ''}
+        </p>
+      )}
+      {model.controls.length > 0 && (
+        <div className="lifelens-confirmation-actions">
+          {model.controls.map((control) => (
+            <button key={control} type="button" disabled={disabled}
+              className={control === 'allow_account_reading' || control === 'run_account_reading'
+                ? 'lifelens-confirm-button' : 'lifelens-dismiss-button'}
+              aria-busy={busy !== undefined || undefined}
+              onClick={() => onControl(control)}>
+              {AUTHENTICATED_CONTROL_LABELS[control]}
+            </button>
+          ))}
+        </div>
+      )}
+    </article>
+  )
+}
+
 function Timeline({ events }: { events: AgentEventView[] }) {
   return (
     <section className="agent-section" aria-label="Task timeline">
@@ -1079,6 +1334,9 @@ function busyText(label: string): string {
     case 'research_prepare': return 'Preparing the research permission — nothing is searched yet…'
     case 'research_run': return 'Searching and reading public pages…'
     case 'research_stop': return 'Stopping — nothing else will be opened…'
+    case 'authenticated_prepare': return 'Preparing the permission card — nothing is opened yet…'
+    case 'authenticated_run': return 'Reading your account pages…'
+    case 'authenticated_stop': return 'Stopping — nothing else will be opened…'
     default: return 'Working…'
   }
 }
