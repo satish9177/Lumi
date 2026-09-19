@@ -37,7 +37,8 @@ npm.cmd run package         # plus the NSIS installer
 4. copies **full Chromium** matching this Playwright from the local cache (or
    downloads it) with `playwright install --no-shell chromium`, refuses the
    build if a headless shell reaches the bundle, and launches the bundled
-   `chrome.exe` once with nothing but the bundle on `PLAYWRIGHT_BROWSERS_PATH`;
+   `chrome.exe` **twice** — once headless, once headed — with nothing but the
+   bundle on `PLAYWRIGHT_BROWSERS_PATH`;
 5. fails the build if any `browser-profiles` directory is inside the bundle;
 6. byte-compiles everything;
 7. imports the runtime, migration, worker, demo site **and every native
@@ -65,6 +66,31 @@ Two things make that work, and both are load-bearing:
   fails outright in a packaged build. With it, development and the packaged app
   launch the *same* binary, so a cached headless shell on a developer machine
   cannot hide a packaging break.
+
+### Headed launch, proven from the bundle alone (Milestone 8a S2)
+
+S1 proved only that the bundled `chrome.exe` launches *headless* from the
+bundle — nothing in M7a/M7b/S1 needed a window. Manual sign-in (S2) is the
+capability that motivated shipping full Chromium in the first place, so the
+build now also launches the same bundled binary **headed**, through the same
+`channel: "chromium"`, from the same bundle-only `PLAYWRIGHT_BROWSERS_PATH`
+and scrubbed environment as the headless check, opens a page, and closes it.
+A packaging break in headed mode (a missing dependency the headless path
+does not exercise, for instance) now fails the build instead of surfacing
+only the first time a person tries to sign in.
+
+Run on this machine (`npm run package:dir`):
+
+```text
+[agent-runtime] verifying the bundled Chromium launches headless from the bundle alone
+[agent-runtime] bundled Chromium 153.0.8010.12 (chromium-1243)
+[agent-runtime] verifying the bundled Chromium also launches headed from the bundle alone
+[agent-runtime] bundled Chromium headed launch verified (153.0.8010.12)
+```
+
+`manifest.json` now carries `browser.headedVerified: true` alongside the
+version each build actually launched — the same binary, in both modes, from
+the bundle alone, with no developer browser cache to fall back on.
 
 Measured on this machine, from the Playwright cache for revision `1243`
 (Chromium 153.0.8010.12):
@@ -122,7 +148,7 @@ All children are started from fixed paths with fixed arguments, no shell,
 | --- | --- |
 | `databaseUrl` | required; must be `postgresql+asyncpg://` |
 | `clinicSite` | `demo` (default), `none`, or `http://127.0.0.1:<port>` |
-| `headless` | `true` (default). Full Chromium is bundled since M8a S1, so headed mode is supported by the bundle; no M8a S1 code path uses it yet. |
+| `headless` | `true` (default); governs the runtime worker's default context only. Full Chromium is bundled since M8a S1 and its headed launch is verified by every build since S2 (above); manual sign-in (S2) opens its own takeover window headed regardless of this setting, since that is the one operation a human must be able to see. |
 
 ### The egress broker and the bundled browser
 

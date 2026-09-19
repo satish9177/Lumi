@@ -219,6 +219,94 @@ profile is persistent and bound to one site. The two kinds refuse each other
 rather than falling back, and the research code has no route to a profile at
 all.
 
+## Manual login and human takeover (Milestone 8a S2)
+
+> S2 allows a user to manually authenticate in a Lumi-owned browser while
+> Lumi is suspended. S2 still does not let an AI model read the authenticated
+> page.
+
+A takeover is a bounded interval (default 15 minutes, hard-timed-out and
+watchdog-swept) in which a human, not Lumi, drives an existing S1 profile's
+Chromium window. Full details, the state machine and the exact test evidence:
+[reviews/milestone-8-s2.md](reviews/milestone-8-s2.md).
+
+**Network mode.** Neither name is a formal enum value in code — both are
+this codebase's own shorthand. During ordinary agent reading (M7a/M7b,
+"`AGENT_READ`"), `PublicNetworkGuard` fetches every request itself, allows
+only `GET`/`HEAD`, allows only a handful of resource types, and never lets
+Chromium follow a redirect natively. During a takeover ("`TAKEOVER`"),
+`TakeoverNetworkGuard` is deliberately wider: Chromium handles the human's
+traffic exactly as an ordinary browser would — a login `POST`, a CAPTCHA
+image, a browser-followed SSO redirect — and the guard refuses only a
+non-`http(s)`/`data:`/`blob:` scheme at the request-interception layer.
+**`file:` is a documented, reactive exception**: Chromium's local-file loader
+never reaches the layer Playwright's `route()` intercepts, so the guard
+instead watches for the top frame committing and retreats a forbidden-scheme
+navigation to `about:blank` immediately after — the forbidden page's content
+is genuinely rendered for a short, real interval first. Neither mode changes
+the S0 broker's destination policy: TAKEOVER traffic is still brokered, still
+requires a public address or an exactly-configured test origin, still uses
+the same proxy, credential and `<-loopback>` bypass arguments S1 already set.
+
+**Zero observation, zero model call, by construction.**
+`LoginTakeoverService`'s constructor has no planner, provider or model-router
+parameter to inject — there is nothing to call. Five takeover-participating
+modules are scanned for model/provider-shaped tokens after stripping
+docstrings and comments, in `test_no_credential_extraction.py`'s own idiom.
+A real, measured proof backs the structural one: a full password+OTP login
+against a real headed Chromium and a real database leaves `tasks`, `actions`,
+`browser_dispatches`, `page_observations` and `research_observations` row
+counts unchanged, and leaves no trace of the fixture's planted password or
+OTP — or the raw account identity, only its hash — anywhere in the database.
+`login_attempts` itself carries no page text, URL, credential signal or raw
+identity column; only that a bounded interval existed and how it ended.
+
+**The credential-surface detector is a deterministic DOM count, over-inclusive
+on purpose, and it is not a proof.** Every check is `locator(...).count()` —
+"how many elements match," never "what do they say." A false positive costs
+one extra "finish signing in yourself" message; a false negative would mean
+an authenticated transition on a page that still needs credentials, which is
+the failure this exists to prevent. Stated plainly: a login form built
+without `type=password` or a matching `autocomplete` value — a custom
+canvas, an image-based keypad, a neutral-named cross-origin iframe — is
+invisible to it, and native passkey/WebAuthn prompts are OS/browser UI the
+DOM cannot see at all. `AUTHENTICATED` requires **both** an in-profile-site
+result from the same pinned-PSL comparison S1 uses **and** an empty
+credential-surface result — never either alone — and only the one
+deterministic check run at "I'm signed in" may ever write it. The check
+follows exactly the one tab a takeover opened; a login that finishes in a
+popup rather than that tab is not counted (S3 residual).
+
+**The account fingerprint is a one-way hash of one bounded, fixture-defined
+attribute**, read and hashed in the same function, never returned, logged or
+stored in raw form; `None` means "no stable signal found" and must be treated
+as `unknown`, never a fabricated identity. The attribute convention
+(`[data-lumi-account-id]`) is this milestone's own synthetic fixture, not a
+real-site standard — what a real site's equivalent signal should be is an
+explicit S3 design question.
+
+**Screen capture is refused, not filtered, while any takeover is open.**
+There is no reliable way to identify which capture source is the takeover
+window (its title changes with every page), so every capture attempt is
+refused outright rather than trying to exclude one source from a list. The
+flag driving this is in-memory and can be stale by at most one poll interval
+in the fail-safe direction only (refusing longer than necessary, never
+granting a capture a takeover still needs protected) — except across an
+Electron main-process restart mid-takeover, which currently leaves no wire
+path for the flag to re-arm (see the review's residual limitations).
+
+**Voice cannot start, confirm or cancel a takeover — structurally, not by
+convention.** `VoiceTaskBackend` names only booking-task methods from
+`AgentTaskController`; the takeover controller is a separate class never
+given to the voice layer, so there is no `Pick` surface that could reach it
+even by future accident.
+
+**The fixed IPC boundary, restated.** Five channels, each named for exactly
+what it does: list profiles, open a login window, confirm signed-in, cancel,
+read one takeover's status. No method takes a hostname, URL, path,
+executable, credential or browser argument, and there is deliberately no way
+for the renderer to create a profile at all.
+
 ## Known gaps
 
 - The broker constrains Chromium, not its host process. A compromised browser
@@ -247,3 +335,19 @@ all.
   filesystem, an SSD's wear levelling, a shadow copy or a backup.
 - Voice narration is steered, not enforced: a live model could still misspeak.
   The card and timeline remain the authority.
+- **The credential-surface detector has known blind spots**: a login surface
+  without a `type=password`/matching-`autocomplete` field, or a native
+  passkey/WebAuthn prompt, is not detected. It is over-inclusive elsewhere to
+  offset false negatives it cannot see, not to eliminate this class.
+- **A `file:` navigation during a takeover is briefly, genuinely rendered**
+  before the guard retreats it — a reactive, not a preventive, control (see
+  above).
+- **Capture exclusion does not re-arm after an Electron main-process restart
+  mid-takeover.** The flag and the open-attempt set it depends on are both
+  in-memory, and no current wire response lets the renderer rediscover a
+  still-open attempt's id afterward.
+- **The Windows Playwright-teardown keep-alive hang found in S2 is mitigated,
+  not root-caused**: a bounded wait for the broker's connections to quiesce
+  before stopping Playwright, plus a hard `pytest-timeout` net. Treat it as a
+  working fix for a reproducing symptom, not a closed investigation into
+  Playwright's or Chromium's internals.
