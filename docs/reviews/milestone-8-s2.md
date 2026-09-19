@@ -12,6 +12,7 @@ Implementation report. Branch `lumi-agent-v2`.
 | Architecture review | `docs/plans/milestone-8.md` §§8, 22b, 27 (S2 exit criteria) |
 | Final SHA (implementation) | `48e9484` (`feat(agent): add manual login takeover (M8a S2)`, 52 files) |
 | Final SHA (documentation) | `11b535d0002bab321dbef6603eaa94a8aa5bb9fe`, then this correction commit recording that SHA |
+| Closure SHA (§9a, capture restart gap) | `b32313f` (`fix(agent): restore takeover capture guard after main restart`, 17 files), then the documentation commit recording it |
 | Migration | `0006` → `0007` |
 
 **Commit structure.** Two commits: `48e9484` (`feat(agent): add manual login
@@ -20,6 +21,13 @@ code, API routes/schemas, Electron main/preload/renderer/IPC, the synthetic
 fixture, and all new/modified tests) and this documentation commit (`docs:
 record milestone 8a S2 manual login`, this report plus `docs/SECURITY.md` and
 `docs/PACKAGING.md`).
+
+**Closure.** One further implementation commit, `b32313f`, closes the
+capture restart gap this report originally recorded as residual §22.6: no
+migration, no new route, no new IPC channel, no renderer change. §9a states
+what it added and what it deliberately did not. This report is not rewritten
+around it — §9, §22.6 and this line all say plainly that the initial S2
+implementation had the gap and that a later commit closed it.
 
 ---
 
@@ -172,6 +180,19 @@ argument or an executable path. `site` never appears in a request body — the
 profile's own bound, immutable site (fixed at S1 creation) is what the
 runtime hands the worker; nothing a caller names here.
 
+The closure commit (§9a) added **no route**. It widened one existing response
+instead: each profile in `GET /browser-profiles` now carries
+
+```text
+active_takeover: { profile_id, attempt_id, status, expires_at } | null
+```
+
+for an attempt in an `OPEN`/`UNCONFIRMED` status. Four fields and no fifth,
+all of them ids, a closed status and a deadline — `ActiveTakeoverResponse` is
+`extra="forbid"`, so widening it further is a test failure rather than a
+quiet change, and `parseActiveTakeover` on the desktop side copies only those
+four whatever else arrives.
+
 ### Runtime → worker
 
 `app/browser/protocol.py`: `TakeoverStartRequest`/`Response`,
@@ -196,6 +217,12 @@ for why that separation is what makes voice exclusion structural. Every
 mutation takes an id (or two) plus the revision the trusted card last showed;
 `listBrowserProfiles` takes no argument; there is still deliberately no
 `createBrowserProfile` reachable from the renderer.
+
+The closure commit added **no IPC channel**: `reconcileTakeovers()` is
+main-only, reached from `TakeoverCaptureGuard`
+(`src/main/services/takeover-capture-guard.ts`) and from nothing the renderer
+can name. The preload surface and every renderer component are byte-identical
+to the initial S2 implementation.
 
 ### Refusal codes
 
@@ -316,8 +343,131 @@ uses to update the trusted card (`openLoginWindow`, `confirmSignedIn`,
 `cancelLogin`, and the panel's own `getLoginTakeover` poll), so the flag can
 be stale by at most one poll interval — and only in the fail-safe direction:
 it can refuse a capture no takeover still needs protected, never grant one
-while a takeover is genuinely open. See §22 for the one restart-time gap this
-leaves.
+while a takeover is genuinely open.
+
+**The initial S2 implementation left one restart-time hole here, closed by
+this slice's closure commit — see §9a.** As first shipped in `48e9484`, both
+the flag and `openAttempts` were purely in-memory, so a fresh Electron main
+process came back believing no takeover existed while a headed,
+credential-bearing browser could still be on screen.
+
+---
+
+## 9a. Capture after an Electron-main restart (S2 closure)
+
+**What the initial S2 implementation got wrong.** §22.6 of this report, as
+first written, recorded the gap honestly: `capture.ts`'s `takeoverActive` and
+`BrowserProfileController`'s `openAttempts` were both in-memory and rebuilt
+empty on a main-process restart, and no wire response let anything rediscover
+a still-open attempt afterward. A takeover that outlived an Electron-main
+restart therefore produced exactly the state S2's own invariant forbids:
+capture available while an active takeover existed.
+
+**What the closure commit added.** Three things, and deliberately no fourth:
+
+```text
+durable            GET /browser-profiles now carries, per profile,
+discovery          active_takeover: { profile_id, attempt_id, status, expires_at }
+                   for an attempt in an OPEN/UNCONFIRMED status -- and nothing else
+
+main               BrowserProfileController.reconcileTakeovers() rebuilds its
+hydration          open-attempt set from that list and sets the capture guard
+                   from it; TakeoverCaptureGuard keeps asking until it has an
+                   answer, and is re-asked whenever the runtime reports running
+
+fail-closed        capture.ts's guard is three-valued -- unreconciled | active |
+capture state      clear -- and a fresh main process starts unreconciled, which
+                   refuses. Only a reconciled, empty answer permits a capture.
+```
+
+The authoritative rule is now exactly:
+
+```text
+capture allowed
+IFF  main has successfully reconciled durable takeover state
+AND  no attempt is in an OPEN/UNCONFIRMED status
+```
+
+**Why Option A (list metadata) rather than a new route.** The desktop already
+had one trusted read of every profile; a takeover is a property of a profile,
+and `GET /browser-profiles` was already in `agent-runtime-supervisor.ts`'s
+allowed-route list. Extending it added no route, no IPC method, no broker
+rule and no renderer change — and `LoginAttemptRepository` already had
+`find_open_for_profile`, so `list_open()` is the same predicate applied to
+every profile rather than to one. There is no generic takeover-query API:
+`list_active_attempts()` takes no argument and answers exactly one question.
+
+**Fail-closed, stated precisely.** A runtime that is not running, restarting,
+refusing, or answering with something that fails the wire parser leaves the
+guard `unreconciled`, which refuses, and schedules another attempt. A
+malformed `active_takeover` rejects the whole profile rather than degrading
+to "no takeover" — the one failure direction that could let a capture through.
+No timeout ever expires into permission to capture, nothing is killed on
+restart, and the renderer is never asked what it remembers.
+
+**The one non-runtime answer the guard accepts**, and why it is not a
+loophole: when main has *established* that this machine has no agent runtime
+at all, the guard resolves to `clear` without a query. Three startup paths
+establish that, and no others — a packaged build with a missing or invalid
+`agent-runtime.json`; a runtime that could not be prepared at all; and
+`AgentRuntimeSupervisor.installed()` reporting that the runtime's own files
+(`agentRoot`, the venv interpreter) are not present, which is the same check
+`start()` refuses on, asked without starting anything. In each case no
+runtime process has ever run on this machine from this installation, and the
+headed sign-in browser only ever exists as a descendant of a runtime process
+started by `AgentRuntimeSupervisor` in main. Without this, an install that
+simply does not use browser profiles — or a checkout with no Python venv —
+would lose screen capture permanently.
+
+What this deliberately does **not** cover: a runtime that *is* installed but
+fails to start, crashes repeatedly, or stops answering. That is an outage,
+not an answer, and it keeps capture refused for as long as it lasts — a
+previous main process could have left a takeover open, and nothing available
+to a broken runtime can rule that out. `agentRuntimeAbsent` (`index.ts`) is
+set only where startup *settles* the question, never while it is still
+deciding, and never by the renderer.
+
+**Capture state is main-driven, not renderer-driven.** The trusted card's
+`getLoginTakeover` poll still refreshes the guard through `track()`, exactly
+as before, but nothing about the protection depends on it: the
+renderer-poll test reconciles with one runtime call, no IPC and no attempt
+id, and asserts the refusal holds.
+
+**Multiple profiles.** The guard is global by construction — the reconciled
+set is every open attempt across every profile, and capture is refused if it
+is non-empty. It is never bound to whichever profile the renderer is
+showing.
+
+**Stale attempts never block forever.** Only `OPEN`/`UNCONFIRMED` block — the
+existing state machine's own open set (§3), not a new one. `COMPLETED`,
+`CANCELLED`, `EXPIRED` and `INTERRUPTED` stop blocking on the first
+reconciliation that sees them settled. An `OPEN` row past its deadline that
+the sweep has not settled yet *does* still block, because the sweep (§15) is
+also what closes the window.
+
+**Tests** (all deterministic; no browser, no process, no timers):
+
+| Claim | Test |
+|---|---|
+| Capture is refused immediately after main state is reconstructed, before anything is reconciled | `takeover-capture-restart.test.ts` — *refuses capture immediately after main state is reconstructed* (asserts zero runtime calls had been made) |
+| The still-open attempt is discovered from durable state alone | *discovers the still-open attempt … and keeps capture refused* |
+| Runtime unavailable → capture stays refused | *keeps capture refused when durable takeover state cannot be read at all*; *refuses again when a later reconciliation cannot reach the runtime* |
+| A malformed response does not degrade to "no takeover" | *rejects a malformed active takeover rather than degrading …* |
+| Settled takeover → capture re-enabled | *re-enables capture once the runtime reports the attempt settled* (all four terminal statuses) |
+| Duplicate reconciliation is idempotent | *is idempotent: reconciling repeatedly reaches the same state*; `test_listing_active_attempts_is_idempotent` |
+| Renderer polling is not required | *protects capture without any renderer poll: no IPC, no attempt id, no card* |
+| Any open takeover blocks, not just the displayed profile | *blocks capture for any open takeover, not only the profile a renderer would be showing*; `test_every_open_takeover_is_listed_not_only_one_profile_s` |
+| No page/credential content and no profile path in the new response | *carries four fields and no fifth*; *copies only those four fields, whatever else a response carries*; *keeps the profile view itself free of paths and page content*; `test_the_profile_list_carries_the_open_takeover_and_nothing_else` |
+| "There is no runtime here" is distinguishable from "the runtime is not answering" | `agent-runtime-supervisor.test.ts` — *reports whether the runtime files exist at all, without starting anything*; `takeover-capture-restart.test.ts` — *treats an installation with no agent runtime as an answer, not an outage* |
+| Reconciliation retries on its own schedule until an answer arrives | *retries on its own schedule until an answer arrives* |
+| The runtime's own view of "active" | `test_an_open_attempt_is_discoverable_from_durable_state_alone`, `…unconfirmed…`, `…completed…`, `…cancelled…`, `…expired…sweep…`, `…interrupted…` |
+
+S2's login/takeover behaviour is unchanged: `test_login_takeover.py`'s
+original cases pass untouched, and no renderer component, IPC method, grant,
+broker rule or refusal code was modified. `capture.test.ts`'s two capture
+cases now state the reconciled answer they assume (`setTakeoverActive(false)`)
+because a fresh process refuses by default; that is the only edit to an
+existing test.
 
 ---
 
@@ -554,6 +704,10 @@ list: [PACKAGING.md](../PACKAGING.md).
 
 All Python figures are from `services/agent` with a real PostgreSQL.
 
+Figures below are the initial S2 implementation's, except where the closure
+row states otherwise; the closure commit's own re-run is the last block of
+this section.
+
 | Suite | Result |
 |---|---|
 | `tests/test_login_takeover.py` | **23 passed** (state machine, scripted fake worker) |
@@ -575,6 +729,26 @@ All Python figures are from `services/agent` with a real PostgreSQL.
 Every new S2 browser/process test cleans up through
 `tests/broker_teardown.py`'s `quiesce_broker`/`bounded` helpers (see §22e);
 `pytest-timeout` (thread method) is a permanent safety net under all of them.
+
+**Closure commit (§9a), re-run on this machine:**
+
+| Suite | Result |
+|---|---|
+| `src/main/services/takeover-capture-restart.test.ts` (new) | **16 passed** |
+| `src/main/services/agent-runtime-supervisor.test.ts` | **9 passed** (8 original, unchanged, plus `installed()`) |
+| `src/main/services/capture.test.ts` | **7 passed** (2 cases now state the reconciled answer they assume) |
+| `tests/test_login_takeover.py` | **32 passed** (23 original, unchanged, plus 9 new) |
+| `tests/test_browser_profiles.py`, `tests/test_desktop_contract.py` | **passed** — the regenerated contract is current |
+| `uv run mypy` | **Success: no issues found in 155 source files** |
+| Full `uv run pytest -m "not browser"` | **806 passed, 1 failed** — the same pre-existing `.env`-dependent baseline in §21, unchanged by this work |
+| `npm.cmd run typecheck` | **clean** |
+| `npm.cmd run build` | **clean** (main, preload, renderer) |
+| `npm.cmd test` (vitest) | **1983 passed, 1 failed, 22 skipped** — the failure is the same pre-existing CSS-whitespace baseline in §21; the two vision-model-pack files still fail to load for the same missing local asset §21 records |
+| `npm.cmd run eval` | **118/118 eval cases passed** |
+
+No Electron acceptance or browser-marked suite was re-run for this closure:
+it adds no browser behaviour, no process behaviour and no route the
+acceptance test drives. Every new test here is in-process and deterministic.
 
 ---
 
@@ -660,19 +834,29 @@ unrelated flake it found (§21 there).
    of an observed timing hazard**, not a proof of its root cause inside
    Playwright's or Chromium's internals — treat it as a working fix for a
    symptom that reproduced deterministically, not as a closed investigation.
-6. **Electron main restart mid-takeover does not re-arm capture exclusion.**
+6. **Electron main restart mid-takeover did not re-arm capture exclusion —
+   fixed; see §9a.** The initial S2 implementation (`48e9484`) kept both
    `capture.ts`'s `takeoverActive` flag and `BrowserProfileController`'s
-   `openAttempts` set are both in-memory and rebuilt empty on a main-process
-   restart. There is currently no wire path for the renderer to rediscover a
-   still-open attempt's id afterward: `AgentBrowserProfileView` carries no
-   open-attempt reference, and the `login_attempt_already_open` refusal a
-   repeated "Sign in manually" click would hit also does not carry one
-   (`projectProfileRuntimeError` maps it to a plain refusal message). Capture
-   exclusion would only re-arm if something already held that attempt id and
-   called `getLoginTakeover` again — which, as of this slice, nothing does
-   automatically after a restart. A takeover that was genuinely still open
-   across a main-process restart is a narrow window (a takeover has a bounded
-   ≤1-hour TTL and restarts are not routine), but it is real and unfixed here.
+   `openAttempts` set purely in memory, rebuilt empty on a main-process
+   restart, with no wire path for anything to rediscover a still-open
+   attempt afterward. The closure commit added durable takeover discovery
+   (`active_takeover` on each profile in `GET /browser-profiles`) and an
+   explicit main-startup hydration step, and made the capture guard fail
+   closed: a fresh main process refuses every capture until it has actually
+   read durable takeover state, and a runtime it cannot read is never treated
+   as "no takeover is open". §9a states what was added, what remains
+   renderer-visible (nothing) and the one non-runtime answer the guard
+   accepts.
+
+   What is *not* claimed as fixed by that work, and remains true: the trusted
+   card itself still cannot resume a takeover it did not start — a user whose
+   main process restarted mid-takeover sees capture correctly refused, but has
+   no button that re-attaches the card to the open attempt, and must wait for
+   the takeover's bounded TTL to expire (or restart the runtime) before
+   "Sign in manually" succeeds again. Giving the card an attempt id to resume
+   from is a UI change this closure deliberately did not make, since S2's
+   login behaviour was to stay unchanged. The security invariant holds either
+   way: capture stays refused for exactly as long as the attempt is open.
 
 ---
 

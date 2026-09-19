@@ -289,11 +289,21 @@ explicit S3 design question.
 There is no reliable way to identify which capture source is the takeover
 window (its title changes with every page), so every capture attempt is
 refused outright rather than trying to exclude one source from a list. The
-flag driving this is in-memory and can be stale by at most one poll interval
-in the fail-safe direction only (refusing longer than necessary, never
-granting a capture a takeover still needs protected) — except across an
-Electron main-process restart mid-takeover, which currently leaves no wire
-path for the flag to re-arm (see the review's residual limitations).
+guard driving this is three-valued — *unreconciled*, *active*, *clear* — and
+only the last of those permits a capture. A main process starts
+**unreconciled**, so capture is refused from its first instruction until
+main has read durable takeover state from the runtime (`active_takeover` on
+each profile in `GET /browser-profiles`: an attempt id, a profile id, a
+status and an expiry, and nothing describing the page). An Electron
+main-process restart during a live takeover therefore cannot produce a
+window in which capture works while a sign-in window is on screen, and
+nothing has to remember an attempt id — not the renderer, not main. A
+runtime that is unreachable, restarting or answering unparseably leaves the
+guard refusing and is retried; a runtime outage is never read as "no
+takeover is open", and no timeout expires into permission to capture. Within
+a reconciled process the guard can still be stale by at most one poll
+interval, in the fail-safe direction only (refusing longer than necessary,
+never granting a capture a takeover still needs protected).
 
 **Voice cannot start, confirm or cancel a takeover — structurally, not by
 convention.** `VoiceTaskBackend` names only booking-task methods from
@@ -342,10 +352,16 @@ for the renderer to create a profile at all.
 - **A `file:` navigation during a takeover is briefly, genuinely rendered**
   before the guard retreats it — a reactive, not a preventive, control (see
   above).
-- **Capture exclusion does not re-arm after an Electron main-process restart
-  mid-takeover.** The flag and the open-attempt set it depends on are both
-  in-memory, and no current wire response lets the renderer rediscover a
-  still-open attempt's id afterward.
+- **Capture is permitted on a machine with no agent runtime without querying
+  anything.** When main has *established* that no runtime exists here
+  (packaged with a missing or invalid `agent-runtime.json`, a runtime that
+  could not be prepared, or the runtime's own files not being present at
+  all), the capture guard resolves to *clear* without a query: the headed
+  sign-in browser only exists as a descendant of a runtime process, and only
+  main's own supervisor starts one. This is the single non-runtime answer the
+  guard accepts; it is never taken while runtime startup is still deciding,
+  and never for a runtime that is installed but failing, which stays an
+  outage and keeps capture refused.
 - **The Windows Playwright-teardown keep-alive hang found in S2 is mitigated,
   not root-caused**: a bounded wait for the broker's connections to quiesce
   before stopping Playwright, plus a hard `pytest-timeout` net. Treat it as a
