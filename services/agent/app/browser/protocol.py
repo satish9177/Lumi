@@ -29,6 +29,7 @@ from app.domain.browser_dispatch import (
     LookupStatus,
     OperationStatus,
 )
+from app.domain.login_takeover import CredentialSignal, TakeoverSiteScope
 
 #: The credential header. A header, never a query parameter: URLs end up in
 #: server logs, browser history, referrers and crash dumps.
@@ -52,6 +53,10 @@ __all__ = [
     "ProfileSessionResponse",
     "SessionRequest",
     "SessionResponse",
+    "TakeoverConfirmRequest",
+    "TakeoverConfirmResponse",
+    "TakeoverStartRequest",
+    "TakeoverStartResponse",
     "WorkerErrorBody",
     "WorkerIdentity",
 ]
@@ -152,6 +157,10 @@ class ProfileSessionRequest(BaseModel):
     runtime_generation: uuid.UUID
     expected_worker_generation: uuid.UUID
     recorded_chromium_build: str | None = Field(default=None, max_length=64)
+    #: Milestone 8a S2. A visible Chromium window for a human-driven manual
+    #: login. `False` (the default) keeps S1's headless-by-worker-setting
+    #: behaviour for every other caller.
+    headed: bool = False
 
 
 class ProfileSessionResponse(BaseModel):
@@ -168,6 +177,71 @@ class ProfileSessionResponse(BaseModel):
     playwright_version: str | None = Field(default=None, max_length=32)
     #: Whether this worker holds the exclusive OS handle on the directory.
     lock_held: bool = False
+
+
+#: A registrable domain, exactly the shape `browser_profiles.site` already
+#: enforces. Echoing this back to the worker is not a caller-chosen URL: it
+#: is the profile's own immutable, database-recorded site, so the worker can
+#: navigate the takeover tab and judge its ending scope without ever holding
+#: a database connection.
+_SITE_PATTERN = r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$"
+
+
+class TakeoverStartRequest(BaseModel):
+    """Open the headed tab for a manual sign-in and hand it to the human.
+
+    No URL field: `site` is the profile's own bound registrable domain, and
+    the worker derives `https://{site}/` from it. There is no other
+    destination this request can name.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: uuid.UUID
+    runtime_generation: uuid.UUID
+    expected_worker_generation: uuid.UUID
+    site: str = Field(min_length=1, max_length=253, pattern=_SITE_PATTERN)
+
+
+class TakeoverStartResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: uuid.UUID
+    worker_generation: uuid.UUID
+    status: Literal["OPEN", "PROFILE_NOT_OPEN", "NAVIGATION_FAILED"]
+
+
+class TakeoverConfirmRequest(BaseModel):
+    """End a takeover and run the deterministic post-takeover check.
+
+    Carries the same bound `site`, for the same reason, and nothing else: no
+    URL, no selector, no page content.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: uuid.UUID
+    runtime_generation: uuid.UUID
+    expected_worker_generation: uuid.UUID
+    site: str = Field(min_length=1, max_length=253, pattern=_SITE_PATTERN)
+
+
+class TakeoverConfirmResponse(BaseModel):
+    """What the deterministic check found. Signals only -- never page text,
+    never a title, never a URL."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: uuid.UUID
+    worker_generation: uuid.UUID
+    status: Literal["CHECKED", "PROFILE_NOT_OPEN"]
+    scope: TakeoverSiteScope = TakeoverSiteScope.NO_PAGE
+    credential_surface: bool = False
+    signals: list[CredentialSignal] = Field(default_factory=list)
+    #: A SHA-256 hash of a stable identity signal the worker located and
+    #: hashed itself. Never the raw identity string, which never leaves the
+    #: worker process.
+    account_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
 
 
 class WorkerIdentity(BaseModel):

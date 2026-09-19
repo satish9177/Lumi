@@ -139,6 +139,16 @@ class Settings(DatabaseSettings):
     )
     research_hosts: str = Field(default="", validation_alias="LUMI_RESEARCH_HOSTS")
     research_test_origins: str = Field(default="", validation_alias="LUMI_RESEARCH_TEST_ORIGINS")
+    #: Milestone 8a S2. Exact loopback origins of the synthetic login/SSO
+    #: fixture the takeover test suite drives. Empty in every build that does
+    #: not test manual login.
+    auth_test_origins: str = Field(default="", validation_alias="LUMI_AUTH_TEST_ORIGINS")
+
+    @field_validator("auth_test_origins")
+    @classmethod
+    def _valid_auth_test_origins(cls, value: str) -> str:
+        parse_test_origins(value)
+        return value
     research_max_tabs: int = Field(
         default=5, ge=1, le=5, validation_alias="LUMI_RESEARCH_MAX_TABS"
     )
@@ -207,6 +217,22 @@ class Settings(DatabaseSettings):
     #: Recorded on a profile row alongside the Chromium and Playwright versions
     #: that last opened it, so a support question can be answered from metadata.
     app_version: str = Field(default="0.1.0", max_length=32, validation_alias="LUMI_APP_VERSION")
+
+    # --- Milestone 8a S2 manual login and human takeover -------------------
+    #
+    # The hard timeout on a takeover: how long the human may control the
+    # browser before Lumi closes the window and returns the profile to
+    # NEEDS_LOGIN without any assumption about whether the website session
+    # persisted. Fifteen minutes by default; configurable within a range that
+    # keeps it a bounded, visible interval rather than an unattended one.
+    login_attempt_ttl_seconds: int = Field(
+        default=900, ge=60, le=3_600, validation_alias="LUMI_LOGIN_ATTEMPT_TTL_SECONDS"
+    )
+    #: How often the runtime sweeps for expired takeovers and closes their
+    #: headed windows. Independent of the timeout itself.
+    login_attempt_sweep_interval_seconds: float = Field(
+        default=15.0, gt=0, le=300, validation_alias="LUMI_LOGIN_ATTEMPT_SWEEP_INTERVAL_SECONDS"
+    )
 
     @property
     def profile_paths(self) -> ProfilePaths | None:

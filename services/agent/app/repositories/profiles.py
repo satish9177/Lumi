@@ -250,6 +250,39 @@ class BrowserProfileRepository:
         row = result.one_or_none()
         return _profile(row) if row is not None else None
 
+    async def mark_authenticated(
+        self, *, profile_id: uuid.UUID, account_fingerprint: str | None
+    ) -> BrowserProfile | None:
+        """Milestone 8a S2: the one place `status` becomes `AUTHENTICATED`.
+
+        Called only after a completed takeover's deterministic post-login
+        check found no login surface and the browser was on the profile's own
+        site. `account_fingerprint`, when given, is a hash already computed
+        by the worker -- never the raw identity string. When it is `None`
+        (the check found no stable signal), any fingerprint already recorded
+        is left untouched rather than being overwritten with `unknown`.
+        """
+        values: dict[str, object] = {
+            "status": ProfileStatus.AUTHENTICATED.value,
+            "last_login_completed_at": func.now(),
+            "last_observed_at": func.now(),
+            "revision": browser_profiles.c.revision + 1,
+            "updated_at": func.now(),
+        }
+        if account_fingerprint is not None:
+            values["account_fingerprint"] = account_fingerprint
+        result = await self._connection.execute(
+            update(browser_profiles)
+            .where(
+                browser_profiles.c.id == profile_id,
+                browser_profiles.c.status.in_(_LIVE),
+            )
+            .values(**values)
+            .returning(*browser_profiles.c)
+        )
+        row = result.one_or_none()
+        return _profile(row) if row is not None else None
+
     async def mark_deleted(
         self, *, profile_id: uuid.UUID, expected_revision: int | None = None
     ) -> BrowserProfile | None:

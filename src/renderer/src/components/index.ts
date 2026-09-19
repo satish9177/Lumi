@@ -1,5 +1,7 @@
 export { AgentTaskPanel } from './AgentTaskPanel'
 export type { AgentTaskPanelProps } from './AgentTaskPanel'
+export { BrowserProfilePanel } from './BrowserProfilePanel'
+export type { BrowserProfilePanelProps } from './BrowserProfilePanel'
 export { BrandMark } from './BrandMark'
 export { ConfirmDialog } from './ConfirmDialog'
 export type { ConfirmContent, ConfirmDialogProps, ConfirmRequest, RequestConfirmation } from './ConfirmDialog'

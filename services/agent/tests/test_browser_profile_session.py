@@ -43,6 +43,7 @@ from app.browser.profile_session import (
 )
 from app.domain.browser_profile import BrowserVersions
 from app.domain.public_url import BROKER_POLICY_VERSION, PublicUrlPolicy
+from tests.broker_teardown import bounded, quiesce_broker
 from evals.sites.account_fixture import ACCOUNT_NAME, SIGNED_IN, SIGNED_OUT, create_site
 
 pytestmark = [pytest.mark.browser]
@@ -154,9 +155,11 @@ async def harness(tmp_path: Path) -> AsyncIterator[ProfileHarness]:
             playwright=playwright, broker=broker, site=site, paths=paths, current=current
         )
     finally:
-        await playwright.stop()
-        await broker.aclose()
-        await site.aclose()
+        # See tests/broker_teardown.py.
+        await quiesce_broker(broker)
+        await bounded("playwright.stop", playwright.stop())
+        await bounded("broker.aclose", broker.aclose())
+        await bounded("site.aclose", site.aclose())
 
 
 async def _text(store: ProfileSessionStore, profile_id: uuid.UUID, url: str) -> str:

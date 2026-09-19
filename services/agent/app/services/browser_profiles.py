@@ -84,6 +84,11 @@ class OpenProfile:
     profile: BrowserProfile
     worker_generation: uuid.UUID
     versions: BrowserVersions
+    #: Whether this open used a visible (headed) Chromium window. Milestone
+    #: 8a S2: a takeover needs headed=True; nothing else in S2 opens a
+    #: profile at all. Tracked so a second open with the other mode is
+    #: refused rather than silently handed the wrong window.
+    headed: bool = False
 
 
 class BrowserProfileService:
@@ -159,7 +164,7 @@ class BrowserProfileService:
     # -- opening and leasing -------------------------------------------------
 
     async def open_profile(
-        self, profile_id: uuid.UUID, *, kind: BrowserContextKind
+        self, profile_id: uuid.UUID, *, kind: BrowserContextKind, headed: bool = False
     ) -> OpenProfile:
         """Lease the profile, then have the worker open its persistent context.
 
@@ -168,6 +173,11 @@ class BrowserProfileService:
         profile through this method, and the research path (`ResearchService`)
         has no way to reach one at all -- it opens `/v1/sessions/open`, which
         creates a disposable context with no `user_data_dir`.
+
+        `headed` exists for Milestone 8a S2's manual-login takeover, which
+        needs a visible window. A profile already open in the *other* mode is
+        refused rather than silently handed back, because a caller that asked
+        for a visible window must never be given a headless one it cannot see.
         """
         if kind is not BrowserContextKind.AUTHENTICATED_PROFILE:
             raise ProfileRefusal("profile_kind_mismatch")
@@ -176,11 +186,13 @@ class BrowserProfileService:
             raise ProfileRefusal("profile_deleted")
         already = self._open.get(profile_id)
         if already is not None:
+            if already.headed != headed:
+                raise ProfileRefusal("profile_open_mode_mismatch")
             return already
 
         leased = await self._acquire(profile)
         try:
-            opened = await self._open_on_worker(leased)
+            opened = await self._open_on_worker(leased, headed=headed)
         except BaseException:
             # Never leave a lease behind for a context that did not open.
             await self._release(profile_id)
@@ -195,9 +207,28 @@ class BrowserProfileService:
             profile=recorded if recorded is not None else leased,
             worker_generation=opened.worker_generation,
             versions=opened.versions,
+            headed=headed,
         )
         self._open[profile_id] = state
         return state
+
+    async def mark_authenticated(
+        self, profile_id: uuid.UUID, *, account_fingerprint: str | None
+    ) -> BrowserProfile:
+        """Milestone 8a S2: record a completed, verified sign-in.
+
+        Called only by `LoginTakeoverService`, only after its worker-side
+        deterministic check found the browser on the profile's own site with
+        no login surface remaining. This service performs no check of its
+        own here -- it trusts the caller to have already run one.
+        """
+        async with self._engine.begin() as connection:
+            updated = await BrowserProfileRepository(connection).mark_authenticated(
+                profile_id=profile_id, account_fingerprint=account_fingerprint
+            )
+        if updated is None:
+            raise ProfileRefusal("profile_deleted")
+        return updated
 
     async def close_profile(self, profile_id: uuid.UUID) -> bool:
         """Close the context and drop the lease. Idempotent."""
@@ -247,10 +278,14 @@ class BrowserProfileService:
             )
         return released is not None
 
-    async def _open_on_worker(self, profile: BrowserProfile) -> WorkerProfileOpen:
+    async def _open_on_worker(
+        self, profile: BrowserProfile, *, headed: bool = False
+    ) -> WorkerProfileOpen:
         try:
             return await self._browser.open_browser_profile(
-                profile_id=profile.id, recorded_chromium_build=profile.chromium_build
+                profile_id=profile.id,
+                recorded_chromium_build=profile.chromium_build,
+                headed=headed,
             )
         except BrowserWorkerRejectedError as error:
             # The worker's refusal codes are already stable and safe; surface

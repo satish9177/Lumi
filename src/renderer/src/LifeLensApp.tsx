@@ -28,6 +28,7 @@ import { classifyUserIntent } from '../../shared/intent'
 import { fileKindLabel } from '../../shared/search-query'
 import {
   AgentTaskPanel,
+  BrowserProfilePanel,
   BrandMark,
   ConfirmDialog,
   DragGrip,
@@ -123,6 +124,9 @@ export default function LifeLensApp() {
   const [windowNotice, setWindowNotice] = useState<string>()
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [agentTasksOpen, setAgentTasksOpen] = useState(false)
+  // Milestone 8a S2: manual login and human takeover. Not task-scoped, so it
+  // is its own overlay rather than a section of AgentTaskPanel.
+  const [browserProfilesOpen, setBrowserProfilesOpen] = useState(false)
   /** A voice outcome asking the trusted task UI to draw attention somewhere. */
   const [agentFocus, setAgentFocus] = useState<{ target: VoiceTaskFocus; serial: number }>()
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest>()
@@ -1811,6 +1815,9 @@ export default function LifeLensApp() {
             <button className="chip" type="button" onClick={() => setAgentTasksOpen(true)} data-testid="open-agent-tasks">
               Agent tasks
             </button>
+            <button className="chip" type="button" onClick={() => setBrowserProfilesOpen(true)} data-testid="open-browser-profiles">
+              Sign-in profiles
+            </button>
           </div>
 
           <form className="composer" onSubmit={(event) => { event.preventDefault(); void askQuestion() }}>
@@ -1866,6 +1873,12 @@ export default function LifeLensApp() {
               <AgentTaskPanel agent={window.lifeLens.agent} focusRequest={agentFocus} onInspectionResult={showInspectionResult}
                 onResearchResult={showResearchResult}
                 onClose={() => setAgentTasksOpen(false)} />
+            </div>
+          )}
+
+          {browserProfilesOpen && (
+            <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Sign-in profiles">
+              <BrowserProfilePanel agent={window.lifeLens.agent} onClose={() => setBrowserProfilesOpen(false)} />
             </div>
           )}
 

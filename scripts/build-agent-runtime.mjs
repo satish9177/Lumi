@@ -191,6 +191,36 @@ if (!skipBrowsers) {
   })
   browserSummary.version = launched.split('\n').pop().trim()
   step(`bundled Chromium ${browserSummary.version} (${chromium})`)
+
+  // Milestone 8a S2: manual login needs a visible window, so the bundle's
+  // Chromium must also launch headed, not only headless -- from the bundle
+  // alone, same channel, same scrubbed environment as the check above. This
+  // is the visible mode that motivated shipping full Chromium instead of the
+  // headless shell in S1; S1 only proved the headless path.
+  step('verifying the bundled Chromium also launches headed from the bundle alone')
+  const launchedHeaded = run(python, ['-c', [
+    'import asyncio',
+    'from playwright.async_api import async_playwright',
+    'async def main():',
+    '    async with async_playwright() as p:',
+    '        b = await p.chromium.launch(channel="chromium", headless=False)',
+    '        page = await b.new_page()',
+    '        await page.goto("about:blank")',
+    '        print(b.version)',
+    '        await b.close()',
+    'asyncio.run(main())'
+  ].join('\n')], {
+    cwd: agentOut,
+    env: {
+      SystemRoot: process.env.SystemRoot ?? 'C:\\Windows',
+      TEMP: process.env.TEMP ?? 'C:\\Windows\\Temp',
+      PYTHONDONTWRITEBYTECODE: '1',
+      PYTHONUTF8: '1',
+      PLAYWRIGHT_BROWSERS_PATH: target
+    }
+  })
+  browserSummary.headedVerified = launchedHeaded.split('\n').pop().trim() === browserSummary.version
+  step(`bundled Chromium headed launch verified (${launchedHeaded.split('\n').pop().trim()})`)
 }
 
 // 4b. A browser profile directory must never reach an artifact.

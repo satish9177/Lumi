@@ -37,6 +37,10 @@ from app.browser.protocol import (
     ProfileSessionResponse,
     SessionRequest,
     SessionResponse,
+    TakeoverConfirmRequest,
+    TakeoverConfirmResponse,
+    TakeoverStartRequest,
+    TakeoverStartResponse,
     WorkerErrorBody,
     WorkerIdentity,
 )
@@ -145,6 +149,54 @@ class BrowserWorkerClient:
             raise _rejection(response)
         try:
             answer = ProfileSessionResponse.model_validate(response.json())
+        except (ValueError, ValidationError) as error:
+            raise BrowserWorkerLostResponseError(
+                f"the worker returned an unreadable result ({type(error).__name__})"
+            )
+        if answer.profile_id != request.profile_id:
+            raise StaleWorkerResultError("it answers a different profile")
+        if answer.worker_generation != request.expected_worker_generation:
+            raise StaleWorkerResultError("it came from a different worker generation")
+        return answer
+
+    async def start_takeover(self, request: TakeoverStartRequest) -> TakeoverStartResponse:
+        """Ask the worker to navigate the profile's headed tab and hand it over."""
+        try:
+            response = await self._client.post(
+                "/v1/profiles/takeover/start", json=request.model_dump(mode="json")
+            )
+        except httpx.ConnectError:
+            raise BrowserWorkerUnavailableError("the worker refused the connection")
+        except httpx.HTTPError as error:
+            raise BrowserWorkerLostResponseError(type(error).__name__)
+        if response.status_code >= 400:
+            raise _rejection(response)
+        try:
+            answer = TakeoverStartResponse.model_validate(response.json())
+        except (ValueError, ValidationError) as error:
+            raise BrowserWorkerLostResponseError(
+                f"the worker returned an unreadable result ({type(error).__name__})"
+            )
+        if answer.profile_id != request.profile_id:
+            raise StaleWorkerResultError("it answers a different profile")
+        if answer.worker_generation != request.expected_worker_generation:
+            raise StaleWorkerResultError("it came from a different worker generation")
+        return answer
+
+    async def confirm_takeover(self, request: TakeoverConfirmRequest) -> TakeoverConfirmResponse:
+        """Ask the worker to run the deterministic post-takeover check."""
+        try:
+            response = await self._client.post(
+                "/v1/profiles/takeover/confirm", json=request.model_dump(mode="json")
+            )
+        except httpx.ConnectError:
+            raise BrowserWorkerUnavailableError("the worker refused the connection")
+        except httpx.HTTPError as error:
+            raise BrowserWorkerLostResponseError(type(error).__name__)
+        if response.status_code >= 400:
+            raise _rejection(response)
+        try:
+            answer = TakeoverConfirmResponse.model_validate(response.json())
         except (ValueError, ValidationError) as error:
             raise BrowserWorkerLostResponseError(
                 f"the worker returned an unreadable result ({type(error).__name__})"

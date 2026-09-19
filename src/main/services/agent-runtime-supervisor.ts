@@ -67,6 +67,12 @@ export interface AgentRuntimeSettings {
   researchTestOrigins?: readonly string[]
   /** A URL template containing `{query}`; empty means research has no search. */
   researchSearchEndpoint?: string
+  /**
+   * Milestone 8a S2. Unpackaged builds only: exact loopback origins of the
+   * synthetic login/SSO fixture the manual-takeover acceptance test drives.
+   * Empty in every build that does not test manual login.
+   */
+  authTestOrigins?: readonly string[]
 }
 
 export type RuntimeMethod = 'GET' | 'POST'
@@ -118,7 +124,15 @@ const ALLOWED_ROUTES: ReadonlyArray<{ method: RuntimeMethod; pattern: RegExp }> 
   {
     method: 'POST',
     pattern: new RegExp(`^/actions/${UUID_PART}/(approval-request|approve|reject|browser-execution|browser-reconciliation)$`)
-  }
+  },
+  // Milestone 8a S1/S2: browser profiles and manual login takeover. Every
+  // path segment here is an opaque id; none is a hostname, a path or a
+  // credential.
+  { method: 'GET', pattern: /^\/browser-profiles$/ },
+  { method: 'GET', pattern: new RegExp(`^/browser-profiles/${UUID_PART}$`) },
+  { method: 'POST', pattern: new RegExp(`^/browser-profiles/${UUID_PART}/takeover$`) },
+  { method: 'GET', pattern: new RegExp(`^/browser-profiles/${UUID_PART}/takeover/${UUID_PART}$`) },
+  { method: 'POST', pattern: new RegExp(`^/browser-profiles/${UUID_PART}/takeover/${UUID_PART}/(confirm|cancel)$`) }
 ]
 
 export function isAllowedRuntimeRoute(method: RuntimeMethod, path: string): boolean {
@@ -156,6 +170,9 @@ export function validateRuntimeSettings(settings: AgentRuntimeSettings): Record<
   }
   if (settings.researchTestOrigins !== undefined && settings.researchTestOrigins.length > 0) {
     environment.LUMI_RESEARCH_TEST_ORIGINS = parseTestOrigins(settings.researchTestOrigins).join(',')
+  }
+  if (settings.authTestOrigins !== undefined && settings.authTestOrigins.length > 0) {
+    environment.LUMI_AUTH_TEST_ORIGINS = parseTestOrigins(settings.authTestOrigins).join(',')
   }
   if (settings.researchSearchEndpoint !== undefined && settings.researchSearchEndpoint !== '') {
     // A URL template, checked here as a shape and again by the runtime against

@@ -52,6 +52,7 @@ from app.browser.protocol import WORKER_TOKEN_HEADER
 from app.browser.session import generate_worker_token
 from app.domain.browser_profile import BrowserVersions
 from app.domain.public_url import BROKER_POLICY_VERSION, PublicUrlPolicy
+from tests.broker_teardown import bounded, quiesce_broker
 from evals.sites.account_fixture import SIGNED_IN, SIGNED_OUT
 from tests.browser_harness import account_fixture_site, free_port
 # The one list of Chromium's own profile filenames, shared with the source-level
@@ -197,9 +198,11 @@ async def _drive(
         await page.goto(f"{origin}{path}", wait_until="load")
         return str(await page.locator("body").inner_text())
     finally:
+        # See tests/broker_teardown.py.
         await store.close_all()
-        await playwright.stop()
-        await broker.aclose()
+        await quiesce_broker(broker)
+        await bounded("playwright.stop", playwright.stop())
+        await bounded("broker.aclose", broker.aclose())
 
 
 def _drive_sync(profile_root: Path, profile_id: uuid.UUID, origin: str, path: str) -> str:

@@ -28,6 +28,7 @@ from app.domain.action_status import (
 )
 from app.domain.browser_dispatch import BrowserEffect, DispatchStatus
 from app.domain.browser_profile import ProfileStatus
+from app.domain.login_takeover import LoginAttemptStatus
 from app.domain.research import GrantStatus
 from app.domain.task_status import TaskStatus
 
@@ -52,7 +53,8 @@ def _values(
     | type[RiskTier]
     | type[DispatchStatus]
     | type[BrowserEffect]
-    | type[ProfileStatus],
+    | type[ProfileStatus]
+    | type[LoginAttemptStatus],
 ) -> str:
     return ", ".join(f"'{member.value}'" for member in members)
 
@@ -745,3 +747,69 @@ Index(
     unique=True,
     postgresql_where=browser_profiles.c.status != ProfileStatus.DELETED.value,
 )
+
+
+# ---- Milestone 8a S2: manual login and human takeover -----------------------
+#
+# One row per takeover: a bounded interval in which the human, not Lumi, owned
+# the browser. This is not an authorization -- there is no `kind`, no `scope`,
+# nothing a step could consume. It records only that the interval existed and
+# how it ended, so a crash mid-login can never be silently read back as a
+# successful sign-in. See `app/domain/login_takeover.py`.
+
+LOGIN_ATTEMPT_STATUSES = tuple(status.value for status in LoginAttemptStatus)
+_OPEN_LOGIN_ATTEMPT_STATUSES = ("OPEN", "UNCONFIRMED")
+
+login_attempts = Table(
+    "login_attempts",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("profile_id", Uuid(), ForeignKey("browser_profiles.id", ondelete="RESTRICT"), nullable=False),
+    Column(
+        "runtime_generation",
+        Uuid(),
+        ForeignKey("runtime_generations.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    # Set once the worker has opened the headed context for this attempt.
+    # Null only for the brief window between the row being created and that
+    # confirmation; a row that never gets one is exactly what "interrupted"
+    # covers.
+    Column(
+        "worker_generation",
+        Uuid(),
+        ForeignKey("browser_worker_generations.id", ondelete="RESTRICT"),
+        nullable=True,
+    ),
+    # The profile's revision this attempt is bound to, captured at start. Not
+    # a compare-and-swap target for the profile row -- that is `revision`
+    # itself, checked by the service -- but a durable record of what the user
+    # was looking at when they clicked "Sign in manually".
+    Column("profile_revision", BigInteger(), nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("completed_at", DateTime(timezone=True), nullable=True),
+    Column("cancelled_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint(
+        "status IN (" + ", ".join(f"'{status}'" for status in LOGIN_ATTEMPT_STATUSES) + ")",
+        name="status",
+    ),
+    CheckConstraint("profile_revision >= 1", name="profile_revision_positive"),
+    CheckConstraint("expires_at > started_at", name="expires_after_start"),
+    CheckConstraint("(completed_at IS NOT NULL) = (status = 'COMPLETED')", name="completed_at_set"),
+    CheckConstraint("(cancelled_at IS NOT NULL) = (status = 'CANCELLED')", name="cancelled_at_set"),
+)
+
+#: At most one live (OPEN or UNCONFIRMED) attempt per profile. A second
+#: "Sign in manually" click while one is already active must be refused, not
+#: silently start a second headed browser on the same profile directory.
+Index(
+    "uq_login_attempts_profile_id_open",
+    login_attempts.c.profile_id,
+    unique=True,
+    postgresql_where=login_attempts.c.status.in_(_OPEN_LOGIN_ATTEMPT_STATUSES),
+)
+Index("ix_login_attempts_profile_id_started_at", login_attempts.c.profile_id, login_attempts.c.started_at)

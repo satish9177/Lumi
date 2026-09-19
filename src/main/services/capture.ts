@@ -9,6 +9,36 @@ const MAX_CAPTURE_HEIGHT = 1_000
 export const MAX_CAPTURE_BYTES = 150_000
 const MIN_CAPTURE_WIDTH = 560
 
+/**
+ * Milestone 8a S2: while a manual-login takeover is open, the human is
+ * driving a real, visible Chromium window that may show a password or an
+ * OTP field. Lumi's screen capture must not see it.
+ *
+ * There is no reliable way to identify *which* `desktopCapturer` source is
+ * the takeover window -- its title changes with every page the human
+ * navigates to -- so a full-screen capture could show it regardless of
+ * which source was requested. The safe answer is not "exclude one source
+ * from the list"; it is "refuse every capture while any takeover is open."
+ * `BrowserProfileController` calls `setTakeoverActive` from the same result
+ * it uses to update the trusted takeover card, so this flag can be stale by
+ * at most one poll interval -- and only in the fail-safe direction: it can
+ * refuse a capture the takeover no longer needs protected, never grant one
+ * while a takeover is genuinely still open.
+ */
+let takeoverActive = false
+
+export function setTakeoverActive(active: boolean): void {
+  takeoverActive = active
+}
+
+export class CaptureRefusedError extends Error {
+  readonly code = 'capture_refused_takeover_active'
+  constructor() {
+    super('Lumi will not capture the screen while a sign-in window is open.')
+    this.name = 'CaptureRefusedError'
+  }
+}
+
 /** The minimal image surface shared by native images and test doubles. */
 export interface CaptureImage {
   toJPEG: (quality: number) => Buffer
@@ -42,6 +72,7 @@ const ELECTRON_CAPTURE_RUNTIME: CaptureRuntime = {
 }
 
 export async function listCaptureSources(): Promise<CaptureSource[]> {
+  if (takeoverActive) throw new CaptureRefusedError()
   const sources = await desktopCapturer.getSources({
     types: ['screen', 'window'],
     thumbnailSize: SOURCE_PREVIEW_SIZE,
@@ -72,6 +103,7 @@ export function isCompanionCaptureLabel(label: string): boolean {
 }
 
 export async function captureScreen(sourceId?: string, runtime: CaptureRuntime = ELECTRON_CAPTURE_RUNTIME): Promise<CaptureResult> {
+  if (takeoverActive) throw new CaptureRefusedError()
   const display = runtime.getPrimaryDisplay()
   const width = Math.min(Math.round(display.size.width * display.scaleFactor), MAX_CAPTURE_WIDTH)
   const height = Math.min(Math.round(display.size.height * display.scaleFactor), MAX_CAPTURE_HEIGHT)

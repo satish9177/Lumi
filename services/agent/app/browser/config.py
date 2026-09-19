@@ -82,6 +82,10 @@ class WorkerSettings(BaseSettings):
     research_test_origins: str = Field(default="")
     #: How many tabs one research session may own.
     research_max_tabs: int = Field(default=5, ge=1, le=5)
+    #: Milestone 8a S2 manual login. Exact http://127.0.0.1:<port> origins of
+    #: the synthetic login/SSO fixture used by the takeover test suite. Empty
+    #: in every build that does not test manual login.
+    auth_test_origins: str = Field(default="")
     #: Milestone 8a S1 persistent profiles. This is a *base directory* and
     #: nothing else -- the worker appends the profile UUID itself, so no caller
     #: names a path. Empty (the default) means `%LOCALAPPDATA%\Lumi\
@@ -113,6 +117,12 @@ class WorkerSettings(BaseSettings):
     @field_validator("inspection_test_origins")
     @classmethod
     def _valid_test_origins(cls, value: str) -> str:
+        parse_test_origins(value)
+        return value
+
+    @field_validator("auth_test_origins")
+    @classmethod
+    def _valid_auth_test_origins(cls, value: str) -> str:
         parse_test_origins(value)
         return value
 
@@ -161,6 +171,7 @@ class WorkerSettings(BaseSettings):
             *self.origins.values(),
             *parse_test_origins(self.inspection_test_origins),
             *parse_test_origins(self.research_test_origins),
+            *parse_test_origins(self.auth_test_origins),
         }
         return frozenset(
             origin for origin in candidates if _TEST_ORIGIN_SHAPE.fullmatch(origin.rstrip("/"))

@@ -14,6 +14,7 @@ from app.domain.booking import BookingProposalError
 from app.domain.page_observation import AnswerNotGroundedError
 from app.domain.research import AnswerNotGroundedError as ResearchAnswerNotGroundedError
 from app.domain.browser_profile import ProfileRefusal
+from app.domain.login_takeover import TakeoverRefusal
 from app.domain.research import ResearchRefusal
 from app.services.research_search import SearchFailedError
 from app.domain.errors import (
@@ -341,6 +342,17 @@ def register_error_handlers(app: FastAPI) -> None:
             status.HTTP_409_CONFLICT,
             "browser_profile_refused",
             "That browser profile operation was refused.",
+            "code",
+        ),
+    )
+    app.add_exception_handler(
+        TakeoverRefusal,
+        # Milestone 8a S2. Never page text, never a title, never a URL: a
+        # takeover refusal carries a stable code and nothing page-derived.
+        _reasoned(
+            status.HTTP_409_CONFLICT,
+            "login_attempt_refused",
+            "That login takeover operation was refused.",
             "code",
         ),
     )

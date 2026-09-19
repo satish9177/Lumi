@@ -16,9 +16,14 @@ from app.api.schemas import (
     BrowserDispatchListResponse,
     BrowserDispatchResponse,
     CancelBookingTaskResponse,
+    CancelLoginBody,
     CancelTaskBody,
+    ConfirmSignedInBody,
     CreateBrowserProfileBody,
     DeleteBrowserProfileBody,
+    LoginAttemptResponse,
+    LoginTakeoverResponse,
+    OpenLoginWindowBody,
     ClinicInfoResponse,
     ConfirmResearchGrantBody,
     DoctorProfileResponse,
@@ -67,7 +72,9 @@ from app.domain.research import (
     parse_step,
 )
 from app.domain.browser_profile import BrowserContextKind
+from app.domain.login_takeover import TakeoverRefusal
 from app.services.browser_profiles import BrowserProfileService
+from app.services.login_takeover import LoginTakeoverService
 from app.services.page_inspection import PageInspectionService
 from app.services.page_inspection import validate_request as validate_inspection_request
 from app.services.research_tasks import ResearchService
@@ -890,3 +897,100 @@ async def delete_browser_profile(
         expected_revision=body.expected_revision if body is not None else None,
     )
     return BrowserProfileResponse.from_profile(deleted)
+
+
+# --- Manual login and human takeover (Milestone 8a S2) -----------------------
+#
+# Three fixed routes plus one read. No route accepts a URL, a credential, a
+# cookie, page content, a browser argument or an executable path. `site` never
+# appears in a request: the profile's own bound, immutable site is what the
+# runtime hands to the worker, never anything a caller names here.
+
+
+def get_login_takeover_service(request: Request) -> LoginTakeoverService:
+    service: LoginTakeoverService = request.app.state.login_takeover_service
+    return service
+
+
+LoginTakeoverServiceDep = Annotated[
+    LoginTakeoverService, Depends(get_login_takeover_service)
+]
+
+
+def _takeover_response(outcome: Any) -> LoginTakeoverResponse:
+    return LoginTakeoverResponse(
+        attempt=LoginAttemptResponse.from_attempt(outcome.attempt),
+        profile=BrowserProfileResponse.from_profile(outcome.profile),
+        refusal_reason=outcome.refusal_reason,
+    )
+
+
+@router.post(
+    "/browser-profiles/{profile_id}/takeover",
+    response_model=LoginTakeoverResponse,
+    responses={**_CONFLICT, **_UNAVAILABLE},
+    summary="Open a headed window for the human to sign in themselves (internal)",
+)
+async def open_login_window(
+    profile_id: uuid.UUID, body: OpenLoginWindowBody, service: LoginTakeoverServiceDep
+) -> LoginTakeoverResponse:
+    """The trusted "Sign in manually" click. Agent automation is suspended for
+    the life of the takeover this starts: no planner call, no observation, no
+    provider call is reachable while it is open."""
+    outcome = await service.start_takeover(profile_id, expected_revision=body.expected_revision)
+    return _takeover_response(outcome)
+
+
+@router.get(
+    "/browser-profiles/{profile_id}/takeover/{attempt_id}",
+    response_model=LoginAttemptResponse,
+    responses=_CONFLICT,
+    summary="One takeover's bounded interval and how it ended (internal)",
+)
+async def get_login_takeover(
+    profile_id: uuid.UUID, attempt_id: uuid.UUID, service: LoginTakeoverServiceDep
+) -> LoginAttemptResponse:
+    attempt = await service.get_attempt(attempt_id)
+    if attempt.profile_id != profile_id:
+        raise TakeoverRefusal("login_attempt_not_found")
+    return LoginAttemptResponse.from_attempt(attempt)
+
+
+@router.post(
+    "/browser-profiles/{profile_id}/takeover/{attempt_id}/confirm",
+    response_model=LoginTakeoverResponse,
+    responses={**_CONFLICT, **_UNAVAILABLE},
+    summary="End the takeover and run the one deterministic post-login check (internal)",
+)
+async def confirm_signed_in(
+    profile_id: uuid.UUID,
+    attempt_id: uuid.UUID,
+    body: ConfirmSignedInBody,
+    service: LoginTakeoverServiceDep,
+) -> LoginTakeoverResponse:
+    """The trusted "I'm signed in" click. This is not, by itself, treated as
+    proof that a sign-in succeeded -- only the check it starts is."""
+    outcome = await service.confirm_takeover(
+        profile_id, attempt_id, expected_revision=body.expected_revision
+    )
+    return _takeover_response(outcome)
+
+
+@router.post(
+    "/browser-profiles/{profile_id}/takeover/{attempt_id}/cancel",
+    response_model=LoginTakeoverResponse,
+    responses={**_CONFLICT, **_UNAVAILABLE},
+    summary="End the takeover without any authentication claim (internal)",
+)
+async def cancel_login(
+    profile_id: uuid.UUID,
+    attempt_id: uuid.UUID,
+    body: CancelLoginBody,
+    service: LoginTakeoverServiceDep,
+) -> LoginTakeoverResponse:
+    """The trusted "Cancel" click. Never a logout: no request reaches the
+    website, and no cookie is cleared."""
+    outcome = await service.cancel_takeover(
+        profile_id, attempt_id, expected_revision=body.expected_revision
+    )
+    return _takeover_response(outcome)

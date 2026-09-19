@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from collections.abc import AsyncIterator
 from contextlib import AbstractContextManager, asynccontextmanager
 
@@ -22,12 +23,15 @@ from app.services.browser_execution import (
     BrowserWorkerConfig,
     WorkerSource,
 )
+from app.services.login_takeover import LoginTakeoverService
 from app.services.parent_watchdog import ParentLiveness, parent_liveness, watch_liveness
 from app.services.research_search import PublicSearchProvider, SearchConfig
 from app.services.research_tasks import ResearchService
 from app.services.recovery import RecoveryService
 from app.services.runtime import register_runtime_generation, runtime_ownership
 from app.services.tasks import TaskService
+
+logger = logging.getLogger("lumi.runtime")
 
 
 def _worker_source(settings: Settings) -> WorkerSource | None:
@@ -39,6 +43,7 @@ def _worker_source(settings: Settings) -> WorkerSource | None:
         settings.browser_site_origin is None
         and not settings.public_policy.configured
         and not settings.research_policy.configured
+        and not settings.auth_test_origins
     ):
         return None
     return ManagedBrowserWorker(
@@ -53,6 +58,7 @@ def _worker_source(settings: Settings) -> WorkerSource | None:
         research_hosts=settings.research_hosts,
         research_test_origins=settings.research_test_origins,
         research_max_tabs=settings.research_max_tabs,
+        auth_test_origins=settings.auth_test_origins,
     )
 
 
@@ -72,6 +78,21 @@ def _worker_config(settings: Settings) -> BrowserWorkerConfig | None:
     )
 
 
+async def _sweep_expired_takeovers(
+    takeovers: LoginTakeoverService, *, interval_seconds: float
+) -> None:
+    """Milestone 8a S2's takeover watchdog: close every headed window whose
+    hard timeout has passed. Runs for the life of the runtime process."""
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            await takeovers.sweep_expired()
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a watchdog must never take the runtime down.
+            logger.exception("the login-takeover watchdog failed to sweep")
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     """Build the app. Run with `uvicorn --factory app.main:create_app`."""
     # Missing or invalid configuration fails here, before the server binds.
@@ -84,6 +105,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         parent_context: AbstractContextManager[ParentLiveness] | None = None
         worker: WorkerSource | None = None
         warm_up: asyncio.Task[None] | None = None
+        takeover_watchdog: asyncio.Task[None] | None = None
         try:
             await ping_database(engine)
             await verify_schema_is_current(engine)
@@ -116,6 +138,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     browser=app.state.browser_execution_service,
                     paths=resolved.profile_paths,
                     lease_ttl_seconds=resolved.browser_profile_lease_ttl_seconds,
+                )
+                app.state.login_takeover_service = LoginTakeoverService(
+                    engine,
+                    runtime_generation=generation.id,
+                    browser=app.state.browser_execution_service,
+                    profiles=app.state.browser_profile_service,
+                    ttl_seconds=resolved.login_attempt_ttl_seconds,
                 )
                 app.state.page_inspection_service = PageInspectionService(
                     engine,
@@ -168,6 +197,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 # directory is the half that still refuses if something is
                 # genuinely using it.
                 await app.state.browser_profile_service.release_stale_leases()
+                # Milestone 8a S2: any takeover left OPEN/UNCONFIRMED by a
+                # generation that no longer exists is INTERRUPTED, never read
+                # back as a successful sign-in. The profile itself is left
+                # untouched -- it was never optimistically marked
+                # AUTHENTICATED mid-takeover.
+                await app.state.login_takeover_service.reconcile_interrupted()
+                takeover_watchdog = asyncio.create_task(
+                    _sweep_expired_takeovers(
+                        app.state.login_takeover_service,
+                        interval_seconds=resolved.login_attempt_sweep_interval_seconds,
+                    )
+                )
                 if resolved.runtime_parent_pid is not None:
                     # Open the stable Windows process handle synchronously. If
                     # Electron is already gone or access fails, startup aborts
@@ -185,6 +226,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     warm_up = asyncio.create_task(worker.warm_up())
                 yield
         finally:
+            if takeover_watchdog is not None:
+                takeover_watchdog.cancel()
+                await asyncio.gather(takeover_watchdog, return_exceptions=True)
             if warm_up is not None:
                 warm_up.cancel()
                 await asyncio.gather(warm_up, return_exceptions=True)

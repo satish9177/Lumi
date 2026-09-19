@@ -41,19 +41,25 @@ in again; Lumi will not gamble with a directory somebody signed into.
 
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 from playwright.async_api import (
     Browser,
     BrowserContext,
     Error as PlaywrightError,
+    Page,
     Playwright,
 )
 
+from app.browser.credential_signals import account_fingerprint, detect_credential_surface
 from app.browser.egress_broker import EgressBroker, managed_launch_options
 from app.browser.profile_lock import ProfileLock, ProfileLockUnavailableError
 from app.browser.profile_paths import ProfilePaths
+from app.browser.takeover_guard import TakeoverNetworkGuard
 from app.domain.browser_profile import BrowserVersions
+from app.domain.public_suffix import PublicSuffixError, registrable_domain
+from app.domain.login_takeover import TakeoverSiteScope
 
 logger = logging.getLogger("lumi.browser.profiles")
 
@@ -108,6 +114,13 @@ class PersistentProfileSession:
     context: BrowserContext
     lock: ProfileLock
     versions: BrowserVersions
+    #: Whether this open used a visible window. Milestone 8a S2.
+    headless: bool = True
+    #: Set only while a takeover is open for this profile (Milestone 8a S2).
+    #: The single tracked tab a takeover navigated, and the guard installed
+    #: on the context for the duration. Neither is ever read for its text.
+    takeover_page: Page | None = field(default=None, repr=False)
+    takeover_guard: TakeoverNetworkGuard | None = field(default=None, repr=False)
 
     async def close(self) -> None:
         try:
@@ -118,6 +131,42 @@ class PersistentProfileSession:
             # The lock is released last and unconditionally: a context that
             # failed to close cleanly must not leave the profile locked.
             self.lock.release()
+
+
+@dataclass(frozen=True, slots=True)
+class TakeoverCheckResult:
+    """The whole metadata surface a completed takeover may report.
+
+    Deliberately this small: a closed scope enum (never a host string), a
+    credential-surface verdict and its signal names, and an account
+    fingerprint hash or `None`. Nothing else -- no text, no title, no URL.
+    """
+
+    scope: "TakeoverSiteScope"
+    credential_surface: bool
+    signals: list[str]
+    account_fingerprint: str | None
+
+
+def _site_scope(page: Page | None, site: str) -> "TakeoverSiteScope":
+    """The closed enum for where a takeover ended. Never returns a host."""
+    if page is None or page.is_closed():
+        return TakeoverSiteScope.NO_PAGE
+    try:
+        host = urlsplit(page.url).hostname
+    except (PlaywrightError, ValueError):  # pragma: no cover - defensive.
+        return TakeoverSiteScope.NO_PAGE
+    if not host:
+        return TakeoverSiteScope.NO_PAGE
+    try:
+        domain = registrable_domain(host)
+    except PublicSuffixError:
+        return TakeoverSiteScope.OTHER_PUBLIC_SITE
+    return (
+        TakeoverSiteScope.IN_PROFILE_SITE
+        if domain == site
+        else TakeoverSiteScope.OTHER_PUBLIC_SITE
+    )
 
 
 def worker_versions(browser: Browser, *, playwright_version: str, app_version: str) -> BrowserVersions:
@@ -182,6 +231,10 @@ class ProfileSessionStore:
         """
         existing = self._sessions.get(profile_id)
         if existing is not None:
+            if existing.headless != headless:
+                # A caller that asked for a visible window must never be
+                # handed back a headless one it cannot see, or vice versa.
+                raise ProfileSessionError("profile_open_mode_mismatch")
             return existing
         if len(self._sessions) >= self._limit:
             raise ProfileSessionError("profile_session_limit")
@@ -208,7 +261,11 @@ class ProfileSessionStore:
         context.set_default_timeout(timeout_seconds * 1_000)
         context.set_default_navigation_timeout(timeout_seconds * 1_000)
         session = PersistentProfileSession(
-            profile_id=profile_id, context=context, lock=lock, versions=current
+            profile_id=profile_id,
+            context=context,
+            lock=lock,
+            versions=current,
+            headless=headless,
         )
         self._sessions[profile_id] = session
         # The id and the codes, never the path: this record is a diagnostic and
@@ -238,12 +295,80 @@ class ProfileSessionStore:
     def __len__(self) -> int:
         return len(self._sessions)
 
+    # -- manual login takeover (Milestone 8a S2) -----------------------------
+
+    async def start_takeover(
+        self, profile_id: uuid.UUID, *, site: str, timeout_seconds: float, scheme: str = "https"
+    ) -> str:
+        """Navigate the profile's one tracked tab to its own site, human-driven.
+
+        Installs `TakeoverNetworkGuard` -- wide method/resource-type traffic,
+        still brokered, still no downloads -- and nothing else: no observation
+        is taken, no planner is invoked, nothing here reads the page.
+
+        `scheme` exists only for this module's own test suite, which drives a
+        plaintext local fixture rather than a real HTTPS site. It is not a
+        parameter the wire protocol exposes -- `TakeoverStartRequest` carries
+        no scheme or URL field at all -- and the worker route that calls this
+        always takes the default.
+        """
+        session = self._sessions.get(profile_id)
+        if session is None:
+            return "PROFILE_NOT_OPEN"
+        if session.headless:
+            raise ProfileSessionError("profile_not_headed")
+        pages = session.context.pages
+        page = pages[0] if pages else await session.context.new_page()
+        guard = TakeoverNetworkGuard()
+        await guard.install(session.context)
+        session.takeover_guard = guard
+        session.takeover_page = page
+        try:
+            await page.goto(
+                f"{scheme}://{site}/", wait_until="load", timeout=timeout_seconds * 1_000
+            )
+        except PlaywrightError:
+            return "NAVIGATION_FAILED"
+        return "OPEN"
+
+    async def confirm_takeover(
+        self, profile_id: uuid.UUID, *, site: str
+    ) -> "TakeoverCheckResult | None":
+        """The one deterministic check run when a takeover ends.
+
+        Returns `None` if the profile is not open in this worker at all.
+        Otherwise: a closed site-scope enum, a credential-surface verdict and
+        its signals, and an account fingerprint hash or `None`. No text, no
+        title, no URL crosses out of this function.
+        """
+        session = self._sessions.get(profile_id)
+        if session is None:
+            return None
+        page = session.takeover_page
+        scope = _site_scope(page, site)
+        credential_surface = False
+        signals: list[str] = []
+        fingerprint: str | None = None
+        if page is not None and not page.is_closed():
+            detected = await detect_credential_surface(page)
+            signals = [signal.value for signal in detected]
+            credential_surface = len(signals) > 0
+            if scope == TakeoverSiteScope.IN_PROFILE_SITE and not credential_surface:
+                fingerprint = await account_fingerprint(page)
+        return TakeoverCheckResult(
+            scope=scope,
+            credential_surface=credential_surface,
+            signals=signals,
+            account_fingerprint=fingerprint,
+        )
+
 
 __all__ = [
     "PERSISTENT_PROFILE_ARGS",
     "PersistentProfileSession",
     "ProfileSessionError",
     "ProfileSessionStore",
+    "TakeoverCheckResult",
     "persistent_launch_options",
     "worker_versions",
 ]

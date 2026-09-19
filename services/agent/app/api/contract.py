@@ -31,6 +31,7 @@ from app.api.schemas import (
     AttemptResponse,
     BookingSearchResponse,
     BookingSlotResponse,
+    BrowserProfileResponse,
     CancelBookingTaskResponse,
     ClinicInfoResponse,
     DoctorProfileResponse,
@@ -38,6 +39,8 @@ from app.api.schemas import (
     ErrorResponse,
     HealthResponse,
     InspectionResponse,
+    LoginAttemptResponse,
+    LoginTakeoverResponse,
     PageAnswerResponse,
     PageObservationResponse,
     PrepareBookingBody,
@@ -64,7 +67,9 @@ from app.domain.action_status import ActionStatus, ApprovalStatus, AttemptOutcom
 from app.domain.booking import CHANGED_FACT_FIELDS, BookingProposal
 from app.domain.booking_criteria import BookingCriteria
 from app.domain.browser_dispatch import DispatchStatus, LookupStatus
+from app.domain.browser_profile import ProfileStatus
 from app.domain.digest import proposal_digest
+from app.domain.login_takeover import LoginAttemptStatus
 from app.domain.page_observation import (
     DisclosureSpec,
     EvidenceQuote,
@@ -105,9 +110,8 @@ ERROR_CODES = (
     "booking_slot_unavailable",
     "browser_execution_not_supported",
     "browser_observation_failed",
-    # Milestone 8a S1. Declared here because the runtime can emit it; no
-    # Electron code path reaches a browser-profile route yet, and the trusted
-    # UI that will is S2's.
+    # Milestone 8a S1/S2. The browser-profile and takeover trusted UI (S2)
+    # both reach this code.
     "browser_profile_refused",
     "browser_worker_not_configured",
     "browser_worker_unavailable",
@@ -119,6 +123,8 @@ ERROR_CODES = (
     "invalid_host",
     "invalid_inspection_proposal",
     "invalid_request",
+    # Milestone 8a S2: manual login and human takeover.
+    "login_attempt_refused",
     "no_unfinished_attempt",
     "observation_not_available",
     "origin_not_allowed",
@@ -150,12 +156,15 @@ _MODELS: tuple[type[BaseModel], ...] = (
     BookingCriteria,
     BookingProposal,
     BookingSearchResponse,
+    BrowserProfileResponse,
     CancelBookingTaskResponse,
     ClinicInfoResponse,
     ErrorResponse,
     HealthResponse,
     InspectionProposal,
     InspectionResponse,
+    LoginAttemptResponse,
+    LoginTakeoverResponse,
     ExecuteResearchStepBody,
     PrepareResearchBody,
     RecordResearchAnswerBody,
@@ -182,6 +191,8 @@ _GENERATION = uuid.UUID("00000000-0000-4000-8000-000000000005")
 _WORKER = uuid.UUID("00000000-0000-4000-8000-000000000006")
 _DISPATCH = uuid.UUID("00000000-0000-4000-8000-000000000007")
 _OBSERVATION = uuid.UUID("00000000-0000-4000-8000-000000000008")
+_PROFILE = uuid.UUID("00000000-0000-4000-8000-000000000009")
+_LOGIN_ATTEMPT = uuid.UUID("00000000-0000-4000-8000-00000000000a")
 
 
 def _enum(members: type[StrEnum]) -> list[str]:
@@ -1282,6 +1293,87 @@ def examples() -> dict[str, Any]:
         ).model_dump(mode="json", exclude_none=True),
         **_inspection_examples(),
         **_research_examples(),
+        **_login_takeover_examples(),
+    }
+
+
+def _login_takeover_examples() -> dict[str, Any]:
+    """Milestone 8a S2. Note what is absent from every example here: no
+    profile directory path, no cookie, no page text, no URL, no credential
+    signal, no raw account identity -- only ids, a closed site name, hashes
+    and codes."""
+    needs_login = BrowserProfileResponse(
+        id=_PROFILE,
+        label="GitHub",
+        site="github.com",
+        allowed_origins=["https://github.com", "https://www.github.com"],
+        status=ProfileStatus.NEEDS_LOGIN,
+        revision=3,
+        chromium_build="153.0.8010.12",
+        playwright_version="1.63.0",
+        app_version="0.1.0",
+        leased=False,
+        lease_expires_at=None,
+        revoke_epoch=0,
+        account_fingerprint=None,
+        account_label_hash=None,
+        last_login_completed_at=None,
+        last_observed_at=_at(4),
+        created_at=_at(0),
+        updated_at=_at(4),
+        deleted_at=None,
+    )
+    authenticated = BrowserProfileResponse(
+        id=_PROFILE,
+        label="GitHub",
+        site="github.com",
+        allowed_origins=["https://github.com", "https://www.github.com"],
+        status=ProfileStatus.AUTHENTICATED,
+        revision=9,
+        chromium_build="153.0.8010.12",
+        playwright_version="1.63.0",
+        app_version="0.1.0",
+        leased=False,
+        lease_expires_at=None,
+        revoke_epoch=0,
+        account_fingerprint="a" * 64,
+        account_label_hash=None,
+        last_login_completed_at=_at(30),
+        last_observed_at=_at(30),
+        created_at=_at(0),
+        updated_at=_at(30),
+        deleted_at=None,
+    )
+    open_attempt = LoginAttemptResponse(
+        id=_LOGIN_ATTEMPT,
+        profile_id=_PROFILE,
+        status=LoginAttemptStatus.OPEN,
+        started_at=_at(5),
+        expires_at=_at(905),
+        completed_at=None,
+        cancelled_at=None,
+    )
+    completed_attempt = LoginAttemptResponse(
+        id=_LOGIN_ATTEMPT,
+        profile_id=_PROFILE,
+        status=LoginAttemptStatus.COMPLETED,
+        started_at=_at(5),
+        expires_at=_at(905),
+        completed_at=_at(30),
+        cancelled_at=None,
+    )
+    return {
+        "browser_profile_needs_login": needs_login.model_dump(mode="json"),
+        "browser_profile_authenticated": authenticated.model_dump(mode="json"),
+        "login_takeover_open": LoginTakeoverResponse(
+            attempt=open_attempt, profile=needs_login, refusal_reason=None
+        ).model_dump(mode="json", exclude_none=True),
+        "login_takeover_authenticated": LoginTakeoverResponse(
+            attempt=completed_attempt, profile=authenticated, refusal_reason=None
+        ).model_dump(mode="json", exclude_none=True),
+        "login_takeover_credential_surface_present": LoginTakeoverResponse(
+            attempt=completed_attempt, profile=needs_login, refusal_reason="login_credential_surface_present"
+        ).model_dump(mode="json", exclude_none=True),
     }
 
 
@@ -1295,7 +1387,9 @@ def build_contract() -> dict[str, Any]:
             "ChangedFactField": list(CHANGED_FACT_FIELDS),
             "DispatchStatus": _enum(DispatchStatus),
             "GrantStatus": _enum(GrantStatus),
+            "LoginAttemptStatus": _enum(LoginAttemptStatus),
             "LookupStatus": _enum(LookupStatus),
+            "ProfileStatus": _enum(ProfileStatus),
             "ResearchOperation": _enum(ResearchOperation),
             "RiskTier": _enum(RiskTier),
             "TaskEventType": _enum(TaskEventType),

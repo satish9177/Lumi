@@ -1,4 +1,12 @@
-import { AGENT_IPC_CHANNELS, type AgentResult, type AgentRuntimeView, type TypedRequestRoute } from '../../shared/agent-contracts'
+import {
+  AGENT_IPC_CHANNELS,
+  type AgentBrowserProfileView,
+  type AgentLoginAttemptView,
+  type AgentLoginTakeoverView,
+  type AgentResult,
+  type AgentRuntimeView,
+  type TypedRequestRoute
+} from '../../shared/agent-contracts'
 import {
   PREFERENCE_KEYS,
   type AgentPreferenceView,
@@ -8,6 +16,7 @@ import {
 import type { VoiceTaskOutcome } from '../../shared/voice-task-contracts'
 import { extractInspectionRequest } from '../agent/task-request-interpreter'
 import type { AgentTaskController } from './agent-tasks'
+import type { BrowserProfileController } from './browser-profile-controller'
 import type { VoiceTaskController } from './voice-task-controller'
 
 /**
@@ -37,6 +46,11 @@ export interface AgentIpcDependencies {
     forget(key: PreferenceKey): Promise<AgentPreferenceView[]>
   }
   diagnostics?: () => ModelDiagnosticView[]
+  /** Milestone 8a S2. Absent in builds without a browser-profile capability. */
+  browserProfiles?: Pick<
+    BrowserProfileController,
+    'listBrowserProfiles' | 'openLoginWindow' | 'confirmSignedIn' | 'cancelLogin' | 'getLoginTakeover'
+  >
 }
 
 const UNAVAILABLE = { code: 'request_failed', message: 'That is not available in this build.' } as const
@@ -55,7 +69,7 @@ function routeWithoutInterpreter(request: unknown): TypedRequestRoute {
 }
 
 export function registerAgentIpc({
-  ipcMain, assertTrustedSender, controller, voice, runtimeStatus, restartRuntime, text, memory, diagnostics
+  ipcMain, assertTrustedSender, controller, voice, runtimeStatus, restartRuntime, text, memory, diagnostics, browserProfiles
 }: AgentIpcDependencies): void {
   const handle = (channel: string, listener: (...args: unknown[]) => unknown): void => {
     ipcMain.handle(channel, (event, ...args) => {
@@ -138,4 +152,19 @@ export function registerAgentIpc({
     }
   })
   handle(AGENT_IPC_CHANNELS.getDiagnostics, (): AgentResult<ModelDiagnosticView[]> => ({ ok: true, value: diagnostics ? diagnostics() : [] }))
+  // Milestone 8a S2: manual login and human takeover. `listBrowserProfiles`
+  // takes no argument; the three mutations take only ids and the revision
+  // shown on screen. None of these five channels is reachable from voice --
+  // `VoiceTaskBackend` only ever picks from `AgentTaskController`, and
+  // `BrowserProfileController` is not that class.
+  handle(AGENT_IPC_CHANNELS.listBrowserProfiles, (): Promise<AgentResult<AgentBrowserProfileView[]>> =>
+    browserProfiles ? browserProfiles.listBrowserProfiles() : Promise.resolve({ ok: true, value: [] }))
+  handle(AGENT_IPC_CHANNELS.openLoginWindow, (profileId, expectedRevision): Promise<AgentResult<AgentLoginTakeoverView>> =>
+    browserProfiles ? browserProfiles.openLoginWindow(profileId, expectedRevision) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.confirmSignedIn, (profileId, attemptId, expectedRevision): Promise<AgentResult<AgentLoginTakeoverView>> =>
+    browserProfiles ? browserProfiles.confirmSignedIn(profileId, attemptId, expectedRevision) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.cancelLogin, (profileId, attemptId, expectedRevision): Promise<AgentResult<AgentLoginTakeoverView>> =>
+    browserProfiles ? browserProfiles.cancelLogin(profileId, attemptId, expectedRevision) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.getLoginTakeover, (profileId, attemptId): Promise<AgentResult<AgentLoginAttemptView>> =>
+    browserProfiles ? browserProfiles.getLoginTakeover(profileId, attemptId) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
 }

@@ -62,7 +62,7 @@ def worker_environment(
     public_hosts: str = "", inspection_test_origins: str = "",
     research_any_public_host: bool = False, research_hosts: str = "",
     research_test_origins: str = "", research_max_tabs: int = 5,
-    profile_root: str = "", app_version: str = "",
+    profile_root: str = "", app_version: str = "", auth_test_origins: str = "",
     source: dict[str, str] | None = None,
 ) -> dict[str, str]:
     inherited = os.environ if source is None else source
@@ -85,6 +85,7 @@ def worker_environment(
         # derives `%LOCALAPPDATA%\Lumi\browser-profiles` from the LOCALAPPDATA
         # it already inherits.
         LUMI_BROWSER_PROFILE_ROOT=profile_root,
+        LUMI_BROWSER_AUTH_TEST_ORIGINS=auth_test_origins,
     )
     if app_version:
         environment["LUMI_BROWSER_APP_VERSION"] = app_version
@@ -112,6 +113,7 @@ class ManagedBrowserWorker:
         research_max_tabs: int = 5,
         profile_root: str = "",
         app_version: str = "",
+        auth_test_origins: str = "",
         startup_timeout_seconds: float = 60.0,
         maximum_starts: int = 4,
         spawn: Callable[[list[str], dict[str, str]], subprocess.Popen[bytes]] | None = None,
@@ -125,6 +127,7 @@ class ManagedBrowserWorker:
         self._research_max_tabs = research_max_tabs
         self._profile_root = profile_root
         self._app_version = app_version
+        self._auth_test_origins = auth_test_origins
         self._headless = headless
         self._timeout_seconds = timeout_seconds
         self._startup_timeout = startup_timeout_seconds
@@ -178,6 +181,7 @@ class ManagedBrowserWorker:
             research_max_tabs=self._research_max_tabs,
             profile_root=self._profile_root,
             app_version=self._app_version,
+            auth_test_origins=self._auth_test_origins,
         )
         try:
             process = self._spawn(arguments, environment)

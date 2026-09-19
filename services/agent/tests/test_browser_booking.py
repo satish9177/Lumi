@@ -604,6 +604,8 @@ def test_the_worker_exposes_no_generic_automation_endpoints(worker: WorkerProces
         "/v1/dispatch",
         "/v1/profiles/close",
         "/v1/profiles/open",
+        "/v1/profiles/takeover/confirm",
+        "/v1/profiles/takeover/start",
         "/v1/sessions/close",
         "/v1/sessions/open",
     ]
@@ -623,6 +625,22 @@ def test_the_worker_exposes_no_generic_automation_endpoints(worker: WorkerProces
             "runtime_generation",
             "expected_worker_generation",
             "recorded_chromium_build",
+            # Milestone 8a S2: a visible window for a human-driven manual
+            # login. Every other caller leaves this false.
+            "headed",
+        }
+    # Milestone 8a S2. `site` is the profile's own immutable, database-bound
+    # registrable domain, echoed back by the trusted runtime that already
+    # owns it -- never a hostname the worker's caller chose freely. Neither
+    # route takes a URL, a selector or any page content.
+    for path in ("/v1/profiles/takeover/start", "/v1/profiles/takeover/confirm"):
+        body = schema["paths"][path]["post"]["requestBody"]["content"]["application/json"]
+        reference = body["schema"]["$ref"].rsplit("/", 1)[-1]
+        assert set(schema["components"]["schemas"][reference]["properties"]) == {
+            "profile_id",
+            "runtime_generation",
+            "expected_worker_generation",
+            "site",
         }
     # And no *field* anywhere in the worker's published contract could carry a
     # filesystem path or a serialised credential. Field names only: the

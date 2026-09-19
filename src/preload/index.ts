@@ -74,7 +74,20 @@ const agentApi: AgentApi = {
   stopResearch: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.stopResearch),
   listPreferences: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.listPreferences),
   forgetPreference: (key: PreferenceKey) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.forgetPreference, key),
-  getDiagnostics: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getDiagnostics)
+  getDiagnostics: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getDiagnostics),
+  // Milestone 8a S2: manual login and human takeover. No hostname, path,
+  // credential or browser argument crosses here -- only ids and the
+  // revision a trusted card already showed. `listBrowserProfiles` takes no
+  // argument at all.
+  listBrowserProfiles: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.listBrowserProfiles),
+  openLoginWindow: (profileId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.openLoginWindow, profileId, expectedRevision),
+  confirmSignedIn: (profileId: string, attemptId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.confirmSignedIn, profileId, attemptId, expectedRevision),
+  cancelLogin: (profileId: string, attemptId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.cancelLogin, profileId, attemptId, expectedRevision),
+  getLoginTakeover: (profileId: string, attemptId: string) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.getLoginTakeover, profileId, attemptId)
 }
 
 // The Gemini Live relay: fixed channels, closed message kinds, validated in

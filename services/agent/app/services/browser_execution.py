@@ -46,7 +46,13 @@ from app.browser.errors import (
     BrowserWorkerUnavailableError,
     StaleWorkerResultError,
 )
-from app.browser.protocol import DispatchRequest, DispatchResponse, ProfileSessionRequest
+from app.browser.protocol import (
+    DispatchRequest,
+    DispatchResponse,
+    ProfileSessionRequest,
+    TakeoverConfirmRequest,
+    TakeoverStartRequest,
+)
 from app.domain.action_status import ActionStatus, AttemptOutcome
 from app.domain.booking import booking_reference, parse_booking_proposal
 from app.domain.browser_profile import BrowserVersions
@@ -123,6 +129,21 @@ class WorkerProfileOpen:
 
 
 @dataclass(frozen=True, slots=True)
+class TakeoverCheckOutcome:
+    """What the worker's deterministic post-takeover check established.
+
+    Note the absence: no page text, no title, no URL, no raw account
+    identity. `account_fingerprint`, if present, is already a hash.
+    """
+
+    status: str
+    scope: str
+    credential_surface: bool
+    signals: tuple[str, ...]
+    account_fingerprint: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class Outcome:
     """What a dispatch established, before it is written anywhere."""
 
@@ -185,7 +206,11 @@ class BrowserExecutionService:
     # ---- persistent browser profiles (Milestone 8a S1) ----------------------
 
     async def open_browser_profile(
-        self, *, profile_id: uuid.UUID, recorded_chromium_build: str | None
+        self,
+        *,
+        profile_id: uuid.UUID,
+        recorded_chromium_build: str | None,
+        headed: bool = False,
     ) -> "WorkerProfileOpen":
         """Have the worker open one persistent profile, and report what opened it.
 
@@ -195,7 +220,8 @@ class BrowserExecutionService:
 
         The request carries an id and the build the database last recorded. It
         carries no path -- the worker derives the directory from the id -- and
-        the response carries none either.
+        the response carries none either. `headed` is Milestone 8a S2's manual
+        login: a visible Chromium window for the human to drive.
         """
         client = await self._client()
         try:
@@ -206,6 +232,7 @@ class BrowserExecutionService:
                     runtime_generation=self._runtime_generation,
                     expected_worker_generation=worker_generation,
                     recorded_chromium_build=recorded_chromium_build,
+                    headed=headed,
                 )
             )
         finally:
@@ -237,6 +264,51 @@ class BrowserExecutionService:
         finally:
             await client.aclose()
         return answer.status == "CLOSED"
+
+    # ---- manual login takeover (Milestone 8a S2) -----------------------------
+
+    async def start_takeover(
+        self, *, profile_id: uuid.UUID, worker_generation: uuid.UUID, site: str
+    ) -> str:
+        """Navigate the profile's headed tab to its own site. No planner call,
+        no observation, no provider call is reachable from this method."""
+        client = await self._client()
+        try:
+            answer = await client.start_takeover(
+                TakeoverStartRequest(
+                    profile_id=profile_id,
+                    runtime_generation=self._runtime_generation,
+                    expected_worker_generation=worker_generation,
+                    site=site,
+                )
+            )
+        finally:
+            await client.aclose()
+        return answer.status
+
+    async def confirm_takeover(
+        self, *, profile_id: uuid.UUID, worker_generation: uuid.UUID, site: str
+    ) -> "TakeoverCheckOutcome":
+        """The one deterministic check run when a takeover ends."""
+        client = await self._client()
+        try:
+            answer = await client.confirm_takeover(
+                TakeoverConfirmRequest(
+                    profile_id=profile_id,
+                    runtime_generation=self._runtime_generation,
+                    expected_worker_generation=worker_generation,
+                    site=site,
+                )
+            )
+        finally:
+            await client.aclose()
+        return TakeoverCheckOutcome(
+            status=answer.status,
+            scope=answer.scope,
+            credential_surface=answer.credential_surface,
+            signals=tuple(answer.signals),
+            account_fingerprint=answer.account_fingerprint,
+        )
 
     # ---- execution ----------------------------------------------------------
 

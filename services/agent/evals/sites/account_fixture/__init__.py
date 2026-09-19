@@ -1,16 +1,38 @@
-"""A deterministic "site with sessions", for Milestone 8a S1 profile persistence.
+"""A deterministic "site with sessions and a login flow", for Milestone 8a.
 
 Run with `uv run python -m evals.sites.account_fixture.server --port 8821`.
-It exists so a test can prove a persistent profile kept its session by asking
-the *server* what it sees, never by exporting a cookie from the browser.
+S1 uses it to prove a persistent profile kept its session by asking the
+*server* what it sees, never by exporting a cookie from the browser. S2 adds
+a synthetic password/OTP/SSO/challenge login flow on the same fixture; see
+`app.py` for the full route list and the fixture's own module docstring.
 """
 
 from evals.sites.account_fixture.app import (
+    ACCOUNT_ID,
     ACCOUNT_NAME,
+    FIXTURE_OTP,
+    FIXTURE_PASSWORD,
+    FIXTURE_USERNAME,
+    SECOND_ACCOUNT_ID,
+    SECOND_ACCOUNT_NAME,
     SESSION_COOKIE,
     SIGNED_IN,
     SIGNED_OUT,
+    SSO_TOKEN,
     create_site,
 )
 
-__all__ = ["ACCOUNT_NAME", "SESSION_COOKIE", "SIGNED_IN", "SIGNED_OUT", "create_site"]
+__all__ = [
+    "ACCOUNT_ID",
+    "ACCOUNT_NAME",
+    "FIXTURE_OTP",
+    "FIXTURE_PASSWORD",
+    "FIXTURE_USERNAME",
+    "SECOND_ACCOUNT_ID",
+    "SECOND_ACCOUNT_NAME",
+    "SESSION_COOKIE",
+    "SIGNED_IN",
+    "SIGNED_OUT",
+    "SSO_TOKEN",
+    "create_site",
+]

@@ -542,6 +542,65 @@ export interface AgentTaskSnapshot {
   events: AgentEventView[]
 }
 
+/**
+ * Milestone 8a S2: manual login and human takeover.
+ *
+ * `AgentBrowserProfileView` is deliberately thin. It carries none of what S1
+ * keeps internal to the runtime and the worker: no directory path, no
+ * cookie, no token, no Chromium/Playwright version, no lease detail. Only
+ * what a trusted "sign in" card needs to show.
+ */
+export const BROWSER_PROFILE_STATUSES = ['NEW', 'NEEDS_LOGIN', 'AUTHENTICATED', 'DELETED'] as const
+export type AgentBrowserProfileStatus = typeof BROWSER_PROFILE_STATUSES[number]
+
+export interface AgentBrowserProfileView {
+  profileId: string
+  label: string
+  site: string
+  status: AgentBrowserProfileStatus
+  revision: number
+  lastLoginCompletedAt?: string
+  lastObservedAt?: string
+}
+
+export const LOGIN_ATTEMPT_STATUSES = [
+  'OPEN', 'UNCONFIRMED', 'COMPLETED', 'CANCELLED', 'EXPIRED', 'INTERRUPTED'
+] as const
+export type AgentLoginAttemptStatus = typeof LOGIN_ATTEMPT_STATUSES[number]
+
+/**
+ * One takeover's bounded interval and how it ended. Note the absence: no
+ * page text, no title, no URL, no credential signal. This is not an
+ * authorization -- it funds nothing -- and clicking "I'm signed in" is not,
+ * by itself, proof that anything succeeded; `refusalReason` on
+ * `AgentLoginTakeoverView` is what a *completed* check actually found.
+ */
+export interface AgentLoginAttemptView {
+  attemptId: string
+  profileId: string
+  status: AgentLoginAttemptStatus
+  startedAt: string
+  expiresAt: string
+  completedAt?: string
+  cancelledAt?: string
+}
+
+/** Statuses in which the takeover is still open: agent automation is
+ * suspended and the human is driving the browser. */
+export const OPEN_LOGIN_ATTEMPT_STATUSES: readonly AgentLoginAttemptStatus[] = ['OPEN', 'UNCONFIRMED']
+
+export interface AgentLoginTakeoverView {
+  attempt: AgentLoginAttemptView
+  profile: AgentBrowserProfileView
+  /**
+   * Set only by a *completed* confirmation that did not result in
+   * `AUTHENTICATED` -- a closed, stable, controller-authored reason, never
+   * page text. `undefined` when the profile is now `AUTHENTICATED`, or while
+   * the takeover is still open.
+   */
+  refusalReason?: string
+}
+
 export const AGENT_ERROR_CODES = [
   'runtime_unavailable',
   'runtime_restarted',
@@ -570,6 +629,10 @@ export const AGENT_ERROR_CODES = [
   'research_refused',
   'research_budget_exhausted',
   'research_in_flight',
+  // Milestone 8a S1/S2: a browser-profile or login-takeover operation was
+  // refused. One code for both server-side families; the message already
+  // names the specific reason.
+  'browser_profile_refused',
   'request_failed'
 ] as const
 export type AgentErrorCode = typeof AGENT_ERROR_CODES[number]
@@ -660,6 +723,30 @@ export interface AgentApi {
   forgetPreference: (key: PreferenceKey) => Promise<AgentResult<AgentPreferenceView[]>>
   /** Redacted model/controller diagnostics. Empty in packaged builds unless enabled. */
   getDiagnostics: () => Promise<AgentResult<ModelDiagnosticView[]>>
+  /**
+   * Milestone 8a S2. Read-only: every Lumi-managed browser profile main
+   * knows about. Takes no argument -- there is no channel that creates a
+   * profile from a hostname the renderer chose.
+   */
+  listBrowserProfiles: () => Promise<AgentResult<AgentBrowserProfileView[]>>
+  /**
+   * The trusted "Sign in manually" click. Names the profile by id and the
+   * revision shown on screen; carries nothing else. Opens a headed,
+   * Lumi-managed Chromium window for the human to drive. Agent automation
+   * (planner, provider, observation, capture) is suspended for the life of
+   * the takeover this starts.
+   */
+  openLoginWindow: (profileId: string, expectedRevision: number) => Promise<AgentResult<AgentLoginTakeoverView>>
+  /**
+   * The trusted "I'm signed in" click. Not, by itself, an authentication
+   * claim -- it only starts the deterministic post-login check whose result
+   * `AgentLoginTakeoverView.profile.status` and `.refusalReason` report.
+   */
+  confirmSignedIn: (profileId: string, attemptId: string, expectedRevision: number) => Promise<AgentResult<AgentLoginTakeoverView>>
+  /** The trusted "Cancel" click. Never a logout. */
+  cancelLogin: (profileId: string, attemptId: string, expectedRevision: number) => Promise<AgentResult<AgentLoginTakeoverView>>
+  /** Read-only: one takeover's bounded interval and how it ended. */
+  getLoginTakeover: (profileId: string, attemptId: string) => Promise<AgentResult<AgentLoginAttemptView>>
 }
 
 /**
@@ -704,7 +791,12 @@ export const AGENT_IPC_CHANNELS = {
   stopResearch: 'lifelens:agent:stop-research',
   listPreferences: 'lifelens:agent:list-preferences',
   forgetPreference: 'lifelens:agent:forget-preference',
-  getDiagnostics: 'lifelens:agent:get-diagnostics'
+  getDiagnostics: 'lifelens:agent:get-diagnostics',
+  listBrowserProfiles: 'lifelens:agent:list-browser-profiles',
+  openLoginWindow: 'lifelens:agent:open-login-window',
+  confirmSignedIn: 'lifelens:agent:confirm-signed-in',
+  cancelLogin: 'lifelens:agent:cancel-login',
+  getLoginTakeover: 'lifelens:agent:get-login-takeover'
 } as const
 
 /** Actions whose side effect is unresolved or in flight. */

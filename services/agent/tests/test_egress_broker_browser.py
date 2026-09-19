@@ -37,6 +37,8 @@ from app.domain.public_url import (
     RESEARCH_POLICY_VERSION,
     PublicUrlPolicy,
 )
+from tests.broker_teardown import bounded
+from tests.broker_teardown import quiesce_broker as _quiesce_before_teardown
 
 pytestmark = [pytest.mark.browser]
 
@@ -207,10 +209,16 @@ async def managed() -> AsyncIterator[Managed]:
             await browser.close()
         except PlaywrightError:  # pragma: no cover - already gone
             pass
-        await playwright.stop()
-        await broker.aclose()
-        await site.aclose()
-        await canary.aclose()
+        # See tests/broker_teardown.py: full Chromium's lingering idle
+        # keep-alive connection to the proxy has been observed to hang
+        # `playwright.stop()` on Windows if torn down while one is still
+        # open. Quiesce first, and bound every step so a future regression
+        # fails one test loudly instead of hanging the whole suite.
+        await _quiesce_before_teardown(broker)
+        await bounded("playwright.stop", playwright.stop())
+        await bounded("broker.aclose", broker.aclose())
+        await bounded("site.aclose", site.aclose())
+        await bounded("canary.aclose", canary.aclose())
 
 
 # ---- the spike -----------------------------------------------------------------

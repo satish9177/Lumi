@@ -55,6 +55,7 @@ import {
   type AgentRuntimeStatus
 } from './services/agent-runtime-supervisor'
 import { ActiveTaskStore, AgentTaskController } from './services/agent-tasks'
+import { BrowserProfileController } from './services/browser-profile-controller'
 import { registerAgentIpc, type IpcMainLike } from './services/agent-ipc'
 import { VoiceTaskController } from './services/voice-task-controller'
 import { AgentMemoryStore } from './agent/agent-memory'
@@ -375,6 +376,8 @@ function developmentAgentRuntimeSettings(): AgentRuntimeSettings {
     if (process.env.LUMI_RESEARCH_SEARCH_ENDPOINT) {
       settings.researchSearchEndpoint = process.env.LUMI_RESEARCH_SEARCH_ENDPOINT
     }
+    const authTestOrigins = parseTestOrigins(process.env.LUMI_AUTH_TEST_ORIGINS ?? '')
+    if (authTestOrigins.length > 0) settings.authTestOrigins = authTestOrigins
   } catch {
     // Fail closed: a malformed list disables page inspection and research.
     publicInspectionPolicy = new PublicUrlPolicy()
@@ -1124,6 +1127,11 @@ app.whenReady().then(async () => {
       ...(researchAnswerer ? { answerer: researchAnswerer } : {})
     }
   )
+  const browserProfiles = new BrowserProfileController({
+    request: (method, path, body, timeoutMs) => agentRuntime
+      ? agentRuntime.request(method, path, body, timeoutMs)
+      : Promise.reject(new RuntimeUnavailableError())
+  })
   const calendar = trustedCalendarClock({ allowFixedNow: !app.isPackaged })
   const memory = new AgentMemoryStore(app.getPath('userData'))
   // Voice and typed requests reach the same durable controller, never a second one.
@@ -1154,6 +1162,7 @@ app.whenReady().then(async () => {
     voice: voiceTasks,
     ...(interpreter ? { text: interpreter } : {}),
     memory,
+    browserProfiles,
     diagnostics: () => diagnosticsVisible ? diagnostics.list() : [],
     runtimeStatus: () => agentRuntimeView(),
     restartRuntime: async () => {

@@ -270,6 +270,7 @@ def browser_worker(
     research_any_public_host: bool = False,
     research_max_tabs: int = 5,
     profile_root: str = "",
+    auth_test_origins: str = "",
 ) -> Iterator[WorkerProcess]:
     from app.browser.protocol import WORKER_TOKEN_HEADER
 
@@ -294,6 +295,9 @@ def browser_worker(
         # directory so a suite never writes into the developer's real
         # %LOCALAPPDATA%\Lumirowser-profiles.
         "LUMI_BROWSER_PROFILE_ROOT": profile_root,
+        # Milestone 8a S2: exact loopback origins of the synthetic login/SSO
+        # fixture, so the S0 broker's configured-origin exception admits them.
+        "LUMI_BROWSER_AUTH_TEST_ORIGINS": auth_test_origins,
     }
     with log_path.open("wb") as log:
         process = _spawn(

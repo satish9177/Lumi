@@ -57,15 +57,21 @@ class FakeBrowser:
         self.refuse = refuse
         self.opened: list[uuid.UUID] = []
         self.closed: list[uuid.UUID] = []
+        self.opened_headed: list[bool] = []
         self.worker_generation = uuid.uuid4()
         self.build = "153.0.8010.12"
 
     async def open_browser_profile(
-        self, *, profile_id: uuid.UUID, recorded_chromium_build: str | None
+        self,
+        *,
+        profile_id: uuid.UUID,
+        recorded_chromium_build: str | None,
+        headed: bool = False,
     ) -> WorkerProfileOpen:
         if self.refuse is not None:
             raise ProfileRefusal(self.refuse)
         self.opened.append(profile_id)
+        self.opened_headed.append(headed)
         return WorkerProfileOpen(
             profile_id=profile_id,
             worker_generation=self.worker_generation,

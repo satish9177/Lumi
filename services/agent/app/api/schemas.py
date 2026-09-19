@@ -9,6 +9,7 @@ from app.domain.action_status import ActionStatus, ApprovalStatus, AttemptOutcom
 from app.domain.booking_criteria import BookingCriteria
 from app.domain.browser_dispatch import BrowserEffect, DispatchStatus
 from app.domain.browser_profile import BrowserProfile, ProfileStatus
+from app.domain.login_takeover import LoginAttempt, LoginAttemptStatus
 from app.domain.digest import canonical_json
 from app.domain.page_observation import (
     DisclosureSpec,
@@ -889,6 +890,82 @@ class DeleteBrowserProfileBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     expected_revision: int | None = Field(default=None, ge=1)
+
+
+# ---- Milestone 8a S2: manual login and human takeover -----------------------
+
+
+class LoginAttemptResponse(BaseModel):
+    """One takeover, as the trusted controller describes it.
+
+    Note what is absent: no page text, no title, no URL, no credential
+    signal, no raw account identity. This is a bounded interval and how it
+    ended, nothing else.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: uuid.UUID
+    profile_id: uuid.UUID
+    status: LoginAttemptStatus
+    started_at: datetime
+    expires_at: datetime
+    completed_at: datetime | None
+    cancelled_at: datetime | None
+
+    @classmethod
+    def from_attempt(cls, attempt: LoginAttempt) -> "LoginAttemptResponse":
+        return cls(
+            id=attempt.id,
+            profile_id=attempt.profile_id,
+            status=attempt.status,
+            started_at=attempt.started_at,
+            expires_at=attempt.expires_at,
+            completed_at=attempt.completed_at,
+            cancelled_at=attempt.cancelled_at,
+        )
+
+
+class LoginTakeoverResponse(BaseModel):
+    """The result of starting, cancelling or confirming one takeover.
+
+    `refusal_reason` is set only when a *completed* confirmation did not
+    result in the profile becoming `AUTHENTICATED` -- e.g. a login surface
+    remained, or the browser ended off the profile's own site. It is a
+    closed, stable code, never page text.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    attempt: LoginAttemptResponse
+    profile: BrowserProfileResponse
+    refusal_reason: str | None = None
+
+
+class OpenLoginWindowBody(BaseModel):
+    """The trusted "Sign in manually" click. Names the profile revision shown
+    on screen; carries nothing else."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=1)
+
+
+class ConfirmSignedInBody(BaseModel):
+    """The trusted "I'm signed in" click. This is not, by itself, proof that
+    a sign-in succeeded -- it only starts the deterministic post-login check."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=1)
+
+
+class CancelLoginBody(BaseModel):
+    """The trusted "Cancel" click. Never a logout."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=1)
 
 
 class HealthResponse(BaseModel):

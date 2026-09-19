@@ -57,6 +57,10 @@ from app.browser.protocol import (
     ProfileSessionResponse,
     SessionRequest,
     SessionResponse,
+    TakeoverConfirmRequest,
+    TakeoverConfirmResponse,
+    TakeoverStartRequest,
+    TakeoverStartResponse,
     WorkerErrorBody,
     WorkerIdentity,
 )
@@ -344,7 +348,10 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
                 profile_id=body.profile_id,
                 recorded=recorded,
                 current=current,
-                headless=resolved.headless,
+                # Milestone 8a S2: a takeover explicitly asks for a visible
+                # window. Every other caller keeps this worker's own
+                # configured default.
+                headless=False if body.headed else resolved.headless,
                 timeout_seconds=resolved.operation_timeout_seconds or 30.0,
             )
         except ProfileSessionError as error:
@@ -403,6 +410,85 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
                 profile_id=body.profile_id,
                 worker_generation=generation.id,
                 status="CLOSED" if closed else "NOT_FOUND",
+            ).model_dump(mode="json")
+        )
+
+    @app.post("/v1/profiles/takeover/start")
+    async def start_takeover(
+        request: Request, body: TakeoverStartRequest, token: str = credential
+    ) -> Response:
+        """Navigate the profile's one tab to its own site and hand it to the
+        human. No planner call, no observation, no provider call: this route
+        only opens a tab and installs the wide-but-scheme-checked TAKEOVER
+        network mode."""
+        refusal = _authenticate(token)
+        if refusal is not None:
+            return refusal
+        generation: WorkerGeneration = request.app.state.generation
+        if body.expected_worker_generation != generation.id:
+            return _error(
+                status.HTTP_409_CONFLICT,
+                "stale_worker_generation",
+                "This takeover was addressed to a different worker generation.",
+                generation.id,
+            )
+        profiles: ProfileSessionStore = request.app.state.profiles
+        try:
+            outcome = await profiles.start_takeover(
+                body.profile_id,
+                site=body.site,
+                timeout_seconds=resolved.operation_timeout_seconds or 30.0,
+            )
+        except ProfileSessionError as error:
+            return _error(
+                status.HTTP_409_CONFLICT,
+                error.code,
+                "That takeover could not be started.",
+                generation.id,
+            )
+        return JSONResponse(
+            content=TakeoverStartResponse(
+                profile_id=body.profile_id, worker_generation=generation.id, status=outcome
+            ).model_dump(mode="json")
+        )
+
+    @app.post("/v1/profiles/takeover/confirm")
+    async def confirm_takeover(
+        request: Request, body: TakeoverConfirmRequest, token: str = credential
+    ) -> Response:
+        """The one deterministic check run when a takeover ends. No planner
+        call, no observation, no provider call: only bounded DOM counts and a
+        closed site-scope enum leave this route."""
+        refusal = _authenticate(token)
+        if refusal is not None:
+            return refusal
+        generation: WorkerGeneration = request.app.state.generation
+        if body.expected_worker_generation != generation.id:
+            return _error(
+                status.HTTP_409_CONFLICT,
+                "stale_worker_generation",
+                "This takeover was addressed to a different worker generation.",
+                generation.id,
+            )
+        profiles: ProfileSessionStore = request.app.state.profiles
+        result = await profiles.confirm_takeover(body.profile_id, site=body.site)
+        if result is None:
+            return JSONResponse(
+                content=TakeoverConfirmResponse(
+                    profile_id=body.profile_id,
+                    worker_generation=generation.id,
+                    status="PROFILE_NOT_OPEN",
+                ).model_dump(mode="json")
+            )
+        return JSONResponse(
+            content=TakeoverConfirmResponse(
+                profile_id=body.profile_id,
+                worker_generation=generation.id,
+                status="CHECKED",
+                scope=result.scope,
+                credential_surface=result.credential_surface,
+                signals=list(result.signals),
+                account_fingerprint=result.account_fingerprint,
             ).model_dump(mode="json")
         )
 
