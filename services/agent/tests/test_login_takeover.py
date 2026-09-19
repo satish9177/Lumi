@@ -25,8 +25,9 @@ The claims that matter, in the order they appear:
 
 import re
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -460,6 +461,199 @@ async def test_reconciliation_never_touches_an_attempt_from_the_current_generati
     assert await takeovers.reconcile_interrupted() == 0
     attempt = await takeovers.get_attempt(started.attempt.id)
     assert attempt.status is LoginAttemptStatus.OPEN
+
+
+# ---- durable discovery of an active takeover ----------------------------------
+#
+# The desktop's screen-capture exclusion is rebuilt from these answers after an
+# Electron-main restart, so "which takeovers are still live?" has to be a
+# question the database answers, not a question a process remembers.
+
+
+async def test_an_open_attempt_is_discoverable_from_durable_state_alone(
+    profiles: BrowserProfileService, takeovers: LoginTakeoverService
+) -> None:
+    profile = await profiles.create_profile(site="github.com", label="GitHub")
+    started = await takeovers.start_takeover(profile.id, expected_revision=profile.revision)
+
+    active = await takeovers.list_active_attempts()
+    assert [attempt.id for attempt in active] == [started.attempt.id]
+    assert [attempt.profile_id for attempt in active] == [profile.id]
+    assert active[0].status is LoginAttemptStatus.OPEN
+
+
+async def test_an_unconfirmed_attempt_is_still_an_active_takeover(
+    profiles: BrowserProfileService, takeovers: LoginTakeoverService, browser: FakeTakeoverBrowser
+) -> None:
+    """The window is still on screen between "I'm signed in" and a verdict."""
+    profile = await profiles.create_profile(site="github.com", label="GitHub")
+    started = await takeovers.start_takeover(profile.id, expected_revision=profile.revision)
+    browser.fail_confirm = True
+    with pytest.raises(BrowserWorkerError):
+        await takeovers.confirm_takeover(
+            profile.id, started.attempt.id, expected_revision=started.profile.revision
+        )
+
+    active = await takeovers.list_active_attempts()
+    assert [attempt.status for attempt in active] == [LoginAttemptStatus.UNCONFIRMED]
+
+
+async def test_a_completed_attempt_is_not_an_active_takeover(
+    profiles: BrowserProfileService, takeovers: LoginTakeoverService, browser: FakeTakeoverBrowser
+) -> None:
+    profile = await profiles.create_profile(site="github.com", label="GitHub")
+    started = await takeovers.start_takeover(profile.id, expected_revision=profile.revision)
+    browser.confirm_outcomes = [_checked(fingerprint="a" * 64)]
+    await takeovers.confirm_takeover(
+        profile.id, started.attempt.id, expected_revision=started.profile.revision
+    )
+    assert await takeovers.list_active_attempts() == []
+
+
+async def test_a_cancelled_attempt_is_not_an_active_takeover(
+    profiles: BrowserProfileService, takeovers: LoginTakeoverService
+) -> None:
+    profile = await profiles.create_profile(site="github.com", label="GitHub")
+    started = await takeovers.start_takeover(profile.id, expected_revision=profile.revision)
+    await takeovers.cancel_takeover(
+        profile.id, started.attempt.id, expected_revision=started.profile.revision
+    )
+    assert await takeovers.list_active_attempts() == []
+
+
+async def test_an_expired_attempt_stops_being_active_only_once_the_sweep_settles_it(
+    profiles: BrowserProfileService, takeovers: LoginTakeoverService, engine: AsyncEngine
+) -> None:
+    """Status decides, not the clock. The sweep is also what closes the headed
+    window, so an `OPEN` row whose deadline has passed but which has not been
+    swept yet still describes a window that may be on screen."""
+    profile = await profiles.create_profile(site="github.com", label="GitHub")
+    started = await takeovers.start_takeover(profile.id, expected_revision=profile.revision)
+    async with engine.begin() as connection:
+        from sqlalchemy import text
+
+        await connection.execute(
+            text(
+                "UPDATE login_attempts SET started_at = now() - interval '2 hours', "
+                "expires_at = now() - interval '1 hour' WHERE id = :id"
+            ),
+            {"id": started.attempt.id},
+        )
+    assert [attempt.id for attempt in await takeovers.list_active_attempts()] == [started.attempt.id]
+
+    assert await takeovers.sweep_expired() == 1
+    assert await takeovers.list_active_attempts() == []
+
+
+async def test_an_interrupted_attempt_is_not_an_active_takeover(
+    engine: AsyncEngine, profiles: BrowserProfileService, browser: FakeTakeoverBrowser
+) -> None:
+    dead_generation = await register_runtime_generation(engine)
+    dead_takeovers = LoginTakeoverService(
+        engine, runtime_generation=dead_generation.id, browser=browser,  # type: ignore[arg-type]
+        profiles=profiles, ttl_seconds=TTL_SECONDS,
+    )
+    profile = await profiles.create_profile(site="github.com", label="GitHub")
+    await dead_takeovers.start_takeover(profile.id, expected_revision=profile.revision)
+
+    live_generation = await register_runtime_generation(engine)
+    live_takeovers = LoginTakeoverService(
+        engine, runtime_generation=live_generation.id, browser=browser,  # type: ignore[arg-type]
+        profiles=profiles, ttl_seconds=TTL_SECONDS,
+    )
+    assert len(await live_takeovers.list_active_attempts()) == 1
+    assert await live_takeovers.reconcile_interrupted() == 1
+    assert await live_takeovers.list_active_attempts() == []
+
+
+async def test_every_open_takeover_is_listed_not_only_one_profile_s(
+    profiles: BrowserProfileService, takeovers: LoginTakeoverService
+) -> None:
+    """The desktop guard is global: any open takeover refuses capture."""
+    first = await profiles.create_profile(site="github.com", label="GitHub")
+    second = await profiles.create_profile(site="gitlab.com", label="GitLab")
+    started_first = await takeovers.start_takeover(first.id, expected_revision=first.revision)
+    started_second = await takeovers.start_takeover(second.id, expected_revision=second.revision)
+
+    active = {attempt.id for attempt in await takeovers.list_active_attempts()}
+    assert active == {started_first.attempt.id, started_second.attempt.id}
+
+
+async def test_listing_active_attempts_is_idempotent(
+    profiles: BrowserProfileService, takeovers: LoginTakeoverService
+) -> None:
+    profile = await profiles.create_profile(site="github.com", label="GitHub")
+    await takeovers.start_takeover(profile.id, expected_revision=profile.revision)
+    first = await takeovers.list_active_attempts()
+    second = await takeovers.list_active_attempts()
+    assert first == second
+
+
+# ---- what the profile list may reveal about an open takeover ------------------
+
+
+async def test_the_profile_list_carries_the_open_takeover_and_nothing_else(
+    client: Any,
+    engine: AsyncEngine,
+    runtime_generation: RuntimeGeneration,
+    profile_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The one new field on the wire, checked as a boundary.
+
+    Four keys, all of them ids, a closed status and a deadline. The scan below
+    is the same one S1 applies to every profile response: a path, a cookie, a
+    URL or page text reaching this response would be a boundary change, and
+    this is what fails when one does.
+    """
+    monkeypatch.setenv(PROFILE_ROOT_VARIABLE, str(profile_root))
+    created = await client.post(
+        "/browser-profiles", json={"site": "github.com", "label": "GitHub"}
+    )
+    assert created.status_code == 201, created.text
+    profile_id = uuid.UUID(created.json()["id"])
+
+    empty = await client.get("/browser-profiles")
+    assert empty.status_code == 200
+    assert empty.json()["profiles"][0]["active_takeover"] is None
+
+    attempt_id = uuid.uuid4()
+    async with engine.begin() as connection:
+        await LoginAttemptRepository(connection).create(
+            attempt_id=attempt_id,
+            profile_id=profile_id,
+            runtime_generation=runtime_generation.id,
+            profile_revision=created.json()["revision"],
+            ttl=timedelta(seconds=TTL_SECONDS),
+        )
+
+    listed = await client.get("/browser-profiles")
+    assert listed.status_code == 200
+    takeover = listed.json()["profiles"][0]["active_takeover"]
+    assert set(takeover) == {"profile_id", "attempt_id", "status", "expires_at"}
+    assert takeover["attempt_id"] == str(attempt_id)
+    assert takeover["profile_id"] == str(profile_id)
+    assert takeover["status"] == "OPEN"
+
+    lowered = listed.text.lower()
+    for leak in (
+        "localappdata",
+        "browser-profiles",
+        "userdatadir",
+        "user_data_dir",
+        "profile_path",
+        "storage_state",
+        "cookie",
+        "appdata",
+        "chrome.exe",
+        "http://",
+        "https://github.com/login",
+        "password",
+        "otp",
+        "one_time_code",
+        "credential",
+    ):
+        assert leak not in lowered, f"{leak!r} reached the profile list"
 
 
 # ---- structural: no model surface ---------------------------------------------

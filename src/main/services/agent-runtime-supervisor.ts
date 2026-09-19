@@ -353,6 +353,18 @@ export class AgentRuntimeSupervisor {
     return { state: this.state, ...(this.session?.generation ? { generation: this.session.generation } : {}) }
   }
 
+  /**
+   * Whether the trusted runtime files exist on this machine at all -- the same
+   * check `start()` refuses on, asked without starting anything. Milestone 8a
+   * S2's screen-capture guard needs to tell "there is no runtime here, and
+   * never was" apart from "the runtime is not answering right now": the first
+   * is an answer (no runtime process has ever run here, so no login takeover
+   * can exist), the second is an outage and is never treated as one.
+   */
+  installed(): boolean {
+    return this.options.pathExists(this.options.agentRoot) && this.options.pathExists(this.options.pythonPath)
+  }
+
   async start(): Promise<void> {
     if (this.wantsRunning) return
     if (!this.options.pathExists(this.options.agentRoot) || !this.options.pathExists(this.options.pythonPath)) {

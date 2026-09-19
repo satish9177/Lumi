@@ -56,6 +56,7 @@ import {
 } from './services/agent-runtime-supervisor'
 import { ActiveTaskStore, AgentTaskController } from './services/agent-tasks'
 import { BrowserProfileController } from './services/browser-profile-controller'
+import { TakeoverCaptureGuard } from './services/takeover-capture-guard'
 import { registerAgentIpc, type IpcMainLike } from './services/agent-ipc'
 import { VoiceTaskController } from './services/voice-task-controller'
 import { AgentMemoryStore } from './agent/agent-memory'
@@ -121,6 +122,15 @@ let publicResearchPolicy = new PublicUrlPolicy({ version: RESEARCH_POLICY_VERSIO
 let agentRuntimeShutdownStarted = false
 /** Packaged builds only: why there is no runtime, when there is none. */
 let agentRuntimeUnconfigured = false
+/**
+ * Milestone 8a S2: set once startup has *established* that this installation
+ * has no agent runtime at all -- never merely because startup has not
+ * finished deciding. It is the one non-runtime answer the screen-capture
+ * takeover guard accepts; see `takeover-capture-guard.ts` for why.
+ */
+let agentRuntimeAbsent = false
+/** Refuses screen capture until durable takeover state has been reconciled. */
+let takeoverCaptureGuard: TakeoverCaptureGuard | undefined
 let demoClinicSite: DemoClinicSite | undefined
 let panelOpen = false
 const retainedCapture = new RetainedCaptureStore()
@@ -340,6 +350,14 @@ function agentRuntimeView(status?: AgentRuntimeStatus): AgentRuntimeView {
 }
 
 function emitAgentRuntimeStatus(status: AgentRuntimeStatus): void {
+  // A runtime that just became reachable is the first chance to learn whether
+  // a takeover is open, and -- after a runtime restart, which settles every
+  // attempt from the dead generation as INTERRUPTED -- the first chance to
+  // learn that one is over. A runtime going *away* is deliberately not a
+  // trigger: it can only ever leave the guard where it already is, since a
+  // takeover cannot begin without a runtime and an open one keeps the guard
+  // refused until something durable says otherwise.
+  if (status.state === 'running') void takeoverCaptureGuard?.reconcileNow()
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send(AGENT_IPC_CHANNELS.runtimeStatusChanged, agentRuntimeView(status))
   }
@@ -396,6 +414,10 @@ async function startPackagedAgentRuntime(): Promise<void> {
   const config = await readRuntimeConfig(app.getPath('userData'))
   if (config.kind !== 'ok') {
     agentRuntimeUnconfigured = true
+    // Established, not assumed: with no configuration there is no runtime to
+    // start, so no takeover can exist for the capture guard to protect.
+    agentRuntimeAbsent = true
+    void takeoverCaptureGuard?.reconcileNow()
     console.error(`Lumi agent runtime is not configured (${config.kind === 'missing' ? 'agent-runtime.json missing' : config.reason}).`)
     emitAgentRuntimeStatus({ state: 'stopped' })
     return
@@ -434,6 +456,8 @@ async function startPackagedAgentRuntime(): Promise<void> {
   } catch {
     console.error('Lumi agent runtime could not be prepared.')
     agentRuntimeUnconfigured = true
+    agentRuntimeAbsent = true
+    void takeoverCaptureGuard?.reconcileNow()
     emitAgentRuntimeStatus({ state: 'failed' })
     return
   }
@@ -442,6 +466,13 @@ async function startPackagedAgentRuntime(): Promise<void> {
 
 function startAgentRuntime(): void {
   if (!agentRuntime) return
+  if (!agentRuntime.installed()) {
+    // The runtime's own files are not on this machine, so no runtime process
+    // has ever run here and no login takeover can exist. That is an answer for
+    // the capture guard, unlike a runtime that is merely not responding.
+    agentRuntimeAbsent = true
+    void takeoverCaptureGuard?.reconcileNow()
+  }
   void agentRuntime.start().catch(() => {
     // Status reaches the UI through onStatus. Never log child output or
     // environment because both can contain credentials.
@@ -1003,6 +1034,8 @@ app.whenReady().then(async () => {
       })
     } catch {
       console.error('Lumi agent runtime configuration is invalid.')
+      agentRuntimeAbsent = true
+      void takeoverCaptureGuard?.reconcileNow()
     }
     startAgentRuntime()
   }
@@ -1132,6 +1165,16 @@ app.whenReady().then(async () => {
       ? agentRuntime.request(method, path, body, timeoutMs)
       : Promise.reject(new RuntimeUnavailableError())
   })
+  // Milestone 8a S2: screen capture is refused from this process's first
+  // instruction and stays refused until durable takeover state has been read.
+  // A main-process restart during a live takeover therefore cannot produce a
+  // moment in which capture works and a sign-in window is on screen, and
+  // nothing has to remember an attempt id -- not the renderer, not main.
+  takeoverCaptureGuard = new TakeoverCaptureGuard({
+    reconcile: () => browserProfiles.reconcileTakeovers(),
+    agentRuntimeAbsent: () => agentRuntimeAbsent
+  })
+  takeoverCaptureGuard.start()
   const calendar = trustedCalendarClock({ allowFixedNow: !app.isPackaged })
   const memory = new AgentMemoryStore(app.getPath('userData'))
   // Voice and typed requests reach the same durable controller, never a second one.
@@ -1198,6 +1241,9 @@ app.whenReady().then(async () => {
 })
 
 app.on('before-quit', () => retainedCapture.clear())
+// Stops retrying; the guard is never cleared on the way out, because quitting
+// is not an answer about whether a sign-in window is open.
+app.on('before-quit', () => takeoverCaptureGuard?.stop())
 app.on('will-quit', () => demoClinicSite?.stop())
 
 app.on('before-quit', (event) => {

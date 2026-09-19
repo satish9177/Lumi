@@ -561,6 +561,29 @@ export interface AgentBrowserProfileView {
   revision: number
   lastLoginCompletedAt?: string
   lastObservedAt?: string
+  /**
+   * The takeover still open on this profile, if there is one. Present so
+   * that main can rediscover a live, human-driven sign-in window from
+   * durable runtime state alone after an Electron-main restart, and keep
+   * screen capture refused until it is gone -- nothing in main or in the
+   * renderer has to remember an attempt id across a restart for the capture
+   * exclusion to hold. `undefined` means the runtime reported no open
+   * attempt for this profile, which is an answer, not a missing value.
+   */
+  activeTakeover?: AgentActiveTakeoverView
+}
+
+/**
+ * Four fields and deliberately no fifth: enough to know that a headed,
+ * human-driven browser window may be on screen and whose it is, and not
+ * enough to describe anything about the page in it. No URL, no title, no
+ * page text, no profile directory, no credential signal.
+ */
+export interface AgentActiveTakeoverView {
+  profileId: string
+  attemptId: string
+  status: AgentLoginAttemptStatus
+  expiresAt: string
 }
 
 export const LOGIN_ATTEMPT_STATUSES = [

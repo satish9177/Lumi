@@ -1,6 +1,7 @@
 import {
   BROWSER_PROFILE_STATUSES,
   LOGIN_ATTEMPT_STATUSES,
+  type AgentActiveTakeoverView,
   type AgentBrowserProfileView,
   type AgentLoginAttemptView,
   type AgentLoginTakeoverView
@@ -61,6 +62,23 @@ function text(value: unknown, what: string, pattern: RegExp): string {
   return value
 }
 
+/**
+ * The open takeover carried on a profile, if any. Exactly four fields are
+ * read and every one is checked: anything else the runtime might put here is
+ * dropped, and a malformed value rejects the whole profile rather than
+ * degrading to "no takeover" -- which would be the one failure direction
+ * that could let a capture through while a sign-in window is on screen.
+ */
+export function parseActiveTakeover(value: unknown): AgentActiveTakeoverView {
+  const takeover = record(value, 'active_takeover')
+  return {
+    profileId: uuid(takeover.profile_id, 'active_takeover.profile_id'),
+    attemptId: uuid(takeover.attempt_id, 'active_takeover.attempt_id'),
+    status: member(LOGIN_ATTEMPT_STATUSES, takeover.status, 'active_takeover.status'),
+    expiresAt: instant(takeover.expires_at, 'active_takeover.expires_at')
+  }
+}
+
 export function parseBrowserProfile(value: unknown): AgentBrowserProfileView {
   const profile = record(value, 'browser_profile')
   return {
@@ -74,7 +92,10 @@ export function parseBrowserProfile(value: unknown): AgentBrowserProfileView {
       : {}),
     ...(nullableInstant(profile.last_observed_at, 'browser_profile.last_observed_at')
       ? { lastObservedAt: nullableInstant(profile.last_observed_at, 'browser_profile.last_observed_at') }
-      : {})
+      : {}),
+    ...(profile.active_takeover === null || profile.active_takeover === undefined
+      ? {}
+      : { activeTakeover: parseActiveTakeover(profile.active_takeover) })
   }
 }
 

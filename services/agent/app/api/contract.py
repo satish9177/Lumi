@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from app.api.schemas import (
     ActionListResponse,
     ActionResponse,
+    ActiveTakeoverResponse,
     ApprovalResponse,
     AttemptResponse,
     BookingSearchResponse,
@@ -153,6 +154,7 @@ ERROR_CODES = (
 _MODELS: tuple[type[BaseModel], ...] = (
     ActionListResponse,
     ActionResponse,
+    ActiveTakeoverResponse,
     BookingCriteria,
     BookingProposal,
     BookingSearchResponse,
@@ -1362,8 +1364,19 @@ def _login_takeover_examples() -> dict[str, Any]:
         completed_at=_at(30),
         cancelled_at=None,
     )
+    takeover_open_profile = needs_login.model_copy(
+        update={
+            "active_takeover": ActiveTakeoverResponse(
+                profile_id=_PROFILE,
+                attempt_id=_LOGIN_ATTEMPT,
+                status=LoginAttemptStatus.OPEN,
+                expires_at=_at(905),
+            )
+        }
+    )
     return {
         "browser_profile_needs_login": needs_login.model_dump(mode="json"),
+        "browser_profile_takeover_open": takeover_open_profile.model_dump(mode="json"),
         "browser_profile_authenticated": authenticated.model_dump(mode="json"),
         "login_takeover_open": LoginTakeoverResponse(
             attempt=open_attempt, profile=needs_login, refusal_reason=None

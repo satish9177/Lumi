@@ -807,17 +807,39 @@ BrowserProfileServiceDep = Annotated[
 ]
 
 
+def get_login_takeover_service(request: Request) -> LoginTakeoverService:
+    service: LoginTakeoverService = request.app.state.login_takeover_service
+    return service
+
+
+LoginTakeoverServiceDep = Annotated[
+    LoginTakeoverService, Depends(get_login_takeover_service)
+]
+
+
 @router.get(
     "/browser-profiles",
     response_model=BrowserProfileListResponse,
     summary="Lumi-managed browser profiles, by opaque id (internal)",
 )
 async def list_browser_profiles(
-    service: BrowserProfileServiceDep,
+    service: BrowserProfileServiceDep, takeovers: LoginTakeoverServiceDep
 ) -> BrowserProfileListResponse:
+    """Milestone 8a S2: each profile also carries its open takeover, if any.
+
+    This is the durable answer the desktop hydrates its screen-capture guard
+    from after an Electron-main restart -- an id, a status and an expiry, and
+    nothing that describes the page the human is signing in to.
+    """
     profiles = await service.list_profiles()
+    active = {attempt.profile_id: attempt for attempt in await takeovers.list_active_attempts()}
     return BrowserProfileListResponse(
-        profiles=[BrowserProfileResponse.from_profile(profile) for profile in profiles]
+        profiles=[
+            BrowserProfileResponse.from_profile(
+                profile, active_takeover=active.get(profile.id)
+            )
+            for profile in profiles
+        ]
     )
 
 
@@ -905,16 +927,6 @@ async def delete_browser_profile(
 # cookie, page content, a browser argument or an executable path. `site` never
 # appears in a request: the profile's own bound, immutable site is what the
 # runtime hands to the worker, never anything a caller names here.
-
-
-def get_login_takeover_service(request: Request) -> LoginTakeoverService:
-    service: LoginTakeoverService = request.app.state.login_takeover_service
-    return service
-
-
-LoginTakeoverServiceDep = Annotated[
-    LoginTakeoverService, Depends(get_login_takeover_service)
-]
 
 
 def _takeover_response(outcome: Any) -> LoginTakeoverResponse:

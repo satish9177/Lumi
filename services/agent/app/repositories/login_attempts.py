@@ -85,6 +85,22 @@ class LoginAttemptRepository:
         row = result.one_or_none()
         return _attempt(row) if row is not None else None
 
+    async def list_open(self) -> list[LoginAttempt]:
+        """Every attempt still in an open status, across all profiles.
+
+        The desktop's capture guard reads this after an Electron-main restart:
+        an open row is the only durable evidence that a headed, human-driven
+        browser may still be on screen. Status alone decides -- an `OPEN` row
+        whose `expires_at` has passed but which the sweep has not settled yet
+        still counts, because the sweep is also what closes the window.
+        """
+        result = await self._connection.execute(
+            select(login_attempts)
+            .where(login_attempts.c.status.in_(_OPEN))
+            .order_by(login_attempts.c.started_at)
+        )
+        return [_attempt(row) for row in result.all()]
+
     async def set_worker_generation(
         self, *, attempt_id: uuid.UUID, worker_generation: uuid.UUID
     ) -> LoginAttempt | None:

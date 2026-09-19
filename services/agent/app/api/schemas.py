@@ -801,6 +801,36 @@ class RecordResearchAnswerBody(BaseModel):
 # ---- Milestone 8a S1: persistent browser profiles ---------------------------
 
 
+class ActiveTakeoverResponse(BaseModel):
+    """The open takeover on a profile, if there is one (Milestone 8a S2).
+
+    Four fields, and deliberately no fifth. This exists so the desktop can
+    rediscover -- from durable runtime state alone, after an Electron-main
+    restart -- that a headed, human-driven browser window may still be on
+    screen, and keep screen capture refused until it is gone. Answering that
+    question needs an id, a status and an expiry; it needs no URL, no page
+    text, no title, no profile directory, no credential signal and no account
+    identity, so none of those are here and adding one would be a boundary
+    change, not a convenience.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: uuid.UUID
+    attempt_id: uuid.UUID
+    status: LoginAttemptStatus
+    expires_at: datetime
+
+    @classmethod
+    def from_attempt(cls, attempt: LoginAttempt) -> "ActiveTakeoverResponse":
+        return cls(
+            profile_id=attempt.profile_id,
+            attempt_id=attempt.id,
+            status=attempt.status,
+            expires_at=attempt.expires_at,
+        )
+
+
 class BrowserProfileResponse(BaseModel):
     """One profile, as the trusted controller describes it.
 
@@ -836,9 +866,15 @@ class BrowserProfileResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     deleted_at: datetime | None
+    #: Milestone 8a S2: the open takeover on this profile, if one exists.
+    #: `None` means "no attempt of this profile is in an open status", which
+    #: is a durable fact, not an absence of information.
+    active_takeover: ActiveTakeoverResponse | None = None
 
     @classmethod
-    def from_profile(cls, profile: BrowserProfile) -> "BrowserProfileResponse":
+    def from_profile(
+        cls, profile: BrowserProfile, *, active_takeover: LoginAttempt | None = None
+    ) -> "BrowserProfileResponse":
         return cls(
             id=profile.id,
             label=profile.label,
@@ -859,6 +895,11 @@ class BrowserProfileResponse(BaseModel):
             created_at=profile.created_at,
             updated_at=profile.updated_at,
             deleted_at=profile.deleted_at,
+            active_takeover=(
+                ActiveTakeoverResponse.from_attempt(active_takeover)
+                if active_takeover is not None
+                else None
+            ),
         )
 
 

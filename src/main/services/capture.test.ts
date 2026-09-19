@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest'
-import { captureScreen, encodeCaptureImage, isCompanionCaptureLabel, MAX_CAPTURE_BYTES, orderCaptureSources } from './capture'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { captureScreen, encodeCaptureImage, isCompanionCaptureLabel, MAX_CAPTURE_BYTES, orderCaptureSources, setTakeoverActive } from './capture'
 
 class FakeCaptureImage {
   constructor(
@@ -57,6 +57,11 @@ describe('encodeCaptureImage', () => {
 })
 
 describe('capture source selection', () => {
+  // The takeover guard starts at "unreconciled, therefore refused" in a fresh
+  // main process; these cases are about frame selection, so each one first
+  // states the reconciled answer it assumes: no takeover is open.
+  beforeEach(() => setTakeoverActive(false))
+
   it('puts application windows before displays and excludes the companion label', () => {
     const ordered = orderCaptureSources([
       { id: 'screen:1:0', label: 'Display 1', kind: 'screen', thumbnailDataUrl: 'data:image/png;base64,AA==' },

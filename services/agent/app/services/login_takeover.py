@@ -311,6 +311,19 @@ class LoginTakeoverService:
 
     # -- reads ------------------------------------------------------------------
 
+    async def list_active_attempts(self) -> list[LoginAttempt]:
+        """Every takeover still in an open status, across every profile.
+
+        This is the durable answer to "may a human-driven, credential-bearing
+        browser window be on screen right now?", and it is why the desktop's
+        screen-capture guard does not have to remember anything across an
+        Electron-main restart. It reports ids, a status and an expiry and
+        nothing else -- no URL, no page text, no profile directory, no
+        credential signal -- because none of those are needed to answer it.
+        """
+        async with self._engine.connect() as connection:
+            return await LoginAttemptRepository(connection).list_open()
+
     async def get_attempt(self, attempt_id: uuid.UUID) -> LoginAttempt:
         return await self._get_attempt(attempt_id)
 

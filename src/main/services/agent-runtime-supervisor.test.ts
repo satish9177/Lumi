@@ -264,4 +264,27 @@ describe('AgentRuntimeSupervisor', () => {
     expect(fetch).not.toHaveBeenCalled()
     expect(supervisor.status()).toEqual({ state: 'failed' })
   })
+
+  it('reports whether the runtime files exist at all, without starting anything', () => {
+    // Milestone 8a S2: the capture guard needs "there is no runtime here" as a
+    // distinct answer from "the runtime is not responding".
+    const spawnRuntime = vi.fn()
+    const present = new AgentRuntimeSupervisor({
+      agentRoot: 'C:\trusted\services\agent',
+      pythonPath: 'C:\trusted\services\agent\.venv\Scripts\python.exe',
+      pathExists: () => true,
+      spawnRuntime: spawnRuntime as never
+    })
+    const missing = new AgentRuntimeSupervisor({
+      agentRoot: 'C:\trusted\services\agent',
+      pythonPath: 'C:\trusted\services\agent\.venv\Scripts\python.exe',
+      pathExists: (path) => !path.endsWith('python.exe'),
+      spawnRuntime: spawnRuntime as never
+    })
+
+    expect(present.installed()).toBe(true)
+    expect(missing.installed()).toBe(false)
+    expect(spawnRuntime).not.toHaveBeenCalled()
+  })
+
 })

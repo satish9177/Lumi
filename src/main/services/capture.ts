@@ -19,24 +19,64 @@ const MIN_CAPTURE_WIDTH = 560
  * navigates to -- so a full-screen capture could show it regardless of
  * which source was requested. The safe answer is not "exclude one source
  * from the list"; it is "refuse every capture while any takeover is open."
- * `BrowserProfileController` calls `setTakeoverActive` from the same result
- * it uses to update the trusted takeover card, so this flag can be stale by
- * at most one poll interval -- and only in the fail-safe direction: it can
- * refuse a capture the takeover no longer needs protected, never grant one
- * while a takeover is genuinely still open.
+ *
+ * The guard is three-valued, not a boolean, because "no takeover is open" and
+ * "nobody has established whether a takeover is open" are different facts and
+ * only one of them may permit a capture. A fresh main process starts at
+ * `unreconciled` and therefore refuses, so an Electron-main restart that
+ * happens while a takeover is still live on the runtime side cannot produce a
+ * window in which capture is available and the sign-in window is on screen.
+ * Only `reconcileTakeoverState`'s own answer -- derived from durable runtime
+ * state, never from renderer memory -- moves it to `clear`.
+ *
+ * Nothing here holds an attempt id, a window title, a source name or a URL.
+ * The whole guard is one enum.
  */
-let takeoverActive = false
+export type TakeoverGuardState = 'unreconciled' | 'active' | 'clear'
 
+let takeoverGuard: TakeoverGuardState = 'unreconciled'
+
+/**
+ * The reconciled answer: `true` when at least one takeover is open, `false`
+ * when durable state has been read and none is. Called by
+ * `BrowserProfileController` from every result that carries an attempt's
+ * status, and from its startup reconciliation.
+ */
 export function setTakeoverActive(active: boolean): void {
-  takeoverActive = active
+  takeoverGuard = active ? 'active' : 'clear'
+}
+
+/**
+ * Back to "unknown, therefore refused". Called when durable takeover state
+ * could not be read at all -- a runtime that is not answering is never
+ * evidence that no sign-in window is open.
+ */
+export function clearTakeoverReconciliation(): void {
+  takeoverGuard = 'unreconciled'
+}
+
+export function takeoverGuardState(): TakeoverGuardState {
+  return takeoverGuard
+}
+
+/** Capture is permitted only by a reconciled, empty answer. */
+export function isCaptureBlocked(): boolean {
+  return takeoverGuard !== 'clear'
 }
 
 export class CaptureRefusedError extends Error {
-  readonly code = 'capture_refused_takeover_active'
-  constructor() {
-    super('Lumi will not capture the screen while a sign-in window is open.')
+  readonly code: 'capture_refused_takeover_active' | 'capture_refused_takeover_unknown'
+  constructor(state: Exclude<TakeoverGuardState, 'clear'> = 'active') {
+    super(state === 'active'
+      ? 'Lumi will not capture the screen while a sign-in window is open.'
+      : 'Lumi is checking whether a sign-in window is open. Try again in a moment.')
+    this.code = state === 'active' ? 'capture_refused_takeover_active' : 'capture_refused_takeover_unknown'
     this.name = 'CaptureRefusedError'
   }
+}
+
+function refuseWhileBlocked(): void {
+  if (takeoverGuard !== 'clear') throw new CaptureRefusedError(takeoverGuard)
 }
 
 /** The minimal image surface shared by native images and test doubles. */
@@ -72,7 +112,7 @@ const ELECTRON_CAPTURE_RUNTIME: CaptureRuntime = {
 }
 
 export async function listCaptureSources(): Promise<CaptureSource[]> {
-  if (takeoverActive) throw new CaptureRefusedError()
+  refuseWhileBlocked()
   const sources = await desktopCapturer.getSources({
     types: ['screen', 'window'],
     thumbnailSize: SOURCE_PREVIEW_SIZE,
@@ -103,7 +143,7 @@ export function isCompanionCaptureLabel(label: string): boolean {
 }
 
 export async function captureScreen(sourceId?: string, runtime: CaptureRuntime = ELECTRON_CAPTURE_RUNTIME): Promise<CaptureResult> {
-  if (takeoverActive) throw new CaptureRefusedError()
+  refuseWhileBlocked()
   const display = runtime.getPrimaryDisplay()
   const width = Math.min(Math.round(display.size.width * display.scaleFactor), MAX_CAPTURE_WIDTH)
   const height = Math.min(Math.round(display.size.height * display.scaleFactor), MAX_CAPTURE_HEIGHT)

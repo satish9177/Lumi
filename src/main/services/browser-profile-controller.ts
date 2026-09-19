@@ -15,7 +15,7 @@ import {
   projectProfileRuntimeError
 } from './browser-profile-wire'
 import { WireError } from './agent-wire'
-import { setTakeoverActive } from './capture'
+import { clearTakeoverReconciliation, setTakeoverActive } from './capture'
 
 /**
  * The trusted domain client for Milestone 8a S2's manual login takeover.
@@ -36,6 +36,13 @@ import { setTakeoverActive } from './capture'
 
 export interface RuntimeRequester {
   request(method: RuntimeMethod, path: string, body: unknown, timeoutMs: number): Promise<RuntimeReply>
+}
+
+/** What one successful reconciliation established. A count, not a list of
+ * ids: nothing outside this controller needs to name an attempt to know
+ * that capture must stay refused. */
+export interface TakeoverReconciliation {
+  activeTakeovers: number
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
@@ -91,6 +98,47 @@ export class BrowserProfileController {
   private readonly openAttempts = new Set<string>()
 
   constructor(private readonly runtime: RuntimeRequester) {}
+
+  /**
+   * Rebuild the open-attempt set from durable runtime state, and set the
+   * capture guard from what it finds.
+   *
+   * This is the answer to an Electron-main restart: `openAttempts` is
+   * in-memory and a fresh main process starts empty, but a takeover lives in
+   * the runtime's own `login_attempts` table and the headed window it named
+   * may still be on screen. `capture.ts` therefore starts refused, and only
+   * this method's own reconciled answer -- never the renderer, never a
+   * remembered attempt id, never a timeout -- can permit a capture again.
+   *
+   * Fail-closed in every uncertain direction: a runtime that is not running,
+   * a refusal, a malformed response, or anything else that stops this from
+   * producing a list leaves the guard at "unreconciled", which refuses. A
+   * runtime outage is never read as "no takeover is open".
+   *
+   * Idempotent: the set is replaced by exactly what the runtime reports, so
+   * running it twice reaches the same state, and an attempt that settled
+   * (`COMPLETED`/`CANCELLED`/`EXPIRED`/`INTERRUPTED`) stops blocking capture
+   * on the first reconciliation that sees the runtime no longer list it.
+   */
+  async reconcileTakeovers(): Promise<AgentResult<TakeoverReconciliation>> {
+    let profiles: AgentBrowserProfileView[]
+    try {
+      const reply = await this.call('GET', '/browser-profiles', undefined, TIMEOUTS.read)
+      profiles = parseBrowserProfileList(reply.body)
+    } catch (error) {
+      clearTakeoverReconciliation()
+      return { ok: false, error: toAgentError(error) }
+    }
+    const active = profiles
+      .map((profile) => profile.activeTakeover)
+      .filter((takeover): takeover is NonNullable<typeof takeover> =>
+        takeover !== undefined
+        && (OPEN_LOGIN_ATTEMPT_STATUSES as readonly string[]).includes(takeover.status))
+    this.openAttempts.clear()
+    for (const takeover of active) this.openAttempts.add(takeover.attemptId)
+    setTakeoverActive(this.openAttempts.size > 0)
+    return { ok: true, value: { activeTakeovers: active.length } }
+  }
 
   private track(attempt: AgentLoginAttemptView): void {
     if ((OPEN_LOGIN_ATTEMPT_STATUSES as readonly string[]).includes(attempt.status)) {
