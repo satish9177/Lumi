@@ -12,7 +12,7 @@ Implementation report. Branch `lumi-agent-v2`.
 |---|---|
 | Starting SHA | `8600e8c0ce57c1d3d5096387c3c09cca8c8b6702` (M8a S2 complete, including the capture restart closure) |
 | Implementation SHA | `44eeabc` (`feat(agent): add account-scoped authenticated reading (M8a S3)`) |
-| Documentation SHA | DOCSHA (recorded here by the following correction commit) |
+| Documentation SHA | `6a2ae641b1e068fe0505b735fc08427b1de9a960` (recorded here by the following correction commit) |
 | Migration | `0007` → `0008` (only S3 needs: `task_grants` gains `profile_id`, `profile_revoke_epoch`; new `authenticated_observations`, `authenticated_answers`) |
 
 ## 1. Real-account acceptance was intentionally not performed
