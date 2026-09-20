@@ -28,6 +28,7 @@ What is proven here, against the real desktop app:
 
 import asyncio
 import os
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -182,6 +183,12 @@ def test_the_disclosure_card_and_the_trusted_click_through_the_desktop_app(
         assert done["answers"] == 1 and done["provider"] == "scripted"
         assert done["research"] == 0
         assert done["grant"] in ("COMPLETED", "REVOKED")
+        # The answer row commits before the worker finishes closing the profile's
+        # Chromium, so release is asynchronous by design; allow it a bounded wait.
+        deadline = time.monotonic() + 30
+        while done["leased"] != 0 and time.monotonic() < deadline:
+            time.sleep(1)
+            done = _counts(migrated_database_url)
         assert done["leased"] == 0  # The profile was released.
         _no_csp_violations(app.console)
     _wait_for_no_processes("*app.server*")
