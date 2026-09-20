@@ -41,6 +41,8 @@ from app.repositories.tasks import TaskRecord, TaskRepository
 
 
 AttemptEvidenceWriter = Callable[[AsyncConnection, AttemptRecord], Awaitable[None]]
+#: Re-checks, inside the approving transaction, the facts an approval depends on.
+ApprovalGuard = Callable[[AsyncConnection, ActionRecord], Awaitable[None]]
 
 
 class ScopedAuthorizer(Protocol):
@@ -770,6 +772,107 @@ class ActionService:
                     "outcome": outcome.value,
                     "error_code": error_code,
                     "reason": "executor_reported",
+                },
+            )
+            return await self._view(connection, moved)
+
+    async def settle_exact_approval(
+        self,
+        action_id: uuid.UUID,
+        *,
+        expected_revision: int,
+        guard: ApprovalGuard,
+        result: dict[str, Any],
+    ) -> ActionView:
+        """Approve, consume and terminalise one exact approval, in ONE transaction.
+
+        For an approval whose only consequence is the approval itself
+        (Milestone 8b S5's disclosure manifest): nothing executes, so there is no
+        worker, no dispatch and no page. The three ordinary steps -- grant the
+        approval, claim it (single-use, re-checked in SQL against revision, digest
+        and expiry), record a finished attempt -- still happen, in the ledger's
+        own order, so the approval is spent exactly as an executed one would be
+        and can never fund anything else.
+
+        `guard` runs under the task lock, inside the transaction, after the
+        approval is found pending and before it is granted. It is where a caller
+        re-checks the facts the approval depends on (saved values, account,
+        grants); if it raises, nothing at all is written.
+        """
+        async with self._engine.begin() as connection:
+            repository = ActionRepository(connection)
+            task, action = await self._lock_task_for_action(connection, action_id)
+            self._check_task_open(task)
+            self._check_revision(action, expected_revision)
+            self._check_transition(action, ActionStatus.APPROVED)
+
+            approval = await repository.get_open_approval(action_id)
+            if approval is None or approval.status is not ApprovalStatus.PENDING:
+                raise ApprovalNotUsableError(action_id, "there is no pending approval request")
+            if approval.proposal_digest != action.proposal_digest:
+                raise ApprovalNotUsableError(action_id, "the approval is for a different proposal")
+            if await repository.is_expired(approval.id):
+                raise ApprovalNotUsableError(action_id, "the approval request has expired")
+            await guard(connection, action)
+
+            approved = await self._transition(
+                connection,
+                task=task,
+                action=action,
+                target=ActionStatus.APPROVED,
+                event_type=TaskEventType.ACTION_APPROVED,
+                payload={"approval_id": str(approval.id)},
+            )
+            granted = await repository.grant_approval(
+                approval_id=approval.id, action_revision=approved.revision
+            )
+            if granted is None:  # pragma: no cover - the task row lock is held.
+                raise ActionConcurrencyError(action_id)
+            claimed = await repository.claim_approval(
+                approval_id=approval.id,
+                action_revision=approved.revision,
+                proposal_digest=approved.proposal_digest,
+            )
+            if claimed is None:  # pragma: no cover - granted a moment ago, task lock held.
+                raise ApprovalNotUsableError(action_id, "the approval no longer matches this action")
+            attempt = await repository.insert_attempt(
+                attempt_id=uuid.uuid4(),
+                action_id=action_id,
+                attempt_number=await repository.next_attempt_number(action_id),
+                approval_id=claimed.id,
+                runtime_generation=self._runtime_generation,
+            )
+            executing = await self._transition(
+                connection,
+                task=(await self._reload_task(TaskRepository(connection), task.id)),
+                action=approved,
+                target=ActionStatus.EXECUTING,
+                event_type=TaskEventType.ACTION_EXECUTION_STARTED,
+                payload={
+                    "attempt_id": str(attempt.id),
+                    "attempt_number": attempt.attempt_number,
+                    "approval_id": str(claimed.id),
+                    "runtime_generation": str(self._runtime_generation),
+                },
+            )
+            finished = await repository.finish_attempt(
+                attempt_id=attempt.id, outcome=AttemptOutcome.SUCCEEDED, result=result, error_code=None
+            )
+            if finished is None:  # pragma: no cover - the task row lock is held.
+                raise ActionConcurrencyError(action_id)
+            moved = await self._transition(
+                connection,
+                task=(await self._reload_task(TaskRepository(connection), task.id)),
+                action=executing,
+                target=ActionStatus.SUCCEEDED,
+                event_type=TaskEventType.ACTION_SUCCEEDED,
+                payload={
+                    "attempt_id": str(finished.id),
+                    "attempt_number": finished.attempt_number,
+                    "outcome": AttemptOutcome.SUCCEEDED.value,
+                    "error_code": None,
+                    "reason": "approval_settled",
+                    "result_code": result.get("code"),
                 },
             )
             return await self._view(connection, moved)

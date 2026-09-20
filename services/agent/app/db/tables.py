@@ -11,6 +11,7 @@ from sqlalchemy import (
     MetaData,
     String,
     Table,
+    Text,
     UniqueConstraint,
     Uuid,
     false,
@@ -29,6 +30,7 @@ from app.domain.action_status import (
 from app.domain.browser_dispatch import BrowserEffect, DispatchStatus
 from app.domain.browser_profile import ProfileStatus
 from app.domain.login_takeover import LoginAttemptStatus
+from app.domain.protected_values import PROTECTED_KINDS
 from app.domain.research import GrantStatus
 from app.domain.task_status import TaskStatus
 
@@ -435,9 +437,11 @@ task_grants = Table(
         "status IN (" + ", ".join(f"'{status}'" for status in GRANT_STATUSES) + ")",
         name="status",
     ),
-    CheckConstraint("kind IN ('public_research', 'authenticated_read')", name="kind"),
     CheckConstraint(
-        "((kind = 'authenticated_read') = (profile_id IS NOT NULL)) "
+        "kind IN ('public_research', 'authenticated_read', 'form_prepare')", name="kind"
+    ),
+    CheckConstraint(
+        "((kind IN ('authenticated_read', 'form_prepare')) = (profile_id IS NOT NULL)) "
         "AND ((profile_id IS NULL) = (profile_revoke_epoch IS NULL)) "
         "AND (profile_revoke_epoch IS NULL OR profile_revoke_epoch >= 0)",
         name="profile_binding",
@@ -464,9 +468,12 @@ task_grants = Table(
 #: never hold two live scopes and a second confirmation cannot widen the first.
 Index("ix_task_grants_profile_id", task_grants.c.profile_id)
 
+#: Per kind since Milestone 8b S5: a task holds its account-reading grant and its
+#: form-planning grant at once, and never two live grants of the same kind.
 Index(
-    "uq_task_grants_task_id_open",
+    "uq_task_grants_task_id_kind_open",
     task_grants.c.task_id,
+    task_grants.c.kind,
     unique=True,
     postgresql_where=task_grants.c.status.in_(("PENDING", "ACTIVE")),
 )
@@ -955,3 +962,34 @@ authenticated_answers = Table(
 )
 
 Index("ix_authenticated_answers_profile_id", authenticated_answers.c.profile_id)
+
+
+#: Milestone 8b S5. The user's saved details, one row per closed kind. The value
+#: is **plaintext task data in the local runtime database** -- not encrypted at
+#: rest and not a credential -- and it never leaves this row in S5: the digest
+#: and the masked preview are what every other surface sees. The database
+#: refuses a digest that is not the SHA-256 of the stored value.
+protected_values = Table(
+    "protected_values",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("kind", String(32), nullable=False),
+    Column("value", Text(), nullable=False),
+    Column("value_digest", String(64), nullable=False),
+    Column("preview", String(120), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("kind"),
+    CheckConstraint(
+        "kind IN (" + ", ".join(f"'{kind}'" for kind in PROTECTED_KINDS) + ")", name="kind"
+    ),
+    CheckConstraint("value_digest ~ '^[0-9a-f]{64}$'", name="value_digest_format"),
+    CheckConstraint(
+        "value_digest = encode(sha256(convert_to(value, 'UTF8')), 'hex')",
+        name="digest_matches_value",
+    ),
+    CheckConstraint(
+        "length(value) BETWEEN 1 AND 300", name="value_bounded"
+    ),
+    CheckConstraint("length(preview) >= 1", name="preview_present"),
+)

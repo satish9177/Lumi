@@ -11,7 +11,9 @@ import {
   type AgentBookingCriteria,
   type AgentError,
   type AgentEventView,
+  type AgentFormPlanView,
   type AgentInspectionView,
+  type AgentProtectedDataKind,
   type AgentResearchView,
   type AgentResult,
   type AgentRuntimeView,
@@ -29,7 +31,9 @@ import {
   describeAuthenticatedDisclosure,
   describeAuthenticatedProgress,
   describeCriteria,
+  describeDisclosureCard,
   describeEvent,
+  describeFormPlan,
   describeInspection,
   describeOutcome,
   describeRecipients,
@@ -45,6 +49,7 @@ import {
   topicLabel,
   type AuthenticatedControl,
   type BookingControl,
+  type FormPlanControl,
   type InspectionControl,
   type ResearchControl
 } from '../agent-task-view'
@@ -73,6 +78,7 @@ interface TaskState {
   inspection?: AgentInspectionView
   research?: AgentResearchView
   authenticated?: AgentAuthenticatedView
+  formPlan?: AgentFormPlanView
 }
 
 const RUNTIME_LABELS: Record<AgentRuntimeView['state'], string> = {
@@ -124,6 +130,8 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
   const [authenticatedProfile, setAuthenticatedProfile] = useState('')
   const [authenticatedRecipient, setAuthenticatedRecipient] = useState('')
   const [authenticatedQuestion, setAuthenticatedQuestion] = useState('')
+  // Which saved details the user chose to let a planner see (masked). Closed ids only.
+  const [formRefs, setFormRefs] = useState<AgentProtectedDataKind[] | undefined>(undefined)
 
   stateRef.current = state
 
@@ -163,7 +171,8 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
       events: sameTask && !full ? mergeEvents(current.events, snapshot.events) : mergeEvents([], snapshot.events),
       ...(snapshot.inspection ? { inspection: snapshot.inspection } : {}),
       ...(snapshot.research ? { research: snapshot.research } : {}),
-      ...(snapshot.authenticated ? { authenticated: snapshot.authenticated } : {})
+      ...(snapshot.authenticated ? { authenticated: snapshot.authenticated } : {}),
+      ...(snapshot.formPlan ? { formPlan: snapshot.formPlan } : {})
     }
     stateRef.current = next
     setState(next)
@@ -419,6 +428,55 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
         return
       case 'stop_account_reading':
         report(await run('authenticated_stop', () => agent.stopAuthenticated()))
+    }
+  }
+
+  /**
+   * The trusted form-planning controls. Each is a button the user pressed and each
+   * carries closed ids and the revision that was on screen -- never a manifest, a
+   * value, an origin, a field or a provider.
+   */
+  async function onFormPlanControl(control: FormPlanControl, plan: AgentFormPlanView): Promise<void> {
+    const grant = plan.grant
+    const disclosure = plan.disclosure
+    switch (control) {
+      case 'plan_form': {
+        const chosen = formRefs ?? plan.savedDetails.map((item) => item.kind)
+        if (chosen.length === 0) return
+        await run('form_prepare', () => agent.prepareFormPlanning(chosen))
+        return
+      }
+      case 'allow_form_planning': {
+        if (!grant) return
+        // Allowing and asking for a plan are one press and two calls: the grant is
+        // confirmed by id and revision first, and only a confirmed grant may fund a plan.
+        await run('form_plan', async () => {
+          if (grant.status === 'PENDING') {
+            const granted = await agent.grantFormPlanning(grant.grantId, grant.revision)
+            if (!granted.ok) return granted
+            const active = granted.value.formPlan?.grant
+            if (!active || active.status !== 'ACTIVE' || active.grantId !== grant.grantId) {
+              return {
+                ok: false as const,
+                error: { code: 'invalid_response' as const, message: 'The permission Lumi recorded did not match what you reviewed. Nothing was sent.' }
+              }
+            }
+          }
+          return agent.runFormPlanning()
+        })
+        return
+      }
+      case 'decline_form_planning':
+        if (!grant) return
+        await run('form_decline', () => agent.declineFormPlanning(grant.grantId, grant.revision))
+        return
+      case 'approve_disclosure':
+        if (!disclosure) return
+        await run('form_approve', () => agent.approveFieldDisclosure(disclosure.actionId, disclosure.revision))
+        return
+      case 'decline_disclosure':
+        if (!disclosure) return
+        await run('form_reject', () => agent.rejectFieldDisclosure(disclosure.actionId, disclosure.revision))
     }
   }
 
@@ -772,6 +830,19 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
                   onControl={(control) => void onAuthenticatedControl(control, state.authenticated!)}
                 />
               </div>
+            )}
+
+            {state.authenticated && state.formPlan && (
+              <FormPlanCard
+                plan={state.formPlan}
+                accountReadingActive={state.authenticated.grant?.status === 'ACTIVE'}
+                now={now}
+                disabled={!runtimeReady || Boolean(busy)}
+                taskClosed={taskClosed}
+                selected={formRefs ?? state.formPlan.savedDetails.map((item) => item.kind)}
+                onSelect={setFormRefs}
+                onControl={(control) => void onFormPlanControl(control, state.formPlan!)}
+              />
             )}
 
             {booking && (
@@ -1140,6 +1211,115 @@ function ResearchCard({ research, now, disabled, busy, taskClosed, onControl }: 
               aria-busy={busy !== undefined || undefined}
               onClick={() => onControl(control)}>
               {RESEARCH_CONTROL_LABELS[control]}
+            </button>
+          ))}
+        </div>
+      )}
+    </article>
+  )
+}
+
+const FORM_PLAN_CONTROL_LABELS: Record<FormPlanControl, string> = {
+  plan_form: 'Plan this form',
+  allow_form_planning: 'Allow planning',
+  decline_form_planning: 'Cancel',
+  approve_disclosure: 'Approve this plan',
+  decline_disclosure: 'Cancel'
+}
+
+/**
+ * The trusted FORM PLANNING and PREPARE THIS FORM cards (Milestone 8b S5).
+ *
+ * Every label and line is Lumi's own, written in `agent-task-view.ts`. Website text
+ * appears only as a plain-text field label or option name inside the manifest rows,
+ * and a masked preview is shown exactly as the runtime sent it: this component never
+ * masks anything and never holds a raw saved value. The buttons say what they do --
+ * "Allow planning" and "Approve this plan" -- never "Fill", because nothing here
+ * changes the page.
+ */
+function FormPlanCard({ plan, accountReadingActive, now, disabled, taskClosed, selected, onSelect, onControl }: {
+  plan: AgentFormPlanView
+  accountReadingActive: boolean
+  now: number
+  disabled: boolean
+  taskClosed: boolean
+  selected: AgentProtectedDataKind[]
+  onSelect: (refs: AgentProtectedDataKind[]) => void
+  onControl: (control: FormPlanControl) => void
+}) {
+  const model = describeFormPlan(plan, accountReadingActive, taskClosed, now)
+  if (model.stage === 'hidden') return null
+  const manifest = plan.disclosure && (model.stage === 'approval' || model.stage === 'prepared')
+    ? describeDisclosureCard(plan.disclosure)
+    : undefined
+  return (
+    <article className="agent-booking-card tone-info" role="group" aria-label={model.title}
+      data-testid="agent-form-plan-card" data-stage={model.stage}
+      data-grant-id={plan.grant?.grantId} data-grant-revision={plan.grant?.revision}
+      data-action-id={plan.disclosure?.actionId} data-action-revision={plan.disclosure?.revision}>
+      <p className="lifelens-card-eyebrow" data-testid="agent-form-plan-eyebrow">{model.eyebrow}</p>
+      <h3 className="lifelens-card-heading" data-testid="agent-form-plan-title">{model.title}</h3>
+      {model.stage === 'offer' && (
+        <fieldset data-testid="agent-form-plan-offer">
+          <legend className="workspace-note">Saved details</legend>
+          {model.offerable.map((item) => (
+            <label key={item.kind} className="agent-checkbox-row">
+              <input type="checkbox" checked={selected.includes(item.kind)} disabled={disabled}
+                onChange={(event) => onSelect(event.target.checked
+                  ? [...selected, item.kind].filter((kind, index, all) => all.indexOf(kind) === index)
+                  : selected.filter((kind) => kind !== item.kind))} />
+              {' '}{item.label} <span className="workspace-note">({item.preview})</span>
+            </label>
+          ))}
+        </fieldset>
+      )}
+      {model.permission && (
+        <div data-testid="agent-form-plan-permission">
+          <dl className="agent-booking-details">
+            <dt>Site</dt><dd data-testid="agent-form-plan-site">{model.permission.site}</dd>
+            <dt>Sent to</dt><dd data-testid="agent-form-plan-provider">{model.permission.provider}</dd>
+          </dl>
+          <p className="workspace-note">To propose which saved detail belongs in which field, Lumi will send to {model.permission.provider}:</p>
+          <ul className="agent-evidence" data-testid="agent-form-plan-sent">
+            {model.permission.sent.map((entry) => <li key={entry}>• {entry}</li>)}
+          </ul>
+          <p data-testid="agent-form-plan-not-sent"><strong>{model.permission.notSent[0]}</strong></p>
+          {model.permission.countryNotice && <p className="workspace-note" data-testid="agent-form-plan-country">{model.permission.countryNotice}</p>}
+          <p className="workspace-note">Saved details available:</p>
+          <ul className="agent-evidence" data-testid="agent-form-plan-details">
+            {model.permission.savedDetails.map((item) => <li key={item.kind}>✓ {item.label}</li>)}
+          </ul>
+          <p className="workspace-note" data-testid="agent-form-plan-cannot-act">{model.permission.cannotAct}</p>
+        </div>
+      )}
+      {manifest && (
+        <div data-testid="agent-form-plan-manifest">
+          <dl className="agent-booking-details">
+            <dt>Site</dt><dd data-testid="agent-form-plan-site">{manifest.site}</dd>
+            {manifest.formLabel && (<><dt>Form</dt><dd data-testid="agent-form-plan-form">{manifest.formLabel}</dd></>)}
+            <dt>Goes to</dt><dd data-testid="agent-form-plan-goes-to">{manifest.site}</dd>
+          </dl>
+          <p className="workspace-note">{model.stage === 'approval' ? 'Lumi plans to use:' : 'You approved:'}</p>
+          <ul className="agent-evidence" data-testid="agent-form-plan-rows">
+            {manifest.rows.map((row) => (
+              <li key={`${row.fieldLabel}-${row.detail}`}>
+                <strong>{row.savedLabel}</strong> {row.detail} → <q>{row.fieldLabel}</q>
+              </li>
+            ))}
+          </ul>
+          {manifest.countryNotice && <p className="workspace-note" data-testid="agent-form-plan-country">{manifest.countryNotice}</p>}
+        </div>
+      )}
+      {model.lines.map((line) => <p key={line} className="workspace-note">{line}</p>)}
+      {model.controls.length > 0 && (
+        <div className="lifelens-confirmation-actions">
+          {model.controls.map((control) => (
+            <button key={control} type="button" disabled={disabled || (control === 'plan_form' && selected.length === 0)}
+              className={control === 'allow_form_planning' || control === 'approve_disclosure' || control === 'plan_form'
+                ? 'lifelens-confirm-button' : 'lifelens-dismiss-button'}
+              data-testid={`agent-form-plan-${control}`}
+              onClick={() => onControl(control)}>
+              {FORM_PLAN_CONTROL_LABELS[control]}
             </button>
           ))}
         </div>

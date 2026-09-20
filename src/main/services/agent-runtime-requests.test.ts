@@ -136,6 +136,28 @@ describe('runtime route allowlist', () => {
     for (const [method, path] of refused) expect(isAllowedRuntimeRoute(method, path), path).toBe(false)
   })
 
+  it('allows exactly the form-planning routes, and no route that saves or reads a saved value (Milestone 8b S5)', () => {
+    const allowed: Array<['GET' | 'POST', string]> = [
+      ['GET', '/tasks/' + TASK + '/authenticated/form'],
+      ['POST', '/tasks/' + TASK + '/authenticated/form/prepare-scope'],
+      ['POST', '/tasks/' + TASK + '/authenticated/form/grant'],
+      ['POST', '/tasks/' + TASK + '/authenticated/form/revoke'],
+      ['POST', '/tasks/' + TASK + '/authenticated/form/planning-context'],
+      ['POST', '/tasks/' + TASK + '/authenticated/form/propose'],
+      ['POST', '/actions/' + TASK + '/field-disclosure/approve'],
+      ['POST', '/actions/' + TASK + '/field-disclosure/reject']
+    ]
+    for (const [method, path] of allowed) expect(isAllowedRuntimeRoute(method, path), path).toBe(true)
+    const refused: Array<['GET' | 'POST' | 'PUT', string]> = [
+      ['GET', '/protected-values'], ['PUT', '/protected-values/email'], ['POST', '/protected-values/email'],
+      ['POST', '/tasks/' + TASK + '/authenticated/form'], ['GET', '/tasks/' + TASK + '/authenticated/form/propose'],
+      ['POST', '/tasks/' + TASK + '/authenticated/form/fill'], ['POST', '/tasks/' + TASK + '/authenticated/form/freeze'],
+      ['POST', '/tasks/' + TASK + '/authenticated/form/grant/extra'], ['GET', '/actions/' + TASK + '/field-disclosure/approve'],
+      ['POST', '/actions/' + TASK + '/field-disclosure/execute'], ['POST', '/actions/' + TASK + '/field-disclosure']
+    ]
+    for (const [method, path] of refused) expect(isAllowedRuntimeRoute(method as never, path), path).toBe(false)
+  })
+
   it('validates runtime settings before they reach the child environment', () => {
     expect(validateRuntimeSettings({ browserSiteOrigin: 'http://127.0.0.1:8801' })).toEqual({
       LUMI_BROWSER_SITE_ORIGIN: 'http://127.0.0.1:8801', LUMI_BROWSER_HEADLESS: 'true'

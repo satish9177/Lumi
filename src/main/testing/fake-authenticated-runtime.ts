@@ -175,6 +175,14 @@ export class FakeAuthenticatedRuntime implements RuntimeRequester {
     }
   }
 
+  /** The form-planning card. Overridden by `FakeFormRuntime`; empty for plain account reading. */
+  protected formPlan(taskId: string): Json {
+    return {
+      task_id: taskId, task_status: 'READY', objective: 'x', site: this.options.site ?? 'github.com',
+      saved_details: [], grant: null, disclosure: null, form_count: 0, candidate_element_count: 0, max_fields: 12
+    }
+  }
+
   private observation(operation: string, blocks: readonly string[]): Json {
     const sequence = this.observations.length + 1
     const taskId = [...this.tasks.keys()][0]
@@ -238,6 +246,10 @@ export class FakeAuthenticatedRuntime implements RuntimeRequester {
     if (method === 'GET' && (match = /^\/tasks\/([0-9a-f-]{36})\/events\?after_sequence=(\d+)&limit=\d+$/.exec(path))) {
       const row = this.tasks.get(match[1])!
       return [200, { task_id: row.id, events: row.events.filter((event) => (event.sequence as number) > Number(match![2])) }]
+    }
+    // Milestone 8b S5: the form-planning card. Empty here; `FakeFormRuntime` fills it.
+    if (method === 'GET' && (match = /^\/tasks\/([0-9a-f-]{36})\/authenticated\/form$/.exec(path))) {
+      return this.tasks.has(match[1]) ? [200, this.formPlan(match[1])] : error(404, 'task_not_found')
     }
     if (method === 'GET' && (match = /^\/tasks\/([0-9a-f-]{36})\/authenticated$/.exec(path))) {
       return this.tasks.has(match[1]) ? [200, this.view(match[1])] : error(404, 'task_not_found')

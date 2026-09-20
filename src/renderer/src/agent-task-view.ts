@@ -5,7 +5,10 @@ import type {
   AgentDisclosureRecipient,
   AgentAuthenticatedPauseReason,
   AgentAuthenticatedView,
+  AgentDisclosureCardView,
   AgentEventView,
+  AgentFormPlanView,
+  AgentProtectedDataKind,
   AgentInspectionView,
   AgentReconciliationView,
   AgentResearchSourceView,
@@ -207,7 +210,23 @@ export function describeBooking(action: AgentActionView, events: readonly AgentE
   }
 }
 
+/** Milestone 8b S5: the disclosure approval's events, worded truthfully. Nothing is booked or changed. */
+function describeDisclosureEvent(event: AgentEventView): string | undefined {
+  if (event.toolName !== 'prepare_form') return undefined
+  switch (event.type) {
+    case 'action.proposed': return 'Form plan prepared — nothing has been changed'
+    case 'action.approval_requested': return 'Waiting for your approval of this form plan'
+    case 'action.approved': return 'You approved this form plan'
+    case 'action.rejected': return event.reason === 'superseded' ? 'Form plan replaced by a newer one' : 'You declined this form plan'
+    case 'action.execution_started': return 'Approval recorded — no page action exists yet'
+    case 'action.succeeded': return 'Form plan approved — nothing was prepared in the page'
+    default: return undefined
+  }
+}
+
 export function describeEvent(event: AgentEventView): string {
+  const disclosure = describeDisclosureEvent(event)
+  if (disclosure) return disclosure
   switch (event.type) {
     case 'task.created': return 'Task created'
     case 'task.cancelled': return 'Task cancelled'
@@ -247,6 +266,10 @@ export function describeEvent(event: AgentEventView): string {
         : 'Recorded: could not verify an answer from your account pages'
     case 'task.authenticated_paused': return 'Paused — Lumi stopped and sent nothing further to an AI'
     case 'task.authenticated_resumed': return 'Resumed'
+    case 'task.form_prepare_scope_requested': return 'Form-planning permission prepared — nothing sent yet'
+    case 'task.form_prepare_scope_granted': return 'You allowed form planning'
+    case 'task.form_prepare_scope_revoked': return 'Form-planning permission withdrawn'
+    case 'task.form_planning_context_built': return 'Form structure and masked previews prepared for the one approved AI'
     case 'action.proposed': return 'Booking prepared from the clinic site'
     case 'action.approval_requested': return 'Waiting for your approval'
     case 'action.approved': return 'You approved the booking'
@@ -949,5 +972,162 @@ export function describeInspection(inspection: AgentInspectionView, now: number)
         lines: [NOT_ANSWERED_REASONS[answer.status] ?? 'Lumi could not verify an answer.'], controls: ['inspect_again']
       }
     }
+  }
+}
+
+
+// ---- Milestone 8b S5: form planning and the exact disclosure card --------------------
+//
+// **S5 changes no website.** Both cards are written here, by Lumi, from the runtime's
+// persisted state -- never from page text, a provider's words or a renderer-side
+// value. A masked preview arrives already masked: this module never masks, never
+// sees a raw saved value and never builds a manifest.
+
+export type FormPlanControl =
+  | 'plan_form'
+  | 'allow_form_planning'
+  | 'decline_form_planning'
+  | 'approve_disclosure'
+  | 'decline_disclosure'
+
+export const DATA_KIND_LABELS: Record<AgentProtectedDataKind, string> = {
+  legal_name: 'legal name',
+  preferred_name: 'preferred name',
+  email: 'email',
+  phone: 'phone',
+  city: 'city',
+  country: 'country',
+  linkedin_url: 'LinkedIn link',
+  portfolio_url: 'portfolio link'
+}
+
+export type FormPlanStage = 'hidden' | 'offer' | 'permission' | 'ready' | 'approval' | 'prepared' | 'declined'
+
+export interface FormPlanModel {
+  stage: FormPlanStage
+  eyebrow: string
+  title: string
+  /** Plain lines, all Lumi's own. */
+  lines: string[]
+  /** `permission` stage: what is sent, what is not, who receives it. */
+  permission?: {
+    site: string
+    provider: string
+    sent: string[]
+    notSent: string[]
+    countryNotice?: string
+    savedDetails: Array<{ kind: AgentProtectedDataKind; label: string }>
+    cannotAct: string
+  }
+  /** `offer` stage: the saved details the user may choose to plan with. */
+  offerable: Array<{ kind: AgentProtectedDataKind; label: string; preview: string }>
+  controls: FormPlanControl[]
+}
+
+const FORM_PLAN_HIDDEN: FormPlanModel = { stage: 'hidden', eyebrow: '', title: '', lines: [], offerable: [], controls: [] }
+
+/**
+ * Which stage of form planning applies. `accountReadingActive` is whether the
+ * account-reading permission is currently usable: planning only starts from it.
+ */
+export function describeFormPlan(
+  plan: AgentFormPlanView | undefined, accountReadingActive: boolean, taskClosed: boolean, now: number
+): FormPlanModel {
+  if (!plan) return FORM_PLAN_HIDDEN
+  const disclosure = plan.disclosure
+  const grant = plan.grant
+  const expired = grant?.expiresAt !== undefined && Date.parse(grant.expiresAt) <= now
+  if (disclosure && disclosure.actionStatus === 'WAITING_APPROVAL' && !taskClosed) {
+    return {
+      stage: 'approval', eyebrow: 'PREPARE THIS FORM', title: 'Approve this form plan',
+      lines: [
+        'When form filling is enabled in a later step, Lumi will only be allowed to use exactly this approved mapping.',
+        'Lumi cannot submit this form.',
+        'This build does not change the page.'
+      ],
+      offerable: [], controls: ['approve_disclosure', 'decline_disclosure']
+    }
+  }
+  if (disclosure && disclosure.resultCode === 'prepared_nothing') {
+    return {
+      stage: 'prepared', eyebrow: 'FORM PLAN APPROVED', title: 'Approved — nothing was changed',
+      lines: [
+        'You approved exactly this plan. Lumi did not type into, choose in, or submit anything on the page.',
+        'This approval was used once and cannot be used again.'
+      ],
+      offerable: [], controls: []
+    }
+  }
+  if (grant?.status === 'PENDING' && !taskClosed) {
+    return {
+      stage: 'permission', eyebrow: 'PLAN FORM PREPARATION', title: 'Let Lumi plan this form?',
+      lines: [],
+      permission: {
+        site: plan.site ?? 'this site',
+        provider: RECIPIENT_LABELS[grant.planningRecipient],
+        sent: [
+          "this form's field labels, types and options",
+          'masked previews of the saved details selected below'
+        ],
+        notSent: ['Raw saved values will NOT be sent to the AI.'],
+        ...(grant.allowedDataRefs.includes('country')
+          ? { countryNotice: 'The one exception: a saved country is sent as written, because a country cannot be masked and is needed to choose the right option.' }
+          : {}),
+        savedDetails: grant.allowedDataRefs.map((kind) => ({ kind, label: DATA_KIND_LABELS[kind] })),
+        cannotAct: 'The AI cannot type into the form or submit it.'
+      },
+      offerable: [], controls: ['decline_form_planning', 'allow_form_planning']
+    }
+  }
+  if (grant?.status === 'ACTIVE' && !expired && !taskClosed && !disclosure) {
+    return {
+      stage: 'ready', eyebrow: 'FORM PLANNING ALLOWED', title: 'Planning is allowed for this form',
+      lines: [`Only ${RECIPIENT_LABELS[grant.planningRecipient]} may see the form structure and masked previews. It cannot type into the form or submit it.`],
+      offerable: [], controls: ['allow_form_planning']
+    }
+  }
+  if (disclosure && (disclosure.actionStatus === 'REJECTED')) {
+    return { stage: 'declined', eyebrow: 'FORM PLAN', title: 'You declined that plan', lines: ['Nothing was changed.'], offerable: [], controls: [] }
+  }
+  if (!taskClosed && accountReadingActive && plan.savedDetails.length > 0 && (!grant || grant.status !== 'ACTIVE')) {
+    return {
+      stage: 'offer', eyebrow: 'FORMS ON THIS SITE', title: 'Plan a form with your saved details',
+      lines: ['Choose which saved details a planner may see (masked). Nothing is sent until you allow it on the next card.'],
+      offerable: plan.savedDetails.map((item) => ({ kind: item.kind, label: DATA_KIND_LABELS[item.kind], preview: item.preview })),
+      controls: ['plan_form']
+    }
+  }
+  return FORM_PLAN_HIDDEN
+}
+
+export interface DisclosureLine {
+  savedLabel?: string
+  detail: string
+  fieldLabel: string
+}
+
+/** The manifest card's rows, in manifest order: what would go into which field. */
+export function describeDisclosureCard(card: AgentDisclosureCardView): {
+  site: string
+  formLabel?: string
+  rows: DisclosureLine[]
+  countryNotice?: string
+} {
+  return {
+    site: card.site,
+    ...(card.formLabel ? { formLabel: card.formLabel } : {}),
+    rows: card.fields.map((field): DisclosureLine => {
+      switch (field.kind) {
+        case 'saved_detail':
+          return { savedLabel: `Saved ${DATA_KIND_LABELS[field.dataRef]}`, detail: field.preview, fieldLabel: field.fieldLabel }
+        case 'option':
+          return { savedLabel: 'Option', detail: field.optionLabel, fieldLabel: field.fieldLabel }
+        case 'checkbox':
+          return { savedLabel: field.checked ? 'Checked' : 'Unchecked', detail: field.checked ? 'tick' : 'leave empty', fieldLabel: field.fieldLabel }
+      }
+    }),
+    ...(card.revealsCountry
+      ? { countryNotice: 'A saved country is shown exactly as saved, because a country cannot be masked.' }
+      : {})
   }
 }

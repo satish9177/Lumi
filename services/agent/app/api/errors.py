@@ -17,6 +17,8 @@ from app.domain.browser_profile import ProfileRefusal
 from app.domain.login_takeover import TakeoverRefusal
 from app.domain.research import ResearchRefusal
 from app.domain.authenticated import AuthenticatedRefusal
+from app.domain.form_prepare import FORM_PREPARE_STATE_CODES, FormPrepareRefusal
+from app.domain.protected_values import ProtectedValueRefusal
 from app.services.research_search import SearchFailedError
 from app.domain.errors import (
     AuthenticatedAnswerAlreadyRecordedError,
@@ -504,6 +506,34 @@ def register_error_handlers(app: FastAPI) -> None:
             status.HTTP_409_CONFLICT,
             "authenticated_answer_already_recorded",
             "This account-reading task already has a recorded answer.",
+        ),
+    )
+    # --- Milestone 8b S5 form planning and exact disclosure approval -------
+    # A refused proposal is a 422; a *state* that no longer allows the approval
+    # (the account changed, a saved value changed, the form was replaced) is a
+    # 409. Codes only -- never a label, a preview, a value or a manifest.
+    async def form_prepare_refused(_: Request, exc: Exception) -> JSONResponse:
+        assert isinstance(exc, FormPrepareRefusal)
+        stale = exc.code in FORM_PREPARE_STATE_CODES
+        return _error(
+            status.HTTP_409_CONFLICT if stale else status.HTTP_422_UNPROCESSABLE_CONTENT,
+            ErrorDetail(
+                code="form_prepare_state_changed" if stale else "form_prepare_refused",
+                message="That form preparation cannot go ahead."
+                if stale
+                else "That form preparation was refused.",
+                reason=exc.code,
+            ),
+        )
+
+    app.add_exception_handler(FormPrepareRefusal, form_prepare_refused)
+    app.add_exception_handler(
+        ProtectedValueRefusal,
+        _reasoned(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "protected_value_refused",
+            "That saved detail was refused.",
+            "code",
         ),
     )
     app.add_exception_handler(StaleTaskRevisionError, _stale_task_revision)

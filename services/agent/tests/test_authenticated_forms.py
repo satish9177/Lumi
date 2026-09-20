@@ -397,7 +397,9 @@ async def test_the_migration_adds_only_the_two_columns_and_no_s5_or_s6_state(eng
     assert {"form_epoch", "element_inventory"} <= columns
     for absent in ("frozen_at", "manifest_digest", "written_value_hash", "protected_value"):
         assert absent not in columns
-    for absent in ("protected_values", "form_drafts", "disclosure_manifests"):
+    # `protected_values` is Milestone 8b S5's table (migration 0010); S4's own
+    # migration added none of it, and S5 still adds no draft or manifest table.
+    for absent in ("form_drafts", "disclosure_manifests", "form_manifest_approvals"):
         assert absent not in tables
 
 

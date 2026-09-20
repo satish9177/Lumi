@@ -55,6 +55,12 @@ class TaskEventType(StrEnum):
     TASK_AUTHENTICATED_ANSWER_RECORDED = "task.authenticated_answer_recorded"
     TASK_AUTHENTICATED_PAUSED = "task.authenticated_paused"
     TASK_AUTHENTICATED_RESUMED = "task.authenticated_resumed"
+    #: Milestone 8b S5 form planning. Ids, digests and counts only -- never a
+    #: label, a preview, a saved value, an origin or a manifest.
+    TASK_FORM_PREPARE_SCOPE_REQUESTED = "task.form_prepare_scope_requested"
+    TASK_FORM_PREPARE_SCOPE_GRANTED = "task.form_prepare_scope_granted"
+    TASK_FORM_PREPARE_SCOPE_REVOKED = "task.form_prepare_scope_revoked"
+    TASK_FORM_PLANNING_CONTEXT_BUILT = "task.form_planning_context_built"
     ACTION_PROPOSED = "action.proposed"
     ACTION_APPROVAL_REQUESTED = "action.approval_requested"
     ACTION_APPROVED = "action.approved"

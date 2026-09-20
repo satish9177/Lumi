@@ -5,6 +5,7 @@ import { extractFacts, extractUntrusted, extractUtterance } from './context-buil
 import { scriptedPageAnswer } from '../agent/page-answer'
 import { scriptedAuthenticatedAnswer } from '../agent/authenticated-answer'
 import { scriptedAuthenticatedDecision } from '../agent/authenticated-planner'
+import { scriptedFormPlanDecision } from '../agent/form-planner'
 import { scriptedResearchAnswer } from '../agent/research-answer'
 import { scriptedResearchDecision } from '../agent/research-planner'
 import { AUTHENTICATED_OPERATIONS, RESEARCH_OPERATIONS, type AgentAuthenticatedOperation, type AgentResearchOperation } from '../../shared/agent-contracts'
@@ -41,6 +42,7 @@ export class ScriptedTextProvider implements ModelProvider {
     if (request.taskClass === 'research_answer') return this.researchAnswer(request)
     if (request.taskClass === 'authenticated_planning') return this.authenticatedPlan(request)
     if (request.taskClass === 'authenticated_answer') return this.authenticatedAnswer(request)
+    if (request.taskClass === 'form_planning') return this.formPlanning(request)
     switch (this.behaviour) {
       case 'timeout':
         throw new ModelProviderError('timeout')
@@ -160,6 +162,39 @@ export class ScriptedTextProvider implements ModelProvider {
       case 'tab':
         return this.reply(JSON.stringify({ ...base, tab_action: step.action, ...(step.tab ? { tab: step.tab } : {}) }))
     }
+  }
+
+  /**
+   * A deterministic form planner. `malformed` and `hostile` try to reach past the
+   * contract (a value, an origin, a provider, a data ref that was never offered),
+   * so the tests can prove the parser and the runtime refuse them.
+   */
+  private formPlanning(request: ModelRequest): ModelResponse {
+    const failure = this.behaviourFailure()
+    if (failure) return failure
+    if (this.behaviour === 'malformed') {
+      return this.reply(JSON.stringify({
+        action: 'propose', observation: 'o1', form: 'f1', origin: 'https://exfil.invalid',
+        entries: [{ element: 'e1', data: 'email', value: 'attacker@example.test' }]
+      }))
+    }
+    if (this.behaviour === 'hostile') {
+      return this.reply(JSON.stringify({
+        action: 'propose', observation: 'o1', form: 'f1',
+        entries: [{ element: 'e1', data: 'portfolio_url' }, { element: 'e2', data: 'password' }]
+      }))
+    }
+    const decision = scriptedFormPlanDecision(extractUntrusted(request.input), extractFacts(request.input))
+    if (decision.kind === 'stop') return this.reply(JSON.stringify({ action: 'stop', reason: decision.reason }))
+    const { proposal } = decision
+    return this.reply(JSON.stringify({
+      action: 'propose', observation: proposal.observation, form: proposal.form_ref, reason: decision.reason,
+      entries: proposal.entries.map((entry) => 'data_ref' in entry
+        ? { element: entry.element_ref, data: entry.data_ref }
+        : 'option_ref' in entry
+          ? { element: entry.element_ref, option: entry.option_ref }
+          : { element: entry.element_ref, checked: entry.checked })
+    }))
   }
 
   private authenticatedAnswer(request: ModelRequest): ModelResponse {

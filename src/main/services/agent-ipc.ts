@@ -145,6 +145,15 @@ export function registerAgentIpc({
   handle(AGENT_IPC_CHANNELS.declineAuthenticatedScope, (grantId, revision) => controller.declineAuthenticatedScope(grantId, revision))
   handle(AGENT_IPC_CHANNELS.runAuthenticated, () => controller.runAuthenticated())
   handle(AGENT_IPC_CHANNELS.stopAuthenticated, () => controller.stopAuthenticated())
+  // Milestone 8b S5: form planning and the exact disclosure approval. Every
+  // handler takes closed ids and revisions only -- no manifest, value, origin,
+  // field or provider -- and each checks the sender like every channel above.
+  handle(AGENT_IPC_CHANNELS.prepareFormPlanning, (refs) => controller.prepareFormPlanning(refs))
+  handle(AGENT_IPC_CHANNELS.grantFormPlanning, (grantId, revision) => controller.grantFormPlanning(grantId, revision))
+  handle(AGENT_IPC_CHANNELS.declineFormPlanning, (grantId, revision) => controller.declineFormPlanning(grantId, revision))
+  handle(AGENT_IPC_CHANNELS.runFormPlanning, () => controller.runFormPlanning())
+  handle(AGENT_IPC_CHANNELS.approveFieldDisclosure, (actionId, revision) => controller.approveFieldDisclosure(actionId, revision))
+  handle(AGENT_IPC_CHANNELS.rejectFieldDisclosure, (actionId, revision) => controller.rejectFieldDisclosure(actionId, revision))
   handle(AGENT_IPC_CHANNELS.listPreferences, async (): Promise<AgentResult<AgentPreferenceView[]>> => {
     if (!memory) return { ok: true, value: [] }
     try {

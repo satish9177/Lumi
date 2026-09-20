@@ -4,10 +4,13 @@ import { dirname, join } from 'node:path'
 import {
   BOOKING_DAYS,
   CLINIC_INFO_TOPICS,
+  PROTECTED_DATA_KINDS,
   UNRESOLVED_ACTION_STATUSES,
   type AgentActionView,
   type AgentAuthenticatedOptions,
   type AgentAuthenticatedView,
+  type AgentFormPlanView,
+  type AgentProtectedDataKind,
   type AgentBookingCriteria,
   type AgentClinicInfoQuery,
   type AgentDisclosureRecipient,
@@ -29,6 +32,7 @@ import {
 import type { AnswerOutcome, PageObservationDetail } from '../agent/page-answer'
 import type { ResearchAnswerOutcome } from '../agent/research-answer'
 import type { AuthenticatedAnswerOutcome } from '../agent/authenticated-answer'
+import type { FormPlanOutcome, FormPlanningContext } from '../agent/form-planner'
 import type {
   AuthenticatedDecision, AuthenticatedPlanOutcome, AuthenticatedStepChoice
 } from '../agent/authenticated-planner'
@@ -48,6 +52,8 @@ import {
   parseEventPage,
   parseAuthenticated,
   parseAuthenticatedStep,
+  parseFormPlan,
+  parsePlanningContext,
   parseResearch,
   parseResearchStep,
   parseSearch,
@@ -358,6 +364,14 @@ type AgentResearchViewInput = ResearchDetail['view']
  * neither has a failover path.
  */
 export interface AuthenticatedSupport {
+  /**
+   * Milestone 8b S5. One proposal per call, to the form-planning grant's one recipient.
+   * It cannot act: its output is a `prepare_form` proposal the runtime validates.
+   */
+  formPlanner?: {
+    recipients(): AgentDisclosureRecipient[]
+    plan(input: { context: FormPlanningContext; taskId: string; recipient: AgentDisclosureRecipient }): Promise<FormPlanOutcome>
+  }
   planner?: {
     recipients(): AgentDisclosureRecipient[]
     next(input: {
@@ -499,6 +513,13 @@ export class AgentTaskController {
       if (loaded.generation !== generation) fail('runtime_restarted', 'The agent runtime restarted while loading. Showing the latest saved state.')
       authenticated = loaded.detail.view
     }
+    let formPlan: AgentFormPlanView | undefined
+    if (task.kind === 'authenticated_read') {
+      const loaded = await this.call('GET', `/tasks/${taskId}/authenticated/form`, undefined, TIMEOUTS.read)
+      if (loaded.generation !== generation) fail('runtime_restarted', 'The agent runtime restarted while loading. Showing the latest saved state.')
+      formPlan = parseFormPlan(loaded.body)
+      if (formPlan.taskId !== taskId) throw new WireError('form_plan.task_id')
+    }
     const events: AgentEventView[] = []
     let cursor = afterSequence
     for (let page = 0; ; page += 1) {
@@ -530,7 +551,8 @@ export class AgentTaskController {
       events,
       ...(inspection ? { inspection } : {}),
       ...(research ? { research } : {}),
-      ...(authenticated ? { authenticated } : {})
+      ...(authenticated ? { authenticated } : {}),
+      ...(formPlan ? { formPlan } : {})
     }
   }
 
@@ -1425,6 +1447,190 @@ export class AgentTaskController {
     })
   }
 
+  // ---- form planning and exact disclosure approval (Milestone 8b S5) ----------------
+  //
+  // **None of this changes a website.** Main brokers four trusted steps and never
+  // decides any of them:
+  //
+  //  * `prepareFormPlanning` -- ask the runtime to build the planning scope and show
+  //    its card. Carries closed data-ref ids; sends nothing to any provider.
+  //  * `grantFormPlanning` / `declineFormPlanning` -- the trusted click. The only way
+  //    a provider may ever be shown a form's structure or a masked preview.
+  //  * `runFormPlanning` -- ONE planner call to the grant's one recipient, then the
+  //    proposal goes to the runtime, which validates it against its own persisted
+  //    observation. The provider is read from the grant, never chosen here, and a
+  //    failure stops the run: there is no second provider.
+  //  * `approveFieldDisclosure` / `rejectFieldDisclosure` -- the trusted click on the
+  //    exact manifest card: an action id and the revision shown. No manifest, value,
+  //    origin, field or provider ever crosses this boundary from the renderer.
+  //
+  // Voice and typed sentences reach none of them: they are not on the voice backend.
+
+  private async loadFormPlan(taskId: string): Promise<AgentFormPlanView> {
+    const reply = await this.call('GET', `/tasks/${taskId}/authenticated/form`, undefined, TIMEOUTS.read)
+    const plan = parseFormPlan(reply.body)
+    if (plan.taskId !== taskId) throw new WireError('form_plan.task_id')
+    return plan
+  }
+
+  /** Show the trusted FORM PLANNING card. Nothing is sent to any provider. */
+  prepareFormPlanning(refsValue: unknown): Promise<AgentResult<AgentTaskSnapshot>> {
+    let refs: AgentProtectedDataKind[]
+    try {
+      refs = parseProtectedDataRefs(refsValue)
+    } catch (error) {
+      return Promise.resolve({ ok: false, error: toAgentError(error) })
+    }
+    return this.exclusive('authenticated', async () => {
+      const taskId = await this.activeTaskId()
+      const { detail } = await this.loadAuthenticated(taskId)
+      if (detail.task.kind !== 'authenticated_read') fail('invalid_request', 'That step does not apply to this kind of task.')
+      const grant = detail.view.grant
+      if (!grant || grant.status !== 'ACTIVE') {
+        fail('authenticated_not_granted', 'Allow account reading first. Nothing has been opened or sent.')
+      }
+      const support = this.requireAuthenticated()
+      if (!support.formPlanner || !support.formPlanner.recipients().includes(grant.scope.recipient)) {
+        fail('model_unavailable', 'The AI provider you approved is not available for planning. Lumi stopped and sent nothing.')
+      }
+      const existing = await this.loadFormPlan(taskId)
+      if (existing.formCount === 0) {
+        // No form has been read yet: read the page once, under the scope the user already allowed.
+        const outcome = await this.submitAuthenticatedStep(taskId, { operation: 'observe', tab: 't1' }, detail.view.usage.plannerCalls)
+        if (outcome.pauseReason) return await this.snapshot(taskId, 0)
+      }
+      await this.call('POST', `/tasks/${taskId}/authenticated/form/prepare-scope`, { allowed_data_refs: refs }, TIMEOUTS.write)
+      return await this.snapshot(taskId, 0)
+    })
+  }
+
+  grantFormPlanning(grantId: unknown, expectedRevision: unknown): Promise<AgentResult<AgentTaskSnapshot>> {
+    return this.formGrantMutation(grantId, expectedRevision, 'grant')
+  }
+
+  declineFormPlanning(grantId: unknown, expectedRevision: unknown): Promise<AgentResult<AgentTaskSnapshot>> {
+    return this.formGrantMutation(grantId, expectedRevision, 'decline')
+  }
+
+  private async formGrantMutation(
+    grantIdValue: unknown, revisionValue: unknown, kind: 'grant' | 'decline'
+  ): Promise<AgentResult<AgentTaskSnapshot>> {
+    let grantId: string
+    let expectedRevision: number
+    try {
+      grantId = parseActionId(grantIdValue)
+      expectedRevision = parseExpectedRevision(revisionValue)
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    return this.exclusive('authenticated', async () => {
+      const taskId = await this.activeTaskId()
+      const plan = await this.loadFormPlan(taskId)
+      const grant = plan.grant
+      if (!grant || grant.grantId !== grantId) fail('not_found', 'That form-planning permission does not belong to the current task.')
+      if (grant.revision !== expectedRevision) {
+        throw new AgentRequestError({
+          code: 'stale_revision',
+          message: 'The form-planning permission changed since you reviewed it. Review the current card.',
+          currentRevision: grant.revision
+        })
+      }
+      const body = kind === 'grant'
+        ? { grant_id: grantId, expected_revision: expectedRevision }
+        : { grant_id: grantId, expected_revision: expectedRevision, reason: 'user_declined' }
+      const reply = await this.call('POST', `/tasks/${taskId}/authenticated/form/${kind === 'grant' ? 'grant' : 'revoke'}`, body, TIMEOUTS.write)
+      if (parseFormPlan(reply.body).taskId !== taskId) throw new WireError(`form_plan.${kind}`)
+      return await this.snapshot(taskId, 0)
+    })
+  }
+
+  /**
+   * One planner call, one proposal, one validation by the runtime.
+   *
+   * The recipient is the form-planning grant's. If that provider is not configured
+   * any more, fails, or answers outside the contract, this stops with
+   * `model_unavailable`: the form structure and the masked previews are not sent
+   * to anybody else, and nothing is retried.
+   */
+  async runFormPlanning(): Promise<AgentResult<AgentTaskSnapshot>> {
+    let support: AuthenticatedSupport
+    try {
+      support = this.requireAuthenticated()
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    return this.exclusive('authenticated', async () => {
+      const taskId = await this.activeTaskId()
+      const plan = await this.loadFormPlan(taskId)
+      const grant = plan.grant
+      if (!grant || grant.status !== 'ACTIVE') {
+        fail('authenticated_not_granted', 'Allow form planning on the card first. Nothing was sent to an AI.')
+      }
+      if (grant.expiresAt && Date.parse(grant.expiresAt) <= Date.now()) {
+        fail('authenticated_not_granted', 'That form-planning permission has expired. Nothing was sent to an AI.')
+      }
+      const recipient = grant.planningRecipient
+      if (!support.formPlanner || !support.formPlanner.recipients().includes(recipient)) {
+        fail('model_unavailable', 'The AI provider you approved is not available for planning. Lumi stopped and sent nothing to another provider.')
+      }
+      const reply = await this.call('POST', `/tasks/${taskId}/authenticated/form/planning-context`, {}, TIMEOUTS.write)
+      const context = parsePlanningContext(reply.body)
+      // The runtime built this for the grant's recipient; refuse anything else.
+      if (context.recipient !== recipient || context.grantId !== grant.grantId) throw new WireError('planning_context.recipient')
+      let decision: FormPlanOutcome['decision']
+      try {
+        decision = (await support.formPlanner.plan({ context, taskId, recipient })).decision
+      } catch {
+        fail('model_unavailable', 'The AI provider you approved could not plan the form. Lumi stopped and did not send the form to another provider.')
+      }
+      if (decision.kind === 'stop') return await this.snapshot(taskId, 0)
+      await this.call(
+        'POST',
+        `/tasks/${taskId}/authenticated/form/propose`,
+        { proposal: decision.proposal, provider: recipient },
+        TIMEOUTS.write
+      )
+      return await this.snapshot(taskId, 0)
+    })
+  }
+
+  approveFieldDisclosure(actionId: unknown, expectedRevision: unknown): Promise<AgentResult<AgentTaskSnapshot>> {
+    return this.disclosureDecision(actionId, expectedRevision, 'approve')
+  }
+
+  rejectFieldDisclosure(actionId: unknown, expectedRevision: unknown): Promise<AgentResult<AgentTaskSnapshot>> {
+    return this.disclosureDecision(actionId, expectedRevision, 'reject')
+  }
+
+  private async disclosureDecision(
+    actionIdValue: unknown, revisionValue: unknown, decision: 'approve' | 'reject'
+  ): Promise<AgentResult<AgentTaskSnapshot>> {
+    let actionId: string
+    let expectedRevision: number
+    try {
+      actionId = parseActionId(actionIdValue)
+      expectedRevision = parseExpectedRevision(revisionValue)
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    return this.exclusive('authenticated', async () => {
+      const taskId = await this.activeTaskId()
+      const card = (await this.loadFormPlan(taskId)).disclosure
+      if (!card || card.actionId !== actionId) fail('not_found', 'That form plan does not belong to the current task.')
+      if (card.revision !== expectedRevision) {
+        throw new AgentRequestError({
+          code: 'stale_revision',
+          message: 'The form plan changed since you reviewed it. Review the current plan.',
+          currentRevision: card.revision
+        })
+      }
+      // An id and a revision. The manifest, the values, the origin and the fields
+      // are all resolved by the runtime from what it stored.
+      await this.call('POST', `/actions/${actionId}/field-disclosure/${decision}`, { expected_revision: expectedRevision }, TIMEOUTS.write)
+      return await this.snapshot(taskId, 0)
+    })
+  }
+
   /** Stop now: withdraw the scope, release the browser, keep the (redacted) evidence. */
   async stopAuthenticated(): Promise<AgentResult<AgentTaskSnapshot>> {
     return this.exclusive('authenticated', async () => {
@@ -1659,4 +1865,20 @@ export function toAgentError(error: unknown): AgentError {
   }
   // Never forward an arbitrary error message across the bridge.
   return { code: 'request_failed', message: 'Lumi could not complete that request.' }
+}
+
+
+/** The closed set of saved-detail refs. Anything else -- a name, a value, a path -- is refused. */
+export function parseProtectedDataRefs(value: unknown): AgentProtectedDataKind[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > PROTECTED_DATA_KINDS.length) {
+    fail('invalid_request', 'Choose which saved details Lumi may plan with.')
+  }
+  const refs = value as unknown[]
+  for (const ref of refs) {
+    if (typeof ref !== 'string' || !(PROTECTED_DATA_KINDS as readonly string[]).includes(ref)) {
+      fail('invalid_request', 'Lumi does not know that saved detail.')
+    }
+  }
+  if (new Set(refs).size !== refs.length) fail('invalid_request', 'A saved detail can only be chosen once.')
+  return refs as AgentProtectedDataKind[]
 }

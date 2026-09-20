@@ -26,7 +26,12 @@ export const MODEL_TASK_CLASSES = [
    * router asked to run them without that rule refuses before any provider is called.
    */
   'authenticated_planning',
-  'authenticated_answer'
+  'authenticated_answer',
+  /**
+   * Milestone 8b S5: propose which saved detail belongs in which form field, from the form
+   * structure and masked previews only. Private, one recipient, no failover, no image.
+   */
+  'form_planning'
 ] as const
 export type ModelTaskClass = typeof MODEL_TASK_CLASSES[number]
 

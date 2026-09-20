@@ -8,7 +8,7 @@ import {
   type ToolProposal
 } from '../shared/contracts'
 import type { GuardedTool } from '../shared/intent'
-import { AGENT_IPC_CHANNELS, type AgentApi, type AgentBookingCriteria, type AgentRuntimeView } from '../shared/agent-contracts'
+import { AGENT_IPC_CHANNELS, type AgentApi, type AgentBookingCriteria, type AgentProtectedDataKind, type AgentRuntimeView } from '../shared/agent-contracts'
 import type { VoiceTaskCommand } from '../shared/voice-task-contracts'
 import type { PreferenceKey } from '../shared/model-contracts'
 import { VOICE_RELAY_CHANNELS, type VoiceRelayApi, type VoiceRelayServerEvent } from '../shared/voice-relay-contracts'
@@ -86,6 +86,13 @@ const agentApi: AgentApi = {
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineAuthenticatedScope, grantId, expectedRevision),
   runAuthenticated: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.runAuthenticated),
   stopAuthenticated: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.stopAuthenticated),
+  // Milestone 8b S5: closed ids and revisions only. No manifest, value, origin, field or provider.
+  prepareFormPlanning: (allowedDataRefs: AgentProtectedDataKind[]) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.prepareFormPlanning, allowedDataRefs),
+  grantFormPlanning: (grantId: string, expectedRevision: number) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.grantFormPlanning, grantId, expectedRevision),
+  declineFormPlanning: (grantId: string, expectedRevision: number) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineFormPlanning, grantId, expectedRevision),
+  runFormPlanning: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.runFormPlanning),
+  approveFieldDisclosure: (actionId: string, expectedRevision: number) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.approveFieldDisclosure, actionId, expectedRevision),
+  rejectFieldDisclosure: (actionId: string, expectedRevision: number) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.rejectFieldDisclosure, actionId, expectedRevision),
   listPreferences: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.listPreferences),
   forgetPreference: (key: PreferenceKey) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.forgetPreference, key),
   getDiagnostics: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getDiagnostics),

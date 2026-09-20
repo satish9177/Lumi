@@ -14,6 +14,7 @@ from app.db.migrations import verify_schema_is_current
 from app.browser.managed import ManagedBrowserWorker
 from app.services.actions import ActionService
 from app.services.authenticated_read import AuthenticatedReadService
+from app.services.form_prepare import FormPrepareService
 from app.services.booking_preparation import BookingPreparationService
 from app.services.booking_tasks import BookingTaskService
 from app.services.clinic_info import ClinicInfoService
@@ -199,6 +200,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     grant_ttl_seconds=resolved.authenticated_grant_ttl_seconds,
                     step_ttl_seconds=resolved.authenticated_step_ttl_seconds,
                     max_tabs=resolved.authenticated_max_tabs,
+                )
+                # Milestone 8b S5. Needs no worker and never opens a browser: it
+                # builds and approves an exact disclosure manifest and stops.
+                app.state.form_prepare_service = FormPrepareService(
+                    engine,
+                    actions=action_service,
+                    grant_ttl_seconds=resolved.authenticated_grant_ttl_seconds,
                 )
                 # A research session belongs to the process that created it.
                 # Sessions a dead runtime left open describe browser contexts

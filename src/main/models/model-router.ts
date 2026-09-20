@@ -96,6 +96,11 @@ export const DEFAULT_ROUTES: RoutingTable = {
   authenticated_answer: {
     providers: [{ provider: 'gemini', model: 'gemini-2.5-flash' }, { provider: 'openai' }, { provider: 'deepseek' }],
     maxInputTokens: 12_000, maxOutputTokens: 900, timeoutMs: 45_000
+  },
+  // Milestone 8b S5. Same rules as the two above: candidates, never a failover chain.
+  form_planning: {
+    providers: [{ provider: 'gemini', model: 'gemini-2.5-flash' }, { provider: 'openai' }, { provider: 'deepseek' }],
+    maxInputTokens: 8_000, maxOutputTokens: 900, timeoutMs: 30_000
   }
 }
 
@@ -109,7 +114,7 @@ export const DEFAULT_ROUTES: RoutingTable = {
  *   another model of the same one) with the same private page.
  * - **No image.** An authenticated screenshot never reaches any provider.
  */
-export const PRIVATE_TASK_CLASSES: readonly ModelTaskClass[] = ['authenticated_planning', 'authenticated_answer']
+export const PRIVATE_TASK_CLASSES: readonly ModelTaskClass[] = ['authenticated_planning', 'authenticated_answer', 'form_planning']
 
 /** A private request was made without the rule that names its one recipient. */
 export class PrivateRouteError extends Error {

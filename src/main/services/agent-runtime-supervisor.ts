@@ -128,6 +128,18 @@ const ALLOWED_ROUTES: ReadonlyArray<{ method: RuntimeMethod; pattern: RegExp }> 
     method: 'POST',
     pattern: new RegExp(`^/tasks/${UUID_PART}/authenticated/(prepare|grant|revoke|steps|answer)$`)
   },
+  // Milestone 8b S5: form planning and the exact disclosure approval. Main calls
+  // exactly these. `PUT /protected-values/{kind}` is deliberately absent: no route
+  // main can reach saves, reads or echoes a saved value.
+  { method: 'GET', pattern: new RegExp(`^/tasks/${UUID_PART}/authenticated/form$`) },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/tasks/${UUID_PART}/authenticated/form/(prepare-scope|grant|revoke|planning-context|propose)$`)
+  },
+  {
+    method: 'POST',
+    pattern: new RegExp(`^/actions/${UUID_PART}/field-disclosure/(approve|reject)$`)
+  },
   { method: 'GET', pattern: new RegExp(`^/actions/${UUID_PART}$`) },
   {
     method: 'POST',

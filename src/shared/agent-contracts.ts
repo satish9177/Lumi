@@ -62,6 +62,8 @@ export const TASK_EVENT_TYPES = [
   'task.research_scope_requested', 'task.research_scope_granted', 'task.research_scope_revoked', 'task.research_answer_recorded',
   'task.authenticated_scope_requested', 'task.authenticated_scope_granted', 'task.authenticated_scope_revoked',
   'task.authenticated_answer_recorded', 'task.authenticated_paused', 'task.authenticated_resumed',
+  'task.form_prepare_scope_requested', 'task.form_prepare_scope_granted', 'task.form_prepare_scope_revoked',
+  'task.form_planning_context_built',
   'action.proposed', 'action.approval_requested',
   'action.approved', 'action.authorized', 'action.rejected', 'action.execution_started', 'action.succeeded',
   'action.failed', 'action.outcome_unknown', 'action.reconciliation_started', 'action.reconciled'
@@ -244,6 +246,8 @@ export interface AgentEventView {
   taskRevision: number
   createdAt: string
   actionId?: string
+  /** The tool an action event belongs to (a closed identifier), so the timeline can word it truthfully. */
+  toolName?: string
   actionStatus?: AgentActionStatus
   actionRevision?: number
   attemptId?: string
@@ -544,6 +548,8 @@ export interface AgentTaskSnapshot {
   research?: AgentResearchView
   /** `authenticated_read` tasks: the scope, the redacted observations and the answer. */
   authenticated?: AgentAuthenticatedView
+  /** `authenticated_read` tasks: the form-planning grant and the exact disclosure card (Milestone 8b S5). */
+  formPlan?: AgentFormPlanView
   /** Events strictly after the requested sequence, ordered, without gaps. */
   events: AgentEventView[]
 }
@@ -704,6 +710,77 @@ export interface AgentAuthenticatedOptions {
   recipients: AgentDisclosureRecipient[]
 }
 
+// ---- Milestone 8b S5: form planning and exact disclosure approval -----------------
+//
+// **S5 changes no website.** Lumi builds an exact, reviewable proposal of which saved
+// detail would go into which field, the user approves exactly that, and it stops
+// with `prepared_nothing`. There is nothing here that types, chooses, checks,
+// clicks or submits, and no value a renderer could send.
+//
+// What these views never carry: a raw saved value, a value digest, an element
+// identity hash, a manifest digest, a selector, an account fingerprint, a revoke
+// epoch or an origin URL. A masked preview is still private data.
+
+/** The closed set of saved details. There is no ninth kind. */
+export const PROTECTED_DATA_KINDS = [
+  'legal_name', 'preferred_name', 'email', 'phone', 'city', 'country', 'linkedin_url', 'portfolio_url'
+] as const
+export type AgentProtectedDataKind = typeof PROTECTED_DATA_KINDS[number]
+
+/** What a terminal S5 approval records: the approval was spent and nothing was prepared. */
+export const PREPARED_NOTHING = 'prepared_nothing'
+
+export interface AgentSavedDetailView {
+  dataRef: AgentProtectedDataKind
+  kind: AgentProtectedDataKind
+  /** Deterministically masked by the runtime. The renderer never masks anything itself. */
+  preview: string
+  updatedAt: string
+}
+
+export interface AgentFormGrantView {
+  grantId: string
+  status: AgentGrantStatus
+  revision: number
+  expiresAt?: string
+  /** The saved details a planner may see masked previews of. Never widened by a model. */
+  allowedDataRefs: AgentProtectedDataKind[]
+  /** Exactly one provider, no failover. */
+  planningRecipient: AgentDisclosureRecipient
+  maxFields: number
+}
+
+export type AgentDisclosureFieldView =
+  | { kind: 'saved_detail'; fieldLabel: string; controlType: string; dataRef: AgentProtectedDataKind; preview: string }
+  | { kind: 'option'; fieldLabel: string; controlType: string; optionLabel: string }
+  | { kind: 'checkbox'; fieldLabel: string; controlType: string; checked: boolean }
+
+export interface AgentDisclosureCardView {
+  actionId: string
+  revision: number
+  actionStatus: AgentActionStatus
+  approvalStatus?: AgentApprovalStatus
+  approvalExpiresAt?: string
+  /** The site's display host, never a URL. */
+  site: string
+  formLabel?: string
+  fields: AgentDisclosureFieldView[]
+  /** True when a saved country is shown as-is (a country cannot be masked). */
+  revealsCountry: boolean
+  /** `prepared_nothing` once the approval was spent. */
+  resultCode?: typeof PREPARED_NOTHING
+}
+
+export interface AgentFormPlanView {
+  taskId: string
+  site?: string
+  savedDetails: AgentSavedDetailView[]
+  grant?: AgentFormGrantView
+  disclosure?: AgentDisclosureCardView
+  formCount: number
+  candidateElementCount: number
+}
+
 /**
  * Milestone 8a S2: manual login and human takeover.
  *
@@ -820,6 +897,9 @@ export const AGENT_ERROR_CODES = [
   'authenticated_refused',
   'authenticated_budget_exhausted',
   'authenticated_in_flight',
+  // Milestone 8b S5: form planning and the exact disclosure approval.
+  'form_plan_refused',
+  'form_plan_stale',
   // The one approved AI provider could not be reached. Lumi stopped; it never tries another.
   'model_unavailable',
   // Milestone 8a S1/S2: a browser-profile or login-takeover operation was
@@ -936,6 +1016,25 @@ export interface AgentApi {
   runAuthenticated: () => Promise<AgentResult<AgentTaskSnapshot>>
   /** Stop now: withdraw the scope and release the browser. */
   stopAuthenticated: () => Promise<AgentResult<AgentTaskSnapshot>>
+  /**
+   * Milestone 8b S5. Show the trusted FORM PLANNING card: which saved details a
+   * planner may see masked previews of. Carries closed data-ref ids only. Sends
+   * nothing to any provider and opens nothing.
+   */
+  prepareFormPlanning: (allowedDataRefs: AgentProtectedDataKind[]) => Promise<AgentResult<AgentTaskSnapshot>>
+  /** The trusted "Allow planning" click, by grant id and the revision shown. */
+  grantFormPlanning: (grantId: string, expectedRevision: number) => Promise<AgentResult<AgentTaskSnapshot>>
+  /** Decline the planning card. Nothing was sent. */
+  declineFormPlanning: (grantId: string, expectedRevision: number) => Promise<AgentResult<AgentTaskSnapshot>>
+  /** Ask the one named planner for a `prepare_form` proposal and show its exact manifest card. */
+  runFormPlanning: () => Promise<AgentResult<AgentTaskSnapshot>>
+  /**
+   * The trusted click on the manifest card: approve exactly this disclosure, by
+   * action id and the revision shown. Carries no manifest, value, origin, field or
+   * provider -- the runtime resolves all of it from persisted state. It changes no website.
+   */
+  approveFieldDisclosure: (actionId: string, expectedRevision: number) => Promise<AgentResult<AgentTaskSnapshot>>
+  rejectFieldDisclosure: (actionId: string, expectedRevision: number) => Promise<AgentResult<AgentTaskSnapshot>>
   listPreferences: () => Promise<AgentResult<AgentPreferenceView[]>>
   forgetPreference: (key: PreferenceKey) => Promise<AgentResult<AgentPreferenceView[]>>
   /** Redacted model/controller diagnostics. Empty in packaged builds unless enabled. */
@@ -1012,6 +1111,12 @@ export const AGENT_IPC_CHANNELS = {
   declineAuthenticatedScope: 'lifelens:agent:decline-authenticated-scope',
   runAuthenticated: 'lifelens:agent:run-authenticated',
   stopAuthenticated: 'lifelens:agent:stop-authenticated',
+  prepareFormPlanning: 'lifelens:agent:prepare-form-planning',
+  grantFormPlanning: 'lifelens:agent:grant-form-planning',
+  declineFormPlanning: 'lifelens:agent:decline-form-planning',
+  runFormPlanning: 'lifelens:agent:run-form-planning',
+  approveFieldDisclosure: 'lifelens:agent:approve-field-disclosure',
+  rejectFieldDisclosure: 'lifelens:agent:reject-field-disclosure',
   listPreferences: 'lifelens:agent:list-preferences',
   forgetPreference: 'lifelens:agent:forget-preference',
   getDiagnostics: 'lifelens:agent:get-diagnostics',

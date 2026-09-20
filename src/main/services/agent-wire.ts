@@ -1,3 +1,4 @@
+import type { FormPlanningContext } from '../agent/form-planner'
 import {
   ACTION_STATUSES,
   APPROVAL_STATUSES,
@@ -11,6 +12,7 @@ import {
   DISCLOSURE_RECIPIENTS,
   DISPATCH_STATUSES,
   GRANT_STATUSES,
+  PROTECTED_DATA_KINDS,
   LOOKUP_STATUSES,
   PAGE_ANSWER_STATUSES,
   RESEARCH_ANSWER_STATUSES,
@@ -38,8 +40,14 @@ import {
   type AgentChangedFact,
   type AgentClinicInfoQuery,
   type AgentDoctorProfileView,
+  type AgentDisclosureCardView,
+  type AgentDisclosureFieldView,
   type AgentError,
   type AgentEventView,
+  type AgentFormGrantView,
+  type AgentFormPlanView,
+  type AgentProtectedDataKind,
+  type AgentSavedDetailView,
   type AgentFoundBookingView,
   type AgentInspectionAttemptView,
   type AgentInspectionProposalView,
@@ -552,6 +560,8 @@ export function parseEvent(value: unknown, taskId: string): AgentEventView {
   }
   const actionId = optional(() => uuid(payload.action_id, 'payload.action_id'))
   if (actionId) view.actionId = actionId
+  const toolName = optional(() => text(payload.tool_name, 'payload.tool_name', CODE, 64))
+  if (toolName) view.toolName = toolName
   const actionStatus = optional(() => member(ACTION_STATUSES, payload.action_status, 'payload.action_status'))
   if (actionStatus) view.actionStatus = actionStatus
   const actionRevision = optional(() => integer(payload.action_revision, 'payload.action_revision', 1))
@@ -1401,6 +1411,26 @@ const AUTHENTICATED_PROFILE_MESSAGES: Record<string, string> = {
   profile_in_use: 'This profile is in use by another Lumi window. Nothing was opened.'
 }
 
+/** What each deterministic form-planning refusal tells the user. None of them changed a website. */
+const FORM_PLAN_MESSAGES: Record<string, string> = {
+  protected_value_changed: 'A saved detail changed after this plan was made, so it cannot be approved. Nothing was changed; plan the form again.',
+  account_changed: 'The account signed in through this profile changed. Nothing was changed; sign in again and start over.',
+  stale_observation: 'The page was read again after this plan was made. Nothing was changed; plan the form again.',
+  stale_document_epoch: 'The page changed after this plan was made. Nothing was changed; plan the form again.',
+  stale_form_epoch: 'The form changed after this plan was made. Nothing was changed; plan the form again.',
+  origin_changed: 'The page is no longer on the site this plan was made for. Nothing was changed.',
+  grant_not_usable: 'The form-planning permission is no longer usable. Nothing was sent or changed.',
+  no_form_observed: 'Lumi has not read a form on this account yet. Nothing was sent.',
+  data_ref_unavailable: 'One of the chosen saved details is not saved yet. Nothing was sent.',
+  data_ref_not_allowed: 'That plan used a saved detail you did not allow for planning, so it was refused.',
+  recipient_mismatch: 'That plan came from a provider that was not approved for planning, so it was refused.',
+  too_many_entries: 'That plan listed more fields than the limit, so it was refused.',
+  no_entries: 'That plan listed no fields, so nothing was proposed.',
+  unsupported_proposal: 'That plan contained something Lumi does not accept, so it was refused.',
+  use_disclosure_route: 'That approval can only be given from the disclosure card.',
+  not_a_disclosure_approval: 'That is not a form-disclosure approval.'
+}
+
 const ERROR_MAP: Record<string, { code: AgentError['code']; message: string }> = {
   task_not_found: { code: 'not_found', message: 'That task no longer exists.' },
   action_not_found: { code: 'not_found', message: 'That booking no longer exists.' },
@@ -1447,6 +1477,9 @@ const ERROR_MAP: Record<string, { code: AgentError['code']; message: string }> =
   authenticated_budget_exhausted: { code: 'authenticated_budget_exhausted', message: 'This account-reading task reached one of its limits and stopped.' },
   authenticated_step_in_flight: { code: 'authenticated_in_flight', message: 'Lumi is still finishing the previous account-reading step.' },
   authenticated_answer_already_recorded: { code: 'invalid_transition', message: 'This account-reading task already has an answer.' },
+  form_prepare_refused: { code: 'form_plan_refused', message: 'Lumi refused that form plan. Nothing was changed.' },
+  form_prepare_state_changed: { code: 'form_plan_stale', message: 'Something changed since that plan was made. Nothing was changed; plan the form again.' },
+  protected_value_refused: { code: 'invalid_request', message: 'Lumi refused that saved detail.' },
   invalid_request: { code: 'invalid_request', message: 'Lumi refused an invalid request.' }
 }
 
@@ -1465,5 +1498,200 @@ export function projectRuntimeError(status: number, value: unknown): AgentError 
   if (runtimeCode === 'authenticated_profile_unavailable' && typeof body?.reason === 'string') {
     error.message = AUTHENTICATED_PROFILE_MESSAGES[body.reason] ?? error.message
   }
+  if ((runtimeCode === 'form_prepare_refused' || runtimeCode === 'form_prepare_state_changed') && typeof body?.reason === 'string') {
+    error.message = FORM_PLAN_MESSAGES[body.reason] ?? error.message
+  }
   return error
+}
+
+// ---- Milestone 8b S5: form planning and exact disclosure approval ------------------------
+
+const DATA_KIND = (value: unknown, what: string): AgentProtectedDataKind => member(PROTECTED_DATA_KINDS, value, what)
+const FORM_REF = /^f[1-5]$/
+const ELEMENT_REF = /^e([1-9]|[1-3][0-9]|40)$/
+const OPTION_REF = /^op([1-9]|1[0-9]|2[0-5])$/
+const OBSERVATION_REF = /^o[1-9][0-9]{0,3}$/
+const PLAN_TEXT = 200
+
+/** Keys that must never appear anywhere in a form-plan payload from the runtime. */
+const FORBIDDEN_PLAN_KEYS = ['value', 'value_digest', 'manifest_digest', 'element_identity_hash', 'option_identity_hash', 'account_fingerprint', 'account_binding', 'recipient_origin', 'origin', 'selector', 'profile_revoke_epoch']
+
+function assertNoForbiddenKeys(value: unknown, what: string, depth = 0): void {
+  if (depth > 8) throw new WireError(what)
+  if (Array.isArray(value)) {
+    for (const item of value) assertNoForbiddenKeys(item, what, depth + 1)
+  } else if (isRecord(value)) {
+    for (const [key, child] of Object.entries(value)) {
+      if (FORBIDDEN_PLAN_KEYS.includes(key)) throw new WireError(what)
+      assertNoForbiddenKeys(child, what, depth + 1)
+    }
+  }
+}
+
+function parseSavedDetail(value: unknown): AgentSavedDetailView {
+  const detail = record(value, 'saved_detail')
+  const kind = DATA_KIND(detail.kind, 'saved_detail.kind')
+  if (DATA_KIND(detail.data_ref, 'saved_detail.data_ref') !== kind) throw new WireError('saved_detail.data_ref')
+  return {
+    dataRef: kind,
+    kind,
+    preview: text(detail.preview, 'saved_detail.preview', undefined, 120),
+    updatedAt: instant(detail.updated_at, 'saved_detail.updated_at')
+  }
+}
+
+function parseFormGrant(value: unknown): AgentFormGrantView | undefined {
+  if (value === null || value === undefined) return undefined
+  const grant = record(value, 'form_plan.grant')
+  const scope = record(grant.scope, 'form_plan.grant.scope')
+  if (scope.failover !== 'none' || scope.freeze_required !== true || scope.classification !== 'account_private') {
+    throw new WireError('form_plan.grant.scope')
+  }
+  if (!Array.isArray(scope.allowed_data_refs) || scope.allowed_data_refs.length === 0 || scope.allowed_data_refs.length > PROTECTED_DATA_KINDS.length) {
+    throw new WireError('form_plan.grant.allowed_data_refs')
+  }
+  const expiresAt = nullableInstant(grant.expires_at, 'form_plan.grant.expires_at')
+  const status = member(GRANT_STATUSES, grant.status, 'form_plan.grant.status')
+  if (status === 'ACTIVE' && !expiresAt) throw new WireError('form_plan.grant.expires_at')
+  return {
+    grantId: uuid(grant.grant_id, 'form_plan.grant.grant_id'),
+    status,
+    revision: integer(grant.revision, 'form_plan.grant.revision', 1),
+    ...(expiresAt ? { expiresAt } : {}),
+    allowedDataRefs: scope.allowed_data_refs.map((item) => DATA_KIND(item, 'form_plan.grant.allowed_data_refs')),
+    planningRecipient: member(DISCLOSURE_RECIPIENTS, scope.planning_recipient, 'form_plan.grant.planning_recipient'),
+    maxFields: integer(scope.max_fields, 'form_plan.grant.max_fields', 1, 12)
+  }
+}
+
+function parseDisclosureField(value: unknown): AgentDisclosureFieldView {
+  const field = record(value, 'form_plan.field')
+  const base = {
+    fieldLabel: text(field.field_label, 'form_plan.field.label', undefined, PLAN_TEXT),
+    controlType: text(field.control_type, 'form_plan.field.control_type', CODE, 32)
+  }
+  switch (field.kind) {
+    case 'saved_detail':
+      return { kind: 'saved_detail', ...base, dataRef: DATA_KIND(field.data_ref, 'form_plan.field.data_ref'), preview: text(field.preview, 'form_plan.field.preview', undefined, 120) }
+    case 'option':
+      return { kind: 'option', ...base, optionLabel: text(field.option_label, 'form_plan.field.option_label', undefined, PLAN_TEXT) }
+    case 'checkbox':
+      if (typeof field.checked !== 'boolean') throw new WireError('form_plan.field.checked')
+      return { kind: 'checkbox', ...base, checked: field.checked }
+    default:
+      throw new WireError('form_plan.field.kind')
+  }
+}
+
+function parseDisclosureCard(value: unknown): AgentDisclosureCardView | undefined {
+  if (value === null || value === undefined) return undefined
+  const card = record(value, 'form_plan.disclosure')
+  if (!Array.isArray(card.fields) || card.fields.length === 0 || card.fields.length > 12) throw new WireError('form_plan.disclosure.fields')
+  if (typeof card.reveals_country !== 'boolean') throw new WireError('form_plan.disclosure.reveals_country')
+  const approvalStatus = card.approval_status === null || card.approval_status === undefined
+    ? undefined
+    : member(APPROVAL_STATUSES, card.approval_status, 'form_plan.disclosure.approval_status')
+  const expires = nullableInstant(card.approval_expires_at, 'form_plan.disclosure.approval_expires_at')
+  const resultCode = card.result_code === null || card.result_code === undefined
+    ? undefined
+    : member(['prepared_nothing'] as const, card.result_code, 'form_plan.disclosure.result_code')
+  const formLabel = card.form_label === null || card.form_label === undefined
+    ? undefined
+    : text(card.form_label, 'form_plan.disclosure.form_label', undefined, PLAN_TEXT)
+  return {
+    actionId: uuid(card.action_id, 'form_plan.disclosure.action_id'),
+    revision: integer(card.revision, 'form_plan.disclosure.revision', 1),
+    actionStatus: member(ACTION_STATUSES, card.action_status, 'form_plan.disclosure.action_status'),
+    ...(approvalStatus ? { approvalStatus } : {}),
+    ...(expires ? { approvalExpiresAt: expires } : {}),
+    site: text(card.site, 'form_plan.disclosure.site', SITE_NAME, 253),
+    ...(formLabel ? { formLabel } : {}),
+    fields: card.fields.map(parseDisclosureField),
+    revealsCountry: card.reveals_country,
+    ...(resultCode ? { resultCode } : {})
+  }
+}
+
+export function parseFormPlan(value: unknown): AgentFormPlanView {
+  assertNoForbiddenKeys(value, 'form_plan.forbidden_key')
+  const body = record(value, 'form_plan')
+  if (!Array.isArray(body.saved_details) || body.saved_details.length > PROTECTED_DATA_KINDS.length) throw new WireError('form_plan.saved_details')
+  const grant = parseFormGrant(body.grant)
+  const disclosure = parseDisclosureCard(body.disclosure)
+  const site = body.site === null || body.site === undefined ? undefined : text(body.site, 'form_plan.site', SITE_NAME, 253)
+  return {
+    taskId: uuid(body.task_id, 'form_plan.task_id'),
+    ...(site ? { site } : {}),
+    savedDetails: body.saved_details.map(parseSavedDetail),
+    ...(grant ? { grant } : {}),
+    ...(disclosure ? { disclosure } : {}),
+    formCount: integer(body.form_count, 'form_plan.form_count', 0, 5),
+    candidateElementCount: integer(body.candidate_element_count, 'form_plan.candidate_element_count', 0, 40)
+  }
+}
+
+/** The one planning context the runtime returns under a confirmed grant. */
+export function parsePlanningContext(value: unknown): FormPlanningContext {
+  assertNoForbiddenKeys(value, 'planning_context.forbidden_key')
+  const body = record(value, 'planning_context')
+  if (!Array.isArray(body.forms) || body.forms.length === 0 || body.forms.length > 5) throw new WireError('planning_context.forms')
+  if (!Array.isArray(body.saved_data) || body.saved_data.length === 0 || body.saved_data.length > PROTECTED_DATA_KINDS.length) {
+    throw new WireError('planning_context.saved_data')
+  }
+  return {
+    grantId: uuid(body.grant_id, 'planning_context.grant_id'),
+    recipient: member(DISCLOSURE_RECIPIENTS, body.recipient, 'planning_context.recipient'),
+    objective: text(body.objective, 'planning_context.objective', undefined, MAX_OBJECTIVE),
+    siteDisplay: text(body.site_display, 'planning_context.site_display', SITE_NAME, 253),
+    observation: text(body.observation, 'planning_context.observation', OBSERVATION_REF, 8),
+    forms: body.forms.map((raw) => {
+      const form = record(raw, 'planning_context.form')
+      if (!Array.isArray(form.elements) || form.elements.length > 40) throw new WireError('planning_context.elements')
+      const label = form.label === null || form.label === undefined ? null : text(form.label, 'planning_context.form.label', undefined, PLAN_TEXT)
+      return {
+        formRef: text(form.form_ref, 'planning_context.form_ref', FORM_REF, 4),
+        label,
+        elements: form.elements.map((item) => {
+          const element = record(item, 'planning_context.element')
+          const options = Array.isArray(element.option_refs) ? element.option_refs : []
+          if (options.length > 25) throw new WireError('planning_context.options')
+          const flag = (key: string): boolean => {
+            if (typeof element[key] !== 'boolean') throw new WireError(`planning_context.${key}`)
+            return element[key] as boolean
+          }
+          return {
+            elementRef: text(element.element_ref, 'planning_context.element_ref', ELEMENT_REF, 4),
+            role: text(element.role, 'planning_context.role', CODE, 32),
+            controlType: text(element.control_type, 'planning_context.control_type', CODE, 32),
+            accessibleName: typeof element.accessible_name === 'string' && element.accessible_name.length <= PLAN_TEXT
+              ? element.accessible_name.replace(/[\x00-\x1f\x7f]/g, ' ')
+              : (() => { throw new WireError('planning_context.accessible_name') })(),
+            required: flag('required'),
+            enabled: flag('enabled'),
+            visible: flag('visible'),
+            readOnly: flag('read_only'),
+            maxLength: element.max_length === null || element.max_length === undefined
+              ? null
+              : integer(element.max_length, 'planning_context.max_length', 0, 1_000_000),
+            submitLike: flag('submit_like'),
+            optionRefs: options.map((option) => {
+              const parsed = record(option, 'planning_context.option')
+              return {
+                ref: text(parsed.ref, 'planning_context.option.ref', OPTION_REF, 5),
+                label: typeof parsed.label === 'string' && parsed.label.length <= PLAN_TEXT
+                  ? parsed.label.replace(/[\x00-\x1f\x7f]/g, ' ')
+                  : (() => { throw new WireError('planning_context.option.label') })()
+              }
+            })
+          }
+        })
+      }
+    }),
+    savedData: body.saved_data.map((raw) => {
+      const item = record(raw, 'planning_context.saved_data')
+      const kind = DATA_KIND(item.kind, 'planning_context.saved_data.kind')
+      if (DATA_KIND(item.data_ref, 'planning_context.saved_data.data_ref') !== kind) throw new WireError('planning_context.saved_data.data_ref')
+      return { dataRef: kind, kind, preview: text(item.preview, 'planning_context.saved_data.preview', undefined, 120) }
+    })
+  }
 }

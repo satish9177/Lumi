@@ -69,6 +69,7 @@ import type { ModelRouter } from './models/model-router'
 import { PageAnswerer } from './agent/page-answer'
 import { AuthenticatedAnswerer } from './agent/authenticated-answer'
 import { AuthenticatedPlanner } from './agent/authenticated-planner'
+import { FormPlanner } from './agent/form-planner'
 import { ResearchAnswerer } from './agent/research-answer'
 import { ResearchPlanner } from './agent/research-planner'
 import {
@@ -1148,6 +1149,8 @@ app.whenReady().then(async () => {
   // refuses to run these classes without it.
   const authenticatedPlanner = modelRouter ? new AuthenticatedPlanner(modelRouter) : undefined
   const authenticatedAnswerer = modelRouter ? new AuthenticatedAnswerer(modelRouter) : undefined
+  // Milestone 8b S5. Proposes a `prepare_form` mapping and can act on nothing.
+  const formPlanner = modelRouter ? new FormPlanner(modelRouter) : undefined
   const agentTasks = new AgentTaskController(
     {
       // Resolved per call: a packaged runtime is created asynchronously.
@@ -1168,7 +1171,8 @@ app.whenReady().then(async () => {
     },
     {
       ...(authenticatedPlanner ? { planner: authenticatedPlanner } : {}),
-      ...(authenticatedAnswerer ? { answerer: authenticatedAnswerer } : {})
+      ...(authenticatedAnswerer ? { answerer: authenticatedAnswerer } : {}),
+      ...(formPlanner ? { formPlanner } : {})
     }
   )
   const browserProfiles = new BrowserProfileController({

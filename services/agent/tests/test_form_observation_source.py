@@ -24,6 +24,13 @@ GUARDED = (
     "app/browser/operations/authenticated.py",
     "app/domain/authenticated_forms.py",
     "app/domain/authenticated.py",
+    # Milestone 8b S5: form planning and the exact disclosure approval. They sit
+    # above the worker and never reach it, so they contain no mutating call either.
+    "app/domain/form_prepare.py",
+    "app/domain/protected_values.py",
+    "app/repositories/form_prepare.py",
+    "app/services/form_prepare.py",
+    "app/api/form_prepare_schemas.py",
 )
 
 
@@ -109,3 +116,41 @@ def test_the_javascript_scanner_accepts_the_reviewed_shape() -> None:
         "  const out = {}; out.required = true; target.x = 1; return out; }"
     )
     assert find_javascript_mutations(reviewed) == []
+
+
+# ---- Milestone 8b S5: nothing in the worker protocol can fill, and no S6 shape exists ----
+
+#: Worker operations, tools and route names that belong to S6 or beyond. None may exist.
+S6_NAMES = (
+    "set_value", "set_checked", "select_option", "local_draft", "LOCAL_DRAFT", "freeze", "unfreeze",
+    "form_drafts", "frozen_at", "handover", "form_is_dirty",
+)
+
+
+def test_the_worker_protocol_and_operations_gained_no_fill_capability() -> None:
+    import re
+
+    for path in (
+        "app/browser/protocol.py", "app/browser/worker.py", "app/browser/registry.py",
+        "app/browser/operations/authenticated.py", "app/domain/browser_dispatch.py",
+    ):
+        source = (ROOT / path).read_text(encoding="utf-8")
+        for name in S6_NAMES:
+            assert not re.search(rf"{re.escape(name)}", source), (path, name)
+        assert "prepare_form" not in source, path
+
+
+def test_no_s6_table_column_route_or_effect_exists() -> None:
+    import re
+
+    from app.db.tables import metadata
+    from app.domain.browser_dispatch import BrowserEffect
+
+    assert "form_drafts" not in metadata.tables
+    assert "frozen_at" not in metadata.tables["browser_dispatches"].c
+    assert {effect.name for effect in BrowserEffect} == {
+        effect.name for effect in BrowserEffect if effect.name != "LOCAL_DRAFT"
+    }
+    routes = (ROOT / "app/api/routes.py").read_text(encoding="utf-8")
+    for path in re.findall(r'@router\.\w+\(\s*"([^"]+)"', routes):
+        assert not re.search(r"freeze|draft|handover|fill", path), path

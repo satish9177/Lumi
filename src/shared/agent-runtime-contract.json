@@ -95,6 +95,10 @@
       "task.authenticated_answer_recorded",
       "task.authenticated_paused",
       "task.authenticated_resumed",
+      "task.form_prepare_scope_requested",
+      "task.form_prepare_scope_granted",
+      "task.form_prepare_scope_revoked",
+      "task.form_planning_context_built",
       "action.proposed",
       "action.approval_requested",
       "action.approved",
@@ -152,6 +156,9 @@
     "invalid_host",
     "invalid_inspection_proposal",
     "invalid_request",
+    "form_prepare_refused",
+    "form_prepare_state_changed",
+    "protected_value_refused",
     "login_attempt_refused",
     "no_unfinished_attempt",
     "observation_not_available",
@@ -951,6 +958,307 @@
       ],
       "task_id": "00000000-0000-4000-8000-000000000001"
     },
+    "form_plan_active": {
+      "candidate_element_count": 6,
+      "disclosure": null,
+      "form_count": 1,
+      "grant": {
+        "expires_at": "2026-09-16T10:15:00Z",
+        "grant_id": "00000000-0000-4000-8000-000000000009",
+        "revision": 2,
+        "scope": {
+          "allowed_data_refs": [
+            "email",
+            "phone",
+            "country"
+          ],
+          "classification": "account_private",
+          "failover": "none",
+          "freeze_required": true,
+          "max_fields": 12,
+          "planning_recipient": "openai"
+        },
+        "status": "ACTIVE"
+      },
+      "max_fields": 12,
+      "objective": "Help me apply",
+      "saved_details": [
+        {
+          "data_ref": "email",
+          "kind": "email",
+          "preview": "s***@g***.com",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "phone",
+          "kind": "phone",
+          "preview": "ending 1234",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "country",
+          "kind": "country",
+          "preview": "India",
+          "updated_at": "2026-09-16T10:00:01Z"
+        }
+      ],
+      "site": "jobs.example.test",
+      "task_id": "00000000-0000-4000-8000-00000000000a",
+      "task_status": "READY"
+    },
+    "form_plan_none": {
+      "candidate_element_count": 6,
+      "disclosure": null,
+      "form_count": 1,
+      "grant": null,
+      "max_fields": 12,
+      "objective": "Help me apply",
+      "saved_details": [
+        {
+          "data_ref": "email",
+          "kind": "email",
+          "preview": "s***@g***.com",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "phone",
+          "kind": "phone",
+          "preview": "ending 1234",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "country",
+          "kind": "country",
+          "preview": "India",
+          "updated_at": "2026-09-16T10:00:01Z"
+        }
+      ],
+      "site": "jobs.example.test",
+      "task_id": "00000000-0000-4000-8000-00000000000a",
+      "task_status": "READY"
+    },
+    "form_plan_pending": {
+      "candidate_element_count": 6,
+      "disclosure": null,
+      "form_count": 1,
+      "grant": {
+        "expires_at": null,
+        "grant_id": "00000000-0000-4000-8000-000000000009",
+        "revision": 1,
+        "scope": {
+          "allowed_data_refs": [
+            "email",
+            "phone",
+            "country"
+          ],
+          "classification": "account_private",
+          "failover": "none",
+          "freeze_required": true,
+          "max_fields": 12,
+          "planning_recipient": "openai"
+        },
+        "status": "PENDING"
+      },
+      "max_fields": 12,
+      "objective": "Help me apply",
+      "saved_details": [
+        {
+          "data_ref": "email",
+          "kind": "email",
+          "preview": "s***@g***.com",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "phone",
+          "kind": "phone",
+          "preview": "ending 1234",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "country",
+          "kind": "country",
+          "preview": "India",
+          "updated_at": "2026-09-16T10:00:01Z"
+        }
+      ],
+      "site": "jobs.example.test",
+      "task_id": "00000000-0000-4000-8000-00000000000a",
+      "task_status": "READY"
+    },
+    "form_plan_prepared_nothing": {
+      "candidate_element_count": 6,
+      "disclosure": {
+        "action_id": "00000000-0000-4000-8000-000000000002",
+        "action_status": "SUCCEEDED",
+        "approval_expires_at": "2026-09-16T10:05:02Z",
+        "approval_status": "CONSUMED",
+        "fields": [
+          {
+            "checked": null,
+            "control_type": "email",
+            "data_ref": "email",
+            "field_label": "Email address",
+            "kind": "saved_detail",
+            "option_label": null,
+            "preview": "s***@g***.com"
+          },
+          {
+            "checked": null,
+            "control_type": "select_single",
+            "data_ref": null,
+            "field_label": "Country",
+            "kind": "option",
+            "option_label": "India",
+            "preview": null
+          },
+          {
+            "checked": true,
+            "control_type": "checkbox",
+            "data_ref": null,
+            "field_label": "I agree to the terms",
+            "kind": "checkbox",
+            "option_label": null,
+            "preview": null
+          }
+        ],
+        "form_label": "Application",
+        "result_code": "prepared_nothing",
+        "reveals_country": false,
+        "revision": 5,
+        "site": "jobs.example.test"
+      },
+      "form_count": 1,
+      "grant": {
+        "expires_at": "2026-09-16T10:15:00Z",
+        "grant_id": "00000000-0000-4000-8000-000000000009",
+        "revision": 2,
+        "scope": {
+          "allowed_data_refs": [
+            "email",
+            "phone",
+            "country"
+          ],
+          "classification": "account_private",
+          "failover": "none",
+          "freeze_required": true,
+          "max_fields": 12,
+          "planning_recipient": "openai"
+        },
+        "status": "ACTIVE"
+      },
+      "max_fields": 12,
+      "objective": "Help me apply",
+      "saved_details": [
+        {
+          "data_ref": "email",
+          "kind": "email",
+          "preview": "s***@g***.com",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "phone",
+          "kind": "phone",
+          "preview": "ending 1234",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "country",
+          "kind": "country",
+          "preview": "India",
+          "updated_at": "2026-09-16T10:00:01Z"
+        }
+      ],
+      "site": "jobs.example.test",
+      "task_id": "00000000-0000-4000-8000-00000000000a",
+      "task_status": "READY"
+    },
+    "form_plan_waiting_approval": {
+      "candidate_element_count": 6,
+      "disclosure": {
+        "action_id": "00000000-0000-4000-8000-000000000002",
+        "action_status": "WAITING_APPROVAL",
+        "approval_expires_at": "2026-09-16T10:05:02Z",
+        "approval_status": "PENDING",
+        "fields": [
+          {
+            "checked": null,
+            "control_type": "email",
+            "data_ref": "email",
+            "field_label": "Email address",
+            "kind": "saved_detail",
+            "option_label": null,
+            "preview": "s***@g***.com"
+          },
+          {
+            "checked": null,
+            "control_type": "select_single",
+            "data_ref": null,
+            "field_label": "Country",
+            "kind": "option",
+            "option_label": "India",
+            "preview": null
+          },
+          {
+            "checked": true,
+            "control_type": "checkbox",
+            "data_ref": null,
+            "field_label": "I agree to the terms",
+            "kind": "checkbox",
+            "option_label": null,
+            "preview": null
+          }
+        ],
+        "form_label": "Application",
+        "result_code": null,
+        "reveals_country": false,
+        "revision": 2,
+        "site": "jobs.example.test"
+      },
+      "form_count": 1,
+      "grant": {
+        "expires_at": "2026-09-16T10:15:00Z",
+        "grant_id": "00000000-0000-4000-8000-000000000009",
+        "revision": 2,
+        "scope": {
+          "allowed_data_refs": [
+            "email",
+            "phone",
+            "country"
+          ],
+          "classification": "account_private",
+          "failover": "none",
+          "freeze_required": true,
+          "max_fields": 12,
+          "planning_recipient": "openai"
+        },
+        "status": "ACTIVE"
+      },
+      "max_fields": 12,
+      "objective": "Help me apply",
+      "saved_details": [
+        {
+          "data_ref": "email",
+          "kind": "email",
+          "preview": "s***@g***.com",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "phone",
+          "kind": "phone",
+          "preview": "ending 1234",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "country",
+          "kind": "country",
+          "preview": "India",
+          "updated_at": "2026-09-16T10:00:01Z"
+        }
+      ],
+      "site": "jobs.example.test",
+      "task_id": "00000000-0000-4000-8000-00000000000a",
+      "task_status": "READY"
+    },
     "health": {
       "database": "ok",
       "runtime_generation": "00000000-0000-4000-8000-000000000005",
@@ -1397,6 +1705,41 @@
         "status": "NEEDS_LOGIN",
         "updated_at": "2026-09-16T10:00:04Z"
       }
+    },
+    "planning_context": {
+      "forms": [
+        {
+          "elements": [
+            {
+              "accessible_name": "Email address",
+              "control_type": "email",
+              "element_ref": "e1",
+              "enabled": true,
+              "max_length": null,
+              "option_refs": [],
+              "read_only": false,
+              "required": true,
+              "role": "textbox",
+              "submit_like": false,
+              "visible": true
+            }
+          ],
+          "form_ref": "f1",
+          "label": "Application"
+        }
+      ],
+      "grant_id": "00000000-0000-4000-8000-000000000009",
+      "objective": "Help me apply",
+      "observation": "o1",
+      "recipient": "openai",
+      "saved_data": [
+        {
+          "data_ref": "email",
+          "kind": "email",
+          "preview": "s***@g***.com"
+        }
+      ],
+      "site_display": "jobs.example.test"
     },
     "record_answer_body": {
       "answer": {
@@ -2362,6 +2705,28 @@
           "tabs": 1
         }
       }
+    },
+    "saved_details": {
+      "details": [
+        {
+          "data_ref": "email",
+          "kind": "email",
+          "preview": "s***@g***.com",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "phone",
+          "kind": "phone",
+          "preview": "ending 1234",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "country",
+          "kind": "country",
+          "preview": "India",
+          "updated_at": "2026-09-16T10:00:01Z"
+        }
+      ]
     },
     "search": {
       "slots": [
@@ -3980,6 +4345,430 @@
       "title": "ExecuteResearchStepBody",
       "type": "object"
     },
+    "FormPlanResponse": {
+      "$defs": {
+        "DisclosureCardResponse": {
+          "description": "The controller-authored manifest card. Ids, labels, masked previews only.",
+          "properties": {
+            "action_id": {
+              "format": "uuid",
+              "title": "Action Id",
+              "type": "string"
+            },
+            "action_status": {
+              "title": "Action Status",
+              "type": "string"
+            },
+            "approval_expires_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Approval Expires At"
+            },
+            "approval_status": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Approval Status"
+            },
+            "fields": {
+              "items": {
+                "$ref": "#/$defs/DisclosureFieldResponse"
+              },
+              "title": "Fields",
+              "type": "array"
+            },
+            "form_label": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Form Label"
+            },
+            "result_code": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Result Code"
+            },
+            "reveals_country": {
+              "title": "Reveals Country",
+              "type": "boolean"
+            },
+            "revision": {
+              "title": "Revision",
+              "type": "integer"
+            },
+            "site": {
+              "title": "Site",
+              "type": "string"
+            }
+          },
+          "required": [
+            "action_id",
+            "revision",
+            "action_status",
+            "approval_status",
+            "approval_expires_at",
+            "site",
+            "form_label",
+            "fields",
+            "reveals_country",
+            "result_code"
+          ],
+          "title": "DisclosureCardResponse",
+          "type": "object"
+        },
+        "DisclosureFieldResponse": {
+          "description": "One line of the card: which saved detail, option or state goes in which field.",
+          "properties": {
+            "checked": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Checked"
+            },
+            "control_type": {
+              "title": "Control Type",
+              "type": "string"
+            },
+            "data_ref": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "legal_name",
+                    "preferred_name",
+                    "email",
+                    "phone",
+                    "city",
+                    "country",
+                    "linkedin_url",
+                    "portfolio_url"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Data Ref"
+            },
+            "field_label": {
+              "title": "Field Label",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "saved_detail",
+                "option",
+                "checkbox"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "option_label": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Option Label"
+            },
+            "preview": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Preview"
+            }
+          },
+          "required": [
+            "field_label",
+            "control_type",
+            "kind"
+          ],
+          "title": "DisclosureFieldResponse",
+          "type": "object"
+        },
+        "FormGrantResponse": {
+          "properties": {
+            "expires_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Expires At"
+            },
+            "grant_id": {
+              "format": "uuid",
+              "title": "Grant Id",
+              "type": "string"
+            },
+            "revision": {
+              "title": "Revision",
+              "type": "integer"
+            },
+            "scope": {
+              "$ref": "#/$defs/FormGrantScopeResponse"
+            },
+            "status": {
+              "$ref": "#/$defs/GrantStatus"
+            }
+          },
+          "required": [
+            "grant_id",
+            "status",
+            "revision",
+            "expires_at",
+            "scope"
+          ],
+          "title": "FormGrantResponse",
+          "type": "object"
+        },
+        "FormGrantScopeResponse": {
+          "properties": {
+            "allowed_data_refs": {
+              "items": {
+                "enum": [
+                  "legal_name",
+                  "preferred_name",
+                  "email",
+                  "phone",
+                  "city",
+                  "country",
+                  "linkedin_url",
+                  "portfolio_url"
+                ],
+                "type": "string"
+              },
+              "title": "Allowed Data Refs",
+              "type": "array"
+            },
+            "classification": {
+              "const": "account_private",
+              "title": "Classification",
+              "type": "string"
+            },
+            "failover": {
+              "const": "none",
+              "title": "Failover",
+              "type": "string"
+            },
+            "freeze_required": {
+              "const": true,
+              "title": "Freeze Required",
+              "type": "boolean"
+            },
+            "max_fields": {
+              "title": "Max Fields",
+              "type": "integer"
+            },
+            "planning_recipient": {
+              "enum": [
+                "openai",
+                "gemini",
+                "deepseek",
+                "scripted"
+              ],
+              "title": "Planning Recipient",
+              "type": "string"
+            }
+          },
+          "required": [
+            "allowed_data_refs",
+            "planning_recipient",
+            "failover",
+            "max_fields",
+            "freeze_required",
+            "classification"
+          ],
+          "title": "FormGrantScopeResponse",
+          "type": "object"
+        },
+        "GrantStatus": {
+          "description": "A grant's life. Only `ACTIVE` authorises anything.",
+          "enum": [
+            "PENDING",
+            "ACTIVE",
+            "REVOKED",
+            "EXPIRED",
+            "COMPLETED"
+          ],
+          "title": "GrantStatus",
+          "type": "string"
+        },
+        "SavedDetailResponse": {
+          "description": "A saved detail as everything but its row may see it. Never the value.",
+          "properties": {
+            "data_ref": {
+              "enum": [
+                "legal_name",
+                "preferred_name",
+                "email",
+                "phone",
+                "city",
+                "country",
+                "linkedin_url",
+                "portfolio_url"
+              ],
+              "title": "Data Ref",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "legal_name",
+                "preferred_name",
+                "email",
+                "phone",
+                "city",
+                "country",
+                "linkedin_url",
+                "portfolio_url"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "preview": {
+              "title": "Preview",
+              "type": "string"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "data_ref",
+            "kind",
+            "preview",
+            "updated_at"
+          ],
+          "title": "SavedDetailResponse",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "candidate_element_count": {
+          "title": "Candidate Element Count",
+          "type": "integer"
+        },
+        "disclosure": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DisclosureCardResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "form_count": {
+          "title": "Form Count",
+          "type": "integer"
+        },
+        "grant": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FormGrantResponse"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "max_fields": {
+          "default": 12,
+          "title": "Max Fields",
+          "type": "integer"
+        },
+        "objective": {
+          "title": "Objective",
+          "type": "string"
+        },
+        "saved_details": {
+          "items": {
+            "$ref": "#/$defs/SavedDetailResponse"
+          },
+          "title": "Saved Details",
+          "type": "array"
+        },
+        "site": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Site"
+        },
+        "task_id": {
+          "format": "uuid",
+          "title": "Task Id",
+          "type": "string"
+        },
+        "task_status": {
+          "title": "Task Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id",
+        "task_status",
+        "objective",
+        "site",
+        "saved_details",
+        "grant",
+        "disclosure",
+        "form_count",
+        "candidate_element_count"
+      ],
+      "title": "FormPlanResponse",
+      "type": "object"
+    },
     "HealthResponse": {
       "properties": {
         "database": {
@@ -5166,6 +5955,67 @@
         "profile"
       ],
       "title": "LoginTakeoverResponse",
+      "type": "object"
+    },
+    "PlanningContextResponse": {
+      "description": "What the ONE named provider may see. Structure and masked previews only.",
+      "properties": {
+        "forms": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "title": "Forms",
+          "type": "array"
+        },
+        "grant_id": {
+          "format": "uuid",
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "objective": {
+          "title": "Objective",
+          "type": "string"
+        },
+        "observation": {
+          "title": "Observation",
+          "type": "string"
+        },
+        "recipient": {
+          "enum": [
+            "openai",
+            "gemini",
+            "deepseek",
+            "scripted"
+          ],
+          "title": "Recipient",
+          "type": "string"
+        },
+        "saved_data": {
+          "items": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "title": "Saved Data",
+          "type": "array"
+        },
+        "site_display": {
+          "title": "Site Display",
+          "type": "string"
+        }
+      },
+      "required": [
+        "grant_id",
+        "recipient",
+        "objective",
+        "site_display",
+        "observation",
+        "forms",
+        "saved_data"
+      ],
+      "title": "PlanningContextResponse",
       "type": "object"
     },
     "PrepareBookingBody": {
@@ -8836,6 +9686,74 @@
         "invalidated_action_ids"
       ],
       "title": "ReviseBookingCriteriaResponse",
+      "type": "object"
+    },
+    "SavedDetailListResponse": {
+      "$defs": {
+        "SavedDetailResponse": {
+          "description": "A saved detail as everything but its row may see it. Never the value.",
+          "properties": {
+            "data_ref": {
+              "enum": [
+                "legal_name",
+                "preferred_name",
+                "email",
+                "phone",
+                "city",
+                "country",
+                "linkedin_url",
+                "portfolio_url"
+              ],
+              "title": "Data Ref",
+              "type": "string"
+            },
+            "kind": {
+              "enum": [
+                "legal_name",
+                "preferred_name",
+                "email",
+                "phone",
+                "city",
+                "country",
+                "linkedin_url",
+                "portfolio_url"
+              ],
+              "title": "Kind",
+              "type": "string"
+            },
+            "preview": {
+              "title": "Preview",
+              "type": "string"
+            },
+            "updated_at": {
+              "format": "date-time",
+              "title": "Updated At",
+              "type": "string"
+            }
+          },
+          "required": [
+            "data_ref",
+            "kind",
+            "preview",
+            "updated_at"
+          ],
+          "title": "SavedDetailResponse",
+          "type": "object"
+        }
+      },
+      "properties": {
+        "details": {
+          "items": {
+            "$ref": "#/$defs/SavedDetailResponse"
+          },
+          "title": "Details",
+          "type": "array"
+        }
+      },
+      "required": [
+        "details"
+      ],
+      "title": "SavedDetailListResponse",
       "type": "object"
     },
     "TaskEventListResponse": {

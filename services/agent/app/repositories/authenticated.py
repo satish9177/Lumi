@@ -206,6 +206,10 @@ def _profile_still_matches_grant() -> Any:
     )
 
 
+#: Shared with the form-planning grant: one definition of "still the same account".
+profile_still_matches_grant = _profile_still_matches_grant
+
+
 class AuthenticatedRepository:
     def __init__(self, connection: AsyncConnection) -> None:
         self._connection = connection
@@ -332,7 +336,7 @@ class AuthenticatedRepository:
             update(task_grants)
             .where(
                 task_grants.c.profile_id == profile_id,
-                task_grants.c.kind == KIND,
+                task_grants.c.kind.in_((KIND, "form_prepare")),
                 task_grants.c.status.in_(_OPEN),
             )
             .values(

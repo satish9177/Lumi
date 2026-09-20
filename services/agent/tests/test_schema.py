@@ -1,4 +1,5 @@
 import asyncio
+from typing import Any
 import re
 from enum import StrEnum
 
@@ -108,3 +109,65 @@ async def _tasks_table_exists(settings: Settings) -> bool:
             return bool(await connection.scalar(text("SELECT to_regclass('public.tasks') IS NOT NULL")))
     finally:
         await engine.dispose()
+
+
+def test_migration_0010_round_trips_and_removes_only_its_own_shape(migrated_database_url: str) -> None:
+    """Milestone 8b S5: `protected_values` and the `form_prepare` grant kind.
+
+    Downgrading to 0009 removes the table and the third grant kind (and any grant of
+    it), keeps every S3/S4 row, and upgrading again restores the S5 shape.
+    """
+    import uuid
+
+    async def seed() -> tuple[uuid.UUID, uuid.UUID]:
+        settings = Settings(
+            database_url=SecretStr(migrated_database_url), runtime_token=TEST_RUNTIME_TOKEN
+        )
+        engine = create_database_engine(settings)
+        task_id, profile_id = uuid.uuid4(), uuid.uuid4()
+        try:
+            async with engine.begin() as connection:
+                await connection.execute(text("TRUNCATE tasks, browser_profiles, protected_values CASCADE"))
+                await connection.execute(
+                    text("INSERT INTO tasks (id, status, request, revision, last_event_sequence) VALUES (:t, 'READY', '{}'::jsonb, 1, 1)"),
+                    {"t": task_id},
+                )
+                await connection.execute(
+                    text("INSERT INTO browser_profiles (id, label, site, allowed_origins, status, revision, revoke_epoch) VALUES (:p, 'L', 'example.test', '[]'::jsonb, 'AUTHENTICATED', 1, 0)"),
+                    {"p": profile_id},
+                )
+                for kind in ("authenticated_read", "form_prepare"):
+                    await connection.execute(
+                        text("INSERT INTO task_grants (id, task_id, kind, status, revision, policy_version, scope, scope_digest, profile_id, profile_revoke_epoch) "
+                             "VALUES (gen_random_uuid(), :t, :k, 'PENDING', 1, 'v', '{}'::jsonb, :d, :p, 0)"),
+                        {"t": task_id, "k": kind, "d": "0" * 64, "p": profile_id},
+                    )
+                await connection.execute(
+                    text("INSERT INTO protected_values (id, kind, value, value_digest, preview) "
+                         "VALUES (gen_random_uuid(), 'city', 'Pune', encode(sha256(convert_to('Pune', 'UTF8')), 'hex'), 'saved city')")
+                )
+        finally:
+            await engine.dispose()
+        return task_id, profile_id
+
+    async def counts() -> dict[str, Any]:
+        settings = Settings(
+            database_url=SecretStr(migrated_database_url), runtime_token=TEST_RUNTIME_TOKEN
+        )
+        engine = create_database_engine(settings)
+        try:
+            async with engine.connect() as connection:
+                kinds = (await connection.execute(text("SELECT kind FROM task_grants ORDER BY kind"))).scalars().all()
+                table = await connection.scalar(text("SELECT to_regclass('public.protected_values') IS NOT NULL"))
+            return {"kinds": kinds, "table": table}
+        finally:
+            await engine.dispose()
+
+    asyncio.run(seed())
+    assert asyncio.run(counts()) == {"kinds": ["authenticated_read", "form_prepare"], "table": True}
+    downgrade(migrated_database_url, "0009")
+    try:
+        assert asyncio.run(counts()) == {"kinds": ["authenticated_read"], "table": False}
+    finally:
+        migrate(migrated_database_url)
+    assert asyncio.run(counts())["table"] is True

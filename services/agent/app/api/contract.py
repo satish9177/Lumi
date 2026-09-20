@@ -24,6 +24,16 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from app.api.form_prepare_schemas import (
+    DisclosureCardResponse,
+    DisclosureFieldResponse,
+    FormGrantResponse,
+    FormGrantScopeResponse,
+    FormPlanResponse,
+    PlanningContextResponse,
+    SavedDetailListResponse,
+    SavedDetailResponse,
+)
 from app.api.schemas import (
     ActionListResponse,
     ActionResponse,
@@ -133,6 +143,10 @@ ERROR_CODES = (
     "invalid_host",
     "invalid_inspection_proposal",
     "invalid_request",
+    # Milestone 8b S5: form planning and the exact disclosure approval.
+    "form_prepare_refused",
+    "form_prepare_state_changed",
+    "protected_value_refused",
     # Milestone 8a S2: manual login and human takeover.
     "login_attempt_refused",
     "no_unfinished_attempt",
@@ -161,6 +175,9 @@ ERROR_CODES = (
 )
 
 _MODELS: tuple[type[BaseModel], ...] = (
+    FormPlanResponse,
+    PlanningContextResponse,
+    SavedDetailListResponse,
     ActionListResponse,
     ActionResponse,
     ActiveTakeoverResponse,
@@ -1305,6 +1322,105 @@ def examples() -> dict[str, Any]:
         **_inspection_examples(),
         **_research_examples(),
         **_login_takeover_examples(),
+        **_form_prepare_examples(),
+    }
+
+
+def _form_prepare_examples() -> dict[str, Any]:
+    """Milestone 8b S5. Every payload here is one the runtime can emit, and none
+    carries a raw saved value, a digest, an identity hash, a fingerprint or an origin."""
+    grant = FormGrantResponse(
+        grant_id=_GRANT,
+        status=GrantStatus.PENDING,
+        revision=1,
+        expires_at=None,
+        scope=FormGrantScopeResponse(
+            allowed_data_refs=["email", "phone", "country"],
+            planning_recipient="openai",
+            failover="none",
+            max_fields=12,
+            freeze_required=True,
+            classification="account_private",
+        ),
+    )
+    active = grant.model_copy(update={"status": GrantStatus.ACTIVE, "revision": 2, "expires_at": _at(900)})
+    saved = [
+        SavedDetailResponse(data_ref="email", kind="email", preview="s***@g***.com", updated_at=_at(1)),
+        SavedDetailResponse(data_ref="phone", kind="phone", preview="ending 1234", updated_at=_at(1)),
+        SavedDetailResponse(data_ref="country", kind="country", preview="India", updated_at=_at(1)),
+    ]
+    card = DisclosureCardResponse(
+        action_id=_ACTION,
+        revision=2,
+        action_status="WAITING_APPROVAL",
+        approval_status="PENDING",
+        approval_expires_at=_at(302),
+        site="jobs.example.test",
+        form_label="Application",
+        fields=[
+            DisclosureFieldResponse(
+                field_label="Email address", control_type="email", kind="saved_detail",
+                data_ref="email", preview="s***@g***.com",
+            ),
+            DisclosureFieldResponse(
+                field_label="Country", control_type="select_single", kind="option", option_label="India"
+            ),
+            DisclosureFieldResponse(
+                field_label="I agree to the terms", control_type="checkbox", kind="checkbox", checked=True
+            ),
+        ],
+        reveals_country=False,
+        result_code=None,
+    )
+
+    def plan(grant_: FormGrantResponse | None, card_: DisclosureCardResponse | None) -> dict[str, Any]:
+        return FormPlanResponse(
+            task_id=_RESEARCH_TASK,
+            task_status="READY",
+            objective="Help me apply",
+            site="jobs.example.test",
+            saved_details=saved,
+            grant=grant_,
+            disclosure=card_,
+            form_count=1,
+            candidate_element_count=6,
+        ).model_dump(mode="json")
+
+    prepared = card.model_copy(
+        update={
+            "revision": 5, "action_status": "SUCCEEDED", "approval_status": "CONSUMED",
+            "result_code": "prepared_nothing",
+        }
+    )
+    return {
+        "form_plan_none": plan(None, None),
+        "form_plan_pending": plan(grant, None),
+        "form_plan_active": plan(active, None),
+        "form_plan_waiting_approval": plan(active, card),
+        "form_plan_prepared_nothing": plan(active, prepared),
+        "planning_context": PlanningContextResponse(
+            grant_id=_GRANT,
+            recipient="openai",
+            objective="Help me apply",
+            site_display="jobs.example.test",
+            observation="o1",
+            forms=[
+                {
+                    "form_ref": "f1",
+                    "label": "Application",
+                    "elements": [
+                        {
+                            "element_ref": "e1", "role": "textbox", "control_type": "email",
+                            "accessible_name": "Email address", "required": True, "enabled": True,
+                            "visible": True, "read_only": False, "max_length": None,
+                            "submit_like": False, "option_refs": [],
+                        }
+                    ],
+                }
+            ],
+            saved_data=[{"data_ref": "email", "kind": "email", "preview": "s***@g***.com"}],
+        ).model_dump(mode="json"),
+        "saved_details": SavedDetailListResponse(details=saved).model_dump(mode="json"),
     }
 
 

@@ -79,7 +79,22 @@ from app.domain.authenticated import (
     AuthenticatedStepEnvelope,
     parse_authenticated_step,
 )
+from app.api.form_prepare_schemas import (
+    ConfirmFormGrantBody,
+    DisclosureDecisionBody,
+    FormPlanResponse,
+    PlanningContextResponse,
+    PrepareFormScopeBody,
+    ProposeFormBody,
+    RevokeFormGrantBody,
+    SaveProtectedValueBody,
+    SavedDetailListResponse,
+    SavedDetailResponse,
+)
+from app.domain.form_prepare import FORM_PREPARE_TOOL, FormPrepareRefusal
+from app.domain.protected_values import ProtectedValueRefusal, is_protected_kind
 from app.services.authenticated_read import AuthenticatedReadService
+from app.services.form_prepare import FormPrepareService
 from app.services.authenticated_read import validate_request as validate_authenticated_request
 from app.domain.research import (
     PUBLIC_RESEARCH_TASK_TYPE,
@@ -248,6 +263,17 @@ def get_action_service(request: Request) -> ActionService:
 ActionServiceDep = Annotated[ActionService, Depends(get_action_service)]
 
 
+async def _refuse_disclosure_tool(service: ActionService, action_id: uuid.UUID) -> None:
+    """The generic action routes can never move a form-disclosure approval.
+
+    Its approval is spent only by `/actions/{id}/field-disclosure/approve`, which
+    re-checks every fact it depends on. Approving, claiming or finishing it through
+    a generic route would skip that.
+    """
+    if (await service.get_action(action_id)).action.tool_name == FORM_PREPARE_TOOL:
+        raise FormPrepareRefusal("use_disclosure_route")
+
+
 @router.post(
     "/tasks/{task_id}/actions",
     response_model=ActionResponse,
@@ -261,6 +287,10 @@ async def propose_action(
     response: Response,
 ) -> ActionResponse:
     """Record a proposal. Replaying the same idempotency key returns `200`."""
+    if body.tool_name == FORM_PREPARE_TOOL:
+        # Only the form-preparation service, from a controller-built manifest, may
+        # create this action. A generic caller cannot mint an approval for one.
+        raise FormPrepareRefusal("use_disclosure_route")
     view, created = await service.propose_action(
         task_id,
         idempotency_key=body.idempotency_key,
@@ -300,6 +330,7 @@ async def request_action_approval(
     service: ActionServiceDep,
     body: Annotated[ExpectedRevisionBody | None, Body()] = None,
 ) -> ActionResponse:
+    await _refuse_disclosure_tool(service, action_id)
     view = await service.request_approval(
         action_id, expected_revision=_expected_revision(body)
     )
@@ -318,6 +349,7 @@ async def approve_action(
     body: Annotated[ExpectedRevisionBody | None, Body()] = None,
 ) -> ActionResponse:
     """Approves the stored proposal by reference; no proposal payload is accepted."""
+    await _refuse_disclosure_tool(service, action_id)
     view = await service.approve_action(action_id, expected_revision=_expected_revision(body))
     return ActionResponse.from_view(view)
 
@@ -353,6 +385,7 @@ async def start_action_attempt(
     service: ActionServiceDep,
     body: Annotated[ExpectedRevisionBody | None, Body()] = None,
 ) -> ActionResponse:
+    await _refuse_disclosure_tool(service, action_id)
     view = await service.start_attempt(action_id, expected_revision=_expected_revision(body))
     return ActionResponse.from_view(view)
 
@@ -366,6 +399,7 @@ async def start_action_attempt(
 async def finish_action_attempt(
     action_id: uuid.UUID, body: FinishAttemptBody, service: ActionServiceDep
 ) -> ActionResponse:
+    await _refuse_disclosure_tool(service, action_id)
     view = await service.finish_attempt(
         action_id,
         outcome=body.outcome,
@@ -388,6 +422,7 @@ async def begin_action_reconciliation(
     body: Annotated[ExpectedRevisionBody | None, Body()] = None,
 ) -> ActionResponse:
     """Valid only from `OUTCOME_UNKNOWN`. Never starts a second attempt."""
+    await _refuse_disclosure_tool(service, action_id)
     view = await service.begin_reconciliation(
         action_id, expected_revision=_expected_revision(body)
     )
@@ -403,6 +438,7 @@ async def begin_action_reconciliation(
 async def finish_action_reconciliation(
     action_id: uuid.UUID, body: FinishReconciliationBody, service: ActionServiceDep
 ) -> ActionResponse:
+    await _refuse_disclosure_tool(service, action_id)
     view = await service.finish_reconciliation(
         action_id,
         result=body.result,
@@ -928,6 +964,172 @@ async def record_authenticated_answer(
         planner_calls=body.planner_calls,
     )
     return AuthenticatedResponse.from_view(view)
+
+
+# --- Form planning and exact disclosure approval (Milestone 8b S5) -----------
+#
+# **These routes change no website.** They have no field for a value to type, an
+# origin, a selector, a URL, a script or a provider to *choose*. What they do:
+#
+#   * `PUT /protected-values/{kind}` saves one detail the user typed directly. The
+#     kind is closed, the body is one string, and the response never echoes it.
+#     Only the trusted desktop layer calls it; no model, voice turn or page can.
+#   * `.../form/prepare-scope` builds the PENDING planning grant (grants nothing),
+#     `.../form/grant` is the trusted click, `.../form/revoke` withdraws it.
+#   * `.../form/planning-context` returns what ONE provider may see, only under a
+#     confirmed grant, and only masked previews of saved details.
+#   * `.../form/propose` takes a planner's `prepare_form` proposal, validates it
+#     against persisted state and opens the exact approval.
+#   * `/actions/{id}/field-disclosure/approve|reject` takes an expected revision
+#     and nothing else. The manifest, the values and the origin all come from
+#     persisted state. Approval ends in `prepared_nothing`.
+
+
+def get_form_prepare_service(request: Request) -> FormPrepareService:
+    service: FormPrepareService = request.app.state.form_prepare_service
+    return service
+
+
+FormPrepareServiceDep = Annotated[FormPrepareService, Depends(get_form_prepare_service)]
+
+
+@router.get(
+    "/protected-values",
+    response_model=SavedDetailListResponse,
+    summary="The saved details, as kind and masked preview only",
+)
+async def list_protected_values(service: FormPrepareServiceDep) -> SavedDetailListResponse:
+    return SavedDetailListResponse(
+        details=[SavedDetailResponse.from_detail(item) for item in await service.list_details()]
+    )
+
+
+@router.put(
+    "/protected-values/{kind}",
+    response_model=SavedDetailResponse,
+    responses={**_CONFLICT},
+    summary="Save one detail the user typed directly (trusted desktop layer only)",
+)
+async def save_protected_value(
+    kind: str, body: SaveProtectedValueBody, service: FormPrepareServiceDep
+) -> SavedDetailResponse:
+    """The kind is one of eight. The value is never echoed and never logged."""
+    if not is_protected_kind(kind):
+        raise ProtectedValueRefusal("unknown_kind")
+    return SavedDetailResponse.from_detail(await service.save_detail(kind, body.value))
+
+
+@router.get(
+    "/tasks/{task_id}/authenticated/form",
+    response_model=FormPlanResponse,
+    responses=_NOT_FOUND,
+    summary="The task's form-planning grant and disclosure card",
+)
+async def get_form_plan(task_id: uuid.UUID, service: FormPrepareServiceDep) -> FormPlanResponse:
+    return FormPlanResponse.from_view(await service.describe(task_id))
+
+
+@router.post(
+    "/tasks/{task_id}/authenticated/form/prepare-scope",
+    status_code=status.HTTP_201_CREATED,
+    response_model=FormPlanResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Build the form-planning scope and open its card (grants nothing)",
+)
+async def prepare_form_scope(
+    task_id: uuid.UUID, body: PrepareFormScopeBody, service: FormPrepareServiceDep
+) -> FormPlanResponse:
+    return FormPlanResponse.from_view(
+        await service.prepare_scope(task_id, allowed_data_refs=list(body.allowed_data_refs))
+    )
+
+
+@router.post(
+    "/tasks/{task_id}/authenticated/form/grant",
+    response_model=FormPlanResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Confirm the form-planning scope shown on the trusted card",
+)
+async def grant_form_scope(
+    task_id: uuid.UUID, body: ConfirmFormGrantBody, service: FormPrepareServiceDep
+) -> FormPlanResponse:
+    return FormPlanResponse.from_view(
+        await service.confirm(
+            task_id, grant_id=body.grant_id, expected_revision=body.expected_revision
+        )
+    )
+
+
+@router.post(
+    "/tasks/{task_id}/authenticated/form/revoke",
+    response_model=FormPlanResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Withdraw the form-planning scope",
+)
+async def revoke_form_scope(
+    task_id: uuid.UUID, body: RevokeFormGrantBody, service: FormPrepareServiceDep
+) -> FormPlanResponse:
+    return FormPlanResponse.from_view(
+        await service.revoke(
+            task_id,
+            reason=body.reason,
+            grant_id=body.grant_id,
+            expected_revision=body.expected_revision,
+        )
+    )
+
+
+@router.post(
+    "/tasks/{task_id}/authenticated/form/planning-context",
+    response_model=PlanningContextResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="What the one named planner may see (internal)",
+)
+async def form_planning_context(
+    task_id: uuid.UUID, service: FormPrepareServiceDep
+) -> PlanningContextResponse:
+    return PlanningContextResponse.from_context(await service.planning_context(task_id))
+
+
+@router.post(
+    "/tasks/{task_id}/authenticated/form/propose",
+    response_model=FormPlanResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Validate a prepare_form proposal and open the exact approval (internal)",
+)
+async def propose_form(
+    task_id: uuid.UUID, body: ProposeFormBody, service: FormPrepareServiceDep
+) -> FormPlanResponse:
+    """Refused before any approval, card or action exists if the proposal is not exact."""
+    return FormPlanResponse.from_view(
+        await service.propose(task_id, body.proposal, provider=body.provider)
+    )
+
+
+@router.post(
+    "/actions/{action_id}/field-disclosure/approve",
+    response_model=FormPlanResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Approve exactly this disclosure manifest (trusted click; changes no website)",
+)
+async def approve_field_disclosure(
+    action_id: uuid.UUID, body: DisclosureDecisionBody, service: FormPrepareServiceDep
+) -> FormPlanResponse:
+    view = await service.approve(action_id, expected_revision=body.expected_revision)
+    return FormPlanResponse.from_view(await service.describe(view.action.task_id))
+
+
+@router.post(
+    "/actions/{action_id}/field-disclosure/reject",
+    response_model=FormPlanResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Decline this disclosure manifest",
+)
+async def reject_field_disclosure(
+    action_id: uuid.UUID, body: DisclosureDecisionBody, service: FormPrepareServiceDep
+) -> FormPlanResponse:
+    view = await service.reject(action_id, expected_revision=body.expected_revision)
+    return FormPlanResponse.from_view(await service.describe(view.action.task_id))
 
 
 # --- Persistent browser profiles (Milestone 8a S1) ---------------------------
