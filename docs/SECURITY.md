@@ -403,6 +403,66 @@ exists only for the fixture. The real-account acceptance pass in the M8 plan was
 **deliberately not performed**: the build is unsigned, and Authenticode remains a
 release gate before any real personal account is used.
 
+## Authenticated form observation (Milestone 8b S4)
+
+> **S4 observes form structure only. It cannot type, choose, check, click, upload
+> or submit anything.** Lumi can observe a field; Lumi cannot change that field.
+
+A page observation of a signed-in account now also carries a bounded, **value-free**
+inventory of the page's form controls: forms (`f1`-`f5`), same-origin frames
+(`fr0`-`fr4`), elements (`e1`-`e40`) and options (`op1`-`op25`), as opaque
+worker-issued refs with a role, control type, a redacted accessible name,
+`valueState` (`empty | filled | unknown`), `required`, `enabled`, `visible`,
+`readOnly`, `maxLength`, redacted option labels and `submitLike`. The step
+vocabulary is unchanged (`navigate observe reveal tab history stop`); there is no
+`prepare_form`, `set_value`, `select_option`, `click`, `focus` or `type`, and the
+network authority is unchanged (`ACCOUNT_READ`, GET/HEAD, S0 broker).
+
+- **No current value leaves the worker.** The page-side helper decides "empty or
+  filled" *inside the page* and returns one word; the value string never reaches
+  Python, the runtime, the database, a log or a provider. The same holds for
+  ordinary text fields, not only passwords.
+- **No DOM identity leaves the worker.** Not an id, name, class, tag, selector,
+  path, HTML, coordinate, dataset, form action/method, raw `autocomplete`, raw
+  option `value=` or frame URL. The models are `extra="forbid"`.
+- **Exclusion happens while listing.** Password, file, hidden, one-time-code,
+  `current-password`, `new-password` and `webauthn` controls never get a ref, and a
+  frame containing any credential-shaped control contributes nothing. A page the
+  S2 detector flags, and any account-identity failure, yields no inventory at all
+  (the S3 gates run first).
+- **Same-origin frames only.** A cross-origin frame is never evaluated: not even
+  its labels are read.
+- **Names and labels are page text.** Redacted with the S3 policy inside the
+  worker and re-checked by the model; bounded to 120 characters.
+- **Provider disclosure is not widened.** The inventory is stored locally
+  (`authenticated_observations.element_inventory`, `account_private`,
+  `untrusted_environment`) and is not part of the runtime's response, the planner
+  prompt, the answer prompt or `authenticatedObservationLines()`. A planted marker
+  is asserted present in the local row and absent from every provider payload,
+  public research table, memory path and diagnostic.
+- **Stale refs fail closed.** A per-tab monotonic `form_epoch` rises whenever the
+  inventory fingerprint changes, so a page that re-renders its form without
+  navigating still invalidates every element ref. A ref is valid only for the exact
+  document epoch and form epoch, and is re-derived from the live DOM (one control
+  at the ordinal, same control count, same semantic identity) before use; no
+  nearest match, no fuzzy fallback, no forcing. No `ElementHandle` is held across
+  steps; the worker-only locator description is never persisted or returned.
+- **Structural no-write guard.** A source scan (AST for Python, a reviewed
+  allow-list for the one static DOM helper) fails on any call-shaped mutation
+  (`fill type press click check select_option set_input_files dispatch_event
+  request_submit ...`), on assignment to anything but two local records, and on a
+  second value read. A fixture with input/change/focus/click/keydown/submit/
+  autosave counters proves that observing a form triggers none.
+
+**Residual limits.** A DOM replacement with an *identical* observed semantic
+fingerprint is indistinguishable by construction; S4 detects structural changes
+visible to the reviewed fingerprint, not every re-render. `submitLike` is a
+heuristic that can only *remove* a future capability and never means "safe". The
+accessible-name algorithm is a simplified worker-authored subset of ARIA, not a
+browser accessibility tree. Shadow DOM and cross-origin frames are not inventoried.
+A synthetic fixture only: no real account or real form was used, and Authenticode
+remains a release gate.
+
 ## Known gaps
 
 - The broker constrains Chromium, not its host process. A compromised browser

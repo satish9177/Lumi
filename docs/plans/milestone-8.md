@@ -1802,3 +1802,5 @@ strictly better, and every later slice depends on it.
 ---
 
 **Status (20 September 2026): M8a S3 implemented** - see `docs/reviews/milestone-8-s3.md`. M8a is complete; the real-GitHub manual pass was deferred by design (Authenticode release gate) and S3 acceptance used synthetic accounts only. **M8b (S4-S6) has not started.**
+
+**Status (20 September 2026): M8b S4 implemented** - see `docs/reviews/milestone-8-s4.md`. S4 observes form structure only; it cannot type, choose, check, click, upload or submit anything. Migration `0009` adds `form_epoch` and a value-free `element_inventory` to `authenticated_observations` (observation schema version 2; existing S3 rows stay version 1). The provider disclosure is unchanged, `reveal(elementRef)` exists only as a worker-level revalidation primitive, and the planner vocabulary is unchanged. **Roadmap:** M8b - S4 ✅ authenticated element/form observation; **S5 next** (protected values, disclosure manifest); **S6 later** (network freeze, writes, handover). M8b itself is not complete; S5 and S6 have not started.
