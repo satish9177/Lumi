@@ -830,6 +830,19 @@ authority. Milestone 6 adds front doors and inputs around them; see
 No migration was added: new data lives in the existing `tasks.request` JSONB
 and `task_events`, so the schema head is still `0003`.
 
+
+## Form planning and exact disclosure approval (M8b S5, migration `0010`)
+
+**No browser writes.** Nothing here reaches the worker: no dispatch, no operation, no page.
+
+* **Migration `0010`** adds `protected_values` (one row per closed kind; `value`, `value_digest` with a CHECK that it equals `sha256(value)`, `preview`) and widens `task_grants` to a third kind, `form_prepare` (`profile_binding` now covers both profile-bound kinds; the one-open-grant index is per `(task_id, kind)`). Downgrade removes `form_prepare` grants and the table. It adds no drafts, freeze, `frozen_at`, written-value hash or dispatch column (S6).
+* **Routes.** `GET /protected-values`, `PUT /protected-values/{kind}` (response: `data_ref`, `kind`, `preview`, `updated_at`; never the value); `GET /tasks/{id}/authenticated/form`; `POST .../form/prepare-scope | grant | revoke | planning-context | propose`; `POST /actions/{id}/field-disclosure/approve | reject` (body: `expected_revision` only). The generic action routes refuse the `prepare_form` tool.
+* **Flow.** observe (S4) -> `prepare-scope` (PENDING, grants nothing) -> trusted `grant` (CAS) -> `planning-context` (structure + masked previews, one provider) -> planner `prepare_form` -> `propose` (validated; builds the manifest; `WAITING_APPROVAL`) -> trusted `approve` -> `prepared_nothing`.
+* **`prepared_nothing` semantics.** No new action status. The exact approval is granted, claimed and terminalised through the existing state machine (`WAITING_APPROVAL -> APPROVED -> EXECUTING -> SUCCEEDED`) in one transaction by `ActionService.settle_exact_approval`; the finished attempt's result is `{"code": "prepared_nothing", "browser_dispatches": 0, ...}`. That attempt creates no `browser_dispatches` row and is never given to a worker; it exists so the approval is spent exactly as an executed one would be. `SUCCEEDED` here means *the approval was recorded and used*, not that anything was done.
+* **A task must be open.** Planning happens while the account-reading grant is active, before an answer closes the task; a recorded answer ends the task and form planning with it. Joining the read loop and the form flow into one product path is S6's concern.
+* **Events.** `task.form_prepare_scope_requested|granted|revoked` and `task.form_planning_context_built` carry ids, digests and counts only; the disclosure action's `action.*` events carry `tool_name = prepare_form` so the timeline words them truthfully.
+* **Errors.** `form_prepare_refused` (422, a proposal/input problem) and `form_prepare_state_changed` (409, the facts moved: `protected_value_changed`, `account_changed`, `stale_observation`, `stale_document_epoch`, `stale_form_epoch`, `origin_changed`, `grant_not_usable`), `protected_value_refused` (422). Each carries a stable `reason` and never a value, label or preview.
+
 ## Memory and classification for authenticated tasks (M8a S3)
 
 `authenticated_read` tasks are classified `account_private`. Episodic memory refuses them, the public research context builder never sees their evidence, and diagnostics carry stable codes and counts only. Evidence lives in `authenticated_observations` / `authenticated_answers` (no raw URLs) and is purged with the task or the profile.

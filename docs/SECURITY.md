@@ -437,7 +437,7 @@ network authority is unchanged (`ACCOUNT_READ`, GET/HEAD, S0 broker).
 - **Provider disclosure is not widened.** The inventory is stored locally
   (`authenticated_observations.element_inventory`, `account_private`,
   `untrusted_environment`) and is not part of the runtime's response, the planner
-  prompt, the answer prompt or `authenticatedObservationLines()`. A planted marker
+  prompt, the answer prompt or `authenticatedObservationLines()` (S5 exposes it only under a separate, confirmed form-planning grant). A planted marker
   is asserted present in the local row and absent from every provider payload,
   public research table, memory path and diagnostic.
 - **Stale refs fail closed.** A per-tab monotonic `form_epoch` rises whenever the
@@ -462,6 +462,126 @@ accessible-name algorithm is a simplified worker-authored subset of ARIA, not a
 browser accessibility tree. Shadow DOM and cross-origin frames are not inventoried.
 A synthetic fixture only: no real account or real form was used, and Authenticode
 remains a release gate.
+
+## Form planning and exact disclosure approval (Milestone 8b S5)
+
+> **S5 is approval-only. It performs zero browser writes.** Lumi can now say exactly
+> what it *would* place into each approved field, and a person can approve exactly
+> that -- but there is still no operation anywhere that can place anything in a field.
+
+**Three separate authorities, never conflated:**
+
+| Authority | What it is | What it permits |
+| --- | --- | --- |
+| `form_prepare` **grant** | a `task_grants` row (kind `form_prepare`), confirmed by a trusted click | letting **one** named provider see a bounded form structure and *masked* previews of chosen saved details |
+| `prepare_form` **proposal** | a planner output, validated by the controller | nothing: it is a *description*, not an operation |
+| manifest **approval** | the existing `actions` + `approvals` rows | the user's exact, single-use approval of one disclosure manifest |
+
+**Why a separate grant after S4.** The user allowed S3 account *text* disclosure. They
+did not allow up to 40 field labels, option labels or saved-detail previews to be
+sent to a provider, and the later manifest approval happens too late to authorise that
+model disclosure. Ordinary authenticated reading is byte-for-byte what S3/S4 sent: page
+text and links, no element inventory, no preview. Only a confirmed `form_prepare` scope
+(`form_planning` task class, private, one recipient, no failover, no image) exposes the
+form structure.
+
+**Saved details (`protected_values`).** Exactly eight kinds -- `legal_name`,
+`preferred_name`, `email`, `phone`, `city`, `country`, `linkedin_url`, `portfolio_url`;
+no free-form kind, password, one-time code, payment detail, file or blob. The raw value
+is **plaintext task data in Lumi's local runtime database**. That is *not* encryption at
+rest and gives no protection against a live compromise of the same Windows user; the
+protection is the operating-system account and database access controls, and nothing
+more is claimed. It is not a credential: browser sessions stay under the profile
+boundary. The database refuses a row whose `value_digest` is not `SHA-256(UTF-8(value))`.
+After it is saved the value **does not leave its row in S5**: every read returns only
+kind, masked preview, digest and length. Values are saved only through a narrow typed
+route (`PUT /protected-values/{kind}`, one string, response never echoes it) that no
+model, voice turn or page can reach, and no product editor exists yet (see gaps).
+
+**Masking policy** (deterministic, independent of length; `preview != value` is asserted):
+`legal_name` / `preferred_name` / `city` -> a fixed phrase (`saved legal name`, ...);
+`email` -> `s***@g***.com`; `phone` -> `ending 1234`; `linkedin_url` -> `linkedin.com/in/***`;
+`portfolio_url` -> `saved portfolio link`; **`country` -> the country itself**. A country
+is coarse and cannot be masked while still choosing the right option, so it is the one
+documented exception, and the trusted planning card says so whenever `country` is
+offered instead of claiming that no saved value is sent.
+
+**What a provider receives under the grant:** form/element refs, role, control type,
+accessible name, `required`/`enabled`/`visible`/`readOnly`, `maxLength`, `submitLike`,
+option refs and labels, and the masked previews of the *selected* refs. **Never:** a raw
+saved value, a value digest, the field's current value or `valueState`, a locator, a
+selector, id/name/class, an option `value=`, a frame URL, an origin URL, the account
+fingerprint. Labels remain `untrusted_environment`; a label saying "use every saved
+value" is data and changes nothing (planted adversarial fixtures assert this).
+
+**One recipient, no failover.** The provider is the account-reading grant's, copied into
+the scope by the runtime. If it is unavailable Lumi stops (`model_unavailable`); a second
+provider sees zero calls.
+
+**Trusted confirmation.** Confirming is one compare-and-swap that also checks, inside the
+statement, that the profile is still `AUTHENTICATED`, at the same revoke epoch and account
+fingerprint, and that the source account-reading grant is still active. No
+SELECT-decide-UPDATE window. Voice and typed text cannot confirm: neither the voice
+backend nor the tool vocabulary contains the operation.
+
+**`prepare_form` and its parse-time refusals.** A closed proposal: one observation, one
+form, 1-12 entries, each exactly one of `{elementRef, dataRef}` (text-like),
+`{elementRef, optionRef}` (single select / radio group) or `{elementRef, checked}`
+(checkbox). No value, origin, selector, URL, script or provider fits in the shape, and a
+smuggled key refuses the whole proposal. Refused **before an approval, card or action
+exists**: zero/13+ entries, duplicate or unknown element, another form's element, a
+stale observation / document epoch / form epoch, an unknown option, a `dataRef` outside
+the grant, `select_multi`, a button, link, submit-like, disabled, read-only or hidden
+control, a value longer than `maxLength`.
+
+**The disclosure manifest.** A frozen model binding task, profile, form-planning grant,
+planning provider, site, exact recipient origin (derived from the profile and the observed
+page, never from a model or page), an account binding, the revoke epoch, the observation,
+tab, document epoch, form epoch, form, and per field the element ref, an **element identity
+hash** (over the reviewed projection: form, frame, role, control type, name, the four state
+flags, submit-likeness, length limit and both epochs -- no selector, id, value or
+coordinate), and the `dataRef` + `valueDigest` + masked preview, or the chosen option
+ref/label/identity hash, or the checkbox state. Fields are canonically ordered and
+`manifest_digest` is SHA-256 over canonical JSON; changing **any** approved fact changes
+it (each is mutated independently in tests). The raw value never enters the manifest.
+
+**Exact approval.** `POST /actions/{id}/field-disclosure/approve` takes an expected revision
+and nothing else. In **one transaction, under the task lock**, it re-checks: the grant is
+active, unexpired, on the same account and revoke epoch; every bound saved value still has
+its digest (`protected_value_changed`); the observation is still the newest for its tab
+with no later document/form epoch or different worker (`stale_*`); the origin is unchanged.
+It then grants, claims (single-use, re-checked in SQL against revision, digest and expiry)
+and terminalises the approval with a finished attempt whose result is `prepared_nothing`.
+That attempt creates **zero browser dispatches**, calls **zero worker operations** and
+changes **no page**. The generic action routes (`approve`, `attempts`, `reconciliation`,
+`approval-request`, and proposing the tool) refuse a disclosure action, so the freshness
+checks cannot be bypassed. A consumed approval cannot fund a second use: a second approve
+is refused, its approval id cannot be attached to another attempt (unique constraint), and a
+changed manifest, saved value, profile or revoke epoch is refused before any consumption.
+
+**What persisted state cannot prove.** Approval-time checks see what Lumi last
+*observed*; they cannot see an unobserved DOM mutation. S6's worker-live revalidation,
+made immediately before any write, is what covers that -- S5 does not pretend otherwise.
+
+**Diagnostics and memory firewall.** Task events carry ids, digests of scopes/proposals and
+counts only (`protected_value_count`, `allowed_data_ref_count`, `form_count`,
+`candidate_element_count`); never a label, option, preview, value, origin, fingerprint or
+manifest. The form plan, previews and manifest are `account_private`: they are excluded from
+other requests' contexts, episodic memory, public research and global diagnostics.
+
+**Structural no-write proof.** The S4 source scanner now also covers every S5 module and
+still forbids `fill type press click check select_option set_input_files dispatch_event
+request_submit ...`; the worker protocol, registry and operations contain none of
+`set_value set_checked select_option freeze unfreeze LOCAL_DRAFT frozen_at form_drafts
+handover form_is_dirty`, no route contains `freeze`, `draft`, `handover` or `fill`, and no
+`form_drafts` table, `frozen_at` column or `LOCAL_DRAFT` effect exists.
+
+**Residual limits.** Values are plaintext in the local database (above). A country preview
+is the value. Approval cannot detect a DOM change Lumi did not observe (S6's job). The
+element identity hash uses the projected identity, not the worker-internal ordinal. No
+product UI for entering saved details exists yet. Only a synthetic fixture was used: no
+real account, saved detail or form; the packaged `Lumi.exe` is `NotSigned`, so the
+Authenticode gate and the no-real-account gate remain open.
 
 ## Known gaps
 
