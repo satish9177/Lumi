@@ -5,6 +5,7 @@ import { AGENT_IPC_CHANNELS } from '../../shared/agent-contracts'
 import { registerAgentIpc, type AgentIpcDependencies } from './agent-ipc'
 import { FakeAuthenticatedRuntime } from '../testing/fake-authenticated-runtime'
 import { ActiveTaskStore, AgentTaskController } from './agent-tasks'
+import { authenticatedObservationLines } from '../agent/authenticated-planner'
 import {
   WireError, parseAuthenticated, parseAuthenticatedStep, parseTask, projectRuntimeError
 } from './agent-wire'
@@ -134,6 +135,28 @@ describe('what the wire refuses', () => {
     expect(parsed.view.grant?.scope.budgets.maxVisionCalls).toBe(0)
     expect(parsed.view.grant?.scope.recipient).toBe('gemini')
     expect(parsed.view.observations).toHaveLength(1)
+  })
+
+  it('S4: a form inventory in a runtime observation never reaches the view or a provider prompt', async () => {
+    const MARKER = 'FORM_FIELD_SECRET_MARKER_0AD'
+    const view = await prepared() as Record<string, any>
+    // What a v2 stored observation holds locally. S4 does not send it on the wire,
+    // and a wire that ever did must still not become provider text.
+    view.observations[0].form_epoch = 3
+    view.observations[0].inventory = {
+      forms: [{ ref: 'f1', label: MARKER }],
+      frames: [{ ref: 'fr0' }],
+      elements: [{ element_ref: 'e1', form_ref: 'f1', frame_ref: 'fr0', role: 'textbox', control_type: 'text',
+        accessible_name: MARKER, value_state: 'filled', required: true, enabled: true, visible: true,
+        read_only: false, max_length: null, option_refs: [{ ref: 'op1', label: MARKER }], submit_like: false }],
+      truncated: false
+    }
+    const parsed = parseAuthenticated(view)
+    const prompt = authenticatedObservationLines(parsed.view).join('\n')
+    expect(prompt).not.toContain(MARKER)
+    expect(prompt).not.toContain('accessible_name')
+    expect(JSON.stringify(parsed.view)).not.toContain(MARKER)
+    expect(JSON.stringify(parsed.view)).not.toContain('inventory')
   })
 
   it.each([

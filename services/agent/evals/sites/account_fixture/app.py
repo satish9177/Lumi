@@ -43,6 +43,8 @@ from urllib.parse import parse_qsl, quote
 from fastapi import APIRouter, FastAPI, Request, Response, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from evals.sites.account_fixture.forms import add_form_routes
+
 SESSION_COOKIE = "lumi_fixture_session"
 ACCOUNT_NAME = "Fixture Account"
 ACCOUNT_ID = "fixture-account-1"
@@ -120,6 +122,7 @@ def create_site(
     effects: dict[str, int] = {
         "read_count": 0,
         "mutations": 0,
+        "submissions": 0,
         "sw_fetches": 0,
         "ws_connects": 0,
         "ping_get": 0,
@@ -584,6 +587,19 @@ def create_site(
         _count("/app/long")
         lines = "".join(f"<p>Row {index} of the ledger has {index * 7} entries.</p>" for index in range(1, 200))
         return _account_page(request, "Long", f"<h1>Ledger</h1>{lines}")
+
+    # Milestone 8b S4: forms, for observation only. See `forms.py`.
+    add_form_routes(
+        router,
+        page=_page,
+        account_page=_account_page,
+        count=_count,
+        effects=effects,
+        external_origin=external_origin,
+        planted_email=PLANTED_EMAIL,
+        planted_long_id=PLANTED_LONG_ID,
+        injection_text=INJECTION_TEXT,
+    )
 
     @router.get("/cdn/app.js")
     async def cdn_script() -> Response:

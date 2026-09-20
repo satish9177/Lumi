@@ -885,10 +885,24 @@ authenticated_observations = Table(
     Column("observed_at", DateTime(timezone=True), nullable=False),
     Column("content_hash", String(64), nullable=False),
     Column("projection", JSONB(), nullable=False),
+    # Milestone 8b S4. A version-1 row is an S3 text/link observation and keeps
+    # the column defaults (epoch 0, empty inventory); it is never rewritten.
+    Column("form_epoch", Integer(), nullable=False, server_default=text("0")),
+    Column(
+        "element_inventory", JSONB(), nullable=False, server_default=text("'{}'::jsonb")
+    ),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     UniqueConstraint("attempt_id"),
     UniqueConstraint("task_id", "sequence"),
-    CheckConstraint("schema_version = 1", name="schema_version"),
+    CheckConstraint("schema_version IN (1, 2)", name="schema_version"),
+    CheckConstraint("form_epoch >= 0", name="form_epoch_nonnegative"),
+    CheckConstraint(
+        "jsonb_typeof(element_inventory) = 'object'", name="element_inventory_is_object"
+    ),
+    CheckConstraint(
+        "schema_version <> 1 OR (form_epoch = 0 AND element_inventory = '{}'::jsonb)",
+        name="v1_has_no_inventory",
+    ),
     CheckConstraint("classification = 'account_private'", name="classification"),
     CheckConstraint("provenance = 'untrusted_environment'", name="provenance"),
     CheckConstraint("sequence >= 1", name="sequence_positive"),

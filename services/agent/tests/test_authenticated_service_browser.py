@@ -65,6 +65,12 @@ from app.services.runtime import RuntimeGeneration
 from app.services.tasks import TaskService
 from evals.sites.account_fixture import (
     ACCOUNT_ID,
+    CONTROL_CLASS_SECRET,
+    CONTROL_ID_SECRET,
+    CONTROL_NAME_SECRET,
+    CURRENT_VALUE_SECRET,
+    FORM_FIELD_SECRET_MARKER,
+    OPTION_VALUE_SECRET,
     PLANTED_CARD,
     PLANTED_EMAIL,
     PLANTED_LONG_ID,
@@ -388,6 +394,65 @@ async def test_no_identifier_is_persisted_anywhere_it_should_not_be(world: World
     for table in ("research_observations", "research_answers", "task_events", "actions", "browser_dispatches", "action_attempts"):
         found = await world.sql(f"SELECT coalesce(string_agg(t::text, ' | '), '') FROM {table} t WHERE t::text LIKE '%{PRIVATE_MARKER}%'")
         assert found == "", (table, found[:600])
+
+
+# ---- Milestone 8b S4: the form inventory is local evidence and nothing else ----------------------
+
+
+async def test_the_form_inventory_is_stored_locally_and_reaches_no_other_surface(world: World) -> None:
+    """S4 observes form structure only; and what it observes stays in one table."""
+    from app.api.authenticated_schemas import AuthenticatedResponse
+
+    await world.goto("/app/apply")
+    task_id, _ = await world.granted()
+    step = await world.observe(task_id)
+    assert step.outcome is AttemptOutcome.SUCCEEDED and step.observation is not None
+    observation = step.observation.observation
+    assert observation.schema_version == 2 and observation.form_epoch >= 1
+    assert any(e.accessible_name == "Full legal name" for e in observation.inventory.elements)
+
+    # Persisted, explicitly versioned, in the account-private evidence table.
+    assert await world.sql("SELECT schema_version FROM authenticated_observations") == 2
+    assert await world.sql("SELECT form_epoch FROM authenticated_observations") == observation.form_epoch
+    assert await world.sql(
+        f"SELECT count(*) FROM authenticated_observations WHERE element_inventory::text LIKE '%{FORM_FIELD_SECRET_MARKER}%'"
+    ) == 1
+    assert await world.sql(
+        "SELECT count(*) FROM authenticated_observations WHERE element_inventory::text LIKE '%Full legal name%'"
+    ) == 1
+
+    # The marker is in no other table -- not the public research tables, not the
+    # ledger, not the events or dispatch results (diagnostics), not the profile.
+    for table in (
+        "research_observations", "research_answers", "research_sessions", "task_events", "actions",
+        "action_attempts", "browser_dispatches", "step_authorizations", "task_grants", "tasks",
+        "browser_profiles", "authenticated_answers", "task_events",
+    ):
+        found = await world.sql(
+            f"SELECT coalesce(string_agg(t::text, ' | '), '') FROM {table} t WHERE t::text LIKE '%{FORM_FIELD_SECRET_MARKER}%'"
+        )
+        assert found == "", (table, found[:400])
+    # Diagnostics carry counts and the epoch, never a name.
+    attempts = await world.sql("SELECT coalesce(string_agg(result::text, ' '), '') FROM action_attempts")
+    assert '"form_epoch"' in attempts and '"element_count"' in attempts
+    assert "Full legal name" not in attempts and "Country" not in attempts
+
+    # What the runtime hands to anything that talks to a provider is the S3 shape:
+    # text and links. The inventory is not in it, so no provider prompt can carry it.
+    view = await world.service.describe(task_id)
+    wire = AuthenticatedResponse.from_view(view).model_dump_json()
+    assert FORM_FIELD_SECRET_MARKER not in wire and "inventory" not in wire and "form_epoch" not in wire
+
+    # Values, option values and DOM identity are in no table at all.
+    for planted in (CURRENT_VALUE_SECRET, OPTION_VALUE_SECRET, CONTROL_ID_SECRET, CONTROL_NAME_SECRET, CONTROL_CLASS_SECRET):
+        for table in ("authenticated_observations", "task_events", "browser_dispatches", "action_attempts", "actions"):
+            found = await world.sql(
+                f"SELECT count(*) FROM {table} t WHERE t::text LIKE '%{planted}%'"
+            )
+            assert found == 0, (table, planted)
+    # Nothing was changed on the website by looking at its form.
+    state = await world.site.effects()
+    assert state["submissions"] == 0 and state["mutations"] == 0
 
 
 # ---- pauses, against a real browser and a real ledger --------------------------------------------

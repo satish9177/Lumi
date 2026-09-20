@@ -146,6 +146,9 @@ def _observation(row: Row[Any]) -> AuthenticatedObservationRecord:
         settled=row.settled,
         truncated=row.truncated,
         observed_at=row.observed_at,
+        form_epoch=row.form_epoch,
+        # A v1 row stores `{}`; the model reads that as the empty inventory.
+        inventory=row.element_inventory or {},
         blocks=projection["blocks"],
         links=projection["links"],
         open_tabs=projection["open_tabs"],
@@ -515,6 +518,10 @@ class AuthenticatedRepository:
                 truncated=observation.truncated,
                 observed_at=observation.observed_at,
                 content_hash=observation.content_hash,
+                form_epoch=observation.form_epoch,
+                # Only a version-2 observation has an inventory; a version-1 row
+                # keeps the column default so it stays what it always was.
+                element_inventory=dumped["inventory"] if observation.schema_version == 2 else {},
                 projection={
                     "blocks": dumped["blocks"],
                     "links": dumped["links"],

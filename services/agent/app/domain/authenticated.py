@@ -31,7 +31,11 @@ What lives here, and what deliberately does not:
   tables, and a `classification` that is a property of the type, not of a
   column somebody might forget to filter on.
 
-Not here: form observation, element refs, field writes, protected values,
+S4 (M8b) adds `AuthenticatedObservation` schema version 2: a bounded, value-free
+form/element inventory and a per-tab `form_epoch` (see `authenticated_forms`).
+It changes nothing about the step vocabulary above.
+
+Not here: field writes, protected values,
 drafts, uploads, downloads, click/invoke, keyboard input. Those are S4-S6 or
 out of scope entirely.
 """
@@ -44,6 +48,7 @@ from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError, field_validator, model_validator
 
+from app.domain.authenticated_forms import EMPTY_INVENTORY, FormInventory
 from app.domain.digest import canonical_json
 from app.domain.login_takeover import CredentialSignal
 from app.domain.redaction import is_redacted
@@ -356,7 +361,10 @@ class AuthenticatedObservation(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[1] = 1
+    #: 1 = the S3 text/link observation, which has no element inventory. 2 = the
+    #: S4 observation with a bounded, value-free form/element inventory. Every new
+    #: observation is 2; a stored v1 row stays v1 and is never reinterpreted.
+    schema_version: Literal[1, 2] = 2
     observation_id: uuid.UUID
     provenance: Literal["untrusted_environment"] = "untrusted_environment"
     classification: Literal["account_private"] = ACCOUNT_PRIVATE
@@ -380,6 +388,11 @@ class AuthenticatedObservation(BaseModel):
     #: How many identifiers were reduced, by kind. Counts only.
     redactions: dict[str, int] = Field(default_factory=dict)
     content_hash: str = Field(pattern=_DIGEST)
+    #: One monotonic counter per authenticated tab. It rises whenever the tab's
+    #: form/control inventory changes, so a page that re-renders its form without
+    #: navigating still invalidates every element ref. 0 on a v1 row.
+    form_epoch: int = Field(default=0, ge=0, le=MAX_SEQUENCE)
+    inventory: FormInventory = EMPTY_INVENTORY
 
     @field_validator("title")
     @classmethod
@@ -407,8 +420,10 @@ class AuthenticatedObservation(BaseModel):
                 raise ValueError(f"{prefix} refs must be sequential")
         if self.kind == "page" and self.host is None:
             raise ValueError("a page observation carries the host it is on")
-        if self.kind == "tab_state" and (self.blocks or self.links):
+        if self.kind == "tab_state" and (self.blocks or self.links or self.inventory.elements):
             raise ValueError("a tab-state observation carries no page content")
+        if self.schema_version == 1 and (self.form_epoch != 0 or self.inventory != EMPTY_INVENTORY):
+            raise ValueError("a version 1 observation has no form inventory")
         # The redaction guarantee is checked here as well as where it is
         # applied: text that still contains an identifier-shaped run was not
         # redacted where it should have been, and is never stored or sent.

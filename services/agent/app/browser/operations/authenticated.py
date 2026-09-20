@@ -8,7 +8,7 @@ validated planner choice into these inputs -- can say:
 
     authenticated_navigate   a tab, a link ref, an expected document epoch
     authenticated_observe    a tab
-    authenticated_reveal     a tab and a link or block ref of the current epoch
+    authenticated_reveal     a tab and a link, block or (S4) element ref of the current epoch
     authenticated_history    a tab and "back" or "forward"
     authenticated_tab        "open", "activate" or "close", and a tab ref
 
@@ -18,13 +18,21 @@ link ref means exists only in this process's memory, for the epoch that issued
 it. Scrolling is `scroll_into_view_if_needed` on a located element -- no
 key event, so a focused control is never fed a key.
 
+**Form observation (Milestone 8b S4) is observation only.** A page observation
+also carries a bounded, value-free inventory of the page's form controls (see
+`form_observation`), built after -- never before -- the checks below. Nothing in
+this module can type into, choose in, check, click, upload to or submit a control:
+the only thing an element ref can do is be *revalidated* against the live DOM and
+scrolled into view, exactly like a block ref.
+
 **The order of checks is the security property.** Before any page content is
 projected, in this order and with no exception:
 
 1. the tab is on a real document inside the profile's site;
 2. the credential-surface detector runs (bounded DOM *counts*);
 3. the account identity is derived and compared with the grant's fingerprint;
-4. only then is text read, **redacted line by line**, split and bounded.
+4. only then is text read, **redacted line by line**, split and bounded, and the
+   form inventory listed.
 
 A credential surface returns signals only. A missing or different identity
 returns a closed enum only. In neither case does a title, a block, a link or a
@@ -40,7 +48,7 @@ from urllib.parse import urldefrag, urljoin, urlsplit
 
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import Page
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.browser import site_scope
 from app.browser.authenticated_session import (
@@ -49,6 +57,7 @@ from app.browser.authenticated_session import (
     LinkEntry,
 )
 from app.browser.credential_signals import account_fingerprint, detect_credential_surface
+from app.browser.form_observation import build_inventory, resolve_element
 from app.browser.protocol import OperationStatus
 from app.browser.registry import (
     BrowserOperation,
@@ -71,6 +80,7 @@ from app.domain.authenticated import (
     IdentityCheckResult,
     WorkerReadResult,
 )
+from app.domain.authenticated_forms import ELEMENT_REF
 from app.domain.redaction import Redactor
 from app.domain.research import (
     BLOCK_REF,
@@ -132,11 +142,24 @@ class ObserveInput(_Input):
     tab: str = Field(pattern=AUTH_TAB_REF)
 
 
+_REVEAL_REF = r"^(l[1-9][0-9]?|b[1-9][0-9]{0,2}|" + ELEMENT_REF[1:-1] + r")$"
+
+
 class RevealInput(_Input):
     tab: str = Field(pattern=AUTH_TAB_REF)
-    target_kind: Literal["link", "block"]
-    target_ref: str = Field(pattern=r"^(l[1-9][0-9]?|b[1-9][0-9]{0,2})$")
+    target_kind: Literal["link", "block", "element"]
+    target_ref: str = Field(pattern=_REVEAL_REF)
     expected_document_epoch: int = Field(ge=1, le=MAX_SEQUENCE)
+    #: Required for an element ref, which is valid only for one form epoch as well
+    #: as one document epoch. The planner cannot produce an element target in S4;
+    #: this is the revalidation primitive S5/S6 will use, proven read-only here.
+    expected_form_epoch: int | None = Field(default=None, ge=1, le=MAX_SEQUENCE)
+
+    @model_validator(mode="after")
+    def _element_needs_its_epoch(self) -> "RevealInput":
+        if (self.target_kind == "element") != (self.expected_form_epoch is not None):
+            raise ValueError("an element ref names its form epoch; a link or block ref does not")
+        return self
 
 
 class HistoryInput(_Input):
@@ -320,6 +343,7 @@ async def _tab_state(
             profile_id=session.profile_id,
             tab=tab.ref if tab is not None else session.active,
             document_epoch=tab.epoch if tab is not None else 1,
+            form_epoch=tab.form_epoch if tab is not None else 0,
             settled=True,
             observed_at=_now(),
             open_tabs=session.open_tabs,
@@ -356,6 +380,7 @@ async def _page_result(
         # 2. Credential surface: bounded counts, and nothing else, on a hit.
         signals = await detect_credential_surface(page)
         if signals:
+            tab.drop_elements()
             return _read_result(
                 WorkerReadResult(
                     credential_surface=CredentialSurfaceResult(
@@ -369,6 +394,7 @@ async def _page_result(
         # 3. Identity. Read, hashed at once, compared, and never returned.
         fingerprint = await account_fingerprint(page)
         if fingerprint != payload.expected_account_fingerprint:
+            tab.drop_elements()
             return _read_result(
                 WorkerReadResult(
                     identity=IdentityCheckResult(
@@ -385,6 +411,8 @@ async def _page_result(
         raw_title = _clean(await page.title())
         title = redactor.redact(raw_title)[:MAX_TITLE_CHARS]
         links, link_table, total_links = await _read_links(page, current_url, session, redactor)
+        # The form inventory: passive, value-free, and only after both gates.
+        collected = await build_inventory(page)
         if tab.epoch == epoch_before:
             break
     else:
@@ -394,6 +422,7 @@ async def _page_result(
         raw_text, redactor, max_chars=payload.max_text_chars, max_blocks=payload.max_blocks
     )
     blocks = [TextBlock(id=f"b{index + 1}", text=text) for index, (text, _) in enumerate(projected)]
+    form_epoch = tab.adopt_inventory(collected)
     tab.record(
         links=link_table,
         blocks={f"b{index + 1}": raw for index, (_, raw) in enumerate(projected)},
@@ -412,6 +441,8 @@ async def _page_result(
             title=title,
             settled=settled,
             truncated=truncated or total_links > len(links),
+            form_epoch=form_epoch,
+            inventory=collected.inventory,
             observed_at=_now(),
             blocks=blocks,
             links=links,
@@ -536,14 +567,59 @@ async def authenticated_observe(context: OperationContext, payload: ObserveInput
     )
 
 
+async def _reveal_element(tab: AuthenticatedTab, payload: RevealInput) -> None:
+    """Revalidate one element ref and scroll it into view. **Nothing else.**
+
+    This is the read-only proof of the revalidation mechanism S5/S6 will build on.
+    It never focuses, clicks, types, hovers or dispatches anything; the only thing
+    done to the control is `scroll_into_view_if_needed`. In order:
+
+    1. the document epoch matches exactly (`stale_document_epoch`);
+    2. the form epoch matches exactly (`element_changed`);
+    3. the ref was issued for this inventory (`unknown_target_ref`);
+    4. the control is re-derived from the *current* DOM: one control at the ordinal,
+       the same number of controls in its frame, the same semantic identity
+       (role, control type, accessible name, required, read-only, enabled,
+       visible). Anything else is `element_changed`, every element ref of the tab
+       is invalidated and a fresh observation is required.
+
+    No force, no nearest match, no search by similar label. A DOM replacement with
+    an identical observed fingerprint is indistinguishable by construction: that
+    is the reviewed residual, stated in `docs/reviews/milestone-8-s4.md`.
+    """
+    locator = tab.resolve_element(
+        document_epoch=payload.expected_document_epoch,
+        form_epoch=payload.expected_form_epoch or 0,
+        ref=payload.target_ref,
+    )
+    page = tab.page
+    if await detect_credential_surface(page):
+        # A login surface appeared without navigation. Touch nothing; the read
+        # that follows reports it and no element ref survives.
+        tab.drop_elements()
+        return
+    handle = await resolve_element(page, locator)
+    if handle is None:
+        tab.drop_elements()
+        raise SessionError("element_changed")
+    try:
+        await handle.scroll_into_view_if_needed(timeout=REVEAL_TIMEOUT_MS)
+    finally:
+        await handle.dispose()
+
+
 async def authenticated_reveal(context: OperationContext, payload: RevealInput) -> OperationResult:
-    """Scroll one observed block or link into view. No key press, no coordinates."""
+    """Scroll one observed block, link or element into view. No key press, no coordinates."""
     try:
         session = _session(context)
         tab = session.tab(payload.tab)
         session.activate(tab.ref)
         page = tab.page
-        if payload.target_kind == "link":
+        if payload.target_kind == "element":
+            if not payload.target_ref.startswith("e"):
+                return _failed("target_mismatch")
+            await _reveal_element(tab, payload)
+        elif payload.target_kind == "link":
             if not payload.target_ref.startswith("l"):
                 return _failed("target_mismatch")
             entry = tab.resolve_link(epoch=payload.expected_document_epoch, ref=payload.target_ref)
@@ -560,7 +636,8 @@ async def authenticated_reveal(context: OperationContext, payload: RevealInput) 
             if await candidates.count() == 0:
                 return _failed("reveal_target_not_found")
             locator = candidates.first
-        await locator.scroll_into_view_if_needed(timeout=REVEAL_TIMEOUT_MS)
+        if payload.target_kind != "element":
+            await locator.scroll_into_view_if_needed(timeout=REVEAL_TIMEOUT_MS)
     except SessionError as error:
         return _failed(error.code)
     except PlaywrightError:
@@ -702,8 +779,9 @@ OPERATIONS: tuple[BrowserOperation, ...] = (
     ),
     _operation(
         REVEAL,
-        "Scroll one observed block or link of the current document into view, then read the tab "
-        "again. No key press, no coordinates, no nearest match.",
+        "Scroll one observed block, link or (revalidated) form element of the current document "
+        "into view, then read the tab again. No key press, no focus, no click, no coordinates, no "
+        "nearest match.",
         RevealInput,
         authenticated_reveal,
         ("the ref resolved against the tab's current document epoch", *_COMMON_POSTCONDITIONS),

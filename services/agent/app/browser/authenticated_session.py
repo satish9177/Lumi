@@ -15,6 +15,15 @@ bookkeeping a read needs on top of it, and nothing else:
   refs, redacted labels and hosts. A private link can itself be a capability,
   so its address stays in this process's memory and dies with the epoch.
 
+* **A form epoch per tab and a locator table** (Milestone 8b S4). A page can
+  replace its whole form without a navigation, so the document epoch alone never
+  proves an element ref is still valid. `form_epoch` is one monotonic counter per
+  tab that rises whenever the tab's form/control inventory fingerprint changes.
+  The table maps `e<n>` to an `ElementLocator` -- a *description* (frame slot,
+  form key, ordinal, expected semantic identity), never a Playwright handle -- and
+  it is re-derived against the live DOM every time a ref is used. Like the link
+  and block tables it lives only here: not returned, not persisted, not logged.
+
 It is deliberately a different class from `ResearchBrowserSession`. A research
 session id can never stand in for one of these, and a profile can never stand
 in for a research session: the dispatch that reaches this module named a
@@ -23,11 +32,12 @@ profile, and the worker refused every other kind of id before getting here.
 
 import logging
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from playwright.async_api import BrowserContext, Error as PlaywrightError, Page
 
 from app.browser.account_read_guard import AccountReadNetworkGuard
+from app.browser.form_observation import CollectedInventory, ElementLocator
 from app.browser.research_session import RETAINED_EPOCHS, DocumentEpochs, SessionError
 from app.domain.authenticated import MAX_AUTH_TABS
 
@@ -53,10 +63,62 @@ class AuthenticatedTab:
     links: dict[int, dict[str, LinkEntry]] = field(default_factory=dict)
     #: document epoch -> {block ref: the block's raw text}
     blocks: dict[int, dict[str, str]] = field(default_factory=dict)
+    #: Monotonic per tab. Rises when the form/control inventory fingerprint changes.
+    form_epoch: int = 0
+    #: Element ref -> locator description, for exactly the current inventory.
+    elements: dict[str, ElementLocator] = field(default_factory=dict)
+    #: Worker-internal hash of the structure that issued `elements`. Never leaves.
+    inventory_fingerprint: str | None = None
+    #: An element ref failed revalidation: the next inventory is a new epoch even
+    #: if it happens to hash the same, so no old ref can come back to life.
+    _renew: bool = False
 
     @property
     def epoch(self) -> int:
         return self.epochs.epoch
+
+    def adopt_inventory(self, collected: CollectedInventory) -> int:
+        """Make `collected` the tab's current inventory and return its form epoch.
+
+        The epoch rises if the structure differs from the one that issued the
+        current refs (or if a ref just failed revalidation), and otherwise stays,
+        so an unchanged form keeps its refs. A ref is never re-pointed at a
+        different control within one epoch.
+        """
+        if self._renew or collected.fingerprint != self.inventory_fingerprint:
+            self.form_epoch += 1
+        self._renew = False
+        self.inventory_fingerprint = collected.fingerprint
+        self.elements = {
+            ref: replace(locator, document_epoch=self.epoch, form_epoch=self.form_epoch)
+            for ref, locator in collected.locators.items()
+        }
+        return self.form_epoch
+
+    def drop_elements(self) -> None:
+        """Kill every element ref of this tab (a gate fired, or a ref went stale)."""
+        self.elements = {}
+        self._renew = True
+
+    def resolve_element(self, *, document_epoch: int, form_epoch: int, ref: str) -> ElementLocator:
+        """The locator `ref` meant, only for the exact document *and* form epoch.
+
+        Checks, in order: the document epoch (`stale_document_epoch`), the form
+        epoch (`element_changed`), that the ref was issued (`unknown_target_ref`).
+        This is the cheap half of revalidation; the caller then re-derives the
+        control from the live DOM, which is the half that catches a re-render that
+        happened after the last observation.
+        """
+        if document_epoch != self.epoch:
+            raise SessionError("stale_document_epoch")
+        if form_epoch != self.form_epoch:
+            raise SessionError("element_changed")
+        locator = self.elements.get(ref)
+        if locator is None:
+            raise SessionError("unknown_target_ref")
+        if locator.document_epoch != self.epoch or locator.form_epoch != self.form_epoch:
+            raise SessionError("element_changed")
+        return locator
 
     def record(self, *, links: dict[str, LinkEntry], blocks: dict[str, str]) -> None:
         self.links[self.epoch] = links
@@ -199,3 +261,4 @@ __all__ = [
     "AuthenticatedTab",
     "LinkEntry",
 ]
+

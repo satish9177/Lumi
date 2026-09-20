@@ -186,7 +186,11 @@ class AuthenticatedObservationResponse(BaseModel):
     worker_generation: uuid.UUID | None
     sequence: int
     ref: str
-    schema_version: int
+    #: The version of *this response shape* -- text and links, exactly as in S3.
+    #: A stored observation may be schema version 2 (S4 adds a local form
+    #: inventory), but the inventory is deliberately not part of this response:
+    #: nothing outside the runtime's own database and worker receives it in S4.
+    schema_version: Literal[1]
     provenance: Literal["untrusted_environment"]
     classification: Literal["account_private"]
     kind: str
@@ -219,7 +223,7 @@ class AuthenticatedObservationResponse(BaseModel):
             worker_generation=record.worker_generation,
             sequence=observation.sequence,
             ref=observation.ref,
-            schema_version=observation.schema_version,
+            schema_version=1,
             provenance=observation.provenance,
             classification=observation.classification,
             kind=observation.kind,

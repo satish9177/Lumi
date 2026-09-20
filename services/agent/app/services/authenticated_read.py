@@ -1295,6 +1295,12 @@ def _step_summary(outcome: Outcome, observation: AuthenticatedObservation | None
             truncated=observation.truncated,
             settled=observation.settled,
             redactions=sum(observation.redactions.values()),
+            # S4: counts, the epoch and a flag. Never a name, a label or a state.
+            form_count=observation.inventory.form_count,
+            element_count=observation.inventory.element_count,
+            option_count=observation.inventory.option_count,
+            form_epoch=observation.form_epoch,
+            inventory_truncated=observation.inventory.truncated,
         )
     else:
         value = outcome.observation.get("http_status")

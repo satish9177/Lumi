@@ -7,6 +7,20 @@ a synthetic password/OTP/SSO/challenge login flow on the same fixture; see
 `app.py` for the full route list and the fixture's own module docstring.
 """
 
+from evals.sites.account_fixture.forms import (
+    CONTROL_CLASS_SECRET,
+    CONTROL_ID_SECRET,
+    CONTROL_NAME_SECRET,
+    CROSS_ORIGIN_FIELD_SECRET,
+    CURRENT_VALUE_SECRET,
+    FILE_LABEL_SECRET,
+    FORM_FIELD_SECRET_MARKER,
+    FRAME_FIELD_LABEL,
+    SECURE_FRAME_SIBLING_SECRET,
+    OPTION_VALUE_SECRET,
+    OTP_LABEL_SECRET,
+    PASSWORD_LABEL_SECRET,
+)
 from evals.sites.account_fixture.app import (
     ACCOUNT_ID,
     ACCOUNT_NAME,
@@ -31,6 +45,18 @@ from evals.sites.account_fixture.app import (
 )
 
 __all__ = [
+    "CONTROL_CLASS_SECRET",
+    "CONTROL_ID_SECRET",
+    "CONTROL_NAME_SECRET",
+    "CROSS_ORIGIN_FIELD_SECRET",
+    "CURRENT_VALUE_SECRET",
+    "FILE_LABEL_SECRET",
+    "FORM_FIELD_SECRET_MARKER",
+    "FRAME_FIELD_LABEL",
+    "SECURE_FRAME_SIBLING_SECRET",
+    "OPTION_VALUE_SECRET",
+    "OTP_LABEL_SECRET",
+    "PASSWORD_LABEL_SECRET",
     "ACCOUNT_ID",
     "ACCOUNT_NAME",
     "INJECTION_TEXT",
