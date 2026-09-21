@@ -25,6 +25,7 @@ from app.services.clinic_info import ClinicInfoService
 from app.services.page_inspection import PageInspectionService
 from app.services.browser_profiles import BrowserProfileService
 from app.services.desktop import DesktopService, desktop_exclusion_roots
+from app.services.desktop_disclosure import DesktopDisclosureService
 from app.services.windows_job import runtime_job_is_active
 from app.services.browser_execution import (
     BrowserExecutionService,
@@ -257,6 +258,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
                 # Desktop text is retained for a bounded time even if nothing asks for it again.
                 await app.state.desktop_service.sweep_expired()
+                # Milestone 9 S2: exact desktop disclosure. It shares the S1 service for its two read-only
+                # calls and adds no desktop capability of its own. A disclosure a dead runtime left
+                # STARTED is OUTCOME_UNKNOWN: Lumi cannot know whether the provider received the private
+                # snapshot, so it is never repeated automatically.
+                app.state.desktop_disclosure_service = DesktopDisclosureService(
+                    engine,
+                    desktop=app.state.desktop_service,
+                    grant_ttl_seconds=resolved.desktop_disclosure_ttl_seconds,
+                )
+                await app.state.desktop_disclosure_service.recover_started()
                 # A research session belongs to the process that created it.
                 # Sessions a dead runtime left open describe browser contexts
                 # that no longer exist, so every semantic ref they issued has

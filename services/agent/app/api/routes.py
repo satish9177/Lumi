@@ -111,6 +111,16 @@ from app.domain.login_takeover import TakeoverRefusal
 from app.desktop.protocol import DesktopObservation, SurfaceListResponse
 from app.services.browser_profiles import BrowserProfileService
 from app.services.desktop import DesktopService
+from app.services.desktop_disclosure import DesktopDisclosureService
+from app.api.desktop_disclosure_schemas import (
+    CreateDesktopReadBody,
+    DesktopGrantBody,
+    DesktopReadResponse,
+    DesktopRevokeBody,
+    LatestDesktopReadResponse,
+    ProviderContextResponse,
+    RecordDesktopResultBody,
+)
 from app.services.login_takeover import LoginTakeoverService
 from app.services.page_inspection import PageInspectionService
 from app.services.page_inspection import validate_request as validate_inspection_request
@@ -1525,3 +1535,127 @@ async def observe_desktop_surface(
     body: ObserveDesktopSurfaceBody, service: DesktopServiceDep
 ) -> DesktopObservation:
     return await service.observe(body.worker_generation, body.surface_ref, body.surface_epoch)
+
+
+# --- Windows desktop disclosure and read-only reasoning (Milestone 9, slice 2) ---------
+#
+# Still no verb that touches a desktop. These routes observe ONE surface locally (S1's read),
+# open a trusted card, take the trusted click, release ONE redacted projection after the claim
+# has committed, and record the one provider attempt's outcome. There is no route that takes a
+# snapshot, a digest, a provider choice from the renderer, a selector, coordinates or a script,
+# and none that focuses, invokes, types, selects, scrolls, clicks or launches.
+
+
+def get_desktop_disclosure_service(request: Request) -> DesktopDisclosureService:
+    service: DesktopDisclosureService = request.app.state.desktop_disclosure_service
+    return service
+
+
+DesktopDisclosureServiceDep = Annotated[DesktopDisclosureService, Depends(get_desktop_disclosure_service)]
+_DESKTOP_DISCLOSURE_RESPONSES: dict[int | str, dict[str, Any]] = {
+    **_NOT_FOUND,
+    **_CONFLICT,
+    status.HTTP_403_FORBIDDEN: {"model": ErrorResponse},
+    status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ErrorResponse},
+    status.HTTP_504_GATEWAY_TIMEOUT: {"model": ErrorResponse},
+}
+
+
+@router.post(
+    "/desktop/read-tasks",
+    status_code=status.HTTP_201_CREATED,
+    response_model=DesktopReadResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="Observe one surface locally and open the disclosure card (nothing is sent)",
+)
+async def create_desktop_read(
+    body: CreateDesktopReadBody, service: DesktopDisclosureServiceDep
+) -> DesktopReadResponse:
+    return DesktopReadResponse.from_view(
+        await service.create(
+            objective=body.objective,
+            recipient=body.recipient,
+            model=body.model,
+            worker_generation=body.worker_generation,
+            surface_ref=body.surface_ref,
+            surface_epoch=body.surface_epoch,
+        )
+    )
+
+
+@router.get(
+    "/desktop/read-tasks/latest",
+    response_model=LatestDesktopReadResponse,
+    summary="The newest desktop read, if any (local, private)",
+)
+async def latest_desktop_read(service: DesktopDisclosureServiceDep) -> LatestDesktopReadResponse:
+    view = await service.latest()
+    return LatestDesktopReadResponse(read=None if view is None else DesktopReadResponse.from_view(view))
+
+
+@router.get(
+    "/desktop/read-tasks/{task_id}",
+    response_model=DesktopReadResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="One desktop read, as the trusted card shows it",
+)
+async def get_desktop_read(task_id: uuid.UUID, service: DesktopDisclosureServiceDep) -> DesktopReadResponse:
+    return DesktopReadResponse.from_view(await service.describe(task_id))
+
+
+@router.post(
+    "/desktop/read-tasks/{task_id}/grant",
+    response_model=DesktopReadResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="Confirm the exact disclosure shown on the trusted card (single use)",
+)
+async def grant_desktop_disclosure(
+    task_id: uuid.UUID, body: DesktopGrantBody, service: DesktopDisclosureServiceDep
+) -> DesktopReadResponse:
+    return DesktopReadResponse.from_view(
+        await service.confirm(task_id, grant_id=body.grant_id, expected_revision=body.expected_revision)
+    )
+
+
+@router.post(
+    "/desktop/read-tasks/{task_id}/revoke",
+    response_model=DesktopReadResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="Decline or withdraw the disclosure (cannot un-send after a claim)",
+)
+async def revoke_desktop_disclosure(
+    task_id: uuid.UUID, body: DesktopRevokeBody, service: DesktopDisclosureServiceDep
+) -> DesktopReadResponse:
+    return DesktopReadResponse.from_view(
+        await service.revoke(
+            task_id, grant_id=body.grant_id, expected_revision=body.expected_revision, reason=body.reason
+        )
+    )
+
+
+@router.post(
+    "/desktop/read-tasks/{task_id}/disclosure",
+    response_model=ProviderContextResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="Claim the single-use approval and release the redacted projection for ONE call (internal)",
+)
+async def claim_desktop_disclosure(
+    task_id: uuid.UUID, service: DesktopDisclosureServiceDep
+) -> ProviderContextResponse:
+    return ProviderContextResponse.from_context(await service.claim(task_id))
+
+
+@router.post(
+    "/desktop/read-tasks/{task_id}/result",
+    response_model=DesktopReadResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="Record the one provider attempt's read-only result or failure (internal)",
+)
+async def record_desktop_result(
+    task_id: uuid.UUID, body: RecordDesktopResultBody, service: DesktopDisclosureServiceDep
+) -> DesktopReadResponse:
+    return DesktopReadResponse.from_view(
+        await service.record_result(
+            task_id, disclosure_id=body.disclosure_id, result=body.result, failure=body.failure
+        )
+    )

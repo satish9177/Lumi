@@ -6,6 +6,7 @@ import { scriptedPageAnswer } from '../agent/page-answer'
 import { scriptedAuthenticatedAnswer } from '../agent/authenticated-answer'
 import { scriptedAuthenticatedDecision } from '../agent/authenticated-planner'
 import { scriptedFormPlanDecision } from '../agent/form-planner'
+import { scriptedDesktopRead } from '../agent/desktop-reader'
 import { scriptedResearchAnswer } from '../agent/research-answer'
 import { scriptedResearchDecision } from '../agent/research-planner'
 import { AUTHENTICATED_OPERATIONS, RESEARCH_OPERATIONS, type AgentAuthenticatedOperation, type AgentResearchOperation } from '../../shared/agent-contracts'
@@ -43,6 +44,7 @@ export class ScriptedTextProvider implements ModelProvider {
     if (request.taskClass === 'authenticated_planning') return this.authenticatedPlan(request)
     if (request.taskClass === 'authenticated_answer') return this.authenticatedAnswer(request)
     if (request.taskClass === 'form_planning') return this.formPlanning(request)
+    if (request.taskClass === 'desktop_planning') return this.desktopRead(request)
     switch (this.behaviour) {
       case 'timeout':
         throw new ModelProviderError('timeout')
@@ -169,6 +171,27 @@ export class ScriptedTextProvider implements ModelProvider {
    * contract (a value, an origin, a provider, a data ref that was never offered),
    * so the tests can prove the parser and the runtime refuse them.
    */
+  /** Milestone 9 S2: quote a control that mentions a failure, or say the snapshot does not show it. */
+  private desktopRead(request: ModelRequest): ModelResponse {
+    const failure = this.behaviourFailure()
+    if (failure) return failure
+    if (this.behaviour === 'malformed') {
+      // Structurally JSON, semantically an attempt to smuggle an action into a read-only reply.
+      return this.reply(JSON.stringify({ schemaVersion: 1, kind: 'answer', answer: 'Done.', operation: 'invoke', controlRef: 'u1' }))
+    }
+    if (this.behaviour === 'hostile') {
+      // Well-formed but ungrounded: a control that does not exist and a quote nobody printed.
+      return this.reply(JSON.stringify({
+        schemaVersion: 1, kind: 'answer', answer: 'There are 999 failures.',
+        evidence: [{ controlRef: 'u199', quote: 'There are 999 failures.' }]
+      }))
+    }
+    const result = scriptedDesktopRead(extractUntrusted(request.input))
+    return this.reply(JSON.stringify(result.kind === 'answer'
+      ? { schemaVersion: 1, kind: 'answer', answer: result.answer, evidence: result.evidence.map((item) => ({ controlRef: item.control_ref, quote: item.quote })) }
+      : { schemaVersion: 1, kind: 'cannot_answer', reason: result.reason }))
+  }
+
   private formPlanning(request: ModelRequest): ModelResponse {
     const failure = this.behaviourFailure()
     if (failure) return failure

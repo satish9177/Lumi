@@ -322,16 +322,31 @@ def test_the_importer_scan_is_sound_because_the_app_uses_no_relative_imports() -
     assert relative == [], "a relative import would slip past the importer allowlist below"
 
 
-def test_only_the_desktop_boundary_imports_desktop_code() -> None:
+def test_only_the_desktop_boundary_and_the_reviewed_s2_disclosure_path_import_desktop_code() -> None:
+    """S1 allowed nothing outside the boundary. S2 rewrites this ON PURPOSE: exactly the reviewed disclosure
+    modules may import desktop code, and each is pinned by name. Anything else fails here until reviewed."""
     importers = _importers("app.desktop", "app.services.desktop", "app.repositories.desktop")
     outside = {name for name in importers if not name.startswith("desktop/")}
     assert outside == {
-        "main.py",                   # wires the (opt-in) service
-        "api/routes.py",             # the two runtime routes
-        "api/errors.py",             # the refusal -> HTTP mapping
-        "services/desktop.py",       # the service itself
-        "repositories/desktop.py",   # the repository (imports nothing desktop, listed for safety)
-    } - {"repositories/desktop.py"}, outside
+        "main.py",                             # wires the (opt-in) services
+        "api/routes.py",                       # the S1 routes and the S2 routes
+        "api/errors.py",                       # the refusal -> HTTP mapping
+        "services/desktop.py",                 # the S1 service itself
+        "services/desktop_disclosure.py",      # S2: the ONE reviewed path from an observation to a provider
+        "domain/desktop_disclosure.py",        # S2: the projection, redaction and grounding rules
+        "api/desktop_disclosure_schemas.py",   # S2: the closed wire shapes
+    }, outside
+
+
+def test_only_the_reviewed_disclosure_service_reads_an_observation_back() -> None:
+    """Without a confirmed, exact disclosure NO provider path can read an observation; with one, exactly the
+    S2 service can. `get_observation` is the only read, and this pins every caller."""
+    callers = {
+        path.relative_to(APP).as_posix()
+        for path in APP.rglob("*.py")
+        if ".get_observation(" in path.read_text(encoding="utf-8") and "desktop" in path.read_text(encoding="utf-8").lower()
+    }
+    assert callers == {"services/desktop_disclosure.py"}, callers
 
 
 def test_no_planner_answer_memory_research_or_task_module_can_see_desktop_data() -> None:
@@ -356,7 +371,7 @@ def test_the_desktop_observation_table_is_referenced_only_by_its_own_persistence
     assert holders == {"db/tables.py", "repositories/desktop.py"}
 
 
-def test_the_contract_only_gains_the_one_error_code_and_no_desktop_schema() -> None:
+def test_the_contract_gains_only_the_desktop_error_codes_and_no_desktop_snapshot_schema() -> None:
     contract = json.loads((AGENT.parents[1] / "src" / "shared" / "agent-runtime-contract.json").read_text(encoding="ascii"))
-    assert "desktop_refused" in contract["errorCodes"]
+    assert {"desktop_refused", "desktop_disclosure_refused", "desktop_disclosure_state_changed"} <= set(contract["errorCodes"])
     assert not [name for name in contract["schemas"] if "esktop" in name or "Surface" in name]

@@ -18,6 +18,8 @@ from app.domain.browser_profile import ProfileRefusal
 from app.domain.login_takeover import TakeoverRefusal
 from app.domain.research import ResearchRefusal
 from app.domain.authenticated import AuthenticatedRefusal
+from app.domain.desktop_disclosure import STATE_CODES as DESKTOP_DISCLOSURE_STATE_CODES
+from app.domain.desktop_disclosure import DesktopDisclosureRefusal
 from app.domain.form_prepare import FORM_PREPARE_STATE_CODES, FormPrepareRefusal
 from app.domain.protected_values import ProtectedValueRefusal
 from app.services.research_search import SearchFailedError
@@ -543,6 +545,24 @@ def register_error_handlers(app: FastAPI) -> None:
         )
 
     app.add_exception_handler(FormPrepareRefusal, form_prepare_refused)
+
+    # --- Milestone 9 S2 desktop disclosure --------------------------------------
+    # Codes only -- never a window title, a question, desktop text, a quote or an answer.
+    async def desktop_disclosure_refused(_: Request, exc: Exception) -> JSONResponse:
+        assert isinstance(exc, DesktopDisclosureRefusal)
+        stale = exc.code in DESKTOP_DISCLOSURE_STATE_CODES
+        return _error(
+            status.HTTP_409_CONFLICT if stale else status.HTTP_422_UNPROCESSABLE_CONTENT,
+            ErrorDetail(
+                code="desktop_disclosure_state_changed" if stale else "desktop_disclosure_refused",
+                message="That desktop disclosure is no longer available."
+                if stale
+                else "That desktop request was refused.",
+                reason=exc.code,
+            ),
+        )
+
+    app.add_exception_handler(DesktopDisclosureRefusal, desktop_disclosure_refused)
     app.add_exception_handler(
         ProtectedValueRefusal,
         _reasoned(

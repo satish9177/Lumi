@@ -31,7 +31,12 @@ export const MODEL_TASK_CLASSES = [
    * Milestone 8b S5: propose which saved detail belongs in which form field, from the form
    * structure and masked previews only. Private, one recipient, no failover, no image.
    */
-  'form_planning'
+  'form_planning',
+  /**
+   * Milestone 9 S2: answer one typed question from ONE redacted, user-approved desktop snapshot.
+   * Private, one recipient, no failover, no image, read-only output.
+   */
+  'desktop_planning'
 ] as const
 export type ModelTaskClass = typeof MODEL_TASK_CLASSES[number]
 

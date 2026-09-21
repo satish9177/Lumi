@@ -294,6 +294,13 @@ if (!existsSync(join(agentOut, 'app', 'desktop', 'worker.py'))) {
 if (!readdirSync(join(agentOut, 'alembic', 'versions')).some((name) => name.startsWith('0012_'))) {
   throw new Error('Migration 0012 is missing from the runtime bundle.')
 }
+// Milestone 9 S2: the exact desktop disclosure tables and the widened grant kind.
+if (!readdirSync(join(agentOut, 'alembic', 'versions')).some((name) => name.startsWith('0013_'))) {
+  throw new Error('Migration 0013 is missing from the runtime bundle.')
+}
+if (!existsSync(join(agentOut, 'app', 'services', 'desktop_disclosure.py'))) {
+  throw new Error('The desktop disclosure service is missing from the runtime bundle.')
+}
 
 // 5. Byte-compile once, so an installed copy never needs to write beside itself.
 step('byte-compiling')

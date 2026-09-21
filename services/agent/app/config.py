@@ -105,6 +105,11 @@ class Settings(DatabaseSettings):
     desktop_observation_timeout_seconds: float = Field(
         default=30.0, gt=0, le=120, validation_alias="LUMI_DESKTOP_TIMEOUT_SECONDS"
     )
+    #: Milestone 9 S2: how long one desktop-disclosure approval stays usable. It is single-use either
+    #: way; expiry never makes it reusable.
+    desktop_disclosure_ttl_seconds: int = Field(
+        default=600, ge=30, le=1_800, validation_alias="LUMI_DESKTOP_DISCLOSURE_TTL_SECONDS"
+    )
     #: Milestone 7a public page inspection. Hosts (`github.com,*.example.org`)
     #: an approved inspection may open, and exact loopback test origins. Both
     #: empty (the default) means there is no public inspection capability.

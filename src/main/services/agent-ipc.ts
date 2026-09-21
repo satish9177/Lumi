@@ -17,6 +17,7 @@ import type { VoiceTaskOutcome } from '../../shared/voice-task-contracts'
 import { extractInspectionRequest } from '../agent/task-request-interpreter'
 import type { AgentTaskController } from './agent-tasks'
 import type { BrowserProfileController } from './browser-profile-controller'
+import type { DesktopReadController } from './desktop-read-controller'
 import type { VoiceTaskController } from './voice-task-controller'
 
 /**
@@ -51,6 +52,11 @@ export interface AgentIpcDependencies {
     BrowserProfileController,
     'listBrowserProfiles' | 'openLoginWindow' | 'confirmSignedIn' | 'cancelLogin' | 'getLoginTakeover'
   >
+  /** Milestone 9 S2. Absent in builds without the desktop capability. */
+  desktopRead?: Pick<
+    DesktopReadController,
+    'listDesktopSurfaces' | 'createDesktopRead' | 'getDesktopRead' | 'grantDesktopDisclosure' | 'declineDesktopDisclosure' | 'runDesktopRead'
+  >
 }
 
 const UNAVAILABLE = { code: 'request_failed', message: 'That is not available in this build.' } as const
@@ -69,7 +75,7 @@ function routeWithoutInterpreter(request: unknown): TypedRequestRoute {
 }
 
 export function registerAgentIpc({
-  ipcMain, assertTrustedSender, controller, voice, runtimeStatus, restartRuntime, text, memory, diagnostics, browserProfiles
+  ipcMain, assertTrustedSender, controller, voice, runtimeStatus, restartRuntime, text, memory, diagnostics, browserProfiles, desktopRead
 }: AgentIpcDependencies): void {
   const handle = (channel: string, listener: (...args: unknown[]) => unknown): void => {
     ipcMain.handle(channel, (event, ...args) => {
@@ -197,4 +203,21 @@ export function registerAgentIpc({
     browserProfiles ? browserProfiles.cancelLogin(profileId, attemptId, expectedRevision) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
   handle(AGENT_IPC_CHANNELS.getLoginTakeover, (profileId, attemptId): Promise<AgentResult<AgentLoginAttemptView>> =>
     browserProfiles ? browserProfiles.getLoginTakeover(profileId, attemptId) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  // Milestone 9 S2: exact desktop disclosure. Six fixed channels, each checking the sender first.
+  // `createDesktopRead` takes a typed question and an opaque surface identity, and nothing else: the
+  // provider is chosen in main. Approval names a grant and the revision shown. None of these is
+  // reachable from voice (`DesktopReadController` is not a member of `VoiceTaskBackend`'s pick), and
+  // none can focus, invoke, type into, select, scroll, click or launch anything.
+  handle(AGENT_IPC_CHANNELS.listDesktopSurfaces, () =>
+    desktopRead ? desktopRead.listDesktopSurfaces() : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.createDesktopRead, (objective, workerGeneration, surfaceRef, surfaceEpoch) =>
+    desktopRead ? desktopRead.createDesktopRead(objective, workerGeneration, surfaceRef, surfaceEpoch) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.getDesktopRead, () =>
+    desktopRead ? desktopRead.getDesktopRead() : Promise.resolve({ ok: true, value: null }))
+  handle(AGENT_IPC_CHANNELS.grantDesktopDisclosure, (grantId, revision) =>
+    desktopRead ? desktopRead.grantDesktopDisclosure(grantId, revision) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.declineDesktopDisclosure, (grantId, revision) =>
+    desktopRead ? desktopRead.declineDesktopDisclosure(grantId, revision) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.runDesktopRead, () =>
+    desktopRead ? desktopRead.runDesktopRead() : Promise.resolve({ ok: false, error: UNAVAILABLE }))
 }

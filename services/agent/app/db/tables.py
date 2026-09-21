@@ -444,7 +444,8 @@ task_grants = Table(
         name="status",
     ),
     CheckConstraint(
-        "kind IN ('public_research', 'authenticated_read', 'form_prepare')", name="kind"
+        "kind IN ('public_research', 'authenticated_read', 'form_prepare', 'desktop_disclose')",
+        name="kind",
     ),
     CheckConstraint(
         "((kind IN ('authenticated_read', 'form_prepare')) = (profile_id IS NOT NULL)) "
@@ -1104,3 +1105,80 @@ desktop_observations = Table(
     CheckConstraint("jsonb_typeof(snapshot) = 'object'", name="snapshot_object"),
 )
 Index("ix_desktop_observations_created_at", desktop_observations.c.created_at)
+
+
+#: Milestone 9 S2. One row per disclosure of one exact desktop observation to one provider.
+#:
+#: A private snapshot leaving the machine is an external effect even though the desktop is not
+#: changed, so it has durable history. `grant_id` is UNIQUE (and so is `task_id`): one approval funds
+#: one claim, whatever races, and a retry is a new task with a new observation and a new approval.
+#: The row is written, and the single-use grant consumed, in ONE transaction that commits *before* the
+#: provider is called; a row still `STARTED` when the runtime dies becomes `OUTCOME_UNKNOWN`, never a
+#: silent replay. `observation_id` is deliberately not a foreign key: the raw observation is retained
+#: under S1's short window, while this audit row (ids, digests, counts, codes -- no desktop text) is not.
+DISCLOSURE_STATUSES = ("STARTED", "SUCCEEDED", "FAILED", "OUTCOME_UNKNOWN")
+
+desktop_disclosures = Table(
+    "desktop_disclosures",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False),
+    Column("grant_id", Uuid(), ForeignKey("task_grants.id", ondelete="RESTRICT"), nullable=False),
+    Column("observation_id", Uuid(), nullable=False),
+    Column("snapshot_digest", String(64), nullable=False),
+    Column("recipient", String(16), nullable=False),
+    Column("model", String(64), nullable=False),
+    Column("projection_digest", String(64), nullable=False),
+    Column("node_count", Integer(), nullable=False),
+    Column("text_bytes", Integer(), nullable=False),
+    Column("redaction_count", Integer(), nullable=False),
+    Column("truncated", Boolean(), nullable=False),
+    Column("status", String(20), nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("error_code", String(40), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("grant_id", name="uq_desktop_disclosures_grant_id"),
+    UniqueConstraint("task_id", name="uq_desktop_disclosures_task_id"),
+    CheckConstraint(
+        "status IN (" + ", ".join(f"'{status}'" for status in DISCLOSURE_STATUSES) + ")", name="status"
+    ),
+    CheckConstraint("snapshot_digest ~ '^[0-9a-f]{64}$'", name="snapshot_digest_format"),
+    CheckConstraint("projection_digest ~ '^[0-9a-f]{64}$'", name="projection_digest_format"),
+    CheckConstraint("node_count >= 0 AND text_bytes >= 0 AND redaction_count >= 0", name="counts_non_negative"),
+    CheckConstraint("(status = 'STARTED') = (finished_at IS NULL)", name="finished_when_not_started"),
+    CheckConstraint(
+        "(status IN ('FAILED', 'OUTCOME_UNKNOWN')) = (error_code IS NOT NULL)", name="error_code_when_not_ok"
+    ),
+)
+
+#: The private answer to one approved disclosure. It stays in the desktop-private domain: it may repeat
+#: desktop text, so it is not memory, not conversation context and not shown to any other task. Evidence
+#: holds the projection's own *redacted* text for each cited control ref, never the projected tree. It is
+#: not pruned with the raw observation: it is a durable, private, user-facing result.
+desktop_answers = Table(
+    "desktop_answers",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False),
+    Column(
+        "disclosure_id", Uuid(), ForeignKey("desktop_disclosures.id", ondelete="RESTRICT"), nullable=False
+    ),
+    Column("observation_id", Uuid(), nullable=False),
+    Column("classification", String(16), nullable=False),
+    Column("recipient", String(16), nullable=False),
+    Column("model", String(64), nullable=False),
+    Column("kind", String(16), nullable=False),
+    Column("answer", String(1200), nullable=True),
+    Column("reason", String(24), nullable=True),
+    Column("evidence", JSONB(), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("disclosure_id", name="uq_desktop_answers_disclosure_id"),
+    CheckConstraint("classification = 'desktop_private'", name="classification"),
+    CheckConstraint("kind IN ('answer', 'cannot_answer')", name="kind"),
+    CheckConstraint("jsonb_typeof(evidence) = 'array'", name="evidence_is_array"),
+    CheckConstraint(
+        "(kind = 'answer') = (answer IS NOT NULL) AND (kind = 'cannot_answer') = (reason IS NOT NULL)",
+        name="shape_matches_kind",
+    ),
+)

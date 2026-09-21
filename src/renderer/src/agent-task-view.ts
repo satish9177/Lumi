@@ -252,6 +252,15 @@ export function describeEvent(event: AgentEventView): string {
   if (disclosure) return disclosure
   switch (event.type) {
     case 'task.created': return 'Task created'
+    // Milestone 9 S2. A desktop read has its own trusted view and is never shown in this timeline; the
+    // words exist so the switch stays exhaustive. They carry no desktop text: the events do not either.
+    case 'task.desktop_disclosure_requested': return 'Desktop snapshot ready for your approval — nothing was sent'
+    case 'task.desktop_disclosure_granted': return 'You allowed this one snapshot to be sent once'
+    case 'task.desktop_disclosure_revoked': return 'Desktop disclosure cancelled'
+    case 'task.desktop_disclosure_started': return 'The approved snapshot was released to one AI provider'
+    case 'task.desktop_answer_recorded': return 'A grounded answer about the snapshot was recorded'
+    case 'task.desktop_disclosure_failed': return 'The AI provider could not answer — nothing was retried'
+    case 'task.desktop_disclosure_outcome_unknown': return 'Lumi cannot tell whether the snapshot reached the AI provider — it was not repeated'
     case 'task.cancelled': return 'Task cancelled'
     case 'task.criteria_updated':
       return event.invalidatedActionIds?.length

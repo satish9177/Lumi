@@ -69,6 +69,14 @@ export const TASK_EVENT_TYPES = [
   'task.form_draft_discarded',
   'task.form_draft_handed_over',
   'task.form_draft_lost',
+  // Milestone 9 S2. Ids, digests, counts and closed codes only -- never desktop text.
+  'task.desktop_disclosure_requested',
+  'task.desktop_disclosure_granted',
+  'task.desktop_disclosure_revoked',
+  'task.desktop_disclosure_started',
+  'task.desktop_answer_recorded',
+  'task.desktop_disclosure_failed',
+  'task.desktop_disclosure_outcome_unknown',
   'action.proposed', 'action.approval_requested',
   'action.approved', 'action.authorized', 'action.rejected', 'action.execution_started', 'action.succeeded',
   'action.failed', 'action.outcome_unknown', 'action.reconciliation_started', 'action.reconciled'
@@ -921,6 +929,99 @@ export interface AgentLoginTakeoverView {
   refusalReason?: string
 }
 
+// ---- Milestone 9 S2: exact desktop disclosure and read-only reasoning ------------------------
+//
+// Read these as the whole of what the renderer can learn about a desktop read. What is missing stays
+// missing: no window handle, process id or path, no AutomationId, class name or coordinate, no
+// snapshot, no digest, no other observation. The window display strings are `untrusted_environment`
+// text: they are rendered as inert text and never choose the provider, the wording or a button.
+
+export const DESKTOP_READ_PHASES = [
+  'awaiting_approval', 'approved', 'reasoning', 'answered', 'failed', 'outcome_unknown', 'declined', 'expired'
+] as const
+export type AgentDesktopReadPhase = typeof DESKTOP_READ_PHASES[number]
+
+export interface AgentDesktopSurface {
+  surfaceRef: string
+  surfaceEpoch: number
+  /** Untrusted display text. */
+  applicationLabel: string
+  /** Untrusted display text. */
+  windowTitle: string
+  visible: boolean
+  minimized: boolean
+}
+
+export interface AgentDesktopSurfaceList {
+  workerGeneration: string
+  surfaces: AgentDesktopSurface[]
+  truncated: boolean
+}
+
+export interface AgentDesktopCardView {
+  grantId: string
+  grantRevision: number
+  grantStatus: 'PENDING' | 'ACTIVE' | 'REVOKED' | 'EXPIRED' | 'COMPLETED'
+  expiresAt?: string
+  /** The one provider that would receive the snapshot, chosen by Lumi main, never the renderer. */
+  recipient: AgentDisclosureRecipient
+  model: string
+  observedAt: string
+  /** Untrusted display text. */
+  applicationLabel: string
+  /** Untrusted display text. */
+  windowTitle: string
+  maxNodes: number
+  maxTextBytes: number
+  redactionPolicy: string
+  observationAvailable: boolean
+  nodeCount?: number
+  textBytes?: number
+  redactionCount?: number
+  truncated?: boolean
+  truncation: string[]
+}
+
+export interface AgentDesktopDisclosureView {
+  disclosureId: string
+  status: 'STARTED' | 'SUCCEEDED' | 'FAILED' | 'OUTCOME_UNKNOWN'
+  errorCode?: string
+  startedAt: string
+  finishedAt?: string
+  nodeCount: number
+  textBytes: number
+  redactionCount: number
+  truncated: boolean
+}
+
+export interface AgentDesktopEvidenceView {
+  controlRef: string
+  quote: string
+}
+
+export interface AgentDesktopAnswerView {
+  kind: 'answer' | 'cannot_answer'
+  answer?: string
+  reason?: string
+  evidence: AgentDesktopEvidenceView[]
+  recipient: AgentDisclosureRecipient
+  model: string
+  observedAt?: string
+  createdAt: string
+}
+
+export interface AgentDesktopReadView {
+  taskId: string
+  taskStatus: AgentTaskStatus
+  taskRevision: number
+  /** The user's own typed question. */
+  objective: string
+  phase: AgentDesktopReadPhase
+  card?: AgentDesktopCardView
+  disclosure?: AgentDesktopDisclosureView
+  answer?: AgentDesktopAnswerView
+}
+
 export const AGENT_ERROR_CODES = [
   'runtime_unavailable',
   'runtime_restarted',
@@ -964,6 +1065,10 @@ export const AGENT_ERROR_CODES = [
   // refused. One code for both server-side families; the message already
   // names the specific reason.
   'browser_profile_refused',
+  // Milestone 9 S2: a desktop read was refused (a credential or elevated window, a surface that
+  // changed) or its approval moved on since the card. The message names the specific reason.
+  'desktop_refused',
+  'desktop_read_stale',
   'request_failed'
 ] as const
 export type AgentErrorCode = typeof AGENT_ERROR_CODES[number]
@@ -1136,6 +1241,25 @@ export interface AgentApi {
   cancelLogin: (profileId: string, attemptId: string, expectedRevision: number) => Promise<AgentResult<AgentLoginTakeoverView>>
   /** Read-only: one takeover's bounded interval and how it ended. */
   getLoginTakeover: (profileId: string, attemptId: string) => Promise<AgentResult<AgentLoginAttemptView>>
+  /**
+   * Milestone 9 S2. The user-visible Windows surfaces, as opaque `(workerGeneration, surfaceRef,
+   * surfaceEpoch)` identities plus display labels. Takes no argument. Read-only.
+   */
+  listDesktopSurfaces: () => Promise<AgentResult<AgentDesktopSurfaceList>>
+  /**
+   * Choose ONE surface and type a question. Lumi inspects it LOCALLY and opens the trusted disclosure
+   * card. Nothing is sent to any provider. The question never goes through the conversation model, and
+   * the renderer cannot choose the provider: main does, from its own configuration.
+   */
+  createDesktopRead: (objective: string, workerGeneration: string, surfaceRef: string, surfaceEpoch: number) => Promise<AgentResult<AgentDesktopReadView>>
+  /** Read-only: the newest desktop read, or none. */
+  getDesktopRead: () => Promise<AgentResult<AgentDesktopReadView | null>>
+  /** The trusted "Allow once" click: names the grant and the revision the card showed. */
+  grantDesktopDisclosure: (grantId: string, expectedRevision: number) => Promise<AgentResult<AgentDesktopReadView>>
+  /** The trusted "Cancel" click. Before the claim, nothing was sent. */
+  declineDesktopDisclosure: (grantId: string, expectedRevision: number) => Promise<AgentResult<AgentDesktopReadView>>
+  /** Run the approved read: ONE call to the approved provider. There is no retry and no other provider. */
+  runDesktopRead: () => Promise<AgentResult<AgentDesktopReadView>>
 }
 
 /**
@@ -1203,7 +1327,15 @@ export const AGENT_IPC_CHANNELS = {
   openLoginWindow: 'lifelens:agent:open-login-window',
   confirmSignedIn: 'lifelens:agent:confirm-signed-in',
   cancelLogin: 'lifelens:agent:cancel-login',
-  getLoginTakeover: 'lifelens:agent:get-login-takeover'
+  getLoginTakeover: 'lifelens:agent:get-login-takeover',
+  // Milestone 9 S2: exact desktop disclosure. Six fixed channels; none takes a method, a route, a
+  // provider, a snapshot, a handle or a coordinate, and none performs any desktop action.
+  listDesktopSurfaces: 'lifelens:agent:list-desktop-surfaces',
+  createDesktopRead: 'lifelens:agent:create-desktop-read',
+  getDesktopRead: 'lifelens:agent:get-desktop-read',
+  grantDesktopDisclosure: 'lifelens:agent:grant-desktop-disclosure',
+  declineDesktopDisclosure: 'lifelens:agent:decline-desktop-disclosure',
+  runDesktopRead: 'lifelens:agent:run-desktop-read'
 } as const
 
 /** Actions whose side effect is unresolved or in flight. */

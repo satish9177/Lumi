@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.domain.action_status import ActionStatus, ApprovalStatus, AttemptOutcome, RiskTier
 from app.domain.booking_criteria import BookingCriteria
@@ -57,6 +57,14 @@ class TaskRequestPayload(BaseModel):
 
     type: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_.]*$")
     text: str | None = Field(default=None, max_length=4_000)
+
+    @field_validator("type")
+    @classmethod
+    def _not_reserved(cls, value: str) -> str:
+        # Milestone 9 S2: a desktop read is created only by its own route, after a local observation.
+        if value == "desktop_read":
+            raise ValueError("this task type is created only by its own route")
+        return value
 
 
 class CreateTaskBody(BaseModel):

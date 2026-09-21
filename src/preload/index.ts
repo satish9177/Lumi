@@ -114,7 +114,20 @@ const agentApi: AgentApi = {
   cancelLogin: (profileId: string, attemptId: string, expectedRevision: number) =>
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.cancelLogin, profileId, attemptId, expectedRevision),
   getLoginTakeover: (profileId: string, attemptId: string) =>
-    ipcRenderer.invoke(AGENT_IPC_CHANNELS.getLoginTakeover, profileId, attemptId)
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.getLoginTakeover, profileId, attemptId),
+  // Milestone 9 S2: exact desktop disclosure. Six exact methods. The question is typed locally and
+  // stays out of the conversation model; the provider is never a parameter; approval names only a
+  // grant id and the revision shown. There is no function that focuses, invokes, types into, selects,
+  // scrolls, clicks or launches anything.
+  listDesktopSurfaces: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.listDesktopSurfaces),
+  createDesktopRead: (objective: string, workerGeneration: string, surfaceRef: string, surfaceEpoch: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.createDesktopRead, objective, workerGeneration, surfaceRef, surfaceEpoch),
+  getDesktopRead: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getDesktopRead),
+  grantDesktopDisclosure: (grantId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.grantDesktopDisclosure, grantId, expectedRevision),
+  declineDesktopDisclosure: (grantId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineDesktopDisclosure, grantId, expectedRevision),
+  runDesktopRead: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.runDesktopRead)
 }
 
 // The Gemini Live relay: fixed channels, closed message kinds, validated in

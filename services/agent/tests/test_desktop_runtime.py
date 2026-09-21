@@ -82,10 +82,24 @@ async def test_the_runtime_requires_its_bearer_credential(quiet_settings: Settin
             assert (await anonymous.post("/desktop/observations", json=body)).status_code == 401
 
 
-def test_the_runtime_exposes_exactly_two_desktop_routes_and_no_verbs(quiet_settings: Settings) -> None:
+def test_the_runtime_exposes_exactly_the_reviewed_desktop_routes_and_no_verbs(quiet_settings: Settings) -> None:
+    """S1 exposed exactly two routes. S2 adds exactly the disclosure routes, ON PURPOSE, and this pins the
+    complete set: still no route that focuses, invokes, types, selects, scrolls, clicks or launches."""
     paths = create_app(quiet_settings).openapi()["paths"]
     desktop = {path: sorted(methods) for path, methods in paths.items() if "desktop" in path}
-    assert desktop == {"/desktop/surfaces": ["get"], "/desktop/observations": ["post"]}
+    assert desktop == {
+        # S1: list and observe (the runtime bearer credential only; Electron main cannot reach the second).
+        "/desktop/surfaces": ["get"],
+        "/desktop/observations": ["post"],
+        # S2: exact desktop disclosure.
+        "/desktop/read-tasks": ["post"],
+        "/desktop/read-tasks/latest": ["get"],
+        "/desktop/read-tasks/{task_id}": ["get"],
+        "/desktop/read-tasks/{task_id}/grant": ["post"],
+        "/desktop/read-tasks/{task_id}/revoke": ["post"],
+        "/desktop/read-tasks/{task_id}/disclosure": ["post"],
+        "/desktop/read-tasks/{task_id}/result": ["post"],
+    }
 
 
 @pytest.mark.parametrize(

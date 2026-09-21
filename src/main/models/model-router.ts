@@ -101,6 +101,12 @@ export const DEFAULT_ROUTES: RoutingTable = {
   form_planning: {
     providers: [{ provider: 'gemini', model: 'gemini-2.5-flash' }, { provider: 'openai' }, { provider: 'deepseek' }],
     maxInputTokens: 8_000, maxOutputTokens: 900, timeoutMs: 30_000
+  },
+  // Milestone 9 S2. A candidate list, never a failover chain: the request must carry the
+  // approval's one-recipient `permits` rule and the first provider attempted is the last.
+  desktop_planning: {
+    providers: [{ provider: 'gemini', model: 'gemini-2.5-flash' }, { provider: 'openai' }, { provider: 'deepseek' }],
+    maxInputTokens: 8_000, maxOutputTokens: 700, timeoutMs: 30_000
   }
 }
 
@@ -114,7 +120,7 @@ export const DEFAULT_ROUTES: RoutingTable = {
  *   another model of the same one) with the same private page.
  * - **No image.** An authenticated screenshot never reaches any provider.
  */
-export const PRIVATE_TASK_CLASSES: readonly ModelTaskClass[] = ['authenticated_planning', 'authenticated_answer', 'form_planning']
+export const PRIVATE_TASK_CLASSES: readonly ModelTaskClass[] = ['authenticated_planning', 'authenticated_answer', 'form_planning', 'desktop_planning']
 
 /** A private request was made without the rule that names its one recipient. */
 export class PrivateRouteError extends Error {
@@ -234,6 +240,14 @@ export class ModelRouter {
 
   route(taskClass: ModelTaskClass): RouteConfig {
     return this.routes[taskClass]
+  }
+
+  /**
+   * Is this provider inside a failure cooldown right now? Checked (by callers that spend a one-shot
+   * approval) BEFORE the approval is spent, so a provider the router would skip cannot burn it.
+   */
+  isCoolingDown(provider: ModelProvider): boolean {
+    return (this.cooldowns.get(`${provider.id}:${provider.model}`) ?? 0) > this.now()
   }
 
   /** Configured providers for a class, in route order. Never contacts one. */

@@ -29,6 +29,7 @@ import { fileKindLabel } from '../../shared/search-query'
 import {
   AgentTaskPanel,
   BrowserProfilePanel,
+  DesktopReadPanel,
   BrandMark,
   ConfirmDialog,
   DragGrip,
@@ -127,6 +128,7 @@ export default function LifeLensApp() {
   // Milestone 8a S2: manual login and human takeover. Not task-scoped, so it
   // is its own overlay rather than a section of AgentTaskPanel.
   const [browserProfilesOpen, setBrowserProfilesOpen] = useState(false)
+  const [desktopReadOpen, setDesktopReadOpen] = useState(false)
   /** A voice outcome asking the trusted task UI to draw attention somewhere. */
   const [agentFocus, setAgentFocus] = useState<{ target: VoiceTaskFocus; serial: number }>()
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest>()
@@ -1818,6 +1820,9 @@ export default function LifeLensApp() {
             <button className="chip" type="button" onClick={() => setBrowserProfilesOpen(true)} data-testid="open-browser-profiles">
               Sign-in profiles
             </button>
+            <button className="chip" type="button" onClick={() => setDesktopReadOpen(true)} data-testid="open-desktop-read">
+              Ask about a window
+            </button>
           </div>
 
           <form className="composer" onSubmit={(event) => { event.preventDefault(); void askQuestion() }}>
@@ -1879,6 +1884,12 @@ export default function LifeLensApp() {
           {browserProfilesOpen && (
             <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Sign-in profiles">
               <BrowserProfilePanel agent={window.lifeLens.agent} onClose={() => setBrowserProfilesOpen(false)} />
+            </div>
+          )}
+
+          {desktopReadOpen && (
+            <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Ask about a window">
+              <DesktopReadPanel agent={window.lifeLens.agent} onClose={() => setDesktopReadOpen(false)} />
             </div>
           )}
 

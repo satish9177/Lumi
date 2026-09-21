@@ -73,6 +73,11 @@ export interface AgentRuntimeSettings {
    * Empty in every build that does not test manual login.
    */
   authTestOrigins?: readonly string[]
+  /**
+   * Milestone 9 S2. Opt in to Windows semantic observation (and so to the desktop-read flow). Off by
+   * default, like the browser worker: a deployment cannot acquire the capability by accident.
+   */
+  desktopObservation?: boolean
 }
 
 export type RuntimeMethod = 'GET' | 'POST'
@@ -156,7 +161,16 @@ const ALLOWED_ROUTES: ReadonlyArray<{ method: RuntimeMethod; pattern: RegExp }> 
   { method: 'GET', pattern: new RegExp(`^/browser-profiles/${UUID_PART}$`) },
   { method: 'POST', pattern: new RegExp(`^/browser-profiles/${UUID_PART}/takeover$`) },
   { method: 'GET', pattern: new RegExp(`^/browser-profiles/${UUID_PART}/takeover/${UUID_PART}$`) },
-  { method: 'POST', pattern: new RegExp(`^/browser-profiles/${UUID_PART}/takeover/${UUID_PART}/(confirm|cancel)$`) }
+  { method: 'POST', pattern: new RegExp(`^/browser-profiles/${UUID_PART}/takeover/${UUID_PART}/(confirm|cancel)$`) },
+  // Milestone 9 S2: exact desktop disclosure. Main calls exactly these. `/desktop/observations` is
+  // deliberately absent: no route main can reach observes a surface without also opening the trusted
+  // card, so a raw observation can never be requested on its own, and none of these takes or returns a
+  // handle, a process, a selector, a coordinate or an action.
+  { method: 'GET', pattern: /^\/desktop\/surfaces$/ },
+  { method: 'POST', pattern: /^\/desktop\/read-tasks$/ },
+  { method: 'GET', pattern: /^\/desktop\/read-tasks\/latest$/ },
+  { method: 'GET', pattern: new RegExp(`^/desktop/read-tasks/${UUID_PART}$`) },
+  { method: 'POST', pattern: new RegExp(`^/desktop/read-tasks/${UUID_PART}/(grant|revoke|disclosure|result)$`) }
 ]
 
 export function isAllowedRuntimeRoute(method: RuntimeMethod, path: string): boolean {
@@ -211,6 +225,7 @@ export function validateRuntimeSettings(settings: AgentRuntimeSettings): Record<
     }
     environment.LUMI_RESEARCH_SEARCH_ENDPOINT = endpoint
   }
+  if (settings.desktopObservation === true) environment.LUMI_DESKTOP_OBSERVATION = 'true'
   if (settings.browsersPath !== undefined) {
     if (!isAbsolute(settings.browsersPath) || /["\r\n]/.test(settings.browsersPath) || settings.browsersPath.length > 500) {
       throw new Error('The bundled browser path is invalid.')

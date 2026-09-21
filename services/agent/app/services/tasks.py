@@ -12,6 +12,7 @@ from app.domain.errors import (
 from app.domain.research import GrantStatus
 from app.domain.task_status import TaskEventType, TaskStatus, can_cancel
 from app.repositories.authenticated import AuthenticatedRepository
+from app.repositories.desktop_disclosure import DesktopDisclosureRepository
 from app.repositories.research import ResearchRepository
 from app.repositories.tasks import TaskEventRecord, TaskRecord, TaskRepository
 
@@ -150,5 +151,31 @@ class TaskService:
                         },
                     )
                     return advanced_account
+                # Milestone 9 S2: cancelling withdraws a desktop disclosure that was not yet claimed.
+                # One that was claimed is already spent (COMPLETED) and is not touched: cancelling cannot
+                # un-send a snapshot.
+                desktop_grant = await DesktopDisclosureRepository(connection).open_grant_for_task(task_id)
+                if desktop_grant is not None:
+                    closed_desktop = await DesktopDisclosureRepository(connection).close_grant(
+                        grant_id=desktop_grant.id, status=GrantStatus.REVOKED
+                    )
+                    advanced_desktop = await repository.advance_task(
+                        task_id=task_id, expected_revision=cancelled.revision
+                    )
+                    if advanced_desktop is None:  # pragma: no cover - this writer holds the row.
+                        raise TaskConcurrencyError(task_id)
+                    await repository.append_event(
+                        task=advanced_desktop,
+                        event_type=TaskEventType.TASK_DESKTOP_DISCLOSURE_REVOKED,
+                        payload={
+                            "grant_id": str(desktop_grant.id),
+                            "grant_revision": (
+                                closed_desktop.revision if closed_desktop else desktop_grant.revision
+                            ),
+                            "grant_status": (closed_desktop or desktop_grant).status.value,
+                            "reason": "task_cancelled",
+                        },
+                    )
+                    return advanced_desktop
                 return cancelled
         raise TaskConcurrencyError(task_id)

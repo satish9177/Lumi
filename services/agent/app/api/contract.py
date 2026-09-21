@@ -141,6 +141,9 @@ ERROR_CODES = (
     "concurrent_modification",
     # Milestone 9 S1: one code, with a closed reason (see app/desktop/errors.py).
     "desktop_refused",
+    # Milestone 9 S2: exact desktop disclosure. A refusal, or a state that moved on since the card.
+    "desktop_disclosure_refused",
+    "desktop_disclosure_state_changed",
     "destination_not_allowed",
     "invalid_action_transition",
     "invalid_booking_criteria",
