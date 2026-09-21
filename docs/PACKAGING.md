@@ -179,6 +179,18 @@ any `browser-profiles` directory is found under `dist/agent-runtime` — and
 into the checkout cannot commit one. `tests/test_profile_paths.py` asserts the
 resolved base is under `%LOCALAPPDATA%` and under none of the build trees.
 
+### Windows UI Automation backend (Milestone 9 S1)
+
+The desktop worker runs on the **existing bundled Python**: no second executable and no helper binary. The lock adds `pywinauto` (0.6.9), `comtypes` (1.4.17) and `pywin32` (312) with the marker `sys_platform == 'win32'`, so other platforms do not install them.
+
+`build-agent-runtime.mjs` (step 4c, before byte-compiling) proves the backend from the bundle alone with a scrubbed environment: it imports the backend **first** (it selects COM's multithreaded apartment before anything initialises COM on the thread; importing `pythoncom` first makes it a single-threaded apartment and the backend's own initialisation then fails), then the native `pywin32` extensions explicitly (`pythoncom`, `pywintypes`, `win32api`, `win32gui`, `win32process`, `win32event`), imports `_ctypes`, constructs `PywinautoBackend`, reads the process's own integrity level, and asserts that comtypes generated `UIAutomationClient.py` into the bundled `comtypes/gen`. It also fails the build if a native binary of Lumi's own (`.exe`, `.dll`, `.pyd`, ...) appears under `agent/`, if the desktop test fixture or harness is present, or if migration `0012` or `app/desktop/worker.py` is missing. The manifest (`version: 3`) records the backend and the three dependency versions.
+
+**comtypes wrapper generation.** comtypes generates Python wrappers for `UIAutomationCore` on first import and checks them against the type library's modification time. The wrappers generated at build time are bundled (and byte-compiled). On a machine whose `UIAutomationCore.dll` has a different timestamp comtypes regenerates them once (about 20 s cold on the developer machine), writing into `comtypes/gen` if it is writable and otherwise into `%APPDATA%\Python\Python312\comtypes_cache` (resolved through a Windows API, so it does not depend on the worker's scrubbed environment). The runtime's startup timeout for the worker is 90 s to cover it. This is a first-use latency and a small per-user cache write, not a correctness issue; it has not been measured on a second machine (see the S1 review's residual risks).
+
+The backend asks for the type library with `comtypes.client.GetModule("UIAutomationCore.dll")` rather than importing `comtypes.gen.UIAutomationClient`, which exists only after generation and so worked on a developer machine but failed on a clean bundle (found by this build check). `pywin32` also ships `Pythonwin.exe`, `pythonservice.exe` and script launchers that Lumi never runs; they are third-party and are recorded here as candidates for pruning.
+
+`pywin32`, `comtypes` and `pywinauto` are third-party; their `.pyd`/`.dll` files fall under the existing third-party classification of the release-signing policy. **No change to the Authenticode gate was needed**, and this section does not alter the release status: the production certificate is still absent and the real-account release gate is still BLOCKED.
+
 ## Runtime start in a packaged build
 
 Electron main (`startPackagedAgentRuntime`):
