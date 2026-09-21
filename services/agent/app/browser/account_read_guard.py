@@ -91,13 +91,70 @@ class AccountReadNetworkGuard:
         self.blocked: Counter[str] = Counter()
         #: Refused request methods, e.g. {"POST": 2}. Names only, never URLs.
         self.blocked_methods: Counter[str] = Counter()
+        # Milestone 8b S6. The freeze is one boolean and one counter, both touched
+        # only from the event loop with no `await` between reading and writing
+        # them, which is what makes "atomically refuse new work" true.
+        self._frozen = False
+        self._in_flight = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
+        self._installed_context: BrowserContext | None = None
 
     async def install(self, context: BrowserContext) -> None:
         await context.route("**/*", self._handle)
         await context.route_web_socket(re.compile(r".*"), self._refuse_socket)
         context.on("page", self._close_popup)
+        self._installed_context = context
         for page in context.pages:
             self._pages.add(page)
+
+    async def uninstall(self) -> None:
+        """Remove this guard's routes. Used only when a human takes the page over
+        (Milestone 8b S6 handover), after another guard already answers every
+        request, so there is no instant at which a request is unhandled."""
+        context, self._installed_context = self._installed_context, None
+        if context is None:
+            return
+        try:
+            await context.unroute("**/*", self._handle)
+        except PlaywrightError:  # pragma: no cover - the context is going away.
+            pass
+        # The WebSocket route has no removal call and is deliberately left: it
+        # only ever *closes* a socket, so after a handover a live-chat socket on
+        # the page stays refused, which is a compatibility cost, not a risk.
+
+    # ---- the freeze (Milestone 8b S6) ---------------------------------------------
+
+    @property
+    def frozen(self) -> bool:
+        return self._frozen
+
+    @property
+    def in_flight(self) -> int:
+        """Requests currently inside this guard's network path (past the freeze
+        check, not yet finished). Counted from the moment they enter."""
+        return self._in_flight
+
+    async def freeze(self, *, settle_timeout_seconds: float) -> bool:
+        """Refuse every request that has not yet entered, and wait for the rest.
+
+        The flag is set first and synchronously, so a request that has not yet
+        passed the check at the top of `_handle` can never enter afterwards.
+        Returns whether `in_flight` reached zero within the bound. **It stays
+        frozen either way**: a caller that could not settle decides whether to
+        `thaw()`, this never quietly re-opens.
+        """
+        self._frozen = True
+        if self._in_flight == 0:
+            return True
+        try:
+            await asyncio.wait_for(self._idle.wait(), timeout=settle_timeout_seconds)
+        except (TimeoutError, asyncio.TimeoutError):
+            return False
+        return self._in_flight == 0
+
+    def thaw(self) -> None:
+        self._frozen = False
 
     def allows_top_level(self, url: str) -> bool:
         """Whether `url` may be a top-level document: well-formed, and in site.
@@ -166,6 +223,25 @@ class AccountReadNetworkGuard:
             pass
 
     async def _handle(self, route: Route) -> None:
+        # Milestone 8b S6. The very first thing, before the request is inspected,
+        # fetched, resolved, proxied or followed: a frozen guard refuses. There
+        # is no `await` between this check and the increment below, so a request
+        # is either refused here or counted as in flight -- never neither.
+        if self._frozen:
+            await self._refuse(
+                route, "frozen", main_document=self._is_main_document(route.request)
+            )
+            return
+        self._in_flight += 1
+        self._idle.clear()
+        try:
+            await self._handle_open(route)
+        finally:
+            self._in_flight -= 1
+            if self._in_flight == 0:
+                self._idle.set()
+
+    async def _handle_open(self, route: Route) -> None:
         request = route.request
         main_document = self._is_main_document(request)
         if request.resource_type not in ALLOWED_RESOURCE_TYPES:

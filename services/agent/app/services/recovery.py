@@ -5,9 +5,12 @@ from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.domain.action_status import ActionStatus, AttemptOutcome, task_status_for
-from app.domain.task_status import TaskEventType
+from app.domain.authenticated import PauseReason
+from app.domain.local_form_draft import FILL_OPERATION, HANDOVER_OPERATION
+from app.domain.task_status import TaskEventType, TaskStatus, accepts_actions
 from app.repositories.actions import ActionRepository
 from app.repositories.browser import BrowserRepository
+from app.repositories.form_drafts import FormDraftRepository
 from app.repositories.tasks import TaskRepository
 
 logger = logging.getLogger(__name__)
@@ -102,6 +105,16 @@ class RecoveryService:
             # closed in the same transaction, so the audit trail never shows a
             # dispatch still in flight on a process that no longer exists.
             dispatch = await BrowserRepository(connection).close_orphaned_dispatch(attempt.id)
+            # Milestone 8b S6. A local draft lives only in the browser, and the browser died
+            # with the runtime. `frozen_at` is the one fact that lets Lumi say anything about
+            # the remote effect: set, it proves both network layers were frozen before any
+            # field was written; NULL, it proves nothing and nothing is claimed. There is no
+            # reconciliation and no retry either way.
+            local_draft = dispatch is not None and dispatch.operation in (
+                FILL_OPERATION,
+                HANDOVER_OPERATION,
+            )
+            frozen = dispatch is not None and dispatch.frozen_at is not None
             moved = await actions_repository.update_action_status(
                 action_id=action.id,
                 expected_revision=action.revision,
@@ -131,11 +144,89 @@ class RecoveryService:
                     "reason": "runtime_restart",
                     "recovered_from_generation": str(finished.runtime_generation),
                     "browser_dispatch_id": str(dispatch.id) if dispatch is not None else None,
+                    **(
+                        {
+                            "frozen_at_present": frozen,
+                            "remote_effect": (
+                                "impossible_under_verified_freeze"
+                                if frozen and dispatch is not None and dispatch.operation == FILL_OPERATION
+                                else "unknown"
+                            ),
+                            "local_state": "lost",
+                        }
+                        if local_draft
+                        else {}
+                    ),
                 },
             )
+            if local_draft:
+                await _pause_browser_lost(tasks_repository, task.id)
             return RecoveredAction(
                 action_id=moved.id,
                 task_id=task.id,
                 attempt_id=finished.id,
                 attempt_number=finished.attempt_number,
             )
+
+
+async def _pause_browser_lost(tasks: TaskRepository, task_id: uuid.UUID) -> None:
+    """The task waits, paused, for a fresh observation and a fresh exact approval."""
+    task = await tasks.get_task(task_id)
+    if task is None or not accepts_actions(task.status):
+        return
+    advanced = await tasks.advance_task(
+        task_id=task.id, expected_revision=task.revision, status=TaskStatus.PAUSED
+    )
+    if advanced is not None:
+        await tasks.append_event(
+            task=advanced,
+            event_type=TaskEventType.TASK_AUTHENTICATED_PAUSED,
+            payload={"reason": PauseReason.BROWSER_LOST.value},
+        )
+
+
+class FormDraftRecovery:
+    """Startup: a local draft is browser state, and the browser is gone.
+
+    Every live `form_drafts` row belongs to a browser that no longer exists, so it is closed as
+    `DISCARDED` -- never re-filled, never restored, and its approval is never reused. The task
+    is paused `browser_lost`, so the user is told the draft is lost and must prepare the form
+    again (a fresh observation and a fresh exact approval).
+    """
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine = engine
+
+    async def discard_lost_drafts(self) -> int:
+        async with self._engine.begin() as connection:
+            lost = await FormDraftRepository(connection).discard_all_live()
+            tasks = TaskRepository(connection)
+            for draft in lost:
+                task = await tasks.lock_task(draft.task_id)
+                if task is None or not accepts_actions(task.status):
+                    continue
+                advanced = await tasks.advance_task(
+                    task_id=task.id, expected_revision=task.revision, status=TaskStatus.PAUSED
+                )
+                if advanced is None:
+                    continue
+                await tasks.append_event(
+                    task=advanced,
+                    event_type=TaskEventType.TASK_FORM_DRAFT_LOST,
+                    payload={"draft_id": str(draft.id), "local_state": "lost"},
+                )
+                task = await tasks.get_task(draft.task_id)
+                if task is not None:
+                    again = await tasks.advance_task(task_id=task.id, expected_revision=task.revision)
+                    if again is not None:
+                        await tasks.append_event(
+                            task=again,
+                            event_type=TaskEventType.TASK_AUTHENTICATED_PAUSED,
+                            payload={"reason": PauseReason.BROWSER_LOST.value},
+                        )
+        if lost:
+            logger.warning(
+                "Closed %d local form draft(s) whose browser is gone; they are lost, not restored.",
+                len(lost),
+            )
+        return len(lost)

@@ -38,6 +38,9 @@ class DispatchRecord:
     result: dict[str, Any] | None
     started_at: datetime
     finished_at: datetime | None
+    #: Milestone 8b S6. Set once, after the worker proved the freeze and before the first
+    #: field write; NULL for every other dispatch and for a freeze that never verified.
+    frozen_at: datetime | None = None
 
 
 def _generation(row: Row[Any]) -> WorkerGenerationRecord:
@@ -66,6 +69,7 @@ def _dispatch(row: Row[Any]) -> DispatchRecord:
         result=row.result,
         started_at=row.started_at,
         finished_at=row.finished_at,
+        frozen_at=row.frozen_at,
     )
 
 
@@ -161,6 +165,30 @@ class BrowserRepository:
             .returning(*browser_dispatches.c)
         )
         return _dispatch(result.one())
+
+    async def mark_frozen(
+        self, *, dispatch_id: uuid.UUID, worker_generation: uuid.UUID
+    ) -> DispatchRecord | None:
+        """Record that the freeze was verified, once, before the first field write.
+
+        One compare-and-set: it succeeds only for *this* dispatch, still `DISPATCHED`,
+        on the worker generation that proved the freeze, with `frozen_at` still NULL.
+        `None` means the proof cannot be recorded, and then no write may follow. It is
+        never called after a write, so a `frozen_at` is never a back-filled claim.
+        """
+        updated = await self._connection.execute(
+            update(browser_dispatches)
+            .where(
+                browser_dispatches.c.id == dispatch_id,
+                browser_dispatches.c.status == DispatchStatus.DISPATCHED.value,
+                browser_dispatches.c.worker_generation == worker_generation,
+                browser_dispatches.c.frozen_at.is_(None),
+            )
+            .values(frozen_at=func.now())
+            .returning(*browser_dispatches.c)
+        )
+        row = updated.one_or_none()
+        return _dispatch(row) if row is not None else None
 
     async def finish_dispatch(
         self,

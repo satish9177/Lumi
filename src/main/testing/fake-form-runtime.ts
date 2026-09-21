@@ -52,7 +52,12 @@ interface Disclosure { id: string; revision: number; status: string; fields: Jso
 export interface FakeFormOptions extends FakeAuthenticatedOptions {
   /** The saved details that exist. Defaults to all five in `SAVED_VALUES`. */
   saved?: string[]
+  /** Milestone 8b S6: start inside the headed preparation window. Defaults to true. */
+  preparing?: boolean
 }
+
+interface FakeDraft { id: string; revision: number; status: string; fieldCount: number }
+interface FakeHandover { id: string; revision: number; status: string; approval: string | null; resultCode: string | null }
 
 export class FakeFormRuntime extends FakeAuthenticatedRuntime {
   formGrant: FormGrant | undefined
@@ -69,11 +74,22 @@ export class FakeFormRuntime extends FakeAuthenticatedRuntime {
   accountChanged = false
   /** Set to make the form observation absent. */
   hasForm = true
+  /** Milestone 8b S6. */
+  preparing: boolean
+  draft: FakeDraft | undefined
+  handover: FakeHandover | undefined
+  /** Whether the fake browser's network is frozen. Lifted only by an approved handover. */
+  networkFrozen = true
+  /** How many times the network was restored. Must equal the number of approved handovers. */
+  networkRestores = 0
+  /** Set to simulate the page no longer matching the approved draft at handover time. */
+  draftChanged = false
   private readonly recipientOfGrant: Map<string, string> = new Map()
 
   constructor(options: FakeFormOptions = {}) {
     super(options)
     this.saved = options.saved ?? Object.keys(SAVED_VALUES)
+    this.preparing = options.preparing ?? true
   }
 
   async request(method: RuntimeMethod, path: string, body: unknown): Promise<RuntimeReply> {
@@ -113,19 +129,43 @@ export class FakeFormRuntime extends FakeAuthenticatedRuntime {
         approval_status: disclosure.approval, approval_expires_at: disclosure.approval === 'PENDING' ? FAR : null,
         site: 'jobs.example.test', form_label: 'Application', fields: disclosure.fields,
         reveals_country: disclosure.fields.some((field) => field.data_ref === 'country'),
-        result_code: disclosure.resultCode
+        result_code: disclosure.resultCode,
+        executable: true
       } : null,
-      form_count: this.hasForm ? 1 : 0, candidate_element_count: this.hasForm ? ELEMENTS.length : 0, max_fields: 12
+      form_count: this.hasForm ? 1 : 0, candidate_element_count: this.hasForm ? ELEMENTS.length : 0, max_fields: 12,
+      preparing: this.preparing,
+      draft: this.draft ? {
+        draft_id: this.draft.id, revision: this.draft.revision, status: this.draft.status,
+        field_count: this.draft.fieldCount, partial: this.draft.status === 'STALE', site: 'jobs.example.test'
+      } : null,
+      handover: this.handover && this.draft ? {
+        action_id: this.handover.id, revision: this.handover.revision, action_status: this.handover.status,
+        approval_status: this.handover.approval, approval_expires_at: this.handover.approval === 'PENDING' ? FAR : null,
+        draft_id: this.draft.id, field_count: this.draft.fieldCount, partial: this.draft.status === 'STALE',
+        site: 'jobs.example.test', result_code: this.handover.resultCode
+      } : null
     }
   }
 
   private handleForm(method: RuntimeMethod, path: string, body: Json): [number, unknown] | undefined {
     let match: RegExpExecArray | null
-    if ((match = /^\/tasks\/([0-9a-f-]{36})\/authenticated\/form\/(prepare-scope|grant|revoke|planning-context|propose)$/.exec(path))) {
+    if ((match = /^\/tasks\/([0-9a-f-]{36})\/authenticated\/form\/(prepare-scope|grant|revoke|planning-context|propose|preparation-mode|stop)$/.exec(path))) {
       if (method !== 'POST') return this.error(422, 'invalid_request')
       const taskId = match[1]
       const route = match[2]
       const authenticated = this.authenticatedGrant(taskId)
+      if (route === 'preparation-mode') {
+        if (this.draft && ['PREPARED', 'STALE'].includes(this.draft.status)) return this.error(409, 'form_prepare_state_changed', 'form_is_dirty')
+        this.preparing = true
+        // Every proposal and approval made from the headless document dies here.
+        if (this.disclosure && this.disclosure.status === 'WAITING_APPROVAL') { this.disclosure.status = 'REJECTED'; this.disclosure.revision += 1 }
+        return [200, this.formPlan(taskId)]
+      }
+      if (route === 'stop') {
+        if (this.draft && ['PREPARED', 'STALE'].includes(this.draft.status)) { this.draft.status = 'DISCARDED'; this.draft.revision += 1; this.networkFrozen = false }
+        this.preparing = false
+        return [200, this.formPlan(taskId)]
+      }
       if (route === 'prepare-scope') {
         if (!authenticated || authenticated.status !== 'ACTIVE') return this.error(409, 'authenticated_grant_not_usable', 'account reading has not been allowed for this task')
         if (this.formGrant && ['PENDING', 'ACTIVE'].includes(this.formGrant.status)) return [201, this.formPlan(taskId)]
@@ -164,6 +204,8 @@ export class FakeFormRuntime extends FakeAuthenticatedRuntime {
         }]
       }
       // route === 'propose'
+      if (!this.preparing) return this.error(409, 'form_prepare_state_changed', 'preparation_mode_required')
+      if (this.draft && ['PREPARED', 'STALE'].includes(this.draft.status)) return this.error(409, 'form_prepare_state_changed', 'form_is_dirty')
       if (body.provider !== grant.recipient) return this.error(422, 'form_prepare_refused', 'recipient_mismatch')
       return this.propose(taskId, grant, (body.proposal ?? {}) as Json)
     }
@@ -181,11 +223,56 @@ export class FakeFormRuntime extends FakeAuthenticatedRuntime {
       }
       if (this.savedValueChanged) return this.error(409, 'form_prepare_state_changed', 'protected_value_changed')
       if (this.accountChanged) return this.error(409, 'form_prepare_state_changed', 'account_changed')
+      if (!this.preparing) return this.error(409, 'form_prepare_state_changed', 'preparation_mode_required')
       this.approvals += 1
       disclosure.status = 'SUCCEEDED'
       disclosure.revision += 3
       disclosure.approval = 'CONSUMED'
-      disclosure.resultCode = 'prepared_nothing'
+      // Milestone 8b S6: approving fills, locally, with the network frozen -- and stays frozen.
+      disclosure.resultCode = 'local_draft_prepared'
+      this.draft = { id: randomUUID(), revision: 1, status: 'PREPARED', fieldCount: disclosure.fields.length }
+      this.networkFrozen = true
+      return [200, this.formPlan(taskId)]
+    }
+    if ((match = /^\/form-drafts\/([0-9a-f-]{36})\/(discard|handover-request)$/.exec(path))) {
+      const draft = this.draft
+      if (!draft || draft.id !== match[1]) return this.error(404, 'form_prepare_refused', 'draft_not_found')
+      if (Object.keys(body).some((key) => key !== 'expected_revision')) return this.error(422, 'invalid_request')
+      if (draft.revision !== body.expected_revision) return this.error(409, 'form_prepare_state_changed', 'draft_changed')
+      if (!['PREPARED', 'STALE'].includes(draft.status)) return this.error(409, 'form_prepare_state_changed', 'draft_not_live')
+      const taskId = this.formGrant!.taskId
+      if (match[2] === 'discard') {
+        // The dirty page is destroyed WHILE FROZEN, and only then does the network return.
+        draft.status = 'DISCARDED'
+        draft.revision += 1
+        this.networkFrozen = false
+        return [200, this.formPlan(taskId)]
+      }
+      this.handover = { id: randomUUID(), revision: 2, status: 'WAITING_APPROVAL', approval: 'PENDING', resultCode: null }
+      return [200, this.formPlan(taskId)]
+    }
+    if ((match = /^\/actions\/([0-9a-f-]{36})\/form-handover\/(approve|reject)$/.exec(path))) {
+      const handover = this.handover
+      if (!handover || handover.id !== match[1] || !this.draft) return this.error(404, 'action_not_found')
+      if (Object.keys(body).some((key) => key !== 'expected_revision')) return this.error(422, 'invalid_request')
+      if (handover.revision !== body.expected_revision) return [409, { error: { code: 'stale_action_revision', message: 'x', current_revision: handover.revision } }]
+      if (handover.status !== 'WAITING_APPROVAL') return this.error(409, 'approval_not_usable')
+      const taskId = this.formGrant!.taskId
+      if (match[2] === 'reject') { handover.status = 'REJECTED'; handover.revision += 1; return [200, this.formPlan(taskId)] }
+      handover.revision += 3
+      handover.approval = 'CONSUMED'
+      if (this.draftChanged) {
+        // The live page no longer matches the approved draft: refused, and still frozen.
+        handover.status = 'FAILED'
+        handover.resultCode = 'handover_refused'
+        return [200, this.formPlan(taskId)]
+      }
+      handover.status = 'SUCCEEDED'
+      handover.resultCode = 'handed_over'
+      this.draft.status = 'HANDED_OVER'
+      this.draft.revision += 1
+      this.networkFrozen = false
+      this.networkRestores += 1
       return [200, this.formPlan(taskId)]
     }
     return undefined

@@ -474,6 +474,25 @@ export function AgentTaskPanel({ agent, onClose, focusRequest, onInspectionResul
         if (!disclosure) return
         await run('form_approve', () => agent.approveFieldDisclosure(disclosure.actionId, disclosure.revision))
         return
+      case 'start_preparation':
+        await run('form_preparation', () => agent.startFormPreparationMode())
+        return
+      case 'discard_draft':
+        if (!plan.draft) return
+        await run('form_discard', () => agent.discardFormDraft(plan.draft!.draftId, plan.draft!.revision))
+        return
+      case 'request_handover':
+        if (!plan.draft) return
+        await run('form_handover_request', () => agent.prepareFormHandover(plan.draft!.draftId, plan.draft!.revision))
+        return
+      case 'approve_handover':
+        if (!plan.handover) return
+        await run('form_handover', () => agent.approveFormHandover(plan.handover!.actionId, plan.handover!.revision))
+        return
+      case 'decline_handover':
+        if (!plan.handover) return
+        await run('form_handover_cancel', () => agent.rejectFormHandover(plan.handover!.actionId, plan.handover!.revision))
+        return
       case 'decline_disclosure':
         if (!disclosure) return
         await run('form_reject', () => agent.rejectFieldDisclosure(disclosure.actionId, disclosure.revision))
@@ -1223,8 +1242,13 @@ const FORM_PLAN_CONTROL_LABELS: Record<FormPlanControl, string> = {
   plan_form: 'Plan this form',
   allow_form_planning: 'Allow planning',
   decline_form_planning: 'Cancel',
-  approve_disclosure: 'Approve this plan',
-  decline_disclosure: 'Cancel'
+  approve_disclosure: 'Fill these fields',
+  decline_disclosure: 'Cancel',
+  start_preparation: 'Open preparation window',
+  discard_draft: 'Discard draft',
+  request_handover: 'Hand over to me',
+  approve_handover: 'Hand over to me',
+  decline_handover: 'Cancel'
 }
 
 /**
@@ -1234,8 +1258,9 @@ const FORM_PLAN_CONTROL_LABELS: Record<FormPlanControl, string> = {
  * appears only as a plain-text field label or option name inside the manifest rows,
  * and a masked preview is shown exactly as the runtime sent it: this component never
  * masks anything and never holds a raw saved value. The buttons say what they do --
- * "Allow planning" and "Approve this plan" -- never "Fill", because nothing here
- * changes the page.
+ * "Allow planning" and, since Milestone 8b S6, "Fill these fields" -- because that click
+ * really does fill the form, locally, with the network frozen -- and "Hand over to me" for
+ * the second approval. Never "Submit", "Send" or "Finish application".
  */
 function FormPlanCard({ plan, accountReadingActive, now, disabled, taskClosed, selected, onSelect, onControl }: {
   plan: AgentFormPlanView
@@ -1249,7 +1274,7 @@ function FormPlanCard({ plan, accountReadingActive, now, disabled, taskClosed, s
 }) {
   const model = describeFormPlan(plan, accountReadingActive, taskClosed, now)
   if (model.stage === 'hidden') return null
-  const manifest = plan.disclosure && (model.stage === 'approval' || model.stage === 'prepared')
+  const manifest = plan.disclosure && (model.stage === 'approval' || model.stage === 'prepared' || model.stage === 'draft')
     ? describeDisclosureCard(plan.disclosure)
     : undefined
   return (
@@ -1316,6 +1341,7 @@ function FormPlanCard({ plan, accountReadingActive, now, disabled, taskClosed, s
           {model.controls.map((control) => (
             <button key={control} type="button" disabled={disabled || (control === 'plan_form' && selected.length === 0)}
               className={control === 'allow_form_planning' || control === 'approve_disclosure' || control === 'plan_form'
+                || control === 'start_preparation' || control === 'approve_handover'
                 ? 'lifelens-confirm-button' : 'lifelens-dismiss-button'}
               data-testid={`agent-form-plan-${control}`}
               onClick={() => onControl(control)}>

@@ -294,15 +294,21 @@ def test_the_served_registry_marks_every_account_read_as_such() -> None:
     names = [name for name in registry.names() if name.startswith("authenticated_")]
     assert names == [
         "authenticated_history", "authenticated_navigate", "authenticated_observe",
-        "authenticated_reveal", "authenticated_tab",
+        "authenticated_prepare_form", "authenticated_reveal", "authenticated_tab",
     ]
     for name in names:
         operation = registry.get(name)
         assert operation is not None
-        assert operation.effect is Effect.ACCOUNT_READ and operation.effect.value != "READ_ONLY"
         assert operation.target is OperationTarget.AUTHENTICATED_SESSION
-        assert operation.retry is RetryPolicy.OBSERVE_THEN_REPLAN
+        # No authenticated operation may gain booking-style reconciliation.
         assert operation.reconciliation is Reconciliation.NOT_REQUIRED
+        if name == "authenticated_prepare_form":
+            # Milestone 8b S6: the local draft is its own effect, and never repeats itself.
+            assert operation.effect is Effect.LOCAL_DRAFT
+            assert operation.retry is RetryPolicy.NEW_APPROVAL_REQUIRED
+        else:
+            assert operation.effect is Effect.ACCOUNT_READ and operation.effect.value != "READ_ONLY"
+            assert operation.retry is RetryPolicy.OBSERVE_THEN_REPLAN
     # And nothing else may target the authenticated session.
     others = [
         name for name in registry.names()

@@ -99,6 +99,11 @@
       "task.form_prepare_scope_granted",
       "task.form_prepare_scope_revoked",
       "task.form_planning_context_built",
+      "task.form_preparation_started",
+      "task.form_draft_recorded",
+      "task.form_draft_discarded",
+      "task.form_draft_handed_over",
+      "task.form_draft_lost",
       "action.proposed",
       "action.approval_requested",
       "action.approved",
@@ -961,6 +966,7 @@
     "form_plan_active": {
       "candidate_element_count": 6,
       "disclosure": null,
+      "draft": null,
       "form_count": 1,
       "grant": {
         "expires_at": "2026-09-16T10:15:00Z",
@@ -980,8 +986,10 @@
         },
         "status": "ACTIVE"
       },
+      "handover": null,
       "max_fields": 12,
       "objective": "Help me apply",
+      "preparing": false,
       "saved_details": [
         {
           "data_ref": "email",
@@ -1006,13 +1014,430 @@
       "task_id": "00000000-0000-4000-8000-00000000000a",
       "task_status": "READY"
     },
+    "form_plan_draft_partial": {
+      "candidate_element_count": 6,
+      "disclosure": {
+        "action_id": "00000000-0000-4000-8000-000000000002",
+        "action_status": "FAILED",
+        "approval_expires_at": "2026-09-16T10:05:02Z",
+        "approval_status": "CONSUMED",
+        "executable": true,
+        "fields": [
+          {
+            "checked": null,
+            "control_type": "email",
+            "data_ref": "email",
+            "field_label": "Email address",
+            "kind": "saved_detail",
+            "option_label": null,
+            "preview": "s***@g***.com"
+          },
+          {
+            "checked": null,
+            "control_type": "select_single",
+            "data_ref": null,
+            "field_label": "Country",
+            "kind": "option",
+            "option_label": "India",
+            "preview": null
+          },
+          {
+            "checked": true,
+            "control_type": "checkbox",
+            "data_ref": null,
+            "field_label": "I agree to the terms",
+            "kind": "checkbox",
+            "option_label": null,
+            "preview": null
+          }
+        ],
+        "form_label": "Application",
+        "result_code": "local_draft_partial",
+        "reveals_country": false,
+        "revision": 5,
+        "site": "jobs.example.test"
+      },
+      "draft": {
+        "draft_id": "00000000-0000-4000-8000-0000000000d1",
+        "field_count": 2,
+        "partial": true,
+        "revision": 1,
+        "site": "jobs.example.test",
+        "status": "STALE"
+      },
+      "form_count": 1,
+      "grant": {
+        "expires_at": "2026-09-16T10:15:00Z",
+        "grant_id": "00000000-0000-4000-8000-000000000009",
+        "revision": 2,
+        "scope": {
+          "allowed_data_refs": [
+            "email",
+            "phone",
+            "country"
+          ],
+          "classification": "account_private",
+          "failover": "none",
+          "freeze_required": true,
+          "max_fields": 12,
+          "planning_recipient": "openai"
+        },
+        "status": "ACTIVE"
+      },
+      "handover": null,
+      "max_fields": 12,
+      "objective": "Help me apply",
+      "preparing": false,
+      "saved_details": [
+        {
+          "data_ref": "email",
+          "kind": "email",
+          "preview": "s***@g***.com",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "phone",
+          "kind": "phone",
+          "preview": "ending 1234",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "country",
+          "kind": "country",
+          "preview": "India",
+          "updated_at": "2026-09-16T10:00:01Z"
+        }
+      ],
+      "site": "jobs.example.test",
+      "task_id": "00000000-0000-4000-8000-00000000000a",
+      "task_status": "PAUSED"
+    },
+    "form_plan_draft_prepared": {
+      "candidate_element_count": 6,
+      "disclosure": {
+        "action_id": "00000000-0000-4000-8000-000000000002",
+        "action_status": "SUCCEEDED",
+        "approval_expires_at": "2026-09-16T10:05:02Z",
+        "approval_status": "CONSUMED",
+        "executable": true,
+        "fields": [
+          {
+            "checked": null,
+            "control_type": "email",
+            "data_ref": "email",
+            "field_label": "Email address",
+            "kind": "saved_detail",
+            "option_label": null,
+            "preview": "s***@g***.com"
+          },
+          {
+            "checked": null,
+            "control_type": "select_single",
+            "data_ref": null,
+            "field_label": "Country",
+            "kind": "option",
+            "option_label": "India",
+            "preview": null
+          },
+          {
+            "checked": true,
+            "control_type": "checkbox",
+            "data_ref": null,
+            "field_label": "I agree to the terms",
+            "kind": "checkbox",
+            "option_label": null,
+            "preview": null
+          }
+        ],
+        "form_label": "Application",
+        "result_code": "local_draft_prepared",
+        "reveals_country": false,
+        "revision": 5,
+        "site": "jobs.example.test"
+      },
+      "draft": {
+        "draft_id": "00000000-0000-4000-8000-0000000000d1",
+        "field_count": 3,
+        "partial": false,
+        "revision": 1,
+        "site": "jobs.example.test",
+        "status": "PREPARED"
+      },
+      "form_count": 1,
+      "grant": {
+        "expires_at": "2026-09-16T10:15:00Z",
+        "grant_id": "00000000-0000-4000-8000-000000000009",
+        "revision": 2,
+        "scope": {
+          "allowed_data_refs": [
+            "email",
+            "phone",
+            "country"
+          ],
+          "classification": "account_private",
+          "failover": "none",
+          "freeze_required": true,
+          "max_fields": 12,
+          "planning_recipient": "openai"
+        },
+        "status": "ACTIVE"
+      },
+      "handover": null,
+      "max_fields": 12,
+      "objective": "Help me apply",
+      "preparing": false,
+      "saved_details": [
+        {
+          "data_ref": "email",
+          "kind": "email",
+          "preview": "s***@g***.com",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "phone",
+          "kind": "phone",
+          "preview": "ending 1234",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "country",
+          "kind": "country",
+          "preview": "India",
+          "updated_at": "2026-09-16T10:00:01Z"
+        }
+      ],
+      "site": "jobs.example.test",
+      "task_id": "00000000-0000-4000-8000-00000000000a",
+      "task_status": "PAUSED"
+    },
+    "form_plan_handed_over": {
+      "candidate_element_count": 6,
+      "disclosure": {
+        "action_id": "00000000-0000-4000-8000-000000000002",
+        "action_status": "SUCCEEDED",
+        "approval_expires_at": "2026-09-16T10:05:02Z",
+        "approval_status": "CONSUMED",
+        "executable": true,
+        "fields": [
+          {
+            "checked": null,
+            "control_type": "email",
+            "data_ref": "email",
+            "field_label": "Email address",
+            "kind": "saved_detail",
+            "option_label": null,
+            "preview": "s***@g***.com"
+          },
+          {
+            "checked": null,
+            "control_type": "select_single",
+            "data_ref": null,
+            "field_label": "Country",
+            "kind": "option",
+            "option_label": "India",
+            "preview": null
+          },
+          {
+            "checked": true,
+            "control_type": "checkbox",
+            "data_ref": null,
+            "field_label": "I agree to the terms",
+            "kind": "checkbox",
+            "option_label": null,
+            "preview": null
+          }
+        ],
+        "form_label": "Application",
+        "result_code": "local_draft_prepared",
+        "reveals_country": false,
+        "revision": 5,
+        "site": "jobs.example.test"
+      },
+      "draft": {
+        "draft_id": "00000000-0000-4000-8000-0000000000d1",
+        "field_count": 3,
+        "partial": false,
+        "revision": 2,
+        "site": "jobs.example.test",
+        "status": "HANDED_OVER"
+      },
+      "form_count": 1,
+      "grant": {
+        "expires_at": "2026-09-16T10:15:00Z",
+        "grant_id": "00000000-0000-4000-8000-000000000009",
+        "revision": 2,
+        "scope": {
+          "allowed_data_refs": [
+            "email",
+            "phone",
+            "country"
+          ],
+          "classification": "account_private",
+          "failover": "none",
+          "freeze_required": true,
+          "max_fields": 12,
+          "planning_recipient": "openai"
+        },
+        "status": "ACTIVE"
+      },
+      "handover": {
+        "action_id": "00000000-0000-4000-8000-0000000000e1",
+        "action_status": "SUCCEEDED",
+        "approval_expires_at": "2026-09-16T10:05:02Z",
+        "approval_status": "CONSUMED",
+        "draft_id": "00000000-0000-4000-8000-0000000000d1",
+        "field_count": 3,
+        "partial": false,
+        "result_code": "handed_over",
+        "revision": 2,
+        "site": "jobs.example.test"
+      },
+      "max_fields": 12,
+      "objective": "Help me apply",
+      "preparing": false,
+      "saved_details": [
+        {
+          "data_ref": "email",
+          "kind": "email",
+          "preview": "s***@g***.com",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "phone",
+          "kind": "phone",
+          "preview": "ending 1234",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "country",
+          "kind": "country",
+          "preview": "India",
+          "updated_at": "2026-09-16T10:00:01Z"
+        }
+      ],
+      "site": "jobs.example.test",
+      "task_id": "00000000-0000-4000-8000-00000000000a",
+      "task_status": "PAUSED"
+    },
+    "form_plan_handover_waiting": {
+      "candidate_element_count": 6,
+      "disclosure": {
+        "action_id": "00000000-0000-4000-8000-000000000002",
+        "action_status": "SUCCEEDED",
+        "approval_expires_at": "2026-09-16T10:05:02Z",
+        "approval_status": "CONSUMED",
+        "executable": true,
+        "fields": [
+          {
+            "checked": null,
+            "control_type": "email",
+            "data_ref": "email",
+            "field_label": "Email address",
+            "kind": "saved_detail",
+            "option_label": null,
+            "preview": "s***@g***.com"
+          },
+          {
+            "checked": null,
+            "control_type": "select_single",
+            "data_ref": null,
+            "field_label": "Country",
+            "kind": "option",
+            "option_label": "India",
+            "preview": null
+          },
+          {
+            "checked": true,
+            "control_type": "checkbox",
+            "data_ref": null,
+            "field_label": "I agree to the terms",
+            "kind": "checkbox",
+            "option_label": null,
+            "preview": null
+          }
+        ],
+        "form_label": "Application",
+        "result_code": "local_draft_prepared",
+        "reveals_country": false,
+        "revision": 5,
+        "site": "jobs.example.test"
+      },
+      "draft": {
+        "draft_id": "00000000-0000-4000-8000-0000000000d1",
+        "field_count": 3,
+        "partial": false,
+        "revision": 1,
+        "site": "jobs.example.test",
+        "status": "PREPARED"
+      },
+      "form_count": 1,
+      "grant": {
+        "expires_at": "2026-09-16T10:15:00Z",
+        "grant_id": "00000000-0000-4000-8000-000000000009",
+        "revision": 2,
+        "scope": {
+          "allowed_data_refs": [
+            "email",
+            "phone",
+            "country"
+          ],
+          "classification": "account_private",
+          "failover": "none",
+          "freeze_required": true,
+          "max_fields": 12,
+          "planning_recipient": "openai"
+        },
+        "status": "ACTIVE"
+      },
+      "handover": {
+        "action_id": "00000000-0000-4000-8000-0000000000e1",
+        "action_status": "WAITING_APPROVAL",
+        "approval_expires_at": "2026-09-16T10:05:02Z",
+        "approval_status": "PENDING",
+        "draft_id": "00000000-0000-4000-8000-0000000000d1",
+        "field_count": 3,
+        "partial": false,
+        "result_code": null,
+        "revision": 2,
+        "site": "jobs.example.test"
+      },
+      "max_fields": 12,
+      "objective": "Help me apply",
+      "preparing": false,
+      "saved_details": [
+        {
+          "data_ref": "email",
+          "kind": "email",
+          "preview": "s***@g***.com",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "phone",
+          "kind": "phone",
+          "preview": "ending 1234",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "country",
+          "kind": "country",
+          "preview": "India",
+          "updated_at": "2026-09-16T10:00:01Z"
+        }
+      ],
+      "site": "jobs.example.test",
+      "task_id": "00000000-0000-4000-8000-00000000000a",
+      "task_status": "PAUSED"
+    },
     "form_plan_none": {
       "candidate_element_count": 6,
       "disclosure": null,
+      "draft": null,
       "form_count": 1,
       "grant": null,
+      "handover": null,
       "max_fields": 12,
       "objective": "Help me apply",
+      "preparing": false,
       "saved_details": [
         {
           "data_ref": "email",
@@ -1040,6 +1465,7 @@
     "form_plan_pending": {
       "candidate_element_count": 6,
       "disclosure": null,
+      "draft": null,
       "form_count": 1,
       "grant": {
         "expires_at": null,
@@ -1059,8 +1485,10 @@
         },
         "status": "PENDING"
       },
+      "handover": null,
       "max_fields": 12,
       "objective": "Help me apply",
+      "preparing": false,
       "saved_details": [
         {
           "data_ref": "email",
@@ -1092,6 +1520,7 @@
         "action_status": "SUCCEEDED",
         "approval_expires_at": "2026-09-16T10:05:02Z",
         "approval_status": "CONSUMED",
+        "executable": false,
         "fields": [
           {
             "checked": null,
@@ -1127,6 +1556,7 @@
         "revision": 5,
         "site": "jobs.example.test"
       },
+      "draft": null,
       "form_count": 1,
       "grant": {
         "expires_at": "2026-09-16T10:15:00Z",
@@ -1146,8 +1576,61 @@
         },
         "status": "ACTIVE"
       },
+      "handover": null,
       "max_fields": 12,
       "objective": "Help me apply",
+      "preparing": false,
+      "saved_details": [
+        {
+          "data_ref": "email",
+          "kind": "email",
+          "preview": "s***@g***.com",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "phone",
+          "kind": "phone",
+          "preview": "ending 1234",
+          "updated_at": "2026-09-16T10:00:01Z"
+        },
+        {
+          "data_ref": "country",
+          "kind": "country",
+          "preview": "India",
+          "updated_at": "2026-09-16T10:00:01Z"
+        }
+      ],
+      "site": "jobs.example.test",
+      "task_id": "00000000-0000-4000-8000-00000000000a",
+      "task_status": "READY"
+    },
+    "form_plan_preparing": {
+      "candidate_element_count": 6,
+      "disclosure": null,
+      "draft": null,
+      "form_count": 1,
+      "grant": {
+        "expires_at": "2026-09-16T10:15:00Z",
+        "grant_id": "00000000-0000-4000-8000-000000000009",
+        "revision": 2,
+        "scope": {
+          "allowed_data_refs": [
+            "email",
+            "phone",
+            "country"
+          ],
+          "classification": "account_private",
+          "failover": "none",
+          "freeze_required": true,
+          "max_fields": 12,
+          "planning_recipient": "openai"
+        },
+        "status": "ACTIVE"
+      },
+      "handover": null,
+      "max_fields": 12,
+      "objective": "Help me apply",
+      "preparing": true,
       "saved_details": [
         {
           "data_ref": "email",
@@ -1179,6 +1662,7 @@
         "action_status": "WAITING_APPROVAL",
         "approval_expires_at": "2026-09-16T10:05:02Z",
         "approval_status": "PENDING",
+        "executable": true,
         "fields": [
           {
             "checked": null,
@@ -1214,6 +1698,7 @@
         "revision": 2,
         "site": "jobs.example.test"
       },
+      "draft": null,
       "form_count": 1,
       "grant": {
         "expires_at": "2026-09-16T10:15:00Z",
@@ -1233,8 +1718,10 @@
         },
         "status": "ACTIVE"
       },
+      "handover": null,
       "max_fields": 12,
       "objective": "Help me apply",
+      "preparing": false,
       "saved_details": [
         {
           "data_ref": "email",
@@ -4382,6 +4869,10 @@
               ],
               "title": "Approval Status"
             },
+            "executable": {
+              "title": "Executable",
+              "type": "boolean"
+            },
             "fields": {
               "items": {
                 "$ref": "#/$defs/DisclosureFieldResponse"
@@ -4434,7 +4925,8 @@
             "form_label",
             "fields",
             "reveals_country",
-            "result_code"
+            "result_code",
+            "executable"
           ],
           "title": "DisclosureCardResponse",
           "type": "object"
@@ -4525,6 +5017,56 @@
           ],
           "title": "DisclosureFieldResponse",
           "type": "object"
+        },
+        "DraftCardResponse": {
+          "description": "The local draft, as the trusted card shows it. Ids, a status and counts only --\nnever a value, a field label, a hash or an origin.",
+          "properties": {
+            "draft_id": {
+              "format": "uuid",
+              "title": "Draft Id",
+              "type": "string"
+            },
+            "field_count": {
+              "title": "Field Count",
+              "type": "integer"
+            },
+            "partial": {
+              "title": "Partial",
+              "type": "boolean"
+            },
+            "revision": {
+              "title": "Revision",
+              "type": "integer"
+            },
+            "site": {
+              "title": "Site",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/DraftStatus"
+            }
+          },
+          "required": [
+            "draft_id",
+            "revision",
+            "status",
+            "field_count",
+            "partial",
+            "site"
+          ],
+          "title": "DraftCardResponse",
+          "type": "object"
+        },
+        "DraftStatus": {
+          "description": "A row in `form_drafts`. A closed set: there is no other state.",
+          "enum": [
+            "PREPARED",
+            "STALE",
+            "DISCARDED",
+            "HANDED_OVER"
+          ],
+          "title": "DraftStatus",
+          "type": "string"
         },
         "FormGrantResponse": {
           "properties": {
@@ -4638,6 +5180,89 @@
           "title": "GrantStatus",
           "type": "string"
         },
+        "HandoverCardResponse": {
+          "description": "The second exact approval: lifting the freeze while the page is dirty.",
+          "properties": {
+            "action_id": {
+              "format": "uuid",
+              "title": "Action Id",
+              "type": "string"
+            },
+            "action_status": {
+              "title": "Action Status",
+              "type": "string"
+            },
+            "approval_expires_at": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Approval Expires At"
+            },
+            "approval_status": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Approval Status"
+            },
+            "draft_id": {
+              "format": "uuid",
+              "title": "Draft Id",
+              "type": "string"
+            },
+            "field_count": {
+              "title": "Field Count",
+              "type": "integer"
+            },
+            "partial": {
+              "title": "Partial",
+              "type": "boolean"
+            },
+            "result_code": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Result Code"
+            },
+            "revision": {
+              "title": "Revision",
+              "type": "integer"
+            },
+            "site": {
+              "title": "Site",
+              "type": "string"
+            }
+          },
+          "required": [
+            "action_id",
+            "revision",
+            "action_status",
+            "approval_status",
+            "approval_expires_at",
+            "draft_id",
+            "field_count",
+            "partial",
+            "site",
+            "result_code"
+          ],
+          "title": "HandoverCardResponse",
+          "type": "object"
+        },
         "SavedDetailResponse": {
           "description": "A saved detail as everything but its row may see it. Never the value.",
           "properties": {
@@ -4704,6 +5329,17 @@
             }
           ]
         },
+        "draft": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DraftCardResponse"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "form_count": {
           "title": "Form Count",
           "type": "integer"
@@ -4718,6 +5354,17 @@
             }
           ]
         },
+        "handover": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/HandoverCardResponse"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "max_fields": {
           "default": 12,
           "title": "Max Fields",
@@ -4726,6 +5373,11 @@
         "objective": {
           "title": "Objective",
           "type": "string"
+        },
+        "preparing": {
+          "default": false,
+          "title": "Preparing",
+          "type": "boolean"
         },
         "saved_details": {
           "items": {

@@ -4,10 +4,13 @@ Callers own the transaction, as everywhere else in this layer.
 
 Two things are load-bearing here:
 
-* `ProtectedValueRepository` never returns a saved value. `upsert` takes it in;
-  every read returns only `kind`, `preview`, the digest and a length. The value
-  does not leave its row in S5, so no query result, log line or model context
-  built from this module can contain it.
+* `ProtectedValueRepository` returns a saved value from exactly one method,
+  `values_for_execution` (Milestone 8b S6), which exists so the trusted runtime can
+  hold the *exact approved bytes* in memory for one frozen local draft. Every other
+  read returns only `kind`, `preview`, the digest and a length. In S5 the value did
+  not leave its row; in S6 an approved value may flow only through trusted runtime
+  and worker memory into the locally frozen browser -- never into a query result
+  shown to a model, a renderer, a log line, a task event or a ledger row.
 * `FormPrepareRepository.confirm_grant` is one compare-and-swap that also checks,
   inside the statement, that the profile is still the one the card showed **and**
   that the account-reading grant the planning grew out of is still active. There
@@ -69,6 +72,20 @@ class ProtectedValueRepository:
             select(protected_values.c.kind, protected_values.c.preview, protected_values.c.updated_at)
         )
         return [SavedDetail(kind=row.kind, preview=row.preview, updated_at=row.updated_at) for row in result]
+
+    async def values_for_execution(self, kinds: Iterable[str]) -> dict[str, str]:
+        """The raw saved values of `kinds`, share-locked, **for one approved local draft**.
+
+        The only method in this layer that returns a value. The caller must hold it in
+        memory only, verify its digest against the approved manifest before using it,
+        and never persist, log, echo or return it.
+        """
+        result = await self._connection.execute(
+            select(protected_values.c.kind, protected_values.c.value)
+            .where(protected_values.c.kind.in_(list(kinds)))
+            .with_for_update(read=True)
+        )
+        return {row.kind: row.value for row in result}
 
     async def snapshots(
         self, kinds: Iterable[str], *, lock: bool = False

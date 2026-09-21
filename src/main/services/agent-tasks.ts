@@ -33,6 +33,7 @@ import type { AnswerOutcome, PageObservationDetail } from '../agent/page-answer'
 import type { ResearchAnswerOutcome } from '../agent/research-answer'
 import type { AuthenticatedAnswerOutcome } from '../agent/authenticated-answer'
 import type { FormPlanOutcome, FormPlanningContext } from '../agent/form-planner'
+import { setFormDraftWindowActive } from './capture'
 import type {
   AuthenticatedDecision, AuthenticatedPlanOutcome, AuthenticatedStepChoice
 } from '../agent/authenticated-planner'
@@ -109,7 +110,10 @@ const TIMEOUTS = {
   // Longer than the runtime's own worker timeout: cutting execution short
   // here would only turn a knowable answer into an unconfirmed one.
   execute: 200_000,
-  reconcile: 180_000
+  reconcile: 180_000,
+  // Reopening the profile headed, returning to the page and observing it takes a browser
+  // launch and a page load; a fill waits for a settled page and a two-layer freeze.
+  prepare: 180_000
 } as const
 
 export class AgentRequestError extends Error {
@@ -520,6 +524,11 @@ export class AgentTaskController {
       formPlan = parseFormPlan(loaded.body)
       if (formPlan.taskId !== taskId) throw new WireError('form_plan.task_id')
     }
+    // The preparation window, or a draft that still exists, can show private details: no screen
+    // capture (which goes to a model) while it does. Derived here, from the runtime's own answer.
+    setFormDraftWindowActive(Boolean(
+      formPlan && (formPlan.preparing || formPlan.draft?.status === 'PREPARED' || formPlan.draft?.status === 'STALE')
+    ))
     const events: AgentEventView[] = []
     let cursor = afterSequence
     for (let page = 0; ; page += 1) {
@@ -1627,6 +1636,110 @@ export class AgentTaskController {
       // An id and a revision. The manifest, the values, the origin and the fields
       // are all resolved by the runtime from what it stored.
       await this.call('POST', `/actions/${actionId}/field-disclosure/${decision}`, { expected_revision: expectedRevision }, TIMEOUTS.write)
+      return await this.snapshot(taskId, 0)
+    })
+  }
+
+  // ---- the network-frozen local draft (Milestone 8b S6) --------------------------------------
+  //
+  // Lumi fills the form in its own browser with the network frozen, verifies the values are in the
+  // fields, and hands the browser to the user. It never submits. Main brokers six trusted clicks and
+  // decides none of them; every one is an id and the revision that was on screen. No value, manifest,
+  // field, origin, selector, URL, provider or freeze flag ever crosses this boundary, and none of
+  // these is reachable from voice or from a typed sentence.
+  //
+  //  * `startFormPreparationMode` -- reopen the profile headed, return internally to the page, observe.
+  //  * `approveFieldDisclosure`    -- (above) the click that FILLS, frozen, in that window.
+  //  * `discardFormDraft`          -- destroy the dirty page while frozen, then thaw.
+  //  * `prepareFormHandover`       -- open the SECOND exact approval; changes nothing.
+  //  * `approveFormHandover`       -- the network is restored for the user. Lumi never submits.
+  //  * `rejectFormHandover`, `stopFormPreparation` -- cancel; or discard and close.
+
+  startFormPreparationMode(): Promise<AgentResult<AgentTaskSnapshot>> {
+    return this.exclusive('authenticated', async () => {
+      const taskId = await this.activeTaskId()
+      const reply = await this.call('POST', `/tasks/${taskId}/authenticated/form/preparation-mode`, {}, TIMEOUTS.prepare)
+      if (parseFormPlan(reply.body).taskId !== taskId) throw new WireError('form_plan.preparation_mode')
+      return await this.snapshot(taskId, 0)
+    })
+  }
+
+  stopFormPreparation(): Promise<AgentResult<AgentTaskSnapshot>> {
+    return this.exclusive('authenticated', async () => {
+      const taskId = await this.activeTaskId()
+      const reply = await this.call('POST', `/tasks/${taskId}/authenticated/form/stop`, {}, TIMEOUTS.prepare)
+      if (parseFormPlan(reply.body).taskId !== taskId) throw new WireError('form_plan.stop')
+      return await this.snapshot(taskId, 0)
+    })
+  }
+
+  discardFormDraft(draftId: unknown, expectedRevision: unknown): Promise<AgentResult<AgentTaskSnapshot>> {
+    return this.draftDecision(draftId, expectedRevision, 'discard')
+  }
+
+  prepareFormHandover(draftId: unknown, expectedRevision: unknown): Promise<AgentResult<AgentTaskSnapshot>> {
+    return this.draftDecision(draftId, expectedRevision, 'handover-request')
+  }
+
+  private async draftDecision(
+    draftIdValue: unknown, revisionValue: unknown, decision: 'discard' | 'handover-request'
+  ): Promise<AgentResult<AgentTaskSnapshot>> {
+    let draftId: string
+    let expectedRevision: number
+    try {
+      draftId = parseActionId(draftIdValue)
+      expectedRevision = parseExpectedRevision(revisionValue)
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    return this.exclusive('authenticated', async () => {
+      const taskId = await this.activeTaskId()
+      const draft = (await this.loadFormPlan(taskId)).draft
+      if (!draft || draft.draftId !== draftId) fail('not_found', 'That form draft does not belong to the current task.')
+      if (draft.revision !== expectedRevision) {
+        throw new AgentRequestError({
+          code: 'stale_revision',
+          message: 'The form draft changed since you reviewed it. Review the current card.',
+          currentRevision: draft.revision
+        })
+      }
+      const reply = await this.call('POST', `/form-drafts/${draftId}/${decision}`, { expected_revision: expectedRevision }, TIMEOUTS.prepare)
+      if (parseFormPlan(reply.body).taskId !== taskId) throw new WireError(`form_plan.${decision}`)
+      return await this.snapshot(taskId, 0)
+    })
+  }
+
+  approveFormHandover(actionId: unknown, expectedRevision: unknown): Promise<AgentResult<AgentTaskSnapshot>> {
+    return this.handoverDecision(actionId, expectedRevision, 'approve')
+  }
+
+  rejectFormHandover(actionId: unknown, expectedRevision: unknown): Promise<AgentResult<AgentTaskSnapshot>> {
+    return this.handoverDecision(actionId, expectedRevision, 'reject')
+  }
+
+  private async handoverDecision(
+    actionIdValue: unknown, revisionValue: unknown, decision: 'approve' | 'reject'
+  ): Promise<AgentResult<AgentTaskSnapshot>> {
+    let actionId: string
+    let expectedRevision: number
+    try {
+      actionId = parseActionId(actionIdValue)
+      expectedRevision = parseExpectedRevision(revisionValue)
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    return this.exclusive('authenticated', async () => {
+      const taskId = await this.activeTaskId()
+      const card = (await this.loadFormPlan(taskId)).handover
+      if (!card || card.actionId !== actionId) fail('not_found', 'That handover does not belong to the current task.')
+      if (card.revision !== expectedRevision) {
+        throw new AgentRequestError({
+          code: 'stale_revision',
+          message: 'The handover changed since you reviewed it. Review the current card.',
+          currentRevision: card.revision
+        })
+      }
+      await this.call('POST', `/actions/${actionId}/form-handover/${decision}`, { expected_revision: expectedRevision }, TIMEOUTS.prepare)
       return await this.snapshot(taskId, 0)
     })
   }

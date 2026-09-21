@@ -24,8 +24,11 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from app.domain.local_form_draft import DraftStatus
 from app.api.form_prepare_schemas import (
     DisclosureCardResponse,
+    DraftCardResponse,
+    HandoverCardResponse,
     DisclosureFieldResponse,
     FormGrantResponse,
     FormGrantScopeResponse,
@@ -1371,12 +1374,21 @@ def _form_prepare_examples() -> dict[str, Any]:
         ],
         reveals_country=False,
         result_code=None,
+        executable=True,
     )
 
-    def plan(grant_: FormGrantResponse | None, card_: DisclosureCardResponse | None) -> dict[str, Any]:
+    def plan(
+        grant_: FormGrantResponse | None,
+        card_: DisclosureCardResponse | None,
+        *,
+        preparing: bool = False,
+        draft: DraftCardResponse | None = None,
+        handover: HandoverCardResponse | None = None,
+        status: str = "READY",
+    ) -> dict[str, Any]:
         return FormPlanResponse(
             task_id=_RESEARCH_TASK,
-            task_status="READY",
+            task_status=status,
             objective="Help me apply",
             site="jobs.example.test",
             saved_details=saved,
@@ -1384,15 +1396,57 @@ def _form_prepare_examples() -> dict[str, Any]:
             disclosure=card_,
             form_count=1,
             candidate_element_count=6,
+            preparing=preparing,
+            draft=draft,
+            handover=handover,
         ).model_dump(mode="json")
 
+    # A historical S5 approval: it ended in `prepared_nothing` and is never executable.
     prepared = card.model_copy(
         update={
             "revision": 5, "action_status": "SUCCEEDED", "approval_status": "CONSUMED",
-            "result_code": "prepared_nothing",
+            "result_code": "prepared_nothing", "executable": False,
         }
     )
+    filled = card.model_copy(
+        update={
+            "revision": 5, "action_status": "SUCCEEDED", "approval_status": "CONSUMED",
+            "result_code": "local_draft_prepared",
+        }
+    )
+    partial_card = card.model_copy(
+        update={
+            "revision": 5, "action_status": "FAILED", "approval_status": "CONSUMED",
+            "result_code": "local_draft_partial",
+        }
+    )
+    draft_id = uuid.UUID("00000000-0000-4000-8000-0000000000d1")
+    draft = DraftCardResponse(
+        draft_id=draft_id, revision=1, status="PREPARED", field_count=3, partial=False,
+        site="jobs.example.test",
+    )
+    stale = draft.model_copy(update={"status": DraftStatus.STALE, "field_count": 2, "partial": True})
+    handover = HandoverCardResponse(
+        action_id=uuid.UUID("00000000-0000-4000-8000-0000000000e1"), revision=2,
+        action_status="WAITING_APPROVAL", approval_status="PENDING", approval_expires_at=_at(302),
+        draft_id=draft_id, field_count=3, partial=False, site="jobs.example.test", result_code=None,
+    )
     return {
+        "form_plan_preparing": plan(active, None, preparing=True),
+        "form_plan_draft_prepared": plan(active, filled, draft=draft, status="PAUSED"),
+        "form_plan_draft_partial": plan(active, partial_card, draft=stale, status="PAUSED"),
+        "form_plan_handover_waiting": plan(
+            active, filled, draft=draft, handover=handover, status="PAUSED"
+        ),
+        "form_plan_handed_over": plan(
+            active, filled,
+            draft=draft.model_copy(update={"status": DraftStatus.HANDED_OVER, "revision": 2}),
+            handover=handover.model_copy(
+                update={"action_status": "SUCCEEDED", "approval_status": "CONSUMED",
+                        "result_code": "handed_over"}
+            ),
+            status="PAUSED",
+        ),
         "form_plan_none": plan(None, None),
         "form_plan_pending": plan(grant, None),
         "form_plan_active": plan(active, None),

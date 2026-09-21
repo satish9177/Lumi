@@ -154,6 +154,14 @@ export function registerAgentIpc({
   handle(AGENT_IPC_CHANNELS.runFormPlanning, () => controller.runFormPlanning())
   handle(AGENT_IPC_CHANNELS.approveFieldDisclosure, (actionId, revision) => controller.approveFieldDisclosure(actionId, revision))
   handle(AGENT_IPC_CHANNELS.rejectFieldDisclosure, (actionId, revision) => controller.rejectFieldDisclosure(actionId, revision))
+  // Milestone 8b S6: the network-frozen local draft. Ids and revisions only; the sender is checked
+  // on each, and none of them exists on the voice backend.
+  handle(AGENT_IPC_CHANNELS.startFormPreparationMode, () => controller.startFormPreparationMode())
+  handle(AGENT_IPC_CHANNELS.stopFormPreparation, () => controller.stopFormPreparation())
+  handle(AGENT_IPC_CHANNELS.discardFormDraft, (draftId, revision) => controller.discardFormDraft(draftId, revision))
+  handle(AGENT_IPC_CHANNELS.prepareFormHandover, (draftId, revision) => controller.prepareFormHandover(draftId, revision))
+  handle(AGENT_IPC_CHANNELS.approveFormHandover, (actionId, revision) => controller.approveFormHandover(actionId, revision))
+  handle(AGENT_IPC_CHANNELS.rejectFormHandover, (actionId, revision) => controller.rejectFormHandover(actionId, revision))
   handle(AGENT_IPC_CHANNELS.listPreferences, async (): Promise<AgentResult<AgentPreferenceView[]>> => {
     if (!memory) return { ok: true, value: [] }
     try {

@@ -14,7 +14,9 @@ from app.db.migrations import verify_schema_is_current
 from app.browser.managed import ManagedBrowserWorker
 from app.services.actions import ActionService
 from app.services.authenticated_read import AuthenticatedReadService
+from app.services.form_draft import FormDraftService
 from app.services.form_prepare import FormPrepareService
+from app.services.form_state import FormStateRegistry
 from app.services.booking_preparation import BookingPreparationService
 from app.services.booking_tasks import BookingTaskService
 from app.services.clinic_info import ClinicInfoService
@@ -29,7 +31,7 @@ from app.services.login_takeover import LoginTakeoverService
 from app.services.parent_watchdog import ParentLiveness, parent_liveness, watch_liveness
 from app.services.research_search import PublicSearchProvider, SearchConfig
 from app.services.research_tasks import ResearchService
-from app.services.recovery import RecoveryService
+from app.services.recovery import FormDraftRecovery, RecoveryService
 from app.services.runtime import register_runtime_generation, runtime_ownership
 from app.services.tasks import TaskService
 
@@ -116,6 +118,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 # Acquire exclusive ownership before recovery. Otherwise a
                 # second live runtime could mark the first one's work unknown.
                 await RecoveryService(engine).recover_unfinished_attempts(generation.id)
+                # Milestone 8b S6: a local form draft is browser state and the browser died
+                # with the last runtime. Its row is closed, never restored or re-filled.
+                await FormDraftRecovery(engine).discard_lost_drafts()
                 app.state.engine = engine
                 app.state.runtime_generation = generation
                 task_service = TaskService(engine)
@@ -134,12 +139,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     worker=worker,
                     public_policy=resolved.public_policy,
                 )
+                # Milestone 8b S6: which profiles are in form preparation or hold a local
+                # draft. Empty on every start, because that state lives in the browser.
+                form_state = FormStateRegistry()
                 app.state.browser_profile_service = BrowserProfileService(
                     engine,
                     runtime_generation=generation.id,
                     browser=app.state.browser_execution_service,
                     paths=resolved.profile_paths,
                     lease_ttl_seconds=resolved.browser_profile_lease_ttl_seconds,
+                    forms=form_state,
                 )
                 app.state.login_takeover_service = LoginTakeoverService(
                     engine,
@@ -200,14 +209,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     grant_ttl_seconds=resolved.authenticated_grant_ttl_seconds,
                     step_ttl_seconds=resolved.authenticated_step_ttl_seconds,
                     max_tabs=resolved.authenticated_max_tabs,
+                    forms=form_state,
                 )
                 # Milestone 8b S5. Needs no worker and never opens a browser: it
-                # builds and approves an exact disclosure manifest and stops.
+                # builds and approves an exact disclosure manifest. Since S6, approving
+                # one is carried out by the draft service below.
                 app.state.form_prepare_service = FormPrepareService(
                     engine,
                     actions=action_service,
                     grant_ttl_seconds=resolved.authenticated_grant_ttl_seconds,
+                    forms=form_state,
                 )
+                # Milestone 8b S6: the network-frozen local form draft.
+                app.state.form_draft_service = FormDraftService(
+                    engine,
+                    actions=action_service,
+                    reads=app.state.authenticated_read_service,
+                    profiles=app.state.browser_profile_service,
+                    form=app.state.form_prepare_service,
+                    runtime_generation=generation.id,
+                    worker=worker,
+                    state=form_state,
+                )
+                app.state.form_prepare_service.attach_drafts(app.state.form_draft_service)
                 # A research session belongs to the process that created it.
                 # Sessions a dead runtime left open describe browser contexts
                 # that no longer exist, so every semantic ref they issued has

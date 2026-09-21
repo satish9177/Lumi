@@ -81,6 +81,7 @@ from app.domain.authenticated import (
 )
 from app.api.form_prepare_schemas import (
     ConfirmFormGrantBody,
+    DraftDecisionBody,
     DisclosureDecisionBody,
     FormPlanResponse,
     PlanningContextResponse,
@@ -92,8 +93,10 @@ from app.api.form_prepare_schemas import (
     SavedDetailResponse,
 )
 from app.domain.form_prepare import FORM_PREPARE_TOOL, FormPrepareRefusal
+from app.domain.local_form_draft import HANDOVER_TOOL
 from app.domain.protected_values import ProtectedValueRefusal, is_protected_kind
 from app.services.authenticated_read import AuthenticatedReadService
+from app.services.form_draft import FormDraftService
 from app.services.form_prepare import FormPrepareService
 from app.services.authenticated_read import validate_request as validate_authenticated_request
 from app.domain.research import (
@@ -270,7 +273,7 @@ async def _refuse_disclosure_tool(service: ActionService, action_id: uuid.UUID) 
     re-checks every fact it depends on. Approving, claiming or finishing it through
     a generic route would skip that.
     """
-    if (await service.get_action(action_id)).action.tool_name == FORM_PREPARE_TOOL:
+    if (await service.get_action(action_id)).action.tool_name in (FORM_PREPARE_TOOL, HANDOVER_TOOL):
         raise FormPrepareRefusal("use_disclosure_route")
 
 
@@ -287,7 +290,7 @@ async def propose_action(
     response: Response,
 ) -> ActionResponse:
     """Record a proposal. Replaying the same idempotency key returns `200`."""
-    if body.tool_name == FORM_PREPARE_TOOL:
+    if body.tool_name in (FORM_PREPARE_TOOL, HANDOVER_TOOL):
         # Only the form-preparation service, from a controller-built manifest, may
         # create this action. A generic caller cannot mint an approval for one.
         raise FormPrepareRefusal("use_disclosure_route")
@@ -993,6 +996,22 @@ def get_form_prepare_service(request: Request) -> FormPrepareService:
 FormPrepareServiceDep = Annotated[FormPrepareService, Depends(get_form_prepare_service)]
 
 
+def get_form_draft_service(request: Request) -> FormDraftService:
+    service: FormDraftService = request.app.state.form_draft_service
+    return service
+
+
+FormDraftServiceDep = Annotated[FormDraftService, Depends(get_form_draft_service)]
+
+
+async def _form_plan(
+    task_id: uuid.UUID, prepare: FormPrepareService, drafts: FormDraftService
+) -> FormPlanResponse:
+    return FormPlanResponse.from_view(
+        await prepare.describe(task_id), handover=await drafts.handover_view(task_id)
+    )
+
+
 @router.get(
     "/protected-values",
     response_model=SavedDetailListResponse,
@@ -1025,8 +1044,10 @@ async def save_protected_value(
     responses=_NOT_FOUND,
     summary="The task's form-planning grant and disclosure card",
 )
-async def get_form_plan(task_id: uuid.UUID, service: FormPrepareServiceDep) -> FormPlanResponse:
-    return FormPlanResponse.from_view(await service.describe(task_id))
+async def get_form_plan(
+    task_id: uuid.UUID, service: FormPrepareServiceDep, drafts: FormDraftServiceDep
+) -> FormPlanResponse:
+    return await _form_plan(task_id, service, drafts)
 
 
 @router.post(
@@ -1113,10 +1134,11 @@ async def propose_form(
     summary="Approve exactly this disclosure manifest (trusted click; changes no website)",
 )
 async def approve_field_disclosure(
-    action_id: uuid.UUID, body: DisclosureDecisionBody, service: FormPrepareServiceDep
+    action_id: uuid.UUID, body: DisclosureDecisionBody, service: FormPrepareServiceDep,
+    drafts: FormDraftServiceDep,
 ) -> FormPlanResponse:
     view = await service.approve(action_id, expected_revision=body.expected_revision)
-    return FormPlanResponse.from_view(await service.describe(view.action.task_id))
+    return await _form_plan(view.action.task_id, service, drafts)
 
 
 @router.post(
@@ -1130,6 +1152,104 @@ async def reject_field_disclosure(
 ) -> FormPlanResponse:
     view = await service.reject(action_id, expected_revision=body.expected_revision)
     return FormPlanResponse.from_view(await service.describe(view.action.task_id))
+
+
+# --- The network-frozen local form draft (Milestone 8b S6) ---------------------------
+#
+# Every route is an id and, where a card was on screen, the revision it showed. There is no
+# field for a value, a manifest, an origin, a selector, a URL, a provider or a freeze flag.
+#
+#   * `.../form/preparation-mode` reopens the profile headed, returns internally to the page
+#     being read and observes it afresh. Nothing is written.
+#   * `/actions/{id}/field-disclosure/approve` (above) is the trusted click that FILLS, with
+#     the network frozen, inside that window.
+#   * `/form-drafts/{id}/discard` destroys the dirty page WHILE FROZEN, then thaws.
+#   * `/form-drafts/{id}/handover-request` opens the SECOND exact approval;
+#     `/actions/{id}/form-handover/approve|reject` decides it. Only the approval restores the
+#     network for the human. Lumi never submits.
+#   * `.../form/stop` is discard plus close.
+
+
+@router.post(
+    "/tasks/{task_id}/authenticated/form/preparation-mode",
+    response_model=FormPlanResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Open the headed preparation window and observe the form afresh (writes nothing)",
+)
+async def start_form_preparation(
+    task_id: uuid.UUID, service: FormPrepareServiceDep, drafts: FormDraftServiceDep
+) -> FormPlanResponse:
+    await drafts.start_preparation(task_id)
+    return await _form_plan(task_id, service, drafts)
+
+
+@router.post(
+    "/tasks/{task_id}/authenticated/form/stop",
+    response_model=FormPlanResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Stop: discard any local draft while frozen, then close the window",
+)
+async def stop_form_preparation(
+    task_id: uuid.UUID, service: FormPrepareServiceDep, drafts: FormDraftServiceDep
+) -> FormPlanResponse:
+    await drafts.stop(task_id)
+    return await _form_plan(task_id, service, drafts)
+
+
+@router.post(
+    "/form-drafts/{draft_id}/discard",
+    response_model=FormPlanResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Discard the local draft: destroy the dirty page while frozen, then thaw",
+)
+async def discard_form_draft(
+    draft_id: uuid.UUID, body: DraftDecisionBody, service: FormPrepareServiceDep,
+    drafts: FormDraftServiceDep,
+) -> FormPlanResponse:
+    record = await drafts.discard(draft_id, expected_revision=body.expected_revision)
+    return await _form_plan(record.task_id, service, drafts)
+
+
+@router.post(
+    "/form-drafts/{draft_id}/handover-request",
+    response_model=FormPlanResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Open the second exact approval for lifting the freeze (changes nothing yet)",
+)
+async def request_form_handover(
+    draft_id: uuid.UUID, body: DraftDecisionBody, service: FormPrepareServiceDep,
+    drafts: FormDraftServiceDep,
+) -> FormPlanResponse:
+    view = await drafts.request_handover(draft_id, expected_revision=body.expected_revision)
+    return await _form_plan(view.action.task_id, service, drafts)
+
+
+@router.post(
+    "/actions/{action_id}/form-handover/approve",
+    response_model=FormPlanResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Approve exactly this handover (trusted click; the page may then send)",
+)
+async def approve_form_handover(
+    action_id: uuid.UUID, body: DisclosureDecisionBody, service: FormPrepareServiceDep,
+    drafts: FormDraftServiceDep,
+) -> FormPlanResponse:
+    view = await drafts.approve_handover(action_id, expected_revision=body.expected_revision)
+    return await _form_plan(view.action.task_id, service, drafts)
+
+
+@router.post(
+    "/actions/{action_id}/form-handover/reject",
+    response_model=FormPlanResponse,
+    responses={**_NOT_FOUND, **_CONFLICT},
+    summary="Decline the handover; the network stays frozen",
+)
+async def reject_form_handover(
+    action_id: uuid.UUID, body: DisclosureDecisionBody, service: FormPrepareServiceDep,
+    drafts: FormDraftServiceDep,
+) -> FormPlanResponse:
+    view = await drafts.reject_handover(action_id, expected_revision=body.expected_revision)
+    return await _form_plan(view.action.task_id, service, drafts)
 
 
 # --- Persistent browser profiles (Milestone 8a S1) ---------------------------

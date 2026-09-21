@@ -122,6 +122,7 @@ from app.services.browser_execution import (
     open_worker_client,
 )
 from app.services.browser_profiles import BrowserProfileService
+from app.services.form_state import FormStateRegistry
 from app.services.tasks import TaskService
 
 logger = logging.getLogger("lumi.authenticated")
@@ -286,8 +287,12 @@ class AuthenticatedReadService:
         grant_ttl_seconds: int,
         step_ttl_seconds: int,
         max_tabs: int = 3,
+        forms: FormStateRegistry | None = None,
     ) -> None:
         self._engine = engine
+        #: Milestone 8b S6: which profile is in form preparation (opened headed) or
+        #: holds a local draft (no read step may touch it).
+        self._forms = forms
         self._tasks = tasks
         self._actions = actions
         self._runtime_generation = runtime_generation
@@ -601,6 +606,10 @@ class AuthenticatedReadService:
             )
         if replay is not None:
             return replay
+        if self._forms is not None:
+            # A page holding a local draft can reflect a protected value anywhere in its
+            # text: no agent read may run against it, and no provider may see it.
+            self._forms.assert_clean(profile.id)
         if not grant.scope.permits(operation):
             raise AuthenticatedStepRefusedError("outside_scope")
         self._check_step_allowed(actions, operation)
@@ -695,6 +704,10 @@ class AuthenticatedReadService:
                 result=_step_summary(outcome, None),
             )
         if parsed.observation is not None:
+            if self._forms is not None:
+                # Recorded so a manifest built from THIS observation is executable: only an
+                # observation taken in the headed preparation window can fund a local draft.
+                self._forms.note_observation(profile.id, parsed.observation.observation_id)
             return await self._finish_success(
                 task_id,
                 action_view,
@@ -870,14 +883,17 @@ class AuthenticatedReadService:
         believes is open in a worker that has since restarted is closed and
         opened afresh, so no step runs against a context that no longer exists.
         """
+        # Milestone 8b S6: a profile in form preparation is headed (a local draft can only
+        # live in a window a person can see); every other read is headless.
+        headed = self._forms is not None and self._forms.is_preparing(profile_id)
         try:
             opened = await self._profiles.open_profile(
-                profile_id, kind=BrowserContextKind.AUTHENTICATED_PROFILE, headed=False
+                profile_id, kind=BrowserContextKind.AUTHENTICATED_PROFILE, headed=headed
             )
             if opened.worker_generation != worker_generation:
                 await self._profiles.close_profile(profile_id)
                 opened = await self._profiles.open_profile(
-                    profile_id, kind=BrowserContextKind.AUTHENTICATED_PROFILE, headed=False
+                    profile_id, kind=BrowserContextKind.AUTHENTICATED_PROFILE, headed=headed
                 )
         except ProfileRefusal as error:
             if error.code == "profile_open_mode_mismatch":

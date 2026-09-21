@@ -118,39 +118,5 @@ def test_the_javascript_scanner_accepts_the_reviewed_shape() -> None:
     assert find_javascript_mutations(reviewed) == []
 
 
-# ---- Milestone 8b S5: nothing in the worker protocol can fill, and no S6 shape exists ----
-
-#: Worker operations, tools and route names that belong to S6 or beyond. None may exist.
-S6_NAMES = (
-    "set_value", "set_checked", "select_option", "local_draft", "LOCAL_DRAFT", "freeze", "unfreeze",
-    "form_drafts", "frozen_at", "handover", "form_is_dirty",
-)
-
-
-def test_the_worker_protocol_and_operations_gained_no_fill_capability() -> None:
-    import re
-
-    for path in (
-        "app/browser/protocol.py", "app/browser/worker.py", "app/browser/registry.py",
-        "app/browser/operations/authenticated.py", "app/domain/browser_dispatch.py",
-    ):
-        source = (ROOT / path).read_text(encoding="utf-8")
-        for name in S6_NAMES:
-            assert not re.search(rf"{re.escape(name)}", source), (path, name)
-        assert "prepare_form" not in source, path
-
-
-def test_no_s6_table_column_route_or_effect_exists() -> None:
-    import re
-
-    from app.db.tables import metadata
-    from app.domain.browser_dispatch import BrowserEffect
-
-    assert "form_drafts" not in metadata.tables
-    assert "frozen_at" not in metadata.tables["browser_dispatches"].c
-    assert {effect.name for effect in BrowserEffect} == {
-        effect.name for effect in BrowserEffect if effect.name != "LOCAL_DRAFT"
-    }
-    routes = (ROOT / "app/api/routes.py").read_text(encoding="utf-8")
-    for path in re.findall(r'@router\.\w+\(\s*"([^"]+)"', routes):
-        assert not re.search(r"freeze|draft|handover|fill", path), path
+# ---- Milestone 8b S5 asserted that no S6 shape existed. S6 exists now, and what replaces that ----
+# ---- assertion is `tests/test_local_form_draft_source.py`: exactly which names may exist, where. ----

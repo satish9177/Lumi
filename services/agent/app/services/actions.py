@@ -877,6 +877,84 @@ class ActionService:
             )
             return await self._view(connection, moved)
 
+    async def begin_exact_execution(
+        self,
+        action_id: uuid.UUID,
+        *,
+        expected_revision: int,
+        guard: ApprovalGuard,
+    ) -> ActionView:
+        """Approve, claim and START one exact approval, in ONE transaction.
+
+        Milestone 8b S6. The counterpart of `settle_exact_approval` for an approval that
+        funds real (browser-local) work rather than only being spent: the approval is
+        granted, claimed (single-use, re-checked in SQL against revision, digest and
+        expiry) and an attempt is persisted with the action `EXECUTING` -- and then this
+        returns, so the caller can act *outside* any transaction and report the outcome
+        with `finish_attempt`. The durable intent to act exists before the browser is
+        touched, exactly as for a booking.
+
+        `guard` runs under the task lock, in this transaction, after the approval is found
+        pending and before it is granted; if it raises, nothing at all is written.
+        """
+        async with self._engine.begin() as connection:
+            repository = ActionRepository(connection)
+            task, action = await self._lock_task_for_action(connection, action_id)
+            self._check_task_open(task)
+            self._check_revision(action, expected_revision)
+            self._check_transition(action, ActionStatus.APPROVED)
+
+            approval = await repository.get_open_approval(action_id)
+            if approval is None or approval.status is not ApprovalStatus.PENDING:
+                raise ApprovalNotUsableError(action_id, "there is no pending approval request")
+            if approval.proposal_digest != action.proposal_digest:
+                raise ApprovalNotUsableError(action_id, "the approval is for a different proposal")
+            if await repository.is_expired(approval.id):
+                raise ApprovalNotUsableError(action_id, "the approval request has expired")
+            await guard(connection, action)
+
+            approved = await self._transition(
+                connection,
+                task=task,
+                action=action,
+                target=ActionStatus.APPROVED,
+                event_type=TaskEventType.ACTION_APPROVED,
+                payload={"approval_id": str(approval.id)},
+            )
+            granted = await repository.grant_approval(
+                approval_id=approval.id, action_revision=approved.revision
+            )
+            if granted is None:  # pragma: no cover - the task row lock is held.
+                raise ActionConcurrencyError(action_id)
+            claimed = await repository.claim_approval(
+                approval_id=approval.id,
+                action_revision=approved.revision,
+                proposal_digest=approved.proposal_digest,
+            )
+            if claimed is None:  # pragma: no cover - granted a moment ago, task lock held.
+                raise ApprovalNotUsableError(action_id, "the approval no longer matches this action")
+            attempt = await repository.insert_attempt(
+                attempt_id=uuid.uuid4(),
+                action_id=action_id,
+                attempt_number=await repository.next_attempt_number(action_id),
+                approval_id=claimed.id,
+                runtime_generation=self._runtime_generation,
+            )
+            executing = await self._transition(
+                connection,
+                task=(await self._reload_task(TaskRepository(connection), task.id)),
+                action=approved,
+                target=ActionStatus.EXECUTING,
+                event_type=TaskEventType.ACTION_EXECUTION_STARTED,
+                payload={
+                    "attempt_id": str(attempt.id),
+                    "attempt_number": attempt.attempt_number,
+                    "approval_id": str(claimed.id),
+                    "runtime_generation": str(self._runtime_generation),
+                },
+            )
+            return await self._view(connection, executing)
+
     # ---- reconciliation -----------------------------------------------------
 
     async def begin_reconciliation(

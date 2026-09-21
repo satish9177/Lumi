@@ -195,11 +195,42 @@ async def scalar(rig_: Rig, sql: str, **params: Any) -> Any:
         return await connection.scalar(text(sql), params)
 
 
+class GuardOnlyExecutor:
+    """Stands in for `FormDraftService` in the tests whose subject is the approval GUARD.
+
+    Since Milestone 8b S6 `FormPrepareService.approve` hands the exact approval to the
+    draft service, which freezes the network and fills a form in a headed window. These
+    tests are about something upstream of that: *which facts must still hold* for an
+    approval to be spent at all (saved values, account, epoch, observation, expiry,
+    single use). This double runs the service's real `_guard` and spends the approval
+    through the real ledger, and does nothing else -- so every guard assertion below is
+    still made against the production code, and the browser work is covered where it
+    belongs: `test_form_draft_service_browser.py` and `test_local_form_draft_browser.py`.
+    """
+
+    def __init__(self, service: FormPrepareService) -> None:
+        self._service = service
+
+    async def fill_approved(self, action_id: uuid.UUID, *, expected_revision: int) -> Any:
+        async with self._service._engine.connect() as connection:
+            _, manifest = await self._service._disclosure_action(connection, action_id)
+
+        async def guard(connection: Any, action: Any) -> None:
+            await self._service._guard(connection, action, manifest)
+
+        return await self._service._actions.settle_exact_approval(
+            action_id,
+            expected_revision=expected_revision,
+            guard=guard,
+            result={"code": "prepared_nothing", "browser_dispatches": 0, "fields": len(manifest.fields)},
+        )
+
+
 @pytest.fixture
 def form(rig: Rig) -> FormRig:  # noqa: F811
-    return FormRig(
-        rig=rig, service=FormPrepareService(rig.engine, actions=rig.actions, grant_ttl_seconds=600)
-    )
+    service = FormPrepareService(rig.engine, actions=rig.actions, grant_ttl_seconds=600)
+    service.attach_drafts(GuardOnlyExecutor(service))  # type: ignore[arg-type]
+    return FormRig(rig=rig, service=service)
 
 
 # ---- saved details ----------------------------------------------------------------------

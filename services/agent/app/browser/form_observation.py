@@ -30,6 +30,12 @@ nothing at all. A page the S2 credential detector flags never reaches this code.
 ancestor are http(s) frames of the top-level document's origin. A cross-origin
 frame is never evaluated, so not even its labels are read.
 
+Milestone 8b S6 adds two more *read-only* modes to the same static helper --
+`resolve_member` (a radio group's native input by option index) and `state`
+(native-ness, selected index, checked flag, `aria-invalid`) -- and nothing that
+changes a control: the writes live in `local_form_draft`, the only module the
+source scan allows to contain them.
+
 No `ElementHandle` survives a step. `resolve_element` re-lists the frame, requires
 the same control count, the same ordinal and the same semantic identity, and
 returns a handle that the caller uses once and disposes. No nearest match, no
@@ -167,6 +173,9 @@ _HELPER = r"""
 
   const records = [];
   const elements = [];
+  // Parallel to `elements`: for a radio group, its native member inputs in option
+  // order (Milestone 8b S6 reads them; nothing here changes one).
+  const groups = [];
   const seenRadioGroups = new Set();
   let more = false;
   let unnamedRadios = 0;
@@ -177,6 +186,7 @@ _HELPER = r"""
     const role = attr(el, 'role');
     if (el.tagName === 'INPUT' && type === 'radio' && el.closest('[role=radiogroup]')) continue;
     let out = null;
+    let members = null;
     const base = {
       formKey: formKeyOf(el), name: bound(nameOf(el)), valueState: 'unknown', required: false,
       enabled: !(el.matches(':disabled') || attr(el, 'aria-disabled') === 'true'),
@@ -199,9 +209,10 @@ _HELPER = r"""
         const key = (el.form ? 'f' + forms.indexOf(el.form) : '__UNOWNED__') + '|' + (name || 'n' + (unnamedRadios++));
         if (seenRadioGroups.has(key)) continue;
         seenRadioGroups.add(key);
-        const members = Array.from(doc.querySelectorAll('input[type=radio]')).filter(
+        const memberList = Array.from(doc.querySelectorAll('input[type=radio]')).filter(
           (r) => name !== '' && attr(r, 'name') === name && (r.form || null) === (el.form || null));
-        const group = members.length ? members : [el];
+        const group = memberList.length ? memberList : [el];
+        members = group;
         out = flags({ ...base, role: 'radiogroup', controlType: 'radiogroup',
           name: bound(groupLabel(el) || base.name), ...optionLabels(group, nameOf) });
         out.required = group.some((r) => r.required === true);
@@ -247,6 +258,7 @@ _HELPER = r"""
     out.formLabel = formLabelOf(out.formKey);
     records.push(out);
     elements.push(el);
+    groups.push(members);
   }
 
   if (request.mode === 'list') return { credential: false, more, records };
@@ -255,7 +267,33 @@ _HELPER = r"""
   if (elements.length !== request.count || more) return null;
   const record = records[request.ordinal];
   if (!record || record.identity !== request.identity || record.formKey !== request.formKey) return null;
-  return elements[request.ordinal];
+  const control = elements[request.ordinal];
+  const group = groups[request.ordinal];
+  if (request.mode === 'resolve') return control;
+  // Milestone 8b S6, read-only: the native member of a radio group, by option index.
+  if (request.mode === 'resolve_member') {
+    if (!group || !Number.isInteger(request.member) || request.member < 0 || request.member >= group.length) return null;
+    return group[request.member];
+  }
+  // Milestone 8b S6, read-only: whether the control is native, which option is
+  // selected (by index), the checked state and aria-invalid. Never a string value.
+  if (request.mode === 'state') {
+    const tag = control.tagName;
+    const native = tag === 'SELECT' || tag === 'TEXTAREA' || tag === 'INPUT';
+    const memberNative = group ? group.every((r) => r.tagName === 'INPUT') : true;
+    let selected = -1;
+    if (tag === 'SELECT') selected = control.selectedIndex;
+    else if (group) selected = group.findIndex((r) => r.checked === true);
+    const invalidAttr = (attr(control, 'aria-invalid') || '').toLowerCase();
+    return {
+      native: native && memberNative,
+      selected,
+      checked: tag === 'INPUT' && kind(control) === 'checkbox' ? control.checked === true : null,
+      invalid: invalidAttr !== '' && invalidAttr !== 'false',
+      members: group ? group.length : 0,
+    };
+  }
+  return null;
 }
 """.replace("__MAX_RECORDS__", str(MAX_FRAME_RECORDS)).replace(
     "__MAX_OPTIONS__", str(MAX_OPTIONS)
@@ -430,24 +468,23 @@ async def build_inventory(page: Page) -> CollectedInventory:
     )
 
 
-async def resolve_element(page: Page, locator: ElementLocator) -> ElementHandle | None:
-    """Re-derive the control from the *current* DOM, or return `None`.
-
-    Exactly one control must sit at the ordinal, the frame must list the same
-    number of controls, and the control's semantic identity must be the one
-    observed. There is no nearest match and no fuzzy fallback. The handle lives
-    for this one step: the caller uses it once and disposes it.
-    """
-    frames = eligible_frames(page)
-    if locator.frame_slot >= len(frames):
-        return None
-    request = {
-        "mode": "resolve",
+def _request(locator: ElementLocator, mode: str, **extra: int) -> dict[str, object]:
+    return {
+        "mode": mode,
         "ordinal": locator.ordinal,
         "count": locator.frame_record_count,
         "identity": locator.identity,
         "formKey": locator.form_key,
+        **extra,
     }
+
+
+async def _resolve_handle(
+    page: Page, locator: ElementLocator, request: dict[str, object]
+) -> ElementHandle | None:
+    frames = eligible_frames(page)
+    if locator.frame_slot >= len(frames):
+        return None
     try:
         handle = await frames[locator.frame_slot].evaluate_handle(_HELPER, request)
     except PlaywrightError:
@@ -458,11 +495,71 @@ async def resolve_element(page: Page, locator: ElementLocator) -> ElementHandle 
     return element
 
 
+async def resolve_element(page: Page, locator: ElementLocator) -> ElementHandle | None:
+    """Re-derive the control from the *current* DOM, or return `None`.
+
+    Exactly one control must sit at the ordinal, the frame must list the same
+    number of controls, and the control's semantic identity must be the one
+    observed. There is no nearest match and no fuzzy fallback. The handle lives
+    for this one step: the caller uses it once and disposes it.
+    """
+    return await _resolve_handle(page, locator, _request(locator, "resolve"))
+
+
+async def resolve_member(
+    page: Page, locator: ElementLocator, member: int
+) -> ElementHandle | None:
+    """The native radio input at `member` of the group `locator` names, or `None`.
+
+    Milestone 8b S6. Re-derived exactly like `resolve_element` (same count, same
+    ordinal, same semantic identity), then indexed by the reviewed option ordinal
+    -- never by a raw `value=` attribute, which is never read.
+    """
+    return await _resolve_handle(page, locator, _request(locator, "resolve_member", member=member))
+
+
+@dataclass(frozen=True, slots=True)
+class ElementState:
+    """Read-only facts about one re-derived control. Never a string value."""
+
+    native: bool
+    #: Index of the selected option (select) or checked radio; -1 for none.
+    selected: int
+    #: `None` unless the control is a native checkbox.
+    checked: bool | None
+    invalid: bool
+    members: int
+
+
+async def read_element_state(page: Page, locator: ElementLocator) -> ElementState | None:
+    """The control's structural state from the live DOM, or `None` if it moved."""
+    frames = eligible_frames(page)
+    if locator.frame_slot >= len(frames):
+        return None
+    try:
+        raw = await frames[locator.frame_slot].evaluate(_HELPER, _request(locator, "state"))
+    except PlaywrightError:
+        return None
+    if not isinstance(raw, dict):
+        return None
+    checked = raw.get("checked")
+    return ElementState(
+        native=bool(raw.get("native")),
+        selected=int(raw.get("selected", -1)),
+        checked=checked if isinstance(checked, bool) else None,
+        invalid=bool(raw.get("invalid")),
+        members=int(raw.get("members", 0)),
+    )
+
+
 __all__ = [
     "MAX_FRAME_RECORDS",
     "CollectedInventory",
     "ElementLocator",
+    "ElementState",
     "build_inventory",
     "eligible_frames",
+    "read_element_state",
     "resolve_element",
+    "resolve_member",
 ]

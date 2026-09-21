@@ -2,6 +2,11 @@ import type { FormPlanningContext } from '../agent/form-planner'
 import {
   ACTION_STATUSES,
   APPROVAL_STATUSES,
+  DISCLOSURE_RESULT_CODES,
+  DRAFT_STATUSES,
+  HANDOVER_RESULT_CODES,
+  type AgentDraftCardView,
+  type AgentHandoverCardView,
   ATTEMPT_OUTCOMES,
   AUTHENTICATED_OPERATIONS,
   AUTHENTICATED_PAUSE_REASONS,
@@ -1428,7 +1433,24 @@ const FORM_PLAN_MESSAGES: Record<string, string> = {
   no_entries: 'That plan listed no fields, so nothing was proposed.',
   unsupported_proposal: 'That plan contained something Lumi does not accept, so it was refused.',
   use_disclosure_route: 'That approval can only be given from the disclosure card.',
-  not_a_disclosure_approval: 'That is not a form-disclosure approval.'
+  not_a_disclosure_approval: 'That is not a form-disclosure approval.',
+  // Milestone 8b S6. Said plainly, and never "nothing was changed" where a draft may exist.
+  preparation_mode_required: 'This plan was not made in the preparation window, so it cannot be used. Open the preparation window and plan the form again. Nothing was filled.',
+  preparation_destination_missing: 'Lumi could not go back to the page it was reading. Open the form in the preparation window yourself, then plan it. Nothing was filled.',
+  preparation_navigation_failed: 'The preparation window could not open that page. Nothing was filled.',
+  legacy_manifest_not_executable: 'That plan was made before form filling existed and cannot be used. Prepare the form again. Nothing was changed.',
+  form_is_dirty: 'A form draft still exists in the browser window. Discard it or hand it over first.',
+  draft_changed: 'The draft is no longer the one you reviewed, so the network stayed frozen and nothing was handed over. Review the current draft.',
+  draft_not_live: 'That draft no longer exists.',
+  draft_not_found: 'That draft no longer exists.',
+  freeze_owned: 'Another form draft is holding the browser. Discard it or hand it over first.',
+  worker_busy: 'The browser is busy. Try again in a moment.',
+  step_in_flight: 'Lumi is still working on a step. Wait for it to finish.',
+  left_site_scope: 'The page left the site this profile is for. Nothing was filled.',
+  login_required: 'The website asked you to sign in again. Nothing was filled.',
+  page_never_settles: 'The page never stopped making requests, so Lumi did not freeze it and did not fill anything.',
+  unsupported_under_freeze: 'This form needs the network to accept a value, which is unavailable while it is frozen. Lumi stopped and did not turn the network on.',
+  element_changed: 'The form changed while Lumi was working. Lumi stopped; nothing was sent.'
 }
 
 const ERROR_MAP: Record<string, { code: AgentError['code']; message: string }> = {
@@ -1594,7 +1616,8 @@ function parseDisclosureCard(value: unknown): AgentDisclosureCardView | undefine
   const expires = nullableInstant(card.approval_expires_at, 'form_plan.disclosure.approval_expires_at')
   const resultCode = card.result_code === null || card.result_code === undefined
     ? undefined
-    : member(['prepared_nothing'] as const, card.result_code, 'form_plan.disclosure.result_code')
+    : member(DISCLOSURE_RESULT_CODES, card.result_code, 'form_plan.disclosure.result_code')
+  if (typeof card.executable !== 'boolean') throw new WireError('form_plan.disclosure.executable')
   const formLabel = card.form_label === null || card.form_label === undefined
     ? undefined
     : text(card.form_label, 'form_plan.disclosure.form_label', undefined, PLAN_TEXT)
@@ -1608,6 +1631,7 @@ function parseDisclosureCard(value: unknown): AgentDisclosureCardView | undefine
     ...(formLabel ? { formLabel } : {}),
     fields: card.fields.map(parseDisclosureField),
     revealsCountry: card.reveals_country,
+    executable: card.executable,
     ...(resultCode ? { resultCode } : {})
   }
 }
@@ -1626,7 +1650,40 @@ export function parseFormPlan(value: unknown): AgentFormPlanView {
     ...(grant ? { grant } : {}),
     ...(disclosure ? { disclosure } : {}),
     formCount: integer(body.form_count, 'form_plan.form_count', 0, 5),
-    candidateElementCount: integer(body.candidate_element_count, 'form_plan.candidate_element_count', 0, 40)
+    candidateElementCount: integer(body.candidate_element_count, 'form_plan.candidate_element_count', 0, 40),
+    preparing: body.preparing === true,
+    ...(parseDraftCard(body.draft) ? { draft: parseDraftCard(body.draft)! } : {}),
+    ...(parseHandoverCard(body.handover) ? { handover: parseHandoverCard(body.handover)! } : {})
+  }
+}
+
+function parseDraftCard(value: unknown): AgentDraftCardView | undefined {
+  if (value === null || value === undefined) return undefined
+  const card = record(value, 'form_plan.draft')
+  return {
+    draftId: uuid(card.draft_id, 'form_plan.draft.draft_id'),
+    revision: integer(card.revision, 'form_plan.draft.revision', 1, 1_000_000_000),
+    status: member(DRAFT_STATUSES, card.status, 'form_plan.draft.status'),
+    fieldCount: integer(card.field_count, 'form_plan.draft.field_count', 0, 12),
+    partial: card.partial === true,
+    site: text(card.site, 'form_plan.draft.site', SITE_NAME, 253)
+  }
+}
+
+function parseHandoverCard(value: unknown): AgentHandoverCardView | undefined {
+  if (value === null || value === undefined) return undefined
+  const card = record(value, 'form_plan.handover')
+  return {
+    actionId: uuid(card.action_id, 'form_plan.handover.action_id'),
+    revision: integer(card.revision, 'form_plan.handover.revision', 1, 1_000_000_000),
+    actionStatus: member(ACTION_STATUSES, card.action_status, 'form_plan.handover.action_status'),
+    ...(card.approval_status ? { approvalStatus: member(APPROVAL_STATUSES, card.approval_status, 'form_plan.handover.approval_status') } : {}),
+    ...(nullableInstant(card.approval_expires_at, 'form_plan.handover.approval_expires_at') ? { approvalExpiresAt: nullableInstant(card.approval_expires_at, 'form_plan.handover.approval_expires_at')! } : {}),
+    draftId: uuid(card.draft_id, 'form_plan.handover.draft_id'),
+    fieldCount: integer(card.field_count, 'form_plan.handover.field_count', 1, 12),
+    partial: card.partial === true,
+    site: text(card.site, 'form_plan.handover.site', SITE_NAME, 253),
+    ...(card.result_code ? { resultCode: member(HANDOVER_RESULT_CODES, card.result_code, 'form_plan.handover.result_code') } : {})
   }
 }
 

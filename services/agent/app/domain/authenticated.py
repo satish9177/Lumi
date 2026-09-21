@@ -510,6 +510,14 @@ class PauseReason(StrEnum):
     ACCOUNT_CHANGED = "account_changed"
     ACCOUNT_IDENTITY_UNKNOWN = "account_identity_unknown"
     LEFT_SITE_SCOPE = "left_site_scope"
+    #: Milestone 8b S6. A local form draft exists in the browser window and waits for the
+    #: user to discard it or take it over. Set by the controller, never by a model.
+    FORM_DRAFT = "form_draft"
+    #: The user took the browser over after a handover approval. Lumi does not know what
+    #: the site accepted or saved, and never says.
+    USER_TAKEOVER = "user_takeover"
+    #: The browser that held a local draft is gone (a crash or a restart). The draft is lost.
+    BROWSER_LOST = "browser_lost"
 
 
 __all__ = [

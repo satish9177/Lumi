@@ -52,6 +52,9 @@ EXPECTED_OPERATIONS = {
     "authenticated_reveal",
     "authenticated_history",
     "authenticated_tab",
+    # Milestone 8b S6: the ONE LOCAL_DRAFT operation. Not a planner operation: only the
+    # runtime, from a persisted, exactly-approved manifest, can dispatch it.
+    "authenticated_prepare_form",
 }
 
 AUTHENTICATED_OPERATIONS = {
@@ -60,6 +63,7 @@ AUTHENTICATED_OPERATIONS = {
     "authenticated_reveal",
     "authenticated_history",
     "authenticated_tab",
+    "authenticated_prepare_form",
 }
 
 RESEARCH_OPERATIONS = {

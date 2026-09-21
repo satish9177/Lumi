@@ -1,8 +1,10 @@
 """Milestone 8b S5: form planning and the exact disclosure approval.
 
-**S5 changes no website.** This module never opens a browser, never calls the
-worker and never creates a dispatch. Its whole job is to turn "which saved detail
-would go where" into an exact, reviewable, digest-bound approval -- and to stop.
+**This module changes no website and touches no browser.** It never opens one, never
+calls the worker and never creates a dispatch. Its whole job is to turn "which saved
+detail would go where" into an exact, reviewable, digest-bound approval. (Since Milestone
+8b S6 the approval it builds funds one network-frozen local draft; carrying that out is
+`FormDraftService`'s job, and `approve` below only hands the exact approval to it.)
 
 ```text
 observed form (S4)
@@ -11,7 +13,8 @@ observed form (S4)
    -> planner proposes `prepare_form`  (a proposal, not a worker operation)
    -> controller validates it deterministically, builds the DisclosureManifest
    -> trusted card shows the manifest; the user approves exactly that digest
-   -> `prepared_nothing`: the approval is spent, no browser action exists
+   -> (S6) the approval funds ONE local draft, filled with the network frozen
+   -> (S5, historical) `prepared_nothing`: the approval was spent and nothing happened
 ```
 
 **Where the authority sits.** The planner proposes; this module authorises. The
@@ -32,7 +35,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -53,6 +56,7 @@ from app.domain.errors import (
 )
 from app.domain.form_prepare import (
     FORM_PREPARE_TOOL,
+    MANIFEST_POLICY_VERSION,
     MAX_FORM_FIELDS,
     PREPARED_NOTHING,
     DisclosureManifest,
@@ -76,6 +80,7 @@ from app.domain.protected_values import (
 from app.domain.research import GrantStatus
 from app.domain.task_status import TaskEventType, accepts_actions
 from app.repositories.actions import ActionRecord, ActionRepository
+from app.repositories.form_drafts import DraftRecord, FormDraftRepository
 from app.repositories.authenticated import (
     AuthenticatedGrantRecord,
     AuthenticatedObservationRecord,
@@ -90,6 +95,10 @@ from app.repositories.form_prepare import (
 from app.repositories.profiles import BrowserProfileRepository
 from app.repositories.tasks import TaskRecord, TaskRepository
 from app.services.actions import ActionService, ActionView
+from app.services.form_state import FormStateRegistry
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; form_draft imports this module.
+    from app.services.form_draft import FormDraftService
 
 logger = logging.getLogger("lumi.form_prepare")
 
@@ -102,8 +111,12 @@ class DisclosureView:
     manifest: DisclosureManifest
     approval_status: str | None
     approval_expires_at: Any
-    #: `prepared_nothing` once the approval was spent; otherwise None.
+    #: What the spent approval ended in (`local_draft_prepared`, `local_draft_partial`,
+    #: `local_draft_not_written`, or the historical S5 `prepared_nothing`); otherwise None.
     result_code: str | None
+    #: `form-prepare-v2` (S6: approving fills, locally, frozen) or `form-prepare-v1` (S5,
+    #: historical: approving did nothing, and can never be executed).
+    executable: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +131,10 @@ class FormPlanView:
     #: Forms and elements in the newest observation (counts, for diagnostics).
     form_count: int
     candidate_element_count: int
+    #: Milestone 8b S6. The newest local draft (any status), and whether the profile is
+    #: currently in preparation mode (a headed window, nothing written).
+    draft: DraftRecord | None = None
+    preparing: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,10 +206,18 @@ class FormPrepareService:
         *,
         actions: ActionService,
         grant_ttl_seconds: int,
+        forms: FormStateRegistry | None = None,
     ) -> None:
         self._engine = engine
         self._actions = actions
         self._grant_ttl = timedelta(seconds=grant_ttl_seconds)
+        #: Milestone 8b S6: which profiles are in preparation mode or hold a local draft.
+        self._forms = forms
+        self._drafts: "FormDraftService | None" = None
+
+    def attach_drafts(self, drafts: "FormDraftService") -> None:
+        """Wire the service that carries an exact approval out (Milestone 8b S6)."""
+        self._drafts = drafts
 
     # ---- saved details (the trusted, direct-user path) ------------------------
 
@@ -243,6 +268,10 @@ class FormPrepareService:
         newest = pages[-1].observation if pages else None
         profile = await self._profile(connection, task)
         return FormPlanView(
+            draft=await FormDraftRepository(connection).latest_for_task(task_id),
+            preparing=bool(
+                profile is not None and self._forms is not None and self._forms.is_preparing(profile.id)
+            ),
             task=task,
             objective=str(task.request.get("objective", "")),
             site=profile.site if profile is not None else None,
@@ -278,12 +307,14 @@ class FormPrepareService:
         approval = approvals[-1] if approvals else None
         attempts = await repository.list_attempts(action.id)
         result = attempts[-1].result if attempts and attempts[-1].result else {}
+        manifest = parse_manifest(action.proposal)
         return DisclosureView(
             action=action,
-            manifest=parse_manifest(action.proposal),
+            manifest=manifest,
             approval_status=approval.status.value if approval else None,
             approval_expires_at=approval.expires_at if approval else None,
             result_code=result.get("code") if isinstance(result, dict) else None,
+            executable=manifest.policy_version == MANIFEST_POLICY_VERSION,
         )
 
     # ---- the planning scope -----------------------------------------------------
@@ -320,10 +351,12 @@ class FormPrepareService:
             if not accepts_actions(task.status):
                 raise TaskNotAcceptingActionsError(task_id, task.status)
             repository = FormPrepareRepository(connection)
+            profile = await self._profile(connection, task)
+            if profile is not None and self._forms is not None:
+                self._forms.assert_clean(profile.id)  # no new planning while a draft exists
             if await repository.open_grant_for_task(task_id) is not None:
                 return await self._view(connection, task_id)
             source = await self._source_grant(connection, task_id)
-            profile = await self._profile(connection, task)
             if profile is None or profile.is_deleted:
                 raise AuthenticatedProfileUnavailableError("profile_not_found")
             if profile.status is not ProfileStatus.AUTHENTICATED or profile.account_fingerprint is None:
@@ -539,6 +572,10 @@ class FormPrepareService:
             observation = record.observation
             profile = await self._profile(connection, task)
             assert profile is not None
+            if self._forms is not None:
+                # No provider may be given a page's structure or a preview once anything is
+                # written, and planning waits for the fresh, headed observation.
+                self._forms.assert_clean(profile.id)
             if _origin_for(profile, observation.host) != grant.scope.recipient_origin:
                 raise FormPrepareRefusal("origin_changed")
             saved = await ProtectedValueRepository(connection).snapshots(grant.scope.allowed_data_refs)
@@ -610,6 +647,14 @@ class FormPrepareService:
         if stale is not None:
             raise FormPrepareRefusal(stale)
         observation = record.observation
+        if self._forms is not None:
+            self._forms.assert_clean(profile.id)
+            state = self._forms.get(profile.id)
+            if state is None or observation.observation_id not in state.observation_ids:
+                # An approval built from a headless document could never be executed: the
+                # draft lives in the headed preparation window and only an observation taken
+                # there counts.
+                raise FormPrepareRefusal("preparation_mode_required")
         if observation.schema_version != 2 or not any(
             form.ref == proposal.form_ref for form in observation.inventory.forms
         ):
@@ -692,26 +737,24 @@ class FormPrepareService:
         return action, manifest
 
     async def approve(self, action_id: uuid.UUID, *, expected_revision: int) -> ActionView:
-        """The trusted click. Exact, single-use, and it changes no website.
+        """The trusted click. Exact, single-use, and (since S6) it fills -- locally, frozen.
 
-        The renderer supplies an id and an expected revision; the manifest, the
-        origin, the values and the fields all come from persisted state. Every
-        fact the approval depends on is re-checked inside the approving
-        transaction. The result is `prepared_nothing`: the approval is spent, no
-        dispatch is created, the worker is never called and no page changes.
+        The renderer supplies an id and an expected revision; the manifest, the origin, the
+        values and the fields all come from persisted state. Every fact the approval depends
+        on is re-checked inside the approving transaction by `_guard`. What the click *does*
+        is `FormDraftService.fill_approved`: freeze the network at two layers, write the
+        approved values into the headed preparation window, verify them, and stay frozen.
+
+        A `form-prepare-v1` manifest is a historical S5 approval, whose approval could only
+        ever end in `prepared_nothing`. It is never executable, whatever its state.
         """
         async with self._engine.connect() as connection:
             _, manifest = await self._disclosure_action(connection, action_id)
-
-        async def guard(connection: AsyncConnection, action: ActionRecord) -> None:
-            await self._guard(connection, action, manifest)
-
-        return await self._actions.settle_exact_approval(
-            action_id,
-            expected_revision=expected_revision,
-            guard=guard,
-            result={"code": PREPARED_NOTHING, "browser_dispatches": 0, "fields": len(manifest.fields)},
-        )
+        if manifest.policy_version != MANIFEST_POLICY_VERSION:
+            raise FormPrepareRefusal("legacy_manifest_not_executable")
+        if self._drafts is None:
+            raise FormPrepareRefusal("preparation_mode_required")
+        return await self._drafts.fill_approved(action_id, expected_revision=expected_revision)
 
     async def _guard(
         self, connection: AsyncConnection, action: ActionRecord, manifest: DisclosureManifest

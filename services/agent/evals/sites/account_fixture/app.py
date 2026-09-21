@@ -43,6 +43,7 @@ from urllib.parse import parse_qsl, quote
 from fastapi import APIRouter, FastAPI, Request, Response, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
+from evals.sites.account_fixture.draft import add_draft_routes
 from evals.sites.account_fixture.forms import add_form_routes
 
 SESSION_COOKIE = "lumi_fixture_session"
@@ -127,6 +128,15 @@ def create_site(
         "ws_connects": 0,
         "ping_get": 0,
         "ping_head": 0,
+        # Milestone 8b S6: what a local draft must never cause. Every one stays 0.
+        "autosave": 0,
+        "blur_save": 0,
+        "exfiltration": 0,
+        "third_party": 0,
+        "popup_hits": 0,
+        "validate_hits": 0,
+        "states_hits": 0,
+        "stream_starts": 0,
     }
 
     def _count(path: str) -> None:
@@ -599,6 +609,14 @@ def create_site(
         planted_email=PLANTED_EMAIL,
         planted_long_id=PLANTED_LONG_ID,
         injection_text=INJECTION_TEXT,
+    )
+
+    add_draft_routes(
+        router,
+        account_page=_account_page,
+        count=_count,
+        effects=effects,
+        external_origin=external_origin,
     )
 
     @router.get("/cdn/app.js")

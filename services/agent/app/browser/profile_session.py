@@ -42,7 +42,7 @@ in again; Lumi will not gamble with a directory somebody signed into.
 import logging
 import uuid
 from dataclasses import dataclass, field
-from urllib.parse import urlsplit
+from urllib.parse import urldefrag, urlsplit
 
 from playwright.async_api import (
     Browser,
@@ -52,6 +52,7 @@ from playwright.async_api import (
     Playwright,
 )
 
+from app.browser import site_scope
 from app.browser.authenticated_session import AuthenticatedReadSession
 from app.browser.credential_signals import account_fingerprint, detect_credential_surface
 from app.browser.egress_broker import EgressBroker, managed_launch_options
@@ -61,6 +62,7 @@ from app.browser.takeover_guard import TakeoverNetworkGuard
 from app.domain.browser_profile import BrowserVersions
 from app.domain.public_suffix import PublicSuffixError, registrable_domain
 from app.domain.login_takeover import TakeoverSiteScope
+from app.domain.research import MAX_REDIRECTS
 
 logger = logging.getLogger("lumi.browser.profiles")
 
@@ -201,6 +203,11 @@ class ProfileSessionStore:
     def __init__(self, *, limit: int = 1) -> None:
         self._sessions: dict[uuid.UUID, PersistentProfileSession] = {}
         self._limit = limit
+        #: Milestone 8b S6. The in-site page a read session was on when form
+        #: preparation began, captured *inside the worker* so the address never
+        #: crosses any boundary. It outlives the headless context that held it (the
+        #: profile is reopened headed) and dies with this worker process.
+        self._destinations: dict[uuid.UUID, str] = {}
 
     def get(self, profile_id: uuid.UUID) -> PersistentProfileSession:
         session = self._sessions.get(profile_id)
@@ -287,17 +294,24 @@ class ProfileSessionStore:
         )
         return session
 
-    async def close(self, profile_id: uuid.UUID) -> bool:
-        session = self._sessions.pop(profile_id, None)
+    async def close(self, profile_id: uuid.UUID, *, force: bool = False) -> bool:
+        session = self._sessions.get(profile_id)
         if session is None:
             return False
+        read = session.read_session
+        if not force and read is not None and read.dirty and not read.handed_over:
+            # Milestone 8b S6. Closing the context destroys a local draft. It is
+            # never a side effect of ordinary read cleanup: only the reviewed
+            # discard (which destroys the page while frozen) clears this.
+            raise ProfileSessionError("form_is_dirty")
+        self._sessions.pop(profile_id, None)
         await session.close()
         logger.info("persistent profile closed", extra={"profile_id": str(profile_id)})
         return True
 
     async def close_all(self) -> None:
         for profile_id in list(self._sessions):
-            await self.close(profile_id)
+            await self.close(profile_id, force=True)
 
     def __len__(self) -> int:
         return len(self._sessions)
@@ -333,6 +347,99 @@ class ProfileSessionStore:
             raise ProfileSessionError("profile_site_mismatch")
         return session.read_session
 
+    # -- form preparation mode (Milestone 8b S6) -----------------------------
+
+    async def capture_preparation_destination(self, profile_id: uuid.UUID, *, site: str) -> str:
+        """Remember the in-site page the read session is on, in worker memory only.
+
+        Returns `CAPTURED`, `NO_DESTINATION` (nothing readable to return to) or
+        `PROFILE_NOT_OPEN`. The address is not returned: it stays here and is used
+        only by `restore_preparation`. A page that is not an in-site http(s)
+        document, or that shows a credential surface, is not remembered.
+        """
+        session = self._sessions.get(profile_id)
+        if session is None:
+            return "PROFILE_NOT_OPEN"
+        read = session.read_session
+        if read is not None and (read.dirty or read.handed_over):
+            raise ProfileSessionError("form_is_dirty")
+        page = None
+        if read is not None and read.active is not None and read.active in read.tabs:
+            page = read.tabs[read.active].page
+        if page is not None and not page.is_closed():
+            url, _ = urldefrag(page.url)
+            in_scope = url.startswith(("http://", "https://")) and site_scope.in_site(url, site)
+            if in_scope and not await detect_credential_surface(page):
+                self._destinations[profile_id] = url
+                return "CAPTURED"
+        return "CAPTURED" if profile_id in self._destinations else "NO_DESTINATION"
+
+    async def restore_preparation(
+        self,
+        profile_id: uuid.UUID,
+        *,
+        site: str,
+        test_origins: frozenset[str] = frozenset(),
+        timeout_seconds: float = 30.0,
+    ) -> str:
+        """Navigate the headed profile back to the captured page, internally.
+
+        The destination is worker-internal and was validated when it was captured
+        and is validated again here: it must still be an in-site http(s) document,
+        every redirect hop is judged by the read guard, and nothing outside the
+        profile's site is contacted. On success the session is marked as being in
+        preparation mode -- the only session a local draft may ever be made in.
+        """
+        session = self._sessions.get(profile_id)
+        if session is None:
+            return "PROFILE_NOT_OPEN"
+        if session.headless:
+            return "NOT_HEADED"
+        url = self._destinations.get(profile_id)
+        if url is None:
+            return "NO_DESTINATION"
+        read = await self.read_session(profile_id, site=site, test_origins=test_origins)
+        if read.dirty or read.handed_over:
+            raise ProfileSessionError("form_is_dirty")
+        guard = read.guard
+        if not guard.allows_top_level(url):
+            return "LEFT_SITE_SCOPE"
+        tab = read.tabs[read.active] if read.active in read.tabs else next(iter(read.tabs.values()))
+        read.activate(tab.ref)
+        guard.following_redirects = True
+        try:
+            for hop in range(MAX_REDIRECTS + 1):
+                guard.pending_redirect = None
+                guard.main_frame_block = None
+                try:
+                    await tab.page.goto(
+                        url, wait_until="domcontentloaded", timeout=timeout_seconds * 1_000
+                    )
+                except PlaywrightError:
+                    block = guard.main_frame_block
+                    guard.main_frame_block = None
+                    return "LEFT_SITE_SCOPE" if block == "left_site_scope" else "NAVIGATION_FAILED"
+                block = guard.main_frame_block
+                guard.main_frame_block = None
+                if block is not None:
+                    return "LEFT_SITE_SCOPE" if block == "left_site_scope" else "NAVIGATION_FAILED"
+                target = guard.pending_redirect
+                if target is None:
+                    break
+                if hop >= MAX_REDIRECTS:
+                    return "NAVIGATION_FAILED"
+                url = target
+            else:  # pragma: no cover - the loop always breaks or returns first.
+                return "NAVIGATION_FAILED"
+        finally:
+            guard.following_redirects = False
+        try:
+            await tab.page.wait_for_load_state("load", timeout=10_000)
+        except PlaywrightError:
+            pass
+        read.preparation_mode = True
+        return "RESTORED"
+
     # -- manual login takeover (Milestone 8a S2) -----------------------------
 
     async def start_takeover(
@@ -355,6 +462,10 @@ class ProfileSessionStore:
             return "PROFILE_NOT_OPEN"
         if session.headless:
             raise ProfileSessionError("profile_not_headed")
+        if session.read_session is not None and (
+            session.read_session.dirty or session.read_session.handed_over
+        ):
+            raise ProfileSessionError("form_is_dirty")
         if session.read_session is not None:
             raise ProfileSessionError("profile_read_session_active")
         pages = session.context.pages

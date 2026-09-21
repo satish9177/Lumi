@@ -61,6 +61,13 @@ class TaskEventType(StrEnum):
     TASK_FORM_PREPARE_SCOPE_GRANTED = "task.form_prepare_scope_granted"
     TASK_FORM_PREPARE_SCOPE_REVOKED = "task.form_prepare_scope_revoked"
     TASK_FORM_PLANNING_CONTEXT_BUILT = "task.form_planning_context_built"
+    #: Milestone 8b S6. Ids, statuses and counts only -- never a value, a label, a hash of
+    #: a value, an origin or a manifest.
+    TASK_FORM_PREPARATION_STARTED = "task.form_preparation_started"
+    TASK_FORM_DRAFT_RECORDED = "task.form_draft_recorded"
+    TASK_FORM_DRAFT_DISCARDED = "task.form_draft_discarded"
+    TASK_FORM_DRAFT_HANDED_OVER = "task.form_draft_handed_over"
+    TASK_FORM_DRAFT_LOST = "task.form_draft_lost"
     ACTION_PROPOSED = "action.proposed"
     ACTION_APPROVAL_REQUESTED = "action.approval_requested"
     ACTION_APPROVED = "action.approved"

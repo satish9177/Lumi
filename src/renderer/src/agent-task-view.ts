@@ -210,16 +210,39 @@ export function describeBooking(action: AgentActionView, events: readonly AgentE
   }
 }
 
-/** Milestone 8b S5: the disclosure approval's events, worded truthfully. Nothing is booked or changed. */
+/**
+ * The disclosure and hand-over approvals' events, worded truthfully. Nothing is booked. Since
+ * Milestone 8b S6 the disclosure approval fills the form in the browser window with the network
+ * frozen; a historical S5 approval (`approval_settled`) only ever recorded that nothing was done.
+ */
 function describeDisclosureEvent(event: AgentEventView): string | undefined {
+  if (event.toolName === 'handover_form') {
+    switch (event.type) {
+      case 'action.proposed': return 'Hand-over requested — the network is still frozen'
+      case 'action.approval_requested': return 'Waiting for your approval to hand the page over'
+      case 'action.approved': return 'You approved handing the page over'
+      case 'action.rejected': return event.reason === 'superseded' ? 'Hand-over replaced by a newer one' : 'You cancelled the hand-over'
+      case 'action.execution_started': return 'Checking the page is still the draft you approved'
+      case 'action.succeeded': return 'You took over in the browser window — Lumi did not submit anything'
+      case 'action.failed': return 'The hand-over was refused — the network stayed frozen'
+      case 'action.outcome_unknown': return 'Lumi lost the answer while handing over and does not know whether the network came back'
+      default: return undefined
+    }
+  }
   if (event.toolName !== 'prepare_form') return undefined
+  const historical = event.reason === 'approval_settled'
   switch (event.type) {
     case 'action.proposed': return 'Form plan prepared — nothing has been changed'
     case 'action.approval_requested': return 'Waiting for your approval of this form plan'
     case 'action.approved': return 'You approved this form plan'
-    case 'action.rejected': return event.reason === 'superseded' ? 'Form plan replaced by a newer one' : 'You declined this form plan'
-    case 'action.execution_started': return 'Approval recorded — no page action exists yet'
-    case 'action.succeeded': return 'Form plan approved — nothing was prepared in the page'
+    case 'action.rejected': return event.reason === 'superseded' || event.reason === 'preparation_mode' ? 'Form plan replaced by a newer one' : 'You declined this form plan'
+    case 'action.execution_started': return historical ? 'Approval recorded — no page action exists yet' : 'Approval recorded — freezing the network, then filling the fields'
+    case 'action.succeeded':
+      return historical
+        ? 'Form plan approved — nothing was prepared in the page'
+        : 'Lumi filled the form in the browser window with the network frozen and checked every field'
+    case 'action.failed': return 'Lumi could not finish filling the form — nothing was sent'
+    case 'action.outcome_unknown': return 'Lumi lost track of the browser window — any draft is lost, and nothing was sent while it was frozen'
     default: return undefined
   }
 }
@@ -270,6 +293,11 @@ export function describeEvent(event: AgentEventView): string {
     case 'task.form_prepare_scope_granted': return 'You allowed form planning'
     case 'task.form_prepare_scope_revoked': return 'Form-planning permission withdrawn'
     case 'task.form_planning_context_built': return 'Form structure and masked previews prepared for the one approved AI'
+    case 'task.form_preparation_started': return 'The preparation window opened and the form was looked at again'
+    case 'task.form_draft_recorded': return 'Lumi filled the form in the browser window with the network frozen and checked it'
+    case 'task.form_draft_discarded': return 'You discarded the draft; the page was destroyed while frozen'
+    case 'task.form_draft_handed_over': return 'You took over in the browser window; Lumi did not submit anything'
+    case 'task.form_draft_lost': return 'The browser window with the draft is gone; the draft is lost'
     case 'action.proposed': return 'Booking prepared from the clinic site'
     case 'action.approval_requested': return 'Waiting for your approval'
     case 'action.approved': return 'You approved the booking'
@@ -707,6 +735,26 @@ const AUTH_PAUSE_LINES: Record<AgentAuthenticatedPauseReason, { title: string; l
     lines: [
       'Lumi stopped. It did not open the other address, and it did not hand it to anything else.'
     ]
+  },
+  form_draft: {
+    title: 'A form is prepared in the browser window',
+    lines: [
+      'Lumi is waiting for you. Discard the draft, or hand the page over to yourself.',
+      'Lumi has not submitted anything.'
+    ]
+  },
+  user_takeover: {
+    title: 'You took over in the browser window',
+    lines: [
+      'Lumi did not submit anything and cannot tell you whether the site accepted or saved it.'
+    ]
+  },
+  browser_lost: {
+    title: 'The browser window with your draft is gone',
+    lines: [
+      'The values were only in that window, so they are lost. Nothing was restored or filled again.',
+      'To try again, prepare the form again and approve it again.'
+    ]
   }
 }
 
@@ -989,6 +1037,12 @@ export type FormPlanControl =
   | 'decline_form_planning'
   | 'approve_disclosure'
   | 'decline_disclosure'
+  // Milestone 8b S6
+  | 'start_preparation'
+  | 'discard_draft'
+  | 'request_handover'
+  | 'approve_handover'
+  | 'decline_handover'
 
 export const DATA_KIND_LABELS: Record<AgentProtectedDataKind, string> = {
   legal_name: 'legal name',
@@ -1001,7 +1055,10 @@ export const DATA_KIND_LABELS: Record<AgentProtectedDataKind, string> = {
   portfolio_url: 'portfolio link'
 }
 
-export type FormPlanStage = 'hidden' | 'offer' | 'permission' | 'ready' | 'approval' | 'prepared' | 'declined'
+export type FormPlanStage =
+  | 'hidden' | 'prepare_offer' | 'offer' | 'permission' | 'ready' | 'approval' | 'prepared' | 'declined'
+  // Milestone 8b S6: a local draft waits frozen; the second approval; after it; not written.
+  | 'draft' | 'handover' | 'handed_over' | 'handover_unknown' | 'not_written' | 'superseded'
 
 export interface FormPlanModel {
   stage: FormPlanStage
@@ -1036,16 +1093,94 @@ export function describeFormPlan(
   if (!plan) return FORM_PLAN_HIDDEN
   const disclosure = plan.disclosure
   const grant = plan.grant
+  const draft = plan.draft
+  const handover = plan.handover
   const expired = grant?.expiresAt !== undefined && Date.parse(grant.expiresAt) <= now
-  if (disclosure && disclosure.actionStatus === 'WAITING_APPROVAL' && !taskClosed) {
+  const draftLive = draft !== undefined && (draft.status === 'PREPARED' || draft.status === 'STALE')
+  // ---- the local draft and its handover (Milestone 8b S6) ----
+  if (handover && handover.actionStatus === 'WAITING_APPROVAL' && draftLive && !taskClosed) {
     return {
-      stage: 'approval', eyebrow: 'PREPARE THIS FORM', title: 'Approve this form plan',
+      stage: 'handover', eyebrow: 'HAND THIS PAGE OVER TO YOU', title: 'Let the page send what is in the form?',
       lines: [
-        'When form filling is enabled in a later step, Lumi will only be allowed to use exactly this approved mapping.',
-        'Lumi cannot submit this form.',
-        'This build does not change the page.'
+        'Lumi filled these fields while the browser could not send anything.',
+        'If you hand the page back to yourself, network access will resume. The site may immediately autosave or otherwise receive what is in the form.',
+        'Lumi will not submit the form.'
+      ],
+      offerable: [], controls: ['decline_handover', 'approve_handover']
+    }
+  }
+  if (handover && handover.resultCode === 'handover_unknown') {
+    return {
+      stage: 'handover_unknown', eyebrow: 'FORM HAND-OVER', title: 'Lumi lost the answer while handing over',
+      lines: [
+        'Lumi does not know whether network access was restored, and will not guess or try again.',
+        'Lumi did not submit anything and cannot tell you whether the site accepted or saved anything.'
+      ],
+      offerable: [], controls: []
+    }
+  }
+  if ((handover && handover.resultCode === 'handed_over') || draft?.status === 'HANDED_OVER') {
+    return {
+      stage: 'handed_over', eyebrow: 'FORM HANDED OVER', title: 'You took over in the browser window',
+      lines: [
+        'Lumi did not submit anything and cannot tell you whether the site accepted or saved it.'
+      ],
+      offerable: [], controls: []
+    }
+  }
+  if (draftLive && draft && !taskClosed) {
+    const partial = draft.partial
+    return {
+      stage: 'draft',
+      eyebrow: partial ? 'FORM PARTLY PREPARED' : 'FORM PREPARED LOCALLY',
+      title: partial ? 'Lumi could not finish this form' : `Lumi filled and checked ${draft.fieldCount} field${draft.fieldCount === 1 ? '' : 's'}`,
+      lines: partial
+        ? [
+            'Lumi stopped because this form needs behavior that is unavailable while the network is frozen.',
+            `Some fields may already be filled locally (${draft.fieldCount} checked). The form needs manual review.`,
+            'Nothing was sent. Lumi has not submitted anything.',
+            'These values exist only in this browser window. If Lumi or your computer restarts, they are lost.'
+          ]
+        : [
+            'Nothing was sent while Lumi filled them.',
+            'Network access is still blocked for this browser page.',
+            'Lumi has not submitted anything.',
+            'These values exist only in this browser window. If Lumi or your computer restarts, they are lost.'
+          ],
+      offerable: [], controls: ['discard_draft', 'request_handover']
+    }
+  }
+  if (disclosure && disclosure.actionStatus === 'WAITING_APPROVAL' && !taskClosed) {
+    if (!disclosure.executable) {
+      return {
+        stage: 'superseded', eyebrow: 'PREPARE THIS FORM', title: 'This plan was made before form filling existed',
+        lines: [
+          'It cannot be used. Prepare the form again to get a new plan you can approve.',
+          'Nothing was changed.'
+        ],
+        offerable: [], controls: ['decline_disclosure']
+      }
+    }
+    return {
+      stage: 'approval', eyebrow: 'PREPARE THIS FORM', title: 'Fill these fields?',
+      lines: [
+        "When you click Fill these fields, Lumi will freeze this browser page's network access, then put exactly these values into exactly these fields and check that each one is there.",
+        'No request can be sent while Lumi is filling. Lumi will not submit the form and cannot submit it.',
+        'Forms that need the network to accept a value may fail; Lumi will stop and tell you, and will not turn the network on.',
+        'The draft stays frozen until you discard it or hand the page over to yourself.',
+        'These values are only in the browser window. If Lumi or your computer restarts, they are gone and you will need to prepare the form again.'
       ],
       offerable: [], controls: ['approve_disclosure', 'decline_disclosure']
+    }
+  }
+  if (disclosure && disclosure.resultCode === 'local_draft_not_written' && !taskClosed) {
+    return {
+      stage: 'not_written', eyebrow: 'FORM NOT FILLED', title: 'Lumi could not fill this form',
+      lines: [
+        'Nothing was written to the page and nothing was sent.',
+        'This approval was used once. To try again, prepare the form again and approve it again.'
+      ],
+      offerable: [], controls: []
     }
   }
   if (disclosure && disclosure.resultCode === 'prepared_nothing') {
@@ -1056,6 +1191,16 @@ export function describeFormPlan(
         'This approval was used once and cannot be used again.'
       ],
       offerable: [], controls: []
+    }
+  }
+  if (!plan.preparing && !taskClosed && accountReadingActive && !grant?.status && plan.formCount > 0) {
+    return {
+      stage: 'prepare_offer', eyebrow: 'FORMS ON THIS SITE', title: 'Open a preparation window for this form?',
+      lines: [
+        'Lumi will reopen this profile in a visible window, go back to the same page and look at the form again. Nothing is filled yet.',
+        'A form can only be filled in a window you can see. Lumi cannot fill it in the hidden reading window.'
+      ],
+      offerable: [], controls: ['start_preparation']
     }
   }
   if (grant?.status === 'PENDING' && !taskClosed) {
@@ -1089,7 +1234,7 @@ export function describeFormPlan(
   if (disclosure && (disclosure.actionStatus === 'REJECTED')) {
     return { stage: 'declined', eyebrow: 'FORM PLAN', title: 'You declined that plan', lines: ['Nothing was changed.'], offerable: [], controls: [] }
   }
-  if (!taskClosed && accountReadingActive && plan.savedDetails.length > 0 && (!grant || grant.status !== 'ACTIVE')) {
+  if (!taskClosed && accountReadingActive && plan.preparing && plan.savedDetails.length > 0 && (!grant || grant.status !== 'ACTIVE')) {
     return {
       stage: 'offer', eyebrow: 'FORMS ON THIS SITE', title: 'Plan a form with your saved details',
       lines: ['Choose which saved details a planner may see (masked). Nothing is sent until you allow it on the next card.'],

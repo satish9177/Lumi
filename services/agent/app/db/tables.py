@@ -29,6 +29,7 @@ from app.domain.action_status import (
 )
 from app.domain.browser_dispatch import BrowserEffect, DispatchStatus
 from app.domain.browser_profile import ProfileStatus
+from app.domain.local_form_draft import DraftStatus
 from app.domain.login_takeover import LoginAttemptStatus
 from app.domain.protected_values import PROTECTED_KINDS
 from app.domain.research import GrantStatus
@@ -293,6 +294,11 @@ browser_dispatches = Table(
     Column("result", JSONB(), nullable=True),
     Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("finished_at", DateTime(timezone=True), nullable=True),
+    # Milestone 8b S6. The proof that the runtime received a successful worker freeze
+    # verification (both layers frozen, nothing in flight, no relay open) BEFORE the
+    # first field write. Written once, only while the dispatch is DISPATCHED, and never
+    # back-filled after a write. NULL for every dispatch that is not a frozen local draft.
+    Column("frozen_at", DateTime(timezone=True), nullable=True),
     UniqueConstraint("attempt_id"),
     CheckConstraint(f"status IN ({_values(DispatchStatus)})", name="status"),
     CheckConstraint("result IS NULL OR jsonb_typeof(result) = 'object'", name="result_is_object"),
@@ -993,3 +999,56 @@ protected_values = Table(
     ),
     CheckConstraint("length(preview) >= 1", name="preview_present"),
 )
+
+
+#: Milestone 8b S6. What Lumi *prepared or attempted* in a form, never a restorable draft
+#: (the page is browser-local and is lost on any restart). `fields` holds refs, identity
+#: hashes, approved digests and verified-local-value hashes only -- never a raw value, a
+#: selector or a locator description. At most one live (PREPARED / STALE) draft per
+#: profile and per task.
+form_drafts = Table(
+    "form_drafts",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False),
+    Column(
+        "profile_id", Uuid(), ForeignKey("browser_profiles.id", ondelete="CASCADE"), nullable=False
+    ),
+    Column("action_id", Uuid(), ForeignKey("actions.id", ondelete="RESTRICT"), nullable=False),
+    Column(
+        "attempt_id", Uuid(), ForeignKey("action_attempts.id", ondelete="RESTRICT"), nullable=False
+    ),
+    Column(
+        "dispatch_id", Uuid(), ForeignKey("browser_dispatches.id", ondelete="RESTRICT"), nullable=False
+    ),
+    Column("manifest_digest", String(64), nullable=False),
+    Column("draft_digest", String(64), nullable=False),
+    Column("observation_id", Uuid(), nullable=False),
+    Column("tab", String(4), nullable=False),
+    Column("document_epoch", Integer(), nullable=False),
+    Column("form_epoch", Integer(), nullable=False),
+    Column("form_ref", String(4), nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("revision", Integer(), nullable=False, server_default=text("1")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("fields", JSONB(), nullable=False),
+    UniqueConstraint("attempt_id"),
+    UniqueConstraint("dispatch_id"),
+    CheckConstraint(
+        "status IN (" + ", ".join(f"'{status.value}'" for status in DraftStatus) + ")", name="status"
+    ),
+    CheckConstraint("revision >= 1", name="revision_positive"),
+    CheckConstraint("manifest_digest ~ '^[0-9a-f]{64}$'", name="manifest_digest_format"),
+    CheckConstraint("draft_digest ~ '^[0-9a-f]{64}$'", name="draft_digest_format"),
+    CheckConstraint("tab ~ '^t[1-3]$'", name="tab_ref"),
+    CheckConstraint("form_ref ~ '^f[1-5]$'", name="form_ref_shape"),
+    CheckConstraint("document_epoch >= 1 AND form_epoch >= 1", name="epochs_positive"),
+    CheckConstraint(
+        "jsonb_typeof(fields) = 'array' AND jsonb_array_length(fields) <= 12", name="fields_bounded"
+    ),
+)
+
+_LIVE_DRAFT = text("status IN ('PREPARED', 'STALE')")
+Index("uq_form_drafts_profile_id_live", form_drafts.c.profile_id, unique=True, postgresql_where=_LIVE_DRAFT)
+Index("uq_form_drafts_task_id_live", form_drafts.c.task_id, unique=True, postgresql_where=_LIVE_DRAFT)

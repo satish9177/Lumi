@@ -81,3 +81,44 @@ def find_javascript_mutations(source: str) -> list[str]:
     if reads != _REVIEWED_VALUE_READS:
         found.append(f"reads a value {reads} time(s); exactly {_REVIEWED_VALUE_READS} is reviewed")
     return found
+
+
+# ---- Milestone 8b S6: the worker-wide scanner -------------------------------------------------
+
+#: Call names that are only *actions* when their receiver is a page, a frame, a locator, a
+#: handle or a control. `policy.check(url)`, `some_dict.clear()` and `writer.write(bytes)` are
+#: not, and a scanner that flagged them would be a scanner nobody could keep green.
+_RECEIVER_SENSITIVE = {
+    "check": r"(locator|handle|member|control|page|frame|element)\b",
+    "clear": r"(locator|handle|member|control|page|frame|element)\b",
+    "write": r"(locator|handle|member|control|page|frame|keyboard)\b",
+}
+#: What `local_form_draft.py` alone may call: three write primitives, one of which (a checked
+#: state) has two spellings.
+S6_PRIMITIVES = frozenset({"fill", "select_option", "set_checked", "check"})
+
+
+def find_worker_mutations(source: str, *, allow: frozenset[str] = frozenset()) -> list[str]:
+    """Every Playwright-shaped action in `source`, except the names in `allow`.
+
+    Like `find_python_mutations` (the S4 scanner), but receiver-aware for the three names
+    that are ordinary methods elsewhere, so the whole worker tree can be scanned and the only
+    thing that varies per file is which of the reviewed primitives it may contain.
+    """
+    tree = ast.parse(source)
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in FORBIDDEN_ATTRIBUTES:
+            found.append(f"line {node.lineno}: .{node.attr}")
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        name = node.func.attr
+        if name not in FORBIDDEN_CALLS or name in allow:
+            continue
+        pattern = _RECEIVER_SENSITIVE.get(name)
+        if pattern is not None:
+            receiver = ast.unparse(node.func.value).lower()
+            if re.search(pattern, receiver.replace(".", " ").replace("_", " ")) is None:
+                continue
+        found.append(f"line {node.lineno}: .{name}(")
+    return found

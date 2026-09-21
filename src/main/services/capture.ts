@@ -59,24 +59,44 @@ export function takeoverGuardState(): TakeoverGuardState {
   return takeoverGuard
 }
 
+/**
+ * Milestone 8b S6. While a form is being prepared, or holds a local draft, the visible browser
+ * window can show the user's private details. A screenshot goes to a model, and no provider may see
+ * a page that can hold a protected value, so capture is refused for as long as that window exists.
+ * Set from the controller's own view of the task -- never from the renderer.
+ */
+let formDraftWindow = false
+
+export function setFormDraftWindowActive(active: boolean): void {
+  formDraftWindow = active
+}
+
 /** Capture is permitted only by a reconciled, empty answer. */
 export function isCaptureBlocked(): boolean {
-  return takeoverGuard !== 'clear'
+  return takeoverGuard !== 'clear' || formDraftWindow
 }
 
 export class CaptureRefusedError extends Error {
-  readonly code: 'capture_refused_takeover_active' | 'capture_refused_takeover_unknown'
-  constructor(state: Exclude<TakeoverGuardState, 'clear'> = 'active') {
+  readonly code:
+    | 'capture_refused_takeover_active'
+    | 'capture_refused_takeover_unknown'
+    | 'capture_refused_form_draft_active'
+  constructor(state: Exclude<TakeoverGuardState, 'clear'> | 'form_draft' = 'active') {
     super(state === 'active'
       ? 'Lumi will not capture the screen while a sign-in window is open.'
-      : 'Lumi is checking whether a sign-in window is open. Try again in a moment.')
-    this.code = state === 'active' ? 'capture_refused_takeover_active' : 'capture_refused_takeover_unknown'
+      : state === 'form_draft'
+        ? 'Lumi will not capture the screen while a form is being prepared in a browser window.'
+        : 'Lumi is checking whether a sign-in window is open. Try again in a moment.')
+    this.code = state === 'active'
+      ? 'capture_refused_takeover_active'
+      : state === 'form_draft' ? 'capture_refused_form_draft_active' : 'capture_refused_takeover_unknown'
     this.name = 'CaptureRefusedError'
   }
 }
 
 function refuseWhileBlocked(): void {
   if (takeoverGuard !== 'clear') throw new CaptureRefusedError(takeoverGuard)
+  if (formDraftWindow) throw new CaptureRefusedError('form_draft')
 }
 
 /** The minimal image surface shared by native images and test doubles. */

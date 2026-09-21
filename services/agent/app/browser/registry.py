@@ -34,6 +34,7 @@ from pydantic import BaseModel
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle at runtime only.
     from app.browser.authenticated_session import AuthenticatedReadSession
+    from app.browser.local_form_draft import FormFreezeController
     from app.browser.research_session import ResearchBrowserSession
 
 from app.browser.network_guard import PublicNetworkGuard
@@ -113,6 +114,9 @@ class OperationContext:
     #: AUTHENTICATED_SESSION operations only: the read session of the one open
     #: persistent profile this step runs in.
     authenticated_session: "AuthenticatedReadSession | None" = None
+    #: LOCAL_DRAFT operations only (Milestone 8b S6): the worker's freeze
+    #: controller, which owns the two-layer network freeze and its owner.
+    form_freeze: "FormFreezeController | None" = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -184,13 +188,31 @@ class OperationRegistry:
                     f"account-read operation {operation.name!r} may only target an "
                     "authenticated session"
                 )
-            if operation.target is OperationTarget.AUTHENTICATED_SESSION and (
-                operation.effect is not Effect.ACCOUNT_READ
-                or operation.retry is not RetryPolicy.OBSERVE_THEN_REPLAN
+            if operation.effect is Effect.LOCAL_DRAFT and (
+                operation.target is not OperationTarget.AUTHENTICATED_SESSION
+                or operation.retry is not RetryPolicy.NEW_APPROVAL_REQUIRED
+            ):
+                # A local draft is a write into the user's own signed-in browser.
+                # It may only run in an authenticated session, and a repeat is
+                # never automatic: it is a new exact approval, because the first
+                # approval was spent and the draft may or may not still exist.
+                raise ValueError(
+                    f"local-draft operation {operation.name!r} may only target an authenticated "
+                    "session and must require a new approval to repeat"
+                )
+            if operation.target is OperationTarget.AUTHENTICATED_SESSION and not (
+                (
+                    operation.effect is Effect.ACCOUNT_READ
+                    and operation.retry is RetryPolicy.OBSERVE_THEN_REPLAN
+                )
+                or (
+                    operation.effect is Effect.LOCAL_DRAFT
+                    and operation.retry is RetryPolicy.NEW_APPROVAL_REQUIRED
+                )
             ):
                 raise ValueError(
-                    f"authenticated operation {operation.name!r} must be an account read and "
-                    "must be recovered by re-observing rather than by repeating itself"
+                    f"authenticated operation {operation.name!r} must be an account read that is "
+                    "recovered by re-observing, or a local draft that needs a new approval to repeat"
                 )
             if (
                 operation.target is OperationTarget.AUTHENTICATED_SESSION
@@ -236,11 +258,12 @@ def build_registry() -> OperationRegistry:
     adds five read-only research operations that run in a task-owned session.
     """
     from app.browser.adapters import appointment_fixture
-    from app.browser.operations import authenticated, public_page, research
+    from app.browser.operations import authenticated, form_draft, public_page, research
 
     return OperationRegistry(
         appointment_fixture.OPERATIONS
         + public_page.OPERATIONS
         + research.OPERATIONS
         + authenticated.OPERATIONS
+        + form_draft.OPERATIONS
     )

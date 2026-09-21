@@ -95,6 +95,12 @@ class WorkerSettings(BaseSettings):
     #: Lumi's own version, recorded on a profile row alongside the Chromium and
     #: Playwright versions that last opened it.
     app_version: str = Field(default="0.1.0", max_length=32)
+    #: Milestone 8b S6 network freeze. How long entering the freeze waits for the
+    #: page and the guard to have no request in flight before it refuses with
+    #: `page_never_settles`, and how long it waits for every broker relay to drain.
+    #: Both are bounds, never a reason to freeze on top of an open request.
+    freeze_settle_seconds: float = Field(default=5.0, ge=0.2, le=60.0)
+    freeze_drain_seconds: float = Field(default=3.0, ge=0.2, le=30.0)
 
     @field_validator("research_hosts")
     @classmethod

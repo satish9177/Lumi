@@ -171,3 +171,110 @@ def test_migration_0010_round_trips_and_removes_only_its_own_shape(migrated_data
     finally:
         migrate(migrated_database_url)
     assert asyncio.run(counts())["table"] is True
+
+
+def test_migration_0011_round_trips_keeps_history_and_enforces_its_constraints(
+    migrated_database_url: str,
+) -> None:
+    """Milestone 8b S6: `form_drafts` and `browser_dispatches.frozen_at`.
+
+    Existing S3/S4/S5 data stays valid (an old dispatch has `frozen_at IS NULL`, and a
+    historical `prepared_nothing` result is untouched), the draft table refuses what it must,
+    and downgrading to 0010 removes exactly the S6 shape.
+    """
+    import uuid
+
+    from sqlalchemy.exc import DBAPIError, IntegrityError
+
+    ids = {name: uuid.uuid4() for name in ("task", "profile", "action", "attempt", "dispatch", "runtime", "worker")}
+
+    def engine_for() -> Any:
+        settings = Settings(database_url=SecretStr(migrated_database_url), runtime_token=TEST_RUNTIME_TOKEN)
+        return create_database_engine(settings)
+
+    async def prepare() -> None:
+        engine = engine_for()
+        try:
+            async with engine.begin() as c:
+                await c.execute(text("TRUNCATE form_drafts, browser_dispatches, action_attempts, approvals, actions, tasks, browser_profiles, browser_worker_generations, runtime_generations CASCADE"))
+                await c.execute(text("INSERT INTO tasks (id, status, request, revision, last_event_sequence) VALUES (:t, 'READY', '{}'::jsonb, 1, 1)"), {"t": ids["task"]})
+                await c.execute(text("INSERT INTO browser_profiles (id, label, site, allowed_origins, status, revision, revoke_epoch) VALUES (:p, 'L', 'example.test', '[]'::jsonb, 'AUTHENTICATED', 1, 0)"), {"p": ids["profile"]})
+                await c.execute(text("INSERT INTO runtime_generations (id) VALUES (:r)"), {"r": ids["runtime"]})
+                await c.execute(text("INSERT INTO browser_worker_generations (id, runtime_generation, worker_started_at) VALUES (:w, :r, now())"), {"w": ids["worker"], "r": ids["runtime"]})
+                await c.execute(
+                    text("INSERT INTO actions (id, task_id, idempotency_key, tool_name, risk_tier, proposal, proposal_digest, status, revision) VALUES (:a, :t, 'k', 'prepare_form', 'R2', '{}'::jsonb, :d, 'SUCCEEDED', 1)"),
+                    {"a": ids["action"], "t": ids["task"], "d": "0" * 64},
+                )
+                approval = uuid.uuid4()
+                await c.execute(
+                    text("INSERT INTO approvals (id, action_id, action_revision, proposal_digest, status, expires_at, approved_at, consumed_at) VALUES (:ap, :a, 1, :d, 'CONSUMED', now() + interval '1 hour', now(), now())"),
+                    {"ap": approval, "a": ids["action"], "d": "0" * 64},
+                )
+                await c.execute(
+                    text("INSERT INTO action_attempts (id, action_id, attempt_number, approval_id, runtime_generation, finished_at, outcome, result) VALUES (:at, :a, 1, :ap, :r, now(), 'SUCCEEDED', '{\"code\": \"prepared_nothing\"}'::jsonb)"),
+                    {"at": ids["attempt"], "a": ids["action"], "r": ids["runtime"], "ap": approval},
+                )
+                await c.execute(
+                    text("INSERT INTO browser_dispatches (id, action_id, attempt_id, worker_generation, operation, site, effect, status, submitted) VALUES (:d, :a, :at, :w, 'authenticated_observe', 'authenticated', 'ACCOUNT_READ', 'DISPATCHED', false)"),
+                    {"d": ids["dispatch"], "a": ids["action"], "at": ids["attempt"], "w": ids["worker"]},
+                )
+        finally:
+            await engine.dispose()
+
+    async def draft(status: str = "PREPARED", *, digest: str = "a" * 64, fields: str = "[]", fresh: bool = False) -> None:
+        engine = engine_for()
+        try:
+            async with engine.begin() as c:
+                attempt, dispatch = (uuid.uuid4(), uuid.uuid4()) if fresh else (ids["attempt"], ids["dispatch"])
+                await c.execute(
+                    text("INSERT INTO form_drafts (id, task_id, profile_id, action_id, attempt_id, dispatch_id, manifest_digest, draft_digest, observation_id, tab, document_epoch, form_epoch, form_ref, status, fields) VALUES (gen_random_uuid(), :t, :p, :a, :at, :d, :m, :dd, gen_random_uuid(), 't1', 1, 1, 'f1', :s, CAST(:f AS jsonb))"),
+                    {"t": ids["task"], "p": ids["profile"], "a": ids["action"], "at": attempt, "d": dispatch, "m": "b" * 64, "dd": digest, "s": status, "f": fields},
+                )
+        finally:
+            await engine.dispose()
+
+    async def state() -> dict[str, Any]:
+        engine = engine_for()
+        try:
+            async with engine.connect() as c:
+                return {
+                    "table": await c.scalar(text("SELECT to_regclass('public.form_drafts') IS NOT NULL")),
+                    "column": await c.scalar(text("SELECT count(*) FROM information_schema.columns WHERE table_name = 'browser_dispatches' AND column_name = 'frozen_at'")),
+                }
+        finally:
+            await engine.dispose()
+
+    async def old() -> tuple[Any, Any]:
+        engine = engine_for()
+        try:
+            async with engine.connect() as c:
+                return (
+                    await c.scalar(text("SELECT frozen_at FROM browser_dispatches WHERE id = :d"), {"d": ids["dispatch"]}),
+                    await c.scalar(text("SELECT result->>'code' FROM action_attempts WHERE id = :a"), {"a": ids["attempt"]}),
+                )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(prepare())
+    assert asyncio.run(state()) == {"table": True, "column": 1}
+    assert asyncio.run(old()) == (None, "prepared_nothing")
+
+    asyncio.run(draft("PREPARED"))
+    bad_rows = (
+        ("ARBITRARY", "a" * 64, "[]"),
+        ("DISCARDED", "not-a-digest", "[]"),
+        ("DISCARDED", "a" * 64, "{}"),
+        ("DISCARDED", "a" * 64, "[" + ",".join(["{}"] * 13) + "]"),
+    )
+    for status, digest, fields in bad_rows:
+        with pytest.raises((IntegrityError, DBAPIError)):
+            asyncio.run(draft(status, digest=digest, fields=fields, fresh=True))
+    with pytest.raises((IntegrityError, DBAPIError)):
+        asyncio.run(draft("STALE"))  # a second live draft for the same profile
+
+    downgrade(migrated_database_url, "0010")
+    try:
+        assert asyncio.run(state()) == {"table": False, "column": 0}
+    finally:
+        migrate(migrated_database_url)
+    assert asyncio.run(state()) == {"table": True, "column": 1}

@@ -29,6 +29,7 @@ from app.domain.browser_dispatch import (
     LookupStatus,
     OperationStatus,
 )
+from app.domain.local_form_draft import VerifiedField
 from app.domain.login_takeover import CredentialSignal, TakeoverSiteScope
 
 #: The credential header. A header, never a query parameter: URLs end up in
@@ -47,8 +48,18 @@ __all__ = [
     "WORKER_TOKEN_HEADER",
     "DispatchRequest",
     "DispatchResponse",
+    "FormDiscardRequest",
+    "FormDiscardResponse",
+    "FormFreezeRequest",
+    "FormFreezeResponse",
+    "FormHandoverRequest",
+    "FormHandoverResponse",
     "LookupStatus",
     "OperationStatus",
+    "PrepareCaptureRequest",
+    "PrepareCaptureResponse",
+    "PrepareRestoreRequest",
+    "PrepareRestoreResponse",
     "ProfileSessionRequest",
     "ProfileSessionResponse",
     "SessionRequest",
@@ -193,6 +204,12 @@ class ProfileSessionResponse(BaseModel):
 _SITE_PATTERN = r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$"
 
 
+#: `_SITE_PATTERN` plus an optional port, for the test fixture's `host:port` site.
+_SITE_PATTERN_WITH_PORT = (
+    r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]{1,5})?$"
+)
+
+
 class TakeoverStartRequest(BaseModel):
     """Open the headed tab for a manual sign-in and hand it to the human.
 
@@ -270,3 +287,141 @@ class WorkerErrorBody(BaseModel):
     code: str
     message: str
     worker_generation: uuid.UUID | None = None
+
+
+# ---- Milestone 8b S6: the network-frozen local form draft -------------------------
+#
+# Narrow, typed routes. There is deliberately no network-mode setter, no boolean and no
+# generic "control the network" call: the freeze is entered by naming the dispatch
+# that will own it, and it is released only by discarding the dirty page or by the
+# second, exact handover approval. None of these carries a URL, a selector, a value,
+# a label or a path, and none returns one.
+
+
+class PrepareCaptureRequest(BaseModel):
+    """Remember, inside the worker, which in-site page the read session is on.
+
+    The address never crosses this boundary in either direction: it is captured
+    into worker memory and used only by `PrepareRestoreRequest`. `site` is the
+    profile's own bound registrable domain, exactly as `TakeoverStartRequest`'s.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: uuid.UUID
+    runtime_generation: uuid.UUID
+    expected_worker_generation: uuid.UUID
+    site: str = Field(min_length=1, max_length=253, pattern=_SITE_PATTERN_WITH_PORT)
+
+
+class PrepareCaptureResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: uuid.UUID
+    worker_generation: uuid.UUID
+    status: Literal["CAPTURED", "NO_DESTINATION", "PROFILE_NOT_OPEN", "REFUSED"]
+    error_code: str | None = Field(default=None, max_length=64)
+
+
+class PrepareRestoreRequest(BaseModel):
+    """Navigate the (headed) profile back to the captured in-site page, internally."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: uuid.UUID
+    runtime_generation: uuid.UUID
+    expected_worker_generation: uuid.UUID
+    site: str = Field(min_length=1, max_length=253, pattern=_SITE_PATTERN_WITH_PORT)
+
+
+class PrepareRestoreResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: uuid.UUID
+    worker_generation: uuid.UUID
+    status: Literal[
+        "RESTORED",
+        "NO_DESTINATION",
+        "NAVIGATION_FAILED",
+        "LEFT_SITE_SCOPE",
+        "NOT_HEADED",
+        "PROFILE_NOT_OPEN",
+        "REFUSED",
+    ]
+    error_code: str | None = Field(default=None, max_length=64)
+
+
+class FormFreezeRequest(BaseModel):
+    """Enter the two-layer freeze, on behalf of the dispatch that will write."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: uuid.UUID
+    dispatch_id: uuid.UUID
+    runtime_generation: uuid.UUID
+    expected_worker_generation: uuid.UUID
+
+
+class FormFreezeResponse(BaseModel):
+    """Safe proof only: counts and a status. No URL, no host, no request detail."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: uuid.UUID
+    dispatch_id: uuid.UUID
+    worker_generation: uuid.UUID
+    status: Literal["FROZEN", "REFUSED"]
+    error_code: str | None = Field(default=None, max_length=64)
+    guard_in_flight: int = Field(default=0, ge=0)
+    broker_active_connections: int = Field(default=0, ge=0)
+    resolution_count: int = Field(default=0, ge=0)
+    dial_count: int = Field(default=0, ge=0)
+    freeze_duration_ms: int = Field(default=0, ge=0)
+
+
+class FormDiscardRequest(BaseModel):
+    """Destroy the dirty page while frozen, then thaw. Idempotent."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: uuid.UUID
+    #: The dispatch that owns the freeze (the fill dispatch).
+    dispatch_id: uuid.UUID
+    runtime_generation: uuid.UUID
+    expected_worker_generation: uuid.UUID
+
+
+class FormDiscardResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: uuid.UUID
+    worker_generation: uuid.UUID
+    status: Literal["DISCARDED", "NOTHING_TO_DISCARD", "PROFILE_NOT_OPEN", "REFUSED"]
+    error_code: str | None = Field(default=None, max_length=64)
+
+
+class FormHandoverRequest(BaseModel):
+    """Lift the freeze for the human, after the second exact approval.
+
+    `fields` is what that approval bound: each approved field's verified hash. The
+    worker re-reads the live page and refuses (`draft_changed`, still frozen) unless
+    it matches.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: uuid.UUID
+    dispatch_id: uuid.UUID
+    runtime_generation: uuid.UUID
+    expected_worker_generation: uuid.UUID
+    fields: list[VerifiedField] = Field(min_length=1, max_length=12)
+
+
+class FormHandoverResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    profile_id: uuid.UUID
+    worker_generation: uuid.UUID
+    status: Literal["HANDED_OVER", "REFUSED", "PROFILE_NOT_OPEN"]
+    error_code: str | None = Field(default=None, max_length=64)
+    verified_count: int = Field(default=0, ge=0)

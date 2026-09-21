@@ -74,6 +74,7 @@ from app.domain.browser_profile import (
 from app.repositories.authenticated import AuthenticatedRepository
 from app.repositories.profiles import BrowserProfileRepository
 from app.services.browser_execution import BrowserExecutionService, WorkerProfileOpen
+from app.services.form_state import FormStateRegistry
 
 logger = logging.getLogger("lumi.profiles")
 
@@ -101,8 +102,11 @@ class BrowserProfileService:
         browser: BrowserExecutionService,
         paths: ProfilePaths | None = None,
         lease_ttl_seconds: int = DEFAULT_LEASE_TTL_SECONDS,
+        forms: FormStateRegistry | None = None,
     ) -> None:
         self._engine = engine
+        #: Milestone 8b S6. Which profiles hold a local draft: closing one would destroy it.
+        self._forms = forms
         self._runtime_generation = runtime_generation
         self._browser = browser
         # Derived from this process's own environment, never from a request,
@@ -246,8 +250,16 @@ class BrowserProfileService:
         return await self.close_profile(profile_id)
 
     async def close_profile(self, profile_id: uuid.UUID) -> bool:
-        """Close the context and drop the lease. Idempotent."""
+        """Close the context and drop the lease. Idempotent.
+
+        Refused (`form_is_dirty`) while the profile holds a local form draft: closing the
+        browser destroys it, and that is only ever done by the reviewed discard.
+        """
+        if self._forms is not None:
+            self._forms.assert_clean(profile_id)
         state = self._open.pop(profile_id, None)
+        if self._forms is not None:
+            self._forms.clear(profile_id)
         if state is not None:
             try:
                 await self._browser.close_browser_profile(

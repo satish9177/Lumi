@@ -64,6 +64,11 @@ export const TASK_EVENT_TYPES = [
   'task.authenticated_answer_recorded', 'task.authenticated_paused', 'task.authenticated_resumed',
   'task.form_prepare_scope_requested', 'task.form_prepare_scope_granted', 'task.form_prepare_scope_revoked',
   'task.form_planning_context_built',
+  'task.form_preparation_started',
+  'task.form_draft_recorded',
+  'task.form_draft_discarded',
+  'task.form_draft_handed_over',
+  'task.form_draft_lost',
   'action.proposed', 'action.approval_requested',
   'action.approved', 'action.authorized', 'action.rejected', 'action.execution_started', 'action.succeeded',
   'action.failed', 'action.outcome_unknown', 'action.reconciliation_started', 'action.reconciled'
@@ -573,7 +578,10 @@ export type AgentAuthenticatedOperation = typeof AUTHENTICATED_OPERATIONS[number
 
 /** Why an authenticated task stopped and needs a human. Set by code, never by a model. */
 export const AUTHENTICATED_PAUSE_REASONS = [
-  'login_required', 'account_changed', 'account_identity_unknown', 'left_site_scope'
+  'login_required', 'account_changed', 'account_identity_unknown', 'left_site_scope',
+  // Milestone 8b S6: a local form draft waits for the user; the user took the browser over;
+  // the browser that held the draft is gone. Set by the controller, never by a model.
+  'form_draft', 'user_takeover', 'browser_lost'
 ] as const
 export type AgentAuthenticatedPauseReason = typeof AUTHENTICATED_PAUSE_REASONS[number]
 
@@ -730,6 +738,16 @@ export type AgentProtectedDataKind = typeof PROTECTED_DATA_KINDS[number]
 /** What a terminal S5 approval records: the approval was spent and nothing was prepared. */
 export const PREPARED_NOTHING = 'prepared_nothing'
 
+/**
+ * What a spent S6 approval ends in. `local_draft_prepared`: every approved field was filled and
+ * verified in the browser window, with the network frozen. `local_draft_partial`: some were, and
+ * the form needs manual review. `local_draft_not_written`: nothing was.
+ */
+export const DISCLOSURE_RESULT_CODES = [
+  PREPARED_NOTHING, 'local_draft_prepared', 'local_draft_partial', 'local_draft_not_written'
+] as const
+export type AgentDisclosureResultCode = typeof DISCLOSURE_RESULT_CODES[number]
+
 export interface AgentSavedDetailView {
   dataRef: AgentProtectedDataKind
   kind: AgentProtectedDataKind
@@ -767,8 +785,44 @@ export interface AgentDisclosureCardView {
   fields: AgentDisclosureFieldView[]
   /** True when a saved country is shown as-is (a country cannot be masked). */
   revealsCountry: boolean
-  /** `prepared_nothing` once the approval was spent. */
-  resultCode?: typeof PREPARED_NOTHING
+  /** What the spent approval ended in; absent until it was spent. */
+  resultCode?: AgentDisclosureResultCode
+  /**
+   * True for a Milestone 8b S6 manifest, whose approval FILLS the form locally with the network
+   * frozen. False for a historical S5 manifest, which is never executable.
+   */
+  executable: boolean
+}
+
+export const DRAFT_STATUSES = ['PREPARED', 'STALE', 'DISCARDED', 'HANDED_OVER'] as const
+export type AgentDraftStatus = typeof DRAFT_STATUSES[number]
+
+/** The local draft, as the trusted card shows it. Ids, a status and counts: never a value. */
+export interface AgentDraftCardView {
+  draftId: string
+  revision: number
+  status: AgentDraftStatus
+  fieldCount: number
+  /** Some approved fields were not verified: the form needs manual review. */
+  partial: boolean
+  site: string
+}
+
+export const HANDOVER_RESULT_CODES = ['handed_over', 'handover_refused', 'handover_unknown'] as const
+export type AgentHandoverResultCode = typeof HANDOVER_RESULT_CODES[number]
+
+/** The second exact approval: letting the page send. Safe references only. */
+export interface AgentHandoverCardView {
+  actionId: string
+  revision: number
+  actionStatus: AgentActionStatus
+  approvalStatus?: AgentApprovalStatus
+  approvalExpiresAt?: string
+  draftId: string
+  fieldCount: number
+  partial: boolean
+  site: string
+  resultCode?: AgentHandoverResultCode
 }
 
 export interface AgentFormPlanView {
@@ -779,6 +833,10 @@ export interface AgentFormPlanView {
   disclosure?: AgentDisclosureCardView
   formCount: number
   candidateElementCount: number
+  /** The profile is open in a headed preparation window and nothing has been written yet. */
+  preparing: boolean
+  draft?: AgentDraftCardView
+  handover?: AgentHandoverCardView
 }
 
 /**
@@ -1035,6 +1093,21 @@ export interface AgentApi {
    */
   approveFieldDisclosure: (actionId: string, expectedRevision: number) => Promise<AgentResult<AgentTaskSnapshot>>
   rejectFieldDisclosure: (actionId: string, expectedRevision: number) => Promise<AgentResult<AgentTaskSnapshot>>
+  /**
+   * Milestone 8b S6. Open the headed preparation window: the same profile, the same page, a
+   * completely fresh observation. Carries nothing. Writes nothing.
+   */
+  startFormPreparationMode: () => Promise<AgentResult<AgentTaskSnapshot>>
+  /** Stop: discard any local draft while the network is frozen, then close the window. */
+  stopFormPreparation: () => Promise<AgentResult<AgentTaskSnapshot>>
+  /** Discard the local draft: the page is destroyed while frozen, then the network returns. */
+  discardFormDraft: (draftId: string, expectedRevision: number) => Promise<AgentResult<AgentTaskSnapshot>>
+  /** Ask for the second, exact approval that lets the page send. Changes nothing yet. */
+  prepareFormHandover: (draftId: string, expectedRevision: number) => Promise<AgentResult<AgentTaskSnapshot>>
+  /** The trusted "Hand over to me" click: the network is restored for the user. Never submits. */
+  approveFormHandover: (actionId: string, expectedRevision: number) => Promise<AgentResult<AgentTaskSnapshot>>
+  /** Cancel the handover; the network stays frozen. */
+  rejectFormHandover: (actionId: string, expectedRevision: number) => Promise<AgentResult<AgentTaskSnapshot>>
   listPreferences: () => Promise<AgentResult<AgentPreferenceView[]>>
   forgetPreference: (key: PreferenceKey) => Promise<AgentResult<AgentPreferenceView[]>>
   /** Redacted model/controller diagnostics. Empty in packaged builds unless enabled. */
@@ -1117,6 +1190,12 @@ export const AGENT_IPC_CHANNELS = {
   runFormPlanning: 'lifelens:agent:run-form-planning',
   approveFieldDisclosure: 'lifelens:agent:approve-field-disclosure',
   rejectFieldDisclosure: 'lifelens:agent:reject-field-disclosure',
+  startFormPreparationMode: 'lifelens:agent:start-form-preparation-mode',
+  stopFormPreparation: 'lifelens:agent:stop-form-preparation',
+  discardFormDraft: 'lifelens:agent:discard-form-draft',
+  prepareFormHandover: 'lifelens:agent:prepare-form-handover',
+  approveFormHandover: 'lifelens:agent:approve-form-handover',
+  rejectFormHandover: 'lifelens:agent:reject-form-handover',
   listPreferences: 'lifelens:agent:list-preferences',
   forgetPreference: 'lifelens:agent:forget-preference',
   getDiagnostics: 'lifelens:agent:get-diagnostics',

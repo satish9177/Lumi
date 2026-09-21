@@ -33,6 +33,7 @@ profile, and the worker refused every other kind of id before getting here.
 import logging
 import uuid
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
 
 from playwright.async_api import BrowserContext, Error as PlaywrightError, Page
 
@@ -40,6 +41,9 @@ from app.browser.account_read_guard import AccountReadNetworkGuard
 from app.browser.form_observation import CollectedInventory, ElementLocator
 from app.browser.research_session import RETAINED_EPOCHS, DocumentEpochs, SessionError
 from app.domain.authenticated import MAX_AUTH_TABS
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; local_form_draft imports this module.
+    from app.browser.local_form_draft import WorkerDraft
 
 logger = logging.getLogger("lumi.browser.authenticated")
 
@@ -72,6 +76,12 @@ class AuthenticatedTab:
     #: An element ref failed revalidation: the next inventory is a new epoch even
     #: if it happens to hash the same, so no old ref can come back to life.
     _renew: bool = False
+    #: Milestone 8b S6. The page observations this worker produced for the *current*
+    #: form epoch. A LOCAL_DRAFT dispatch names the observation its approval was
+    #: built from, and the worker refuses one it never issued for this document and
+    #: form -- which is what stops an approval made from a headless document being
+    #: replayed against the headed one that replaced it.
+    form_observation_ids: set[uuid.UUID] = field(default_factory=set)
 
     @property
     def epoch(self) -> int:
@@ -87,6 +97,7 @@ class AuthenticatedTab:
         """
         if self._renew or collected.fingerprint != self.inventory_fingerprint:
             self.form_epoch += 1
+            self.form_observation_ids = set()
         self._renew = False
         self.inventory_fingerprint = collected.fingerprint
         self.elements = {
@@ -99,6 +110,11 @@ class AuthenticatedTab:
         """Kill every element ref of this tab (a gate fired, or a ref went stale)."""
         self.elements = {}
         self._renew = True
+        self.form_observation_ids = set()
+
+    def note_observation(self, observation_id: uuid.UUID) -> None:
+        """Remember that this worker issued `observation_id` for the current form."""
+        self.form_observation_ids.add(observation_id)
 
     def resolve_element(self, *, document_epoch: int, form_epoch: int, ref: str) -> ElementLocator:
         """The locator `ref` meant, only for the exact document *and* form epoch.
@@ -170,6 +186,17 @@ class AuthenticatedReadSession:
         self.max_tabs = min(max_tabs, MAX_AUTH_TABS)
         self.tabs: dict[str, AuthenticatedTab] = {}
         self.active: str | None = None
+        #: Milestone 8b S6. The profile was reopened headed *for form preparation*:
+        #: only such a session may hold a local draft.
+        self.preparation_mode = False
+        #: The page holds a local draft (a mutating primitive has been invoked).
+        #: Every agent read, navigation, history, tab and close operation is
+        #: refused while this is set; only discard and handover clear it.
+        self.dirty = False
+        #: The user took the browser over. The agent never reads it again.
+        self.handed_over = False
+        #: Worker-memory record of what was written where (hashes only).
+        self.draft: "WorkerDraft | None" = None
 
     @classmethod
     async def open(
@@ -200,6 +227,16 @@ class AuthenticatedReadSession:
         else:
             await session.open_tab()
         return session
+
+    def replace_with(self, page: Page) -> AuthenticatedTab:
+        """Make `page` the session's only tab, `t1`. Every old tab and ref is gone.
+
+        Used after a discard destroyed the dirty document: the profile keeps one
+        blank window, and no element ref, link table or observation of the old
+        document survives.
+        """
+        self.tabs = {}
+        return self._adopt(page)
 
     def _adopt(self, page: Page) -> AuthenticatedTab:
         ref = TAB_REFS[0]

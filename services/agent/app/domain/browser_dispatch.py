@@ -26,6 +26,14 @@ class BrowserEffect(StrEnum):
     #: Navigates and fills fields. Browser-local state only; the site is not
     #: asked to do anything.
     PREPARE = "PREPARE"
+    #: Milestone 8b S6. Writes only to browser-local, authenticated form controls
+    #: while the browser is under the *verified* S6 network freeze: both the
+    #: Playwright guard and the egress broker refuse everything, and no relay is
+    #: open. Deliberately not `PREPARE`, which is the booking adapter's and does
+    #: not carry that guarantee. It has no reconciliation path: there is no
+    #: authoritative verifier for "did this site save my draft", and the freeze
+    #: is what makes the question moot rather than answerable.
+    LOCAL_DRAFT = "LOCAL_DRAFT"
     #: Can change the outside world irreversibly. Requires a durable approval,
     #: a persisted execution attempt, and a reconciliation path.
     CONSEQUENTIAL = "CONSEQUENTIAL"

@@ -303,7 +303,7 @@ describe('the exact disclosure approval', () => {
     expect(h.runtime.approvals).toBe(0)
   })
 
-  it('approves with an id and a revision only, ends prepared_nothing, and mutates no page', async () => {
+  it('approves with an id and a revision only, fills locally (frozen), and mutates no page', async () => {
     const h = harness()
     const snapshot = await waiting(h)
     const card = snapshot.formPlan!.disclosure!
@@ -311,7 +311,7 @@ describe('the exact disclosure approval', () => {
     const result = await h.controller.approveFieldDisclosure(card.actionId, card.revision)
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect(result.value.formPlan?.disclosure?.resultCode).toBe('prepared_nothing')
+    expect(result.value.formPlan?.disclosure?.resultCode).toBe('local_draft_prepared')
     expect(result.value.formPlan?.disclosure?.approvalStatus).toBe('CONSUMED')
     const approvals = h.runtime.calls.slice(before).filter((call) => /field-disclosure/.test(call.path))
     expect(approvals).toHaveLength(1)

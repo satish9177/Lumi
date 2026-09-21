@@ -18,9 +18,10 @@ Two responsibilities, and they are both about not believing things:
 import logging
 import uuid
 from types import TracebackType
+from typing import TypeVar
 
 import httpx
-from pydantic import SecretStr, ValidationError
+from pydantic import BaseModel, SecretStr, ValidationError
 
 from app.browser.errors import (
     BrowserWorkerError,
@@ -33,6 +34,16 @@ from app.browser.protocol import (
     WORKER_TOKEN_HEADER,
     DispatchRequest,
     DispatchResponse,
+    FormDiscardRequest,
+    FormDiscardResponse,
+    FormFreezeRequest,
+    FormFreezeResponse,
+    FormHandoverRequest,
+    FormHandoverResponse,
+    PrepareCaptureRequest,
+    PrepareCaptureResponse,
+    PrepareRestoreRequest,
+    PrepareRestoreResponse,
     ProfileSessionRequest,
     ProfileSessionResponse,
     SessionRequest,
@@ -46,6 +57,8 @@ from app.browser.protocol import (
 )
 
 logger = logging.getLogger("lumi.browser.client")
+
+_Response = TypeVar("_Response", bound=BaseModel)
 
 
 class BrowserWorkerClient:
@@ -206,6 +219,64 @@ class BrowserWorkerClient:
         if answer.worker_generation != request.expected_worker_generation:
             raise StaleWorkerResultError("it came from a different worker generation")
         return answer
+
+    # ---- Milestone 8b S6: form preparation, freeze, discard, handover ------------------
+
+    async def _typed_call(
+        self, path: str, request: BaseModel, response_type: type[_Response], *, profile_id: uuid.UUID,
+        worker_generation: uuid.UUID,
+    ) -> _Response:
+        """One narrow POST. A connection refusal means nothing was delivered; anything
+        after delivery that does not come back readable is a lost response."""
+        try:
+            response = await self._client.post(path, json=request.model_dump(mode="json"))
+        except httpx.ConnectError:
+            raise BrowserWorkerUnavailableError("the worker refused the connection")
+        except httpx.HTTPError as error:
+            raise BrowserWorkerLostResponseError(type(error).__name__)
+        if response.status_code >= 400:
+            raise _rejection(response)
+        try:
+            answer = response_type.model_validate(response.json())
+        except (ValueError, ValidationError) as error:
+            raise BrowserWorkerLostResponseError(
+                f"the worker returned an unreadable result ({type(error).__name__})"
+            )
+        if getattr(answer, "profile_id", profile_id) != profile_id:
+            raise StaleWorkerResultError("it answers a different profile")
+        if getattr(answer, "worker_generation", worker_generation) != worker_generation:
+            raise StaleWorkerResultError("it came from a different worker generation")
+        return answer
+
+    async def prepare_capture(self, request: PrepareCaptureRequest) -> PrepareCaptureResponse:
+        return await self._typed_call(
+            "/v1/profiles/prepare-capture", request, PrepareCaptureResponse,
+            profile_id=request.profile_id, worker_generation=request.expected_worker_generation,
+        )
+
+    async def prepare_restore(self, request: PrepareRestoreRequest) -> PrepareRestoreResponse:
+        return await self._typed_call(
+            "/v1/profiles/prepare-restore", request, PrepareRestoreResponse,
+            profile_id=request.profile_id, worker_generation=request.expected_worker_generation,
+        )
+
+    async def form_freeze(self, request: FormFreezeRequest) -> FormFreezeResponse:
+        return await self._typed_call(
+            "/v1/profiles/form-freeze", request, FormFreezeResponse,
+            profile_id=request.profile_id, worker_generation=request.expected_worker_generation,
+        )
+
+    async def form_discard(self, request: FormDiscardRequest) -> FormDiscardResponse:
+        return await self._typed_call(
+            "/v1/profiles/form-discard", request, FormDiscardResponse,
+            profile_id=request.profile_id, worker_generation=request.expected_worker_generation,
+        )
+
+    async def form_handover(self, request: FormHandoverRequest) -> FormHandoverResponse:
+        return await self._typed_call(
+            "/v1/profiles/form-handover", request, FormHandoverResponse,
+            profile_id=request.profile_id, worker_generation=request.expected_worker_generation,
+        )
 
     async def dispatch(self, request: DispatchRequest) -> DispatchResponse:
         try:

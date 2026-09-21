@@ -423,6 +423,7 @@ async def _page_result(
     )
     blocks = [TextBlock(id=f"b{index + 1}", text=text) for index, (text, _) in enumerate(projected)]
     form_epoch = tab.adopt_inventory(collected)
+    tab.note_observation(context.observation_id)
     tab.record(
         links=link_table,
         blocks={f"b{index + 1}": raw for index, (_, raw) in enumerate(projected)},
@@ -466,6 +467,12 @@ def _session(context: OperationContext) -> AuthenticatedReadSession:
     session = context.authenticated_session
     if session is None:
         raise SessionError("unknown_session")
+    if session.dirty or session.handed_over:
+        # Milestone 8b S6. A page holding a local draft can reflect a protected
+        # value anywhere in its text, so no agent read, navigation, history move
+        # or tab change may run against it: only the reviewed discard and
+        # handover operations touch a dirty session, and neither is one of these.
+        raise SessionError("form_is_dirty")
     return session
 
 

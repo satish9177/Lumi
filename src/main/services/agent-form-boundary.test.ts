@@ -177,7 +177,7 @@ describe('the trusted cards', () => {
       { dataRef: 'email', kind: 'email', preview: 'E***@e***.test', updatedAt: '2026-09-20T10:00:00+00:00' },
       { dataRef: 'country', kind: 'country', preview: 'India', updatedAt: '2026-09-20T10:00:00+00:00' }
     ],
-    formCount: 1, candidateElementCount: 5
+    formCount: 1, candidateElementCount: 5, preparing: true
   }
   const grant = (status: 'PENDING' | 'ACTIVE') => ({
     grantId: '00000000-0000-4000-8000-0000000000aa', status, revision: 1, allowedDataRefs: ['email', 'country'] as never,
@@ -185,7 +185,7 @@ describe('the trusted cards', () => {
   })
   const disclosure = (over: Record<string, unknown> = {}) => ({
     actionId: '00000000-0000-4000-8000-0000000000bb', revision: 2, actionStatus: 'WAITING_APPROVAL' as const,
-    approvalStatus: 'PENDING' as const, site: 'jobs.example.test', formLabel: 'Application', revealsCountry: false,
+    approvalStatus: 'PENDING' as const, site: 'jobs.example.test', formLabel: 'Application', revealsCountry: false, executable: true,
     fields: [
       { kind: 'saved_detail' as const, fieldLabel: 'Email address', controlType: 'email', dataRef: 'email' as const, preview: 'E***@e***.test' },
       { kind: 'option' as const, fieldLabel: 'Country', controlType: 'select_single', optionLabel: 'India' },
@@ -213,16 +213,22 @@ describe('the trusted cards', () => {
     expect(withoutCountry.permission?.countryNotice).toBeUndefined()
   })
 
-  it('shows the exact manifest with truthful wording -- never "Fill"', () => {
+  it('shows the exact manifest and says, before the click, that approving FILLS the form locally', () => {
     const view = { ...base, grant: grant('ACTIVE'), disclosure: disclosure() }
     const model = describeFormPlan(view, true, false, NOW)
     expect(model.stage).toBe('approval')
     expect(model.eyebrow).toBe('PREPARE THIS FORM')
     expect(model.controls).toEqual(['approve_disclosure', 'decline_disclosure'])
     const text = JSON.stringify(model)
-    expect(text).toContain('Lumi cannot submit this form.')
-    expect(text).toContain('does not change the page')
-    expect(text).not.toMatch(/\bfill\b/i)
+    expect(model.title).toBe('Fill these fields?')
+    // What the click does, said before the click: the freeze, the guarantee, the limits.
+    expect(text).toContain('freeze this browser page')
+    expect(text).toContain('No request can be sent while Lumi is filling')
+    expect(text).toContain('Lumi will not submit the form and cannot submit it')
+    expect(text).toContain('Forms that need the network to accept a value may fail')
+    expect(text).toContain('The draft stays frozen until you discard it or hand the page over to yourself')
+    expect(text).toContain('If Lumi or your computer restarts, they are gone and you will need to prepare the form again')
+    expect(text).not.toMatch(/does not change the page|nothing was changed/i)
     const card = describeDisclosureCard(view.disclosure)
     expect(card.site).toBe('jobs.example.test')
     expect(card.formLabel).toBe('Application')
@@ -233,7 +239,7 @@ describe('the trusted cards', () => {
     ])
   })
 
-  it('says nothing was changed once the approval is spent', () => {
+  it('keeps the historical S5 result readable: nothing was changed', () => {
     const model = describeFormPlan({ ...base, grant: grant('ACTIVE'), disclosure: disclosure({ actionStatus: 'SUCCEEDED', approvalStatus: 'CONSUMED', resultCode: 'prepared_nothing' }) }, true, false, NOW)
     expect(model.stage).toBe('prepared')
     expect(model.controls).toEqual([])
@@ -254,7 +260,8 @@ describe('the trusted cards', () => {
     }) as never
     expect(describeEvent(event('action.proposed'))).toBe('Form plan prepared — nothing has been changed')
     expect(describeEvent(event('action.approved'))).toBe('You approved this form plan')
-    expect(describeEvent(event('action.succeeded'))).toBe('Form plan approved — nothing was prepared in the page')
+    expect(describeEvent(event('action.succeeded', { reason: 'approval_settled' }))).toBe('Form plan approved — nothing was prepared in the page')
+    expect(describeEvent(event('action.succeeded', { reason: 'executor_reported' }))).toBe('Lumi filled the form in the browser window with the network frozen and checked every field')
     expect(describeEvent(event('action.rejected', { reason: 'user_declined' }))).toBe('You declined this form plan')
     for (const type of ['action.proposed', 'action.approved', 'action.execution_started', 'action.succeeded']) {
       expect(describeEvent(event(type))).not.toMatch(/book/i)

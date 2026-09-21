@@ -134,8 +134,12 @@ const ALLOWED_ROUTES: ReadonlyArray<{ method: RuntimeMethod; pattern: RegExp }> 
   { method: 'GET', pattern: new RegExp(`^/tasks/${UUID_PART}/authenticated/form$`) },
   {
     method: 'POST',
-    pattern: new RegExp(`^/tasks/${UUID_PART}/authenticated/form/(prepare-scope|grant|revoke|planning-context|propose)$`)
+    pattern: new RegExp(`^/tasks/${UUID_PART}/authenticated/form/(prepare-scope|grant|revoke|planning-context|propose|preparation-mode|stop)$`)
   },
+  // Milestone 8b S6: the network-frozen local draft. Six routes, every segment an opaque id or
+  // one of a few fixed words; none takes or returns a value, a manifest, an origin or a URL.
+  { method: 'POST', pattern: new RegExp(`^/form-drafts/${UUID_PART}/(discard|handover-request)$`) },
+  { method: 'POST', pattern: new RegExp(`^/actions/${UUID_PART}/form-handover/(approve|reject)$`) },
   {
     method: 'POST',
     pattern: new RegExp(`^/actions/${UUID_PART}/field-disclosure/(approve|reject)$`)

@@ -287,6 +287,39 @@ class EgressBroker:
         logger.info("egress broker frozen", extra={"broker_generation": str(self.generation)})
         return self.active_connections
 
+    async def freeze_and_drain(self, *, timeout_seconds: float = 3.0) -> int:
+        """Freeze, then cancel every relay, and report how many are left.
+
+        Milestone 8b S6. `freeze()` alone stops *new* connections; it cannot stop
+        a CONNECT tunnel or keep-alive relay that was opened before it, and a
+        page that is dirty must not be able to write into one. So:
+
+        1. the mode is set to `FROZEN` **first**, so nothing new resolves or
+           dials while the drain runs (and `_serve` refuses a fresh connection
+           without ever registering it);
+        2. every relay task is cancelled, which closes both of its sockets in
+           `_splice`'s `finally`;
+        3. this waits, bounded, for the set to be empty, and cancels again if a
+           task slipped in between.
+
+        Returns `active_connections` at the end. Zero is the only value a caller
+        may treat as "no path to the network exists". It never thaws to make that
+        happen.
+        """
+        self.mode = BrokerMode.FROZEN
+        logger.info("egress broker frozen and draining", extra={"broker_generation": str(self.generation)})
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while self._connections:
+            pending = list(self._connections)
+            for task in pending:
+                task.cancel()
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                break
+            await asyncio.wait(pending, timeout=remaining)
+        return self.active_connections
+
     def thaw(self) -> None:
         self.mode = BrokerMode.OPEN
 
@@ -378,6 +411,15 @@ class EgressBroker:
     # ---- the listener ---------------------------------------------------------
 
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        if self.mode is BrokerMode.FROZEN:
+            # Milestone 8b S6. A connection that arrives while frozen is refused
+            # before it is registered, so `active_connections` stays a fact about
+            # relays that exist and a refused connection can never be mistaken
+            # for one. Nothing is parsed, resolved or dialled.
+            self._refuse("frozen", "listener")
+            await _respond(writer, 403, "frozen")
+            _close(writer)
+            return
         task = asyncio.current_task()
         if task is not None:
             self._connections.add(task)

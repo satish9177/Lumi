@@ -61,6 +61,8 @@ class DocumentEpochs:
         self._page = page
         self.epoch = 1
         self.in_flight: set[object] = set()
+        #: The document epoch each in-flight request started in (Milestone 8b S6).
+        self._started_in: dict[object, int] = {}
         page.on("framenavigated", self._navigated)
         page.on("request", self._started)
         page.on("requestfinished", self._ended)
@@ -77,9 +79,25 @@ class DocumentEpochs:
         resource = getattr(request, "resource_type", "")
         if resource in ("document", "script", "xhr", "fetch"):
             self.in_flight.add(request)
+            self._started_in[request] = self.epoch
 
     def _ended(self, request: object) -> None:
         self.in_flight.discard(request)
+        self._started_in.pop(request, None)
+
+    @property
+    def pending(self) -> set[object]:
+        """Requests still in flight that belong to the *current* document.
+
+        A request the previous document started can never carry a value the current
+        one holds, and Playwright does not always report an abandoned, intercepted
+        request as finished, so `in_flight` can keep one indefinitely. A freeze that
+        must be sure nothing is in flight asks this instead, so a stale entry from a
+        document that is gone cannot hold it up forever. (The network layer's own
+        count -- `AccountReadNetworkGuard.in_flight` -- is what still sees such a
+        request until its fetch actually ends.)
+        """
+        return {item for item in self.in_flight if self._started_in.get(item, self.epoch) == self.epoch}
 
 
 @dataclass(slots=True)

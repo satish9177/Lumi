@@ -55,6 +55,10 @@ from app.domain.research import MAX_HOST_CHARS, OBSERVATION_REF
 
 FORM_PREPARE_KIND: Final = "form_prepare"
 FORM_PREPARE_POLICY_VERSION: Final = "form-prepare-v1"
+#: What a manifest built now carries. S6 changed what approving one *does*, so it is
+#: a new policy version; the grant scope keeps `form-prepare-v1` (it authorises a
+#: planner to see a structure, which S6 did not change).
+MANIFEST_POLICY_VERSION: Final = "form-prepare-v2"
 #: The persisted tool identity of the exact disclosure approval. It is **not** a
 #: worker operation: the browser worker has no operation of this name, and the
 #: runtime never dispatches an action carrying it.
@@ -82,6 +86,22 @@ FORM_PREPARE_STATE_CODES: Final = frozenset(
         "stale_form_epoch",
         "origin_changed",
         "grant_not_usable",
+        # Milestone 8b S6: the browser, the draft or the window is not in the state the
+        # request needs. Never malformed input: the same request is fine in another state.
+        "form_is_dirty",
+        "preparation_mode_required",
+        "preparation_destination_missing",
+        "preparation_navigation_failed",
+        "legacy_manifest_not_executable",
+        "draft_changed",
+        "draft_not_live",
+        "draft_not_found",
+        "freeze_owned",
+        "worker_busy",
+        "step_in_flight",
+        "left_site_scope",
+        "login_required",
+        "no_form_observed",
     }
 )
 
@@ -271,11 +291,18 @@ class ManifestField(_Frozen):
 
 
 class DisclosureManifest(_Frozen):
-    """The exact, reviewable statement a user approves. Free of raw saved values."""
+    """The exact, reviewable statement a user approves. Free of raw saved values.
+
+    `policy_version` is `form-prepare-v2` for every manifest built since Milestone 8b
+    S6, whose approval funds one network-frozen local draft. A `form-prepare-v1`
+    manifest is a historical S5 approval (it could only ever end in
+    `prepared_nothing`): it still parses, and its digest still verifies, so history
+    stays readable -- and it is **never executable**, whatever its state.
+    """
 
     schema_version: Literal[1] = 1
     kind: Literal["form_disclosure_manifest"] = FORM_DISCLOSURE_KIND
-    policy_version: Literal["form-prepare-v1"] = FORM_PREPARE_POLICY_VERSION
+    policy_version: Literal["form-prepare-v1", "form-prepare-v2"] = MANIFEST_POLICY_VERSION
     classification: Literal["account_private"] = ACCOUNT_PRIVATE
     task_id: uuid.UUID
     profile_id: uuid.UUID
@@ -527,6 +554,7 @@ __all__ = [
     "FORM_PREPARE_STATE_CODES",
     "FORM_PREPARE_POLICY_VERSION",
     "FORM_PREPARE_TOOL",
+    "MANIFEST_POLICY_VERSION",
     "MAX_FORM_FIELDS",
     "PREPARED_NOTHING",
     "CheckEntry",

@@ -19,7 +19,10 @@ from app.domain.authenticated import Recipient
 from app.domain.form_prepare import MAX_FORM_FIELDS, ManifestField
 from app.domain.protected_values import PROTECTED_KINDS, ProtectedKind
 from app.domain.research import GrantStatus
+from app.domain.local_form_draft import DraftStatus
+from app.repositories.form_drafts import DraftRecord
 from app.repositories.form_prepare import FormPrepareGrantRecord, SavedDetail
+from app.services.form_draft import HandoverView
 from app.services.form_prepare import DisclosureView, FormPlanView, PlanningContext
 
 
@@ -188,8 +191,12 @@ class DisclosureCardResponse(BaseModel):
     fields: list[DisclosureFieldResponse]
     #: True when a `country` value is shown as-is (a country cannot be masked).
     reveals_country: bool
-    #: `prepared_nothing` once the approval was spent. Nothing was changed.
+    #: What the spent approval ended in: `local_draft_prepared`, `local_draft_partial`,
+    #: `local_draft_not_written`, or the historical S5 `prepared_nothing`.
     result_code: str | None
+    #: True for a `form-prepare-v2` manifest, whose approval fills the form locally with the
+    #: network frozen. False for a historical S5 manifest, which is never executable.
+    executable: bool
 
     @classmethod
     def from_view(cls, view: DisclosureView) -> "DisclosureCardResponse":
@@ -205,7 +212,71 @@ class DisclosureCardResponse(BaseModel):
             fields=[DisclosureFieldResponse.from_field(field) for field in manifest.fields],
             reveals_country="country" in manifest.data_refs,
             result_code=view.result_code,
+            executable=view.executable,
         )
+
+
+class DraftCardResponse(BaseModel):
+    """The local draft, as the trusted card shows it. Ids, a status and counts only --
+    never a value, a field label, a hash or an origin."""
+
+    draft_id: uuid.UUID
+    revision: int
+    status: DraftStatus
+    field_count: int
+    #: Some approved fields were not verified: the form needs manual review.
+    partial: bool
+    site: str
+
+    @classmethod
+    def from_record(cls, record: DraftRecord, *, site: str, approved_fields: int | None = None) -> "DraftCardResponse":
+        return cls(
+            draft_id=record.id,
+            revision=record.revision,
+            status=record.status,
+            field_count=len(record.fields),
+            partial=record.status is DraftStatus.STALE,
+            site=site,
+        )
+
+
+class HandoverCardResponse(BaseModel):
+    """The second exact approval: lifting the freeze while the page is dirty."""
+
+    action_id: uuid.UUID
+    revision: int
+    action_status: str
+    approval_status: str | None
+    approval_expires_at: datetime | None
+    draft_id: uuid.UUID
+    field_count: int
+    partial: bool
+    site: str
+    #: `handed_over`, `handover_refused` or `handover_unknown` once the approval was spent.
+    result_code: str | None
+
+    @classmethod
+    def from_view(cls, view: HandoverView) -> "HandoverCardResponse":
+        return cls(
+            action_id=view.action.id,
+            revision=view.action.revision,
+            action_status=view.action.status.value,
+            approval_status=view.approval_status,
+            approval_expires_at=view.approval_expires_at,
+            draft_id=view.proposal.draft_id,
+            field_count=view.proposal.field_count,
+            partial=view.proposal.partial,
+            site=view.proposal.site_display,
+            result_code=view.result_code,
+        )
+
+
+class DraftDecisionBody(BaseModel):
+    """The trusted click on a draft card: the revision that was on screen, nothing else."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=1)
 
 
 class FormPlanResponse(BaseModel):
@@ -219,10 +290,17 @@ class FormPlanResponse(BaseModel):
     form_count: int
     candidate_element_count: int
     max_fields: int = MAX_FORM_FIELDS
+    #: The profile is open in a headed preparation window, nothing written yet.
+    preparing: bool = False
+    draft: DraftCardResponse | None = None
+    handover: HandoverCardResponse | None = None
 
     @classmethod
-    def from_view(cls, view: FormPlanView) -> "FormPlanResponse":
+    def from_view(cls, view: FormPlanView, handover: HandoverView | None = None) -> "FormPlanResponse":
         return cls(
+            preparing=view.preparing,
+            draft=DraftCardResponse.from_record(view.draft, site=view.site or "") if view.draft else None,
+            handover=HandoverCardResponse.from_view(handover) if handover else None,
             task_id=view.task.id,
             task_status=view.task.status.value,
             objective=view.objective,
