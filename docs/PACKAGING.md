@@ -26,9 +26,73 @@ Lumi/                                  (install directory)
 ```powershell
 npm.cmd run package:dir     # release\<version>\win-unpacked
 npm.cmd run package         # plus the NSIS installer
+npm.cmd run package:release # signed release plus post-build verification
 ```
 
-`build:agent-runtime` (run by both):
+`package:dir` and `package` are development packaging paths. They may produce
+unsigned output and remain unchanged. An unsigned package is **not a release
+artifact** and **must not be used for real-account testing**.
+
+`package:release` is the only release path. Before it runs either build step it
+requires these trusted environment values:
+
+- `LUMI_SIGNING_CERT_SHA1`: the complete 40-hex certificate-store thumbprint;
+  whitespace is removed and the value is uppercased before an exact match.
+- `LUMI_SIGNING_TIMESTAMP_URL`: an explicit `http:` or `https:` RFC 3161
+  endpoint without credentials, a query string or a fragment. There is
+  deliberately no default.
+- `LUMI_SIGNING_EXPECTED_SUBJECT`: optional exact signer subject. If present,
+  post-build verification requires an exact match.
+
+The release path runs the same `build` and `build:agent-runtime` steps as
+`package`, then invokes electron-builder 26 with release-only configuration:
+`forceCodeSigning: true`, certificate-store selection by the exact SHA-1
+thumbprint, `signingHashAlgorithms: ['sha256']`, and the explicit RFC 3161
+server. It also forces `directories.output` to `release/<version>` and passes
+`publish: 'never'`, so builder cannot publish before independent verification.
+The inherited package build configuration is rejected before work if it
+contains publishing, lifecycle/artifact hooks, custom signing hooks, file-based
+certificate credentials, Azure signing, an NSIS script, or disabled executable
+signing. The SHA-1 thumbprint identifies the certificate; it is not a SHA-1
+file-signature digest. No certificate file, private key, password, token or
+vendor credential is read by Lumi's wrapper. The expected production model is
+a Windows certificate-store certificate whose private key operations remain in
+the provider's HSM through its CNG/KSP integration (for example, an eSigner
+store integration).
+
+After packaging, the release command verifies exactly these distributed files:
+
+- `release/<version>/win-unpacked/Lumi.exe`;
+- the single expected `release/<version>/Lumi Setup <version>.exe` installer.
+
+The release directory may contain no other top-level `.exe`, both expected
+artifacts must be newer than the recorded start of this release build, and
+electron-builder must report the canonical installer path in its returned
+artifact list. Stale files are never deleted automatically; they fail the gate.
+
+For each file, fixed PowerShell calls `Get-AuthenticodeSignature` and requires
+`Status == Valid`, a signer certificate, and the exact configured thumbprint
+(and exact subject when configured). A fixed, argument-array SignTool command
+then runs `verify /pa /all /tw /v`; command failure, warnings, an untrusted
+chain, a missing timestamp, missing/non-parseable output, or a missing tool all
+fail the release. A signer with `Subject == Issuer` is also rejected. The
+PowerShell timestamp certificate is treated only as a hint and is not proof;
+the gate establishes only that a trusted timestamp is present and verified by
+SignTool `/tw`. It does not independently prove the timestamp protocol or
+server. The forced RFC 3161 signing configuration plus artifact freshness ties
+that verification to this build. Before building, the same PowerShell check
+also requires the vendored SignTool itself to be `Valid` and Microsoft-signed.
+
+The result is written outside the application at
+`release/<version>/signing-report/release-signing-report.json`. It contains
+artifact paths and SHA-256 hashes, signature status, public signer identity and
+validity dates, SignTool `/tw` timestamp result, whether freshness was checked,
+verification time and pass/fail. It
+does not contain environment dumps or credentials. A failure still produces a
+report when artifact discovery and report output are available, then exits
+non-zero.
+
+`build:agent-runtime` (run by all three packaging commands):
 
 1. copies the uv-managed CPython that `services/agent/.venv` is based on;
 2. installs exactly `uv export --frozen --no-dev` into it;
@@ -220,10 +284,57 @@ Authenticode-signed:
 
 Do not disable Smart App Control or WDAC to run an unsigned build; sign it.
 
+### Third-party executable signing policy
+
+electron-builder 26.15.3 would normally call `signIf` for every `.exe` copied
+through `extraResources`, and it also walks executable files in
+`resources/app.asar.unpacked`. With a real Lumi certificate, the default would
+therefore replace vendor signatures on bundled executables. The release-only
+configuration prevents that with the supported `win.signExts` suffix policy:
+positive Lumi-owned suffixes are listed before a catch-all `!.exe` exclusion.
+This relies on the v26 `shouldSignFile` precedence inspected in
+`node_modules/app-builder-lib/out/winPackager.js` and is pinned by tests.
+
+The packaged executable-code classes are:
+
+1. **Lumi-owned, must sign:** `Lumi.exe`, the exact versioned NSIS installer,
+   and electron-builder's temporary `__uninstaller.exe` before it is embedded.
+2. **Third-party, retain vendor provenance:** CPython (`python.exe`,
+   `pythonw.exe`), Playwright Chromium (`chrome.exe` and helpers), ffmpeg, Node,
+   NSIS `elevate.exe`, native `.pyd`/`.dll` dependencies, and other executable
+   runtime content. These are not selected for Lumi signing; existing vendor
+   signatures are neither removed nor replaced.
+3. **Actually passed to Lumi signing by the release configuration:** only paths
+   ending in `Lumi.exe`, the exact `Lumi Setup <version>.exe`, or
+   `__uninstaller.exe`. The final verifier independently checks `Lumi.exe` and
+   the installer. The embedded uninstaller is not separately extracted and
+   verified by this gate.
+
+The filename policy is intentionally narrow. A future Lumi-owned executable
+requires an explicit reviewed suffix and verification decision. Conversely, a
+third-party file colliding with one of the allowlisted suffixes would be a
+release-review blocker; the current runtime has no such collision.
+
+### What this gate does not establish
+
+`Valid`, `/pa`, a trusted timestamp verified by SignTool `/tw`, and a
+non-self-issued leaf are necessary technical
+checks, not proof that the intended public production account was purchased or
+approved. An enterprise/private root could be trusted locally, and this script
+does not independently prove public-CA issuance. The real-account gate also
+requires a release manager to confirm a publicly trusted code-signing CA and
+the intended Lumi publisher identity. The JSON therefore never claims that the
+real-account gate is satisfied; it says only `release signature verified`.
+
+No production certificate has been acquired or exercised in this repository.
+Until that human identity/CA check and a real signed-artifact run occur,
+real-account release remains **BLOCKED**.
+
 ## Known limitations
 
 - PostgreSQL is not bundled.
-- Unsigned build (see above).
+- Development packages may be unsigned; no production certificate has been
+  acquired, so the real signed-release path has not yet been exercised.
 - The bundled demo clinic site is the deterministic test fixture; no real
   clinic website is supported.
 - Only Windows x64 is packaged.

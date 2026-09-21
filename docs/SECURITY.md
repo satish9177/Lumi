@@ -84,6 +84,37 @@ The only user-editable input is `agent-runtime.json`, read and validated by
 main. Distribution builds must be Authenticode-signed; see
 [PACKAGING.md](PACKAGING.md#windows-application-control).
 
+### Release-signing boundary
+
+Development packaging (`package:dir` and `package`) may be unsigned. Unsigned
+output is not a release artifact and must not be used with a real account. The
+separate `package:release` path fails before building unless an exact full
+certificate-store thumbprint and explicit RFC 3161 URL are supplied from the
+environment; credential-bearing, query-string and fragment URLs are rejected.
+It rejects inherited publish/hooks and alternate signing configuration, forces
+`publish: 'never'`, and forces the versioned release output directory. It then
+treats Windows—not builder log text—as authoritative: `Get-AuthenticodeSignature`
+must return `Valid` with the exact signer, and fixed SignTool verification must
+establish the Authenticode policy chain and that a trusted timestamp is present
+and verified by `/tw` for both `Lumi.exe` and the NSIS installer. That check
+does not independently prove the timestamp protocol or server; the forced RFC
+3161 signing configuration and fresh artifact mtimes tie it to this build.
+SignTool must itself be `Valid` and Microsoft-signed. Missing tools, stale or
+extra artifacts, ambiguous output and every non-`Valid` status fail closed.
+
+The release signing configuration does not pass bundled vendor executables to
+the Lumi signer. CPython, Chromium, ffmpeg, Node and native extensions retain
+their vendor provenance; Lumi owns and signs its application executable, NSIS
+installer and the temporary embedded uninstaller. Details and the exact v26
+mechanism are in [PACKAGING.md](PACKAGING.md#third-party-executable-signing-policy).
+
+A self-issued signer is rejected, but local trust can still include a private
+enterprise CA. Therefore automation reports only `release signature verified`.
+It never opens the real-account gate by itself: a release manager must also
+confirm a publicly trusted code-signing CA and the intended Lumi publisher.
+No production certificate has been acquired or validated, so real-account
+release remains **BLOCKED**.
+
 ## Public page inspection (Milestone 7a)
 
 Page inspection is disabled unless trusted configuration names public hosts.
@@ -696,10 +727,13 @@ the machine. (6) Service workers stay blocked, so a queued Background Sync write
 - **A persistent profile is an impersonation artefact, and same-user isolation
   does not exist.** Any process running as the user can decrypt it. This is the
   largest new risk M8a introduces and nothing in the design removes it.
-- **The packaged build is unsigned**, and unsigned distribution combined with a
-  real session cookie is materially worse than unsigned plus a disposable
-  context. **Authenticode signing is a release gate before M8a reaches a real
-  user account**, not a documentation note. M7b's packaged acceptance
+- **The existing packaged build is unsigned**, and unsigned distribution
+  combined with a real session cookie is materially worse than unsigned plus a
+  disposable context. A fail-closed Authenticode release command now exists,
+  but no production certificate or successfully verified production artifact
+  exists yet. **Authenticode plus release-manager confirmation of the public CA
+  and publisher identity remains a release gate before M8a reaches a real user
+  account**, not a documentation note. M7b's packaged acceptance
   substituted the stock Electron executable to get past Smart App Control, which
   disables asar integrity validation; that workaround is **development-only** and
   is not acceptable for a build holding real session data. Machines with Smart
