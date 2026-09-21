@@ -95,6 +95,12 @@ def configure_runtime_process_tree() -> None:
     _JOB_HANDLE = int(job)
 
 
+def runtime_job_is_active() -> bool:
+    """True when this process created the kill-on-close job that its descendants inherit."""
+
+    return _JOB_HANDLE is not None
+
+
 def acquire_runtime_process_lock() -> None:
     """Refuse a second local runtime before either process reaches recovery."""
 

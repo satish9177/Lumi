@@ -13,6 +13,7 @@ dependencies = [
     "playwright>=1.49.0",
     "pydantic>=2.13.5",
     "pydantic-settings>=2.15.0",
+    "pywinauto>=0.6.9 ; sys_platform == 'win32'",
     "sqlalchemy[asyncio]>=2.0.53",
     "uvicorn>=0.53.0",
 ]
@@ -46,6 +47,7 @@ timeout_method = "thread"
 markers = [
     "browser: needs a real Chromium via Playwright and the deterministic fixture site",
     "hardkill: starts and hard-kills runtime/worker subprocesses",
+    "desktop_uia: drives a real Win32 fixture window through the real UI Automation backend (Windows only)",
 ]
 
 [tool.mypy]
@@ -55,5 +57,5 @@ files = ["app", "tests", "alembic", "evals"]
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["asyncpg.*"]
+module = ["asyncpg.*", "comtypes", "comtypes.*", "pywinauto", "pywinauto.*"]
 ignore_missing_imports = true

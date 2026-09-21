@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import AbstractContextManager, asynccontextmanager
 
@@ -12,6 +13,7 @@ from app.config import Settings
 from app.db.engine import create_database_engine, ping_database
 from app.db.migrations import verify_schema_is_current
 from app.browser.managed import ManagedBrowserWorker
+from app.desktop.managed import ManagedDesktopWorker
 from app.services.actions import ActionService
 from app.services.authenticated_read import AuthenticatedReadService
 from app.services.form_draft import FormDraftService
@@ -22,6 +24,8 @@ from app.services.booking_tasks import BookingTaskService
 from app.services.clinic_info import ClinicInfoService
 from app.services.page_inspection import PageInspectionService
 from app.services.browser_profiles import BrowserProfileService
+from app.services.desktop import DesktopService, desktop_exclusion_roots
+from app.services.windows_job import runtime_job_is_active
 from app.services.browser_execution import (
     BrowserExecutionService,
     BrowserWorkerConfig,
@@ -110,6 +114,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         worker: WorkerSource | None = None
         warm_up: asyncio.Task[None] | None = None
         takeover_watchdog: asyncio.Task[None] | None = None
+        desktop_worker: ManagedDesktopWorker | None = None
         try:
             await ping_database(engine)
             await verify_schema_is_current(engine)
@@ -232,6 +237,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     state=form_state,
                 )
                 app.state.form_prepare_service.attach_drafts(app.state.form_draft_service)
+                # Milestone 9 S1: Windows semantic observation. The isolated worker is created
+                # here but never started until the first desktop request, and only when the
+                # capability is explicitly enabled and the platform can do it.
+                if resolved.desktop_observation and os.name == "nt":
+                    desktop_worker = ManagedDesktopWorker(
+                        root_pids=desktop_exclusion_roots(os.getpid(), resolved.runtime_parent_pid),
+                        timeout_seconds=resolved.desktop_observation_timeout_seconds,
+                        # Every process in the runtime's own kill-on-close job is Lumi's, whatever
+                        # its parent chain looks like; only claimed when this runtime made that job.
+                        trust_job=runtime_job_is_active(),
+                    )
+                app.state.desktop_service = DesktopService(
+                    engine,
+                    runtime_generation=generation.id,
+                    worker=desktop_worker,
+                    timeout_seconds=resolved.desktop_observation_timeout_seconds,
+                    unsupported=resolved.desktop_observation and os.name != "nt",
+                )
+                # Desktop text is retained for a bounded time even if nothing asks for it again.
+                await app.state.desktop_service.sweep_expired()
                 # A research session belongs to the process that created it.
                 # Sessions a dead runtime left open describe browser contexts
                 # that no longer exist, so every semantic ref they issued has
@@ -280,6 +305,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await asyncio.gather(warm_up, return_exceptions=True)
             if isinstance(worker, ManagedBrowserWorker):
                 await worker.aclose()
+            if desktop_worker is not None:
+                await desktop_worker.aclose()
             if parent_watchdog is not None:
                 parent_watchdog.cancel()
                 await asyncio.gather(parent_watchdog, return_exceptions=True)

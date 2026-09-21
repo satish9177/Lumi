@@ -139,6 +139,8 @@ ERROR_CODES = (
     "browser_worker_not_configured",
     "browser_worker_unavailable",
     "concurrent_modification",
+    # Milestone 9 S1: one code, with a closed reason (see app/desktop/errors.py).
+    "desktop_refused",
     "destination_not_allowed",
     "invalid_action_transition",
     "invalid_booking_criteria",

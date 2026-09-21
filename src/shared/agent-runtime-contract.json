@@ -154,6 +154,7 @@
     "browser_worker_not_configured",
     "browser_worker_unavailable",
     "concurrent_modification",
+    "desktop_refused",
     "destination_not_allowed",
     "invalid_action_transition",
     "invalid_booking_criteria",

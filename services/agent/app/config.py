@@ -97,6 +97,14 @@ class Settings(DatabaseSettings):
         default=None, validation_alias="LUMI_BROWSER_SITE_ORIGIN"
     )
     browser_headless: bool = Field(default=True, validation_alias="LUMI_BROWSER_HEADLESS")
+    #: Milestone 9 S1: Windows semantic observation. Off unless explicitly enabled, exactly
+    #: like the browser worker: a deployment that has no business reading other applications
+    #: cannot acquire the capability by accident. Even when enabled, the isolated desktop
+    #: worker starts only on the first request, and nothing in the product calls it yet.
+    desktop_observation: bool = Field(default=False, validation_alias="LUMI_DESKTOP_OBSERVATION")
+    desktop_observation_timeout_seconds: float = Field(
+        default=30.0, gt=0, le=120, validation_alias="LUMI_DESKTOP_TIMEOUT_SECONDS"
+    )
     #: Milestone 7a public page inspection. Hosts (`github.com,*.example.org`)
     #: an approved inspection may open, and exact loopback test origins. Both
     #: empty (the default) means there is no public inspection capability.

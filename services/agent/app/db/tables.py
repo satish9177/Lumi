@@ -1052,3 +1052,55 @@ form_drafts = Table(
 _LIVE_DRAFT = text("status IN ('PREPARED', 'STALE')")
 Index("uq_form_drafts_profile_id_live", form_drafts.c.profile_id, unique=True, postgresql_where=_LIVE_DRAFT)
 Index("uq_form_drafts_task_id_live", form_drafts.c.task_id, unique=True, postgresql_where=_LIVE_DRAFT)
+
+
+#: Milestone 9 S1. Windows desktop observation, local and private.
+#:
+#: `desktop_worker_generations` mirrors `browser_worker_generations`: the identity of one
+#: run of the isolated desktop worker, bound to the runtime generation that started it.
+desktop_worker_generations = Table(
+    "desktop_worker_generations",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column(
+        "runtime_generation",
+        Uuid(),
+        ForeignKey("runtime_generations.id", ondelete="RESTRICT", name="fk_desktop_worker_generations_runtime_generation"),
+        nullable=False,
+    ),
+    Column("worker_started_at", DateTime(timezone=True), nullable=False),
+    Column("registered_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+)
+
+#: The safe durable projection of one semantic observation. `snapshot` is the closed
+#: `DesktopObservation` schema: roles, bounded names and text, and states. It has no column
+#: or key for a window handle, a process id or path, a bounding rectangle, an
+#: AutomationId, a class name or a password. Ownership is the worker generation (and through
+#: it the runtime generation): there is no task association because no planner consumes
+#: these observations yet, and nothing here is a provider-visible record.
+desktop_observations = Table(
+    "desktop_observations",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column(
+        "worker_generation",
+        Uuid(),
+        ForeignKey("desktop_worker_generations.id", ondelete="RESTRICT", name="fk_desktop_observations_worker_generation"),
+        nullable=False,
+    ),
+    Column("surface_ref", String(4), nullable=False),
+    Column("surface_epoch", Integer(), nullable=False),
+    Column("schema_version", Integer(), nullable=False),
+    Column("classification", String(16), nullable=False),
+    Column("snapshot", JSONB(), nullable=False),
+    Column("snapshot_digest", String(64), nullable=False),
+    Column("truncated", Boolean(), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint("classification = 'desktop_private'", name="classification"),
+    CheckConstraint("surface_ref ~ '^s([1-9]|1[0-6])$'", name="surface_ref_shape"),
+    CheckConstraint("surface_epoch >= 1", name="epoch_positive"),
+    CheckConstraint("schema_version >= 1", name="schema_version_positive"),
+    CheckConstraint("snapshot_digest ~ '^[0-9a-f]{64}$'", name="digest_format"),
+    CheckConstraint("jsonb_typeof(snapshot) = 'object'", name="snapshot_object"),
+)
+Index("ix_desktop_observations_created_at", desktop_observations.c.created_at)

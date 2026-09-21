@@ -1024,3 +1024,15 @@ class ErrorDetail(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: ErrorDetail
+
+
+class ObserveDesktopSurfaceBody(BaseModel):
+    """Which surface, exactly as listed: the worker generation it was listed under, its ref and its
+    epoch. A pair is only unique within one worker generation, and a ref alone could name a different
+    window after the inventory moved on, so all three are required."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    worker_generation: uuid.UUID
+    surface_ref: str = Field(pattern=r"^s(?:[1-9]|1[0-6])$")
+    surface_epoch: int = Field(ge=1)

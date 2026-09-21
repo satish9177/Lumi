@@ -13,6 +13,7 @@ from app.browser.errors import (
 from app.domain.booking import BookingProposalError
 from app.domain.page_observation import AnswerNotGroundedError
 from app.domain.research import AnswerNotGroundedError as ResearchAnswerNotGroundedError
+from app.desktop.errors import DesktopRefusal
 from app.domain.browser_profile import ProfileRefusal
 from app.domain.login_takeover import TakeoverRefusal
 from app.domain.research import ResearchRefusal
@@ -151,6 +152,20 @@ def _reasoned(status_code: int, code: str, message: str, attribute: str) -> Hand
         )
 
     return handler
+
+
+async def _desktop_refused(_: Request, exc: Exception) -> JSONResponse:
+    """Milestone 9 S1. A stable code and one closed reason, never a window title, a name
+    or any text observed on the desktop."""
+    assert isinstance(exc, DesktopRefusal)
+    return _error(
+        exc.http_status,
+        ErrorDetail(
+            code="desktop_refused",
+            message="That desktop operation was refused.",
+            reason=exc.code.value,
+        ),
+    )
 
 
 def _fixed(status_code: int, code: str, message: str) -> Handler:
@@ -356,6 +371,7 @@ def register_error_handlers(app: FastAPI) -> None:
             "code",
         ),
     )
+    app.add_exception_handler(DesktopRefusal, _desktop_refused)
     app.add_exception_handler(
         TakeoverRefusal,
         # Milestone 8a S2. Never page text, never a title, never a URL: a

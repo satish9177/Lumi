@@ -242,6 +242,59 @@ if (profileDirectories.length > 0) {
   throw new Error(`A browser-profiles directory reached the runtime bundle: ${profileDirectories.join(', ')}`)
 }
 
+// 4c. Milestone 9 S1: the Windows UI Automation backend (pywinauto + comtypes + pywin32).
+//
+// Verified from the bundle alone, before byte-compiling, because importing the backend makes
+// comtypes generate its UIAutomationClient wrappers into the bundled `comtypes/gen`, and those
+// files should exist (and be compiled) inside the artifact rather than being written beside an
+// installed copy. Native extensions are imported explicitly: Windows Application Control can block
+// an unsigned `.pyd` that a plain import would only touch later. Nothing here opens a window or
+// reads another application: it constructs the backend and reads this process's own integrity level.
+step('verifying the bundled Windows UI Automation backend imports from the bundle alone')
+const desktopEnv = { SystemRoot: process.env.SystemRoot ?? 'C:\\Windows', PYTHONDONTWRITEBYTECODE: '1', PYTHONUTF8: '1' }
+const desktop = JSON.parse(run(python, ['-c', [
+  'import importlib.metadata as m, json',
+  // The backend goes first: it selects COM's multithreaded apartment before anything initialises COM
+  // on this thread (importing pythoncom first would make it a single-threaded apartment and the
+  // backend's own initialisation would then fail). The pywin32 natives follow, explicitly.
+  'from app.desktop.uia_backend import PywinautoBackend',
+  'from app.desktop.win32 import WindowsSystemProbe',
+  'import _ctypes, comtypes.gen',
+  'import pythoncom, pywintypes, win32api, win32gui, win32process, win32event',
+  'PywinautoBackend()',
+  'integrity = WindowsSystemProbe().own_integrity_level()',
+  'assert integrity is not None',
+  'print(json.dumps({',
+  '    "backend": "pywinauto-uia",',
+  '    "pywinauto": m.version("pywinauto"), "comtypes": m.version("comtypes"), "pywin32": m.version("pywin32"),',
+  '    "ownIntegrityLevel": integrity}))'
+].join('\n')], { cwd: agentOut, env: desktopEnv }))
+const generated = readdirSync(join(OUT, 'python', 'Lib', 'site-packages', 'comtypes', 'gen')).filter((name) => name.endsWith('.py'))
+if (!generated.includes('UIAutomationClient.py')) {
+  throw new Error('The comtypes UI Automation wrappers were not generated into the bundle.')
+}
+desktop.generatedWrappers = generated.filter((name) => name !== '__init__.py')
+
+// The desktop package ships as source in the existing Python. It must not bring a helper executable
+// or a native binary of Lumi's own (those would need signing and are exactly what the release
+// gate's suffix policy does not expect), and no test fixture may be bundled.
+const listNames = (directory) => readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
+  entry.isDirectory() ? [entry.name, ...listNames(join(directory, entry.name))] : [entry.name])
+const bundledNames = listNames(agentOut)
+const ownBinaries = bundledNames.filter((name) => /\.(exe|dll|pyd|sys|msi|scr)$/i.test(name))
+if (ownBinaries.length > 0) {
+  throw new Error(`A Lumi-owned native binary reached the runtime bundle: ${ownBinaries.join(', ')}`)
+}
+if (bundledNames.some((name) => /desktop_fixture_app|desktop_harness|desktop_fakes|^tests?$/.test(name))) {
+  throw new Error('The desktop test fixture reached the runtime bundle.')
+}
+if (!existsSync(join(agentOut, 'app', 'desktop', 'worker.py'))) {
+  throw new Error('The desktop worker is missing from the runtime bundle.')
+}
+if (!readdirSync(join(agentOut, 'alembic', 'versions')).some((name) => name.startsWith('0012_'))) {
+  throw new Error('Migration 0012 is missing from the runtime bundle.')
+}
+
 // 5. Byte-compile once, so an installed copy never needs to write beside itself.
 step('byte-compiling')
 run(python, ['-m', 'compileall', '-q', '-j', '0', join(agentOut, 'app'), join(agentOut, 'alembic'), join(agentOut, 'evals'), join(OUT, 'python', 'Lib')], {})
@@ -281,13 +334,14 @@ const publicSuffix = JSON.parse(run(python, ['-c', [
 ].join('\n')], { cwd: agentOut, env: bare }))
 
 const manifest = {
-  version: 2,
+  version: 3,
   builtAt: new Date().toISOString(),
   python: run(python, ['-c', 'import sys; print(sys.version.split()[0])'], { env: bare }),
   playwright: run(python, ['-c', 'import importlib.metadata as m; print(m.version("playwright"))'], { env: bare }),
   browsers: skipBrowsers ? 'not bundled' : 'chromium',
   browser: browserSummary,
   publicSuffixList: publicSuffix,
+  desktop,
   // Measured, never estimated: the S1 report quotes these numbers.
   sizeMegabytes: {
     total: megabytes(measureTree(OUT)),

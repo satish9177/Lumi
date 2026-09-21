@@ -7,6 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.api.schemas import (
+    ObserveDesktopSurfaceBody,
     ActionListResponse,
     ActionResponse,
     BookingSearchResponse,
@@ -107,7 +108,9 @@ from app.domain.research import (
 )
 from app.domain.browser_profile import BrowserContextKind
 from app.domain.login_takeover import TakeoverRefusal
+from app.desktop.protocol import DesktopObservation, SurfaceListResponse
 from app.services.browser_profiles import BrowserProfileService
+from app.services.desktop import DesktopService
 from app.services.login_takeover import LoginTakeoverService
 from app.services.page_inspection import PageInspectionService
 from app.services.page_inspection import validate_request as validate_inspection_request
@@ -1478,3 +1481,47 @@ async def cancel_login(
         profile_id, attempt_id, expected_revision=body.expected_revision
     )
     return _takeover_response(outcome)
+
+
+# --- Windows desktop observation (Milestone 9, slice 1) -----------------------------
+#
+# Two routes and no verb. There is no route that focuses, invokes, types, selects,
+# scrolls, clicks, launches or executes anything, and neither request has a field for a
+# window handle, a process id, a selector, coordinates, a script or a property name.
+# Observations stay local: no other route, model, memory or summary refers to them.
+
+
+def get_desktop_service(request: Request) -> DesktopService:
+    service: DesktopService = request.app.state.desktop_service
+    return service
+
+
+DesktopServiceDep = Annotated[DesktopService, Depends(get_desktop_service)]
+_DESKTOP_REFUSED: dict[int | str, dict[str, Any]] = {
+    status.HTTP_403_FORBIDDEN: {"model": ErrorResponse},
+    status.HTTP_409_CONFLICT: {"model": ErrorResponse},
+    status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ErrorResponse},
+    status.HTTP_504_GATEWAY_TIMEOUT: {"model": ErrorResponse},
+}
+
+
+@router.get(
+    "/desktop/surfaces",
+    response_model=SurfaceListResponse,
+    responses=_DESKTOP_REFUSED,
+    summary="The user-visible Windows surfaces (internal, local only)",
+)
+async def list_desktop_surfaces(service: DesktopServiceDep) -> SurfaceListResponse:
+    return await service.list_surfaces()
+
+
+@router.post(
+    "/desktop/observations",
+    response_model=DesktopObservation,
+    responses=_DESKTOP_REFUSED,
+    summary="One bounded, read-only semantic observation of a surface (internal, local only)",
+)
+async def observe_desktop_surface(
+    body: ObserveDesktopSurfaceBody, service: DesktopServiceDep
+) -> DesktopObservation:
+    return await service.observe(body.worker_generation, body.surface_ref, body.surface_epoch)
