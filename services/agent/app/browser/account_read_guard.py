@@ -197,6 +197,16 @@ class AccountReadNetworkGuard:
         self._popups.add(task)
         task.add_done_callback(self._popups.discard)
 
+    async def drain_popups(self) -> None:
+        """Wait for every popup this guard scheduled to be closed to actually be closed.
+
+        Milestone 8b S6: a popup's own navigation is a request of its own, and a discard must not
+        open the network while one is still queued for the guard.
+        """
+        pending = list(self._popups)
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
     @staticmethod
     async def _close(popup: Page) -> None:
         try:

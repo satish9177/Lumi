@@ -603,7 +603,13 @@ def test_the_worker_exposes_no_generic_automation_endpoints(worker: WorkerProces
         "/health",
         "/v1/dispatch",
         "/v1/profiles/close",
+        # Milestone 8b S6: five narrow, typed routes and nothing generic beside them.
+        "/v1/profiles/form-discard",
+        "/v1/profiles/form-freeze",
+        "/v1/profiles/form-handover",
         "/v1/profiles/open",
+        "/v1/profiles/prepare-capture",
+        "/v1/profiles/prepare-restore",
         "/v1/profiles/takeover/confirm",
         "/v1/profiles/takeover/start",
         "/v1/sessions/close",
@@ -642,6 +648,20 @@ def test_the_worker_exposes_no_generic_automation_endpoints(worker: WorkerProces
             "expected_worker_generation",
             "site",
         }
+    # Milestone 8b S6. Each new route is an id, a generation and (for the freeze, the discard and
+    # the handover) the dispatch that owns the freeze. None takes a URL, a selector, a value, a
+    # label, a script or a network-mode flag; the handover carries only refs and verified hashes.
+    expected_s6 = {
+        "/v1/profiles/prepare-capture": {"profile_id", "runtime_generation", "expected_worker_generation", "site"},
+        "/v1/profiles/prepare-restore": {"profile_id", "runtime_generation", "expected_worker_generation", "site"},
+        "/v1/profiles/form-freeze": {"profile_id", "dispatch_id", "runtime_generation", "expected_worker_generation"},
+        "/v1/profiles/form-discard": {"profile_id", "dispatch_id", "runtime_generation", "expected_worker_generation"},
+        "/v1/profiles/form-handover": {"profile_id", "dispatch_id", "runtime_generation", "expected_worker_generation", "fields"},
+    }
+    for path, expected in expected_s6.items():
+        body = schema["paths"][path]["post"]["requestBody"]["content"]["application/json"]
+        reference = body["schema"]["$ref"].rsplit("/", 1)[-1]
+        assert set(schema["components"]["schemas"][reference]["properties"]) == expected, path
     # And no *field* anywhere in the worker's published contract could carry a
     # filesystem path or a serialised credential. Field names only: the
     # descriptions explain at length what is deliberately absent, and must be

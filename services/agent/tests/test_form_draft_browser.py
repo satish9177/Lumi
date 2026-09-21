@@ -150,8 +150,11 @@ async def test_headless_to_headed_preparation_fill_verify_and_discard(world: Wor
     assert events[-1].observation.inventory.forms
 
     disclosure = await chain.plan_and_propose()
-    resolutions, dials = chain.broker.counters.resolutions, chain.broker.counters.dial_count
     settled = await chain.form.approve(disclosure.action.id, expected_revision=disclosure.action.revision)
+    # The baseline is the worker's own freeze proof (taken after both layers were frozen), not a
+    # reading from before it: background Chromium traffic may resolve a name just before the freeze.
+    assert chain.freeze.proof is not None
+    resolutions, dials = chain.freeze.proof.resolution_count, chain.freeze.proof.dial_count
 
     assert settled.action.status is ActionStatus.SUCCEEDED
     assert settled.attempts[-1].result is not None and settled.attempts[-1].result["code"] == "local_draft_prepared"

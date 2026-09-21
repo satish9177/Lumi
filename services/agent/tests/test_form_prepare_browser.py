@@ -1,14 +1,18 @@
-"""Milestone 8b S5 acceptance: a real form, a real worker, and **zero** changes.
+"""Milestone 8b S5 acceptance, kept under S6: planning a form from a *headless* read changes nothing.
 
-The S5 chain, every link real: the synthetic authenticated `/app/apply` page is
-observed by the real worker (S4), the user's trusted click enables form planning,
-a scripted planner proposes `prepare_form`, the controller validates it against the
-persisted inventory, builds the exact manifest, a trusted approval spends it -- and
-then the assertions that make S5 what it is:
+The chain, every link real: the synthetic authenticated `/app/apply` page is observed by the
+real worker (S4), the user's trusted click enables form planning, a scripted planner proposes
+`prepare_form`, and the controller validates it against the persisted inventory and builds the
+exact manifest. The assertions that make S5 what it was still hold:
 
-    browser dispatches created by S5 == 0, worker mutation operations == 0,
-    input / change / focus / click / keydown / submit / autosave events == 0,
-    submissions == 0, and the approval cannot be spent a second time.
+    browser dispatches created by planning == 0, worker mutation operations == 0,
+    input / change / focus / click / keydown / submit / autosave events == 0, submissions == 0.
+
+What changed in S6 is the last step. Approving such a plan used to spend it as `prepared_nothing`;
+now approving fills a form in a HEADED preparation window with the network frozen, and a plan
+made from this headless document cannot do that: with no preparation window the approval is
+refused (`preparation_mode_required`), consumes nothing, and the page is still untouched. The
+executable path is `test_form_draft_browser.py`.
 """
 
 import uuid
@@ -18,7 +22,7 @@ import pytest
 
 from app.api.form_prepare_schemas import PlanningContextResponse
 from app.domain.action_status import ActionStatus
-from app.domain.errors import ApprovalNotUsableError
+from app.domain.form_prepare import FormPrepareRefusal
 from app.services.form_prepare import FormPrepareService
 from tests.test_authenticated_service_browser import (  # noqa: F401 - fixtures the acceptance builds on.
     World,
@@ -42,7 +46,7 @@ async def counters(world: World) -> dict[str, int]:
     return values
 
 
-async def test_an_apply_form_is_planned_and_approved_and_nothing_on_the_page_changes(world: World) -> None:
+async def test_an_apply_form_is_planned_from_a_headless_read_and_nothing_on_the_page_changes(world: World) -> None:
     form = FormPrepareService(world.engine, actions=world.actions, grant_ttl_seconds=600)
     for kind, value in SAVED.items():
         await form.save_detail(kind, value)
@@ -95,11 +99,13 @@ async def test_an_apply_form_is_planned_and_approved_and_nothing_on_the_page_cha
     disclosure = proposed.disclosure
     assert disclosure.action.status is ActionStatus.WAITING_APPROVAL
 
-    settled = await form.approve(disclosure.action.id, expected_revision=disclosure.action.revision)
-    assert settled.action.status is ActionStatus.SUCCEEDED
-    assert settled.attempts[-1].result is not None and settled.attempts[-1].result["code"] == "prepared_nothing"
-
-    # The whole S5 claim: nothing was written, dispatched, focused, submitted or saved.
+    # Approving a plan made from the headless document is refused: a draft lives only in the headed
+    # preparation window, and there is none. Nothing is consumed and nothing on the page changed.
+    with pytest.raises(FormPrepareRefusal) as refused:
+        await form.approve(disclosure.action.id, expected_revision=disclosure.action.revision)
+    assert refused.value.code == "preparation_mode_required"
+    approval = (await world.actions.get_action(disclosure.action.id)).approval
+    assert approval is not None and approval.status.value == "PENDING"
     assert await world.sql("SELECT count(*) FROM browser_dispatches") == dispatches_before
     assert await world.sql(
         f"SELECT count(*) FROM browser_dispatches WHERE action_id = '{disclosure.action.id}'"
@@ -115,7 +121,4 @@ async def test_an_apply_form_is_planned_and_approved_and_nothing_on_the_page_cha
         dumped = await world.sql(f"SELECT coalesce(string_agg(t::text, ' '), '') FROM {table} t")
         assert all(marker not in dumped for marker in MARKERS), table
 
-    # A spent approval cannot be spent again.
-    with pytest.raises((ApprovalNotUsableError, Exception)):
-        await form.approve(disclosure.action.id, expected_revision=settled.action.revision)
     assert isinstance(task_id, uuid.UUID)

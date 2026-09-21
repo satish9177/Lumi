@@ -186,11 +186,11 @@ async def test_the_form_is_filled_verified_and_nothing_is_sent(rig: Rig, caplog:
     caplog.set_level(logging.DEBUG)
     p = await prepared(rig)
     assert len(FULL) == 8
-    resolutions = rig.broker.counters.resolutions
-    dials = rig.broker.counters.dial_count
-
     proof = await p.enter()
     assert (proof.guard_in_flight, proof.broker_active_connections) == (0, 0)
+    # Measured from the freeze PROOF, not from before it: Chromium's own background traffic may
+    # resolve a name in the instant before the freeze, and the claim is about what happens after.
+    resolutions, dials = proof.resolution_count, proof.dial_count
     assert p.read.guard.frozen and rig.broker.mode is BrokerMode.FROZEN
 
     result, parsed = await p.fill(FULL)
@@ -279,7 +279,7 @@ async def test_a_thaw_between_two_writes_stops_the_second(rig: Rig, monkeypatch:
 
     monkeypatch.setattr(local_form_draft, "_read_back", thaw_after_first)
     _, parsed = await p.fill([("Full name", NAME), ("Email address", EMAIL)])
-    assert calls == 1 and parsed.error_code == "not_frozen"
+    assert calls >= 1 and parsed.error_code == "not_frozen"  # `_stabilize` re-reads what was written
     assert parsed.fields_verified == 1 and parsed.first_failed_element_ref == element(p.observation, "Email address").element_ref
     assert await p.value("#name") == NAME and await p.value("#email") == ""
 
@@ -457,6 +457,7 @@ async def test_discard_destroys_a_page_that_would_autosave_and_it_never_gets_the
     assert await discard_draft(p.read, p.freeze, p.dispatch_id) is True
 
     assert old_page.is_closed()  # the dirty document is gone
+    assert len(p.read.context.pages) == 1  # ... and so is every popup it opened: only the blank tab remains
     assert not p.read.dirty and p.read.draft is None and p.freeze.owner is None
     assert rig.broker.mode is BrokerMode.OPEN and not p.read.guard.frozen
     await asyncio.sleep(1.2)  # long enough for any surviving timer to fire once the network is back

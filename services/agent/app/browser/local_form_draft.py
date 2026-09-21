@@ -833,9 +833,9 @@ async def _destroy_and_thaw(
 
     1. the network is *verified* frozen (re-frozen if anything was not);
     2. a blank tab is opened first, so the profile keeps a window;
-    3. every dirty tab is closed with `run_before_unload=False` (a page's own
-       `beforeunload` handler must not be able to veto this) and `is_closed()` is
-       asserted;
+    3. every dirty tab -- and every other window of the context, popups included -- is closed
+       with `run_before_unload=False` (a page's own `beforeunload` handler must not be able to
+       veto this), `is_closed()` is asserted, and the guard finishes closing its popups;
     4. draft ownership is cleared;
     5. **only then** the broker opens, then the guard.
 
@@ -866,6 +866,18 @@ async def _destroy_and_thaw(
         if not tab.page.is_closed():
             raise DraftError("freeze_failed")
         destroyed = True
+    # Every OTHER window of the context goes too: a popup the dirty page opened has a navigation
+    # of its own (which could carry a value in its address), and it must be gone, and the guard
+    # must have finished closing it, before the network can return.
+    stragglers = [page for page in list(session.context.pages) if page is not blank]
+    for page in stragglers:
+        try:
+            await page.close(run_before_unload=False)
+        except PlaywrightError:
+            pass
+    await guard.drain_popups()
+    if any(not page.is_closed() for page in stragglers):
+        raise DraftError("freeze_failed")
     session.replace_with(blank)
     session.draft = None
     session.dirty = False
