@@ -1,5 +1,24 @@
 # Delivery status
 
+## Milestone 9 (Windows semantic computer use): S1-S3 complete, S4-S5 not started
+
+```text
+M8b engineering                    COMPLETE
+Windows signing infrastructure     READY
+Production certificate             NOT CONFIGURED
+Real-account release               BLOCKED
+
+M9  S1 UIA observation             COMPLETE
+    S2 disclosure/reasoning        COMPLETE
+    S3 focus/scroll/app launch     COMPLETE  (engineering)
+    S4 semantic actions            NOT STARTED
+    S5 visual fallback             NOT STARTED
+M10                                NOT STARTED
+```
+
+S3 adds exactly three exact-approval desktop effects (focus a visible window, UIA-scroll a list by a closed step, open a registered application) and still no click, key, mouse, value, selection, shell or arbitrary launch. Details: [reviews/milestone-9-s3.md](reviews/milestone-9-s3.md), plan [plans/milestone-9.md](plans/milestone-9.md). Production-signed installed validation remains blocked by the missing Authenticode certificate.
+
+
 ## Milestone 6 — final hardening: complete (17 September 2026)
 
 Lumi is complete for the current project scope. Milestone 6 added realtime and

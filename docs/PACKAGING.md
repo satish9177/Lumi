@@ -353,6 +353,10 @@ real-account release remains **BLOCKED**.
 
 **M8a S3 packaging note.** Authenticated reading adds no new binary: it uses the bundled full Chromium and the S0 broker. Profiles live under the user data directory (`LUMI_BROWSER_PROFILE_ROOT`), not in the bundle. No new packaged-build run was performed for S3.
 
+### Desktop focus, scroll and registered launch (Milestone 9 S3)
+
+No new native dependency and **no new executable**: starting a registered application is `subprocess.Popen` of a program the user registered, not a bundled helper. `build-agent-runtime.mjs` additionally fails the build if migration `0014` (`desktop_dispatches`), `app/desktop/effects.py`, `effects_win32.py`, `registry.py`, `app/services/desktop_actions.py` or `app/domain/desktop_actions.py` is missing from the runtime bundle. The user's registered-application list (`LUMI_DESKTOP_REGISTERED_APPS`) is configuration and is never bundled; no fixture or test file ships. No signing change.
+
 ### Desktop disclosure (Milestone 9 S2)
 
 No new native dependency, no new executable and no signing change. `build-agent-runtime.mjs` additionally fails the build if migration `0013` (`desktop_disclosures`, `desktop_answers` and the widened grant kind) or `app/services/desktop_disclosure.py` is missing from the runtime bundle.
