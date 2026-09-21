@@ -352,3 +352,7 @@ real-account release remains **BLOCKED**.
 - Only Windows x64 is packaged.
 
 **M8a S3 packaging note.** Authenticated reading adds no new binary: it uses the bundled full Chromium and the S0 broker. Profiles live under the user data directory (`LUMI_BROWSER_PROFILE_ROOT`), not in the bundle. No new packaged-build run was performed for S3.
+
+### Desktop disclosure (Milestone 9 S2)
+
+No new native dependency, no new executable and no signing change. `build-agent-runtime.mjs` additionally fails the build if migration `0013` (`desktop_disclosures`, `desktop_answers` and the widened grant kind) or `app/services/desktop_disclosure.py` is missing from the runtime bundle.

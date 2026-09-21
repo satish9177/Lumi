@@ -2,19 +2,23 @@
 
 > **Lumi can read a Windows application the way a screen reader does (roles, names, values and states from UI Automation) before it is ever allowed to touch one.**
 
-Status: **S1 implemented (observation only). S2 and later are NOT started. M10 is NOT started.**
+Status: **S1 (observation only) and S2 (exact desktop disclosure and read-only reasoning) are implemented. S3 and later are NOT started. M10 is NOT started.**
 
 This plan refines the M9 entry in `docs/plans/general-computer-use-architecture.md`. That entry lists window inventory, focus, app launch, UIA observe/invoke/value/selection/scroll and a scoped visual fallback. M9 is delivered in slices, in the same order M8 used: **observation and target identity are reviewed before any write exists.** Each slice below is one reviewable change with its own tests and review report.
 
 ```text
 M9 - Windows semantic computer use
 
-S1  current (done)  isolated UIA worker + surface inventory + bounded semantic observation. Zero input.
-S2  later           explicit desktop disclosure scope + planner observation (first time desktop text may reach a provider)
-S3  later           trusted app focus + passive scroll observation
+S1  done            isolated UIA worker + surface inventory + bounded semantic observation. Zero input.
+S2  done            exact one-observation disclosure to ONE provider + read-only grounded reasoning. Zero input.
+S3  NEXT            trusted app focus + passive scroll observation
 S4  later           bounded Invoke / Value / Selection actions on re-resolved targets
 S5  later           limited visual fallback, only where semantics are unavailable
 ```
+
+## S2 in one paragraph
+
+S2 changes **who may see an already-captured snapshot**, and nothing else. The user picks one window and types a question (locally; it never goes through the conversation model). Lumi observes it locally (S1), then shows a trusted card: *one* named provider and model would receive a redacted, bounded projection of *that* capture, once. Only the "Allow once" click can send it. The approval binds one task, one observation id and its exact snapshot digest, one surface identity, one recipient/model, one redaction policy, one provider call and a ten-minute expiry; a newer observation of the same window is a new digest and needs a new approval. The single-use grant is consumed and a UNIQUE disclosure row written in one transaction that commits **before** the provider is called; a claim whose result never arrives is `OUTCOME_UNKNOWN` and is never replayed. The provider makes exactly one attempt (no failover, no retry, no image) and answers with a closed read-only shape whose every claim is grounded in a quote from the redacted projection. See `docs/reviews/milestone-9-s2.md`, `docs/SECURITY.md` and `docs/AGENT-RUNTIME.md`.
 
 ## The S1 invariant
 
@@ -66,7 +70,7 @@ Everything in S1 exists to make that sentence checkable rather than promised.
 
 ## Later slices (not implemented, boundaries refined)
 
-**S2, disclosure.** Define an explicit, user-approved desktop disclosure scope: which surface, which fields, what text, for what task and for how long. Desktop text is untrusted environment data and must never carry instructions or approvals. Only then may an observation be projected into a planner payload. Needs its own classification, redaction and firewall rewrite (this slice's firewall tests are meant to be changed on purpose here).
+**S2, disclosure (done).** An explicit, user-approved, exact-observation disclosure scope (see above), with its own private task class (`desktop_planning`), redaction before the provider, a read-only grounded result, and the firewall tests rewritten on purpose (`tests/test_desktop_source.py`, `src/main/agent/desktop-firewall.test.ts`). A disclosure grant is *not* a desktop control grant: no control grant exists yet.
 
 **S3, focus and passive scroll.** Trusted, user-initiated focus of a registered application, and scroll *observation*. Focus is a state change, so it takes a per-action approval, a stale-identity check before use, and human-input takeover detection. Registered-app launch belongs here or after, never as arbitrary paths.
 
