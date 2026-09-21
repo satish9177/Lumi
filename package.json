@@ -13,6 +13,7 @@
     "test": "vitest run",
     "build": "electron-vite build",
     "package": "npm run build && npm run build:agent-runtime && electron-builder --win --x64",
+    "package:release": "node scripts/package-release.mjs",
     "build:agent-runtime": "node scripts/build-agent-runtime.mjs",
     "package:dir": "npm run build && npm run build:agent-runtime && electron-builder --win --x64 --dir",
     "eval": "node scripts/run-evals.mjs",
