@@ -49,6 +49,7 @@ from app.desktop.protocol import (
     DesktopObservation,
     DesktopPattern,
     DesktopRole,
+    ScrollStep,
     Truncation,
     clean_text,
 )
@@ -97,11 +98,28 @@ class RawProps:
     expanded: bool | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class ScrollState:
+    """UIA ScrollPattern state for one control. Worker-internal."""
+
+    vertically_scrollable: bool
+    vertical_percent: float | None
+
+
 class UiaElement(Protocol):
     def props(self, level: str) -> RawProps:
         """`level` is one of "scan", "structure", "full"."""
 
     def children(self) -> Sequence["UiaElement"]: ...
+
+    def scroll_state(self) -> ScrollState | None:
+        """The ScrollPattern's vertical state, or None when the element exposes no ScrollPattern."""
+
+    def scroll(self, step: ScrollStep) -> None:
+        """ONE `ScrollPattern.Scroll` call by a closed step. No wheel, key or coordinate."""
+
+    def focus(self) -> None:
+        """ONE `IUIAutomationElement.SetFocus`, on a top-level window root. Nothing else may call it."""
 
 
 class UiaBackend(Protocol):
@@ -313,10 +331,12 @@ class ObservationStats:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedControl:
-    """A control re-derived from the live tree. Worker-internal: no action consumes it in S1."""
+    """A control re-derived from the live tree. Worker-internal: never crosses the wire."""
 
     role: DesktopRole
     name: str
+    patterns: frozenset[DesktopPattern] = frozenset()
+    element: UiaElement | None = None
 
 
 class DesktopObserver:
@@ -387,6 +407,9 @@ class DesktopObserver:
         )
         self.last_stats = stats
         return observation, stats
+
+    def root_for(self, resolved: ResolvedSurface) -> UiaElement:
+        return self._backend_root(resolved)
 
     def _backend_root(self, resolved: ResolvedSurface) -> UiaElement:
         try:
@@ -508,4 +531,6 @@ class DesktopObserver:
         if props.runtime_id != locator.runtime_id:
             # The same selector now names a different element instance: it was replaced.
             raise DesktopRefusal(DesktopReason.ELEMENT_CHANGED)
-        return ResolvedControl(role=role_for(props.control_type), name=props.name)
+        return ResolvedControl(
+            role=role_for(props.control_type), name=props.name, patterns=props.patterns, element=current
+        )

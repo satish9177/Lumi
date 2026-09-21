@@ -99,6 +99,17 @@ def test_the_runtime_exposes_exactly_the_reviewed_desktop_routes_and_no_verbs(qu
         "/desktop/read-tasks/{task_id}/revoke": ["post"],
         "/desktop/read-tasks/{task_id}/disclosure": ["post"],
         "/desktop/read-tasks/{task_id}/result": ["post"],
+        # S3: exactly three effects, each behind an exact approval. Still no verb that invokes, types, selects,
+        # clicks or takes a handle, a path, an argument or a coordinate.
+        "/desktop/actions/apps": ["get"],
+        "/desktop/actions/focus": ["post"],
+        "/desktop/actions/scroll": ["post"],
+        "/desktop/actions/launch": ["post"],
+        "/desktop/actions/scroll-targets": ["post"],
+        "/desktop/actions/latest": ["get"],
+        "/desktop/actions/{action_id}": ["get"],
+        "/desktop/actions/{action_id}/approve": ["post"],
+        "/desktop/actions/{action_id}/decline": ["post"],
     }
 
 

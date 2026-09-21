@@ -209,6 +209,158 @@ def test_only_the_supervisor_may_start_or_stop_a_process() -> None:
     assert scan_source("thread.start()", "app/desktop/observer.py"), "only the worker may start its own UIA thread"
 
 
+# ---- S3: the effects are pinned to their modules ------------------------------------------------------
+
+
+def test_the_effect_platform_may_call_only_its_four_pinned_entry_points() -> None:
+    allowed = "self._user32.GetForegroundWindow()\nself._user32.GetLastInputInfo(i)\nself._kernel32.OpenProcess(a, b, c)"
+    assert scan_source(allowed, "app/desktop/effects_win32.py") == []
+    for planted in ("user32.ShowWindow(h, 9)", "user32.SendInput(1, p, 40)", "user32.BringWindowToTop(h)",
+                    "user32.AttachThreadInput(a, b, True)", "user32.keybd_event(1, 0, 0, 0)", "user32.mouse_event(2, 0, 0, 0, 0)",
+                    "user32.SetCursorPos(1, 1)", "user32.PostMessageW(h, 1, 0, 0)", "user32.Beep(1, 1)"):
+        assert scan_source(planted, "app/desktop/effects_win32.py"), planted
+    # The raw foreground call is allowed NOWHERE: focus is UIA SetFocus, in one reviewed method.
+    for other in ("win32.py", "effects_win32.py", "effects.py", "worker.py", "observer.py", "surfaces.py", "client.py", "uia_backend.py"):
+        assert scan_source("user32.SetForegroundWindow(h)", f"app/desktop/{other}"), other
+
+
+def test_uia_set_focus_may_be_called_once_inside_the_reviewed_focus_method_only() -> None:
+    good = "class E:\n    def focus(self):\n        self._element.SetFocus()\n"
+    assert scan_source(good, "app/desktop/uia_backend.py") == []
+    assert scan_source("element.SetFocus()", "app/desktop/uia_backend.py"), "outside the method"
+    assert scan_source(good.replace("def focus", "def nudge"), "app/desktop/uia_backend.py")
+    assert scan_source(good + "        self._element.SetFocus()\n", "app/desktop/uia_backend.py")
+    assert scan_source(good.replace("SetFocus()", "SetFocus(1)"), "app/desktop/uia_backend.py")
+    for other in ("observer.py", "effects.py", "effects_win32.py", "worker.py", "surfaces.py", "win32.py"):
+        assert scan_source("element.SetFocus()", f"app/desktop/{other}"), other
+        assert scan_source("element.set_focus()", f"app/desktop/{other}"), other
+
+
+GOLDEN_SPAWN = (
+    "import subprocess" + chr(10)
+    + "subprocess.Popen([app.executable, *app.args], shell=False, env=launch_environment(), cwd=ntpath.dirname(app.executable), "
+    + "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True, "
+    + "creationflags=_CREATE_NEW_PROCESS_GROUP | _DETACHED_PROCESS | _CREATE_BREAKAWAY_FROM_JOB)"
+)
+
+
+def test_the_one_process_start_must_be_exactly_the_reviewed_call() -> None:
+    assert scan_source(GOLDEN_SPAWN, "app/desktop/effects_win32.py") == []
+    nl = chr(10)
+    mutations = {
+        "shell": GOLDEN_SPAWN.replace("shell=False", "shell=True"),
+        "no shell": GOLDEN_SPAWN.replace("shell=False, ", ""),
+        "string command": GOLDEN_SPAWN.replace("[app.executable, *app.args]", "app.executable"),
+        "other argv": GOLDEN_SPAWN.replace("[app.executable, *app.args]", "['cmd.exe', '/c', app.executable]"),
+        "argv without args": GOLDEN_SPAWN.replace("[app.executable, *app.args]", "[app.executable]"),
+        "inherited environment": GOLDEN_SPAWN.replace("env=launch_environment()", "env=os.environ"),
+        "no environment": GOLDEN_SPAWN.replace("env=launch_environment(), ", ""),
+        "other cwd": GOLDEN_SPAWN.replace("cwd=ntpath.dirname(app.executable)", "cwd='C:/Users'"),
+        "inherited handles": GOLDEN_SPAWN.replace("close_fds=True", "close_fds=False"),
+        "no close_fds": GOLDEN_SPAWN.replace("close_fds=True, ", ""),
+        "pipe stdin": GOLDEN_SPAWN.replace("stdin=subprocess.DEVNULL", "stdin=subprocess.PIPE"),
+        "other flags": GOLDEN_SPAWN.replace("_DETACHED_PROCESS | ", ""),
+        "extra flags": GOLDEN_SPAWN.replace("_CREATE_BREAKAWAY_FROM_JOB)", "_CREATE_BREAKAWAY_FROM_JOB | 0x10)"),
+        "startupinfo": GOLDEN_SPAWN[:-1] + ", startupinfo=si)",
+        "executable override": GOLDEN_SPAWN[:-1] + ", executable='cmd.exe')",
+        "two starts": GOLDEN_SPAWN + nl + GOLDEN_SPAWN.split(nl, 1)[1],
+        "run": "import subprocess" + nl + "subprocess.run(['cmd', '/c', 'x'])",
+        "check_output": "import subprocess" + nl + "subprocess.check_output(['x'])",
+        "call": "import subprocess" + nl + "subprocess.call('x', shell=True)",
+        "alias import": "import subprocess as sp" + nl + "sp.run('cmd', shell=True)",
+        "from import": "from subprocess import Popen" + nl + "Popen('cmd', shell=True)",
+        "from import run": "from subprocess import run" + nl + "run('cmd', shell=True)",
+        "os.popen": GOLDEN_SPAWN + nl + "os.popen('cmd')",
+        "os.system": "import os" + nl + "os.system('cmd')",
+        "startfile": "import os" + nl + "os.startfile('x')",
+    }
+    for name, source in mutations.items():
+        assert scan_source(source, "app/desktop/effects_win32.py"), name
+    # Starting a process is not allowed in any other module.
+    for other in ("effects.py", "worker.py", "observer.py", "registry.py", "client.py", "surfaces.py"):
+        assert scan_source(GOLDEN_SPAWN, f"app/desktop/{other}"), other
+
+
+def test_only_the_effect_module_may_leave_the_runtimes_job() -> None:
+    from tests.desktop_source_scan import breakaway_violations
+
+    assert breakaway_violations(APP) == []
+    # A planted flag anywhere else is found.
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / "desktop").mkdir()
+        (root / "services").mkdir()
+        (root / "services" / "other.py").write_text("FLAG = 0x01000000  # CREATE_BREAKAWAY_FROM_JOB" + chr(10), encoding="utf-8")
+        (root / "desktop" / "effects_win32.py").write_text("X = 'CREATE_BREAKAWAY_FROM_JOB'" + chr(10), encoding="utf-8")
+        assert [v.file for v in breakaway_violations(root)] == ["services/other.py"]
+
+
+def test_focus_may_only_be_called_on_a_window_root_in_the_effect_module() -> None:
+    assert scan_source("self._observer.root_for(resolved).focus()", "app/desktop/effects.py") == []
+    for planted in ("control.focus()", "child.focus()", "self._observer.focus()", "element.children()[0].focus()"):
+        assert scan_source(planted, "app/desktop/effects.py"), planted
+
+
+def test_a_member_reference_cannot_dodge_the_call_site_pin() -> None:
+    nl = chr(10)
+    dodge = "class E:" + nl + "    def focus(self):" + nl + "        f = self._element.SetFocus" + nl + "        f()" + nl
+    assert scan_source(dodge, "app/desktop/uia_backend.py")
+    scroll = "class E:" + nl + "    def scroll(self, step):" + nl + "        s = pattern.Scroll" + nl + "        s(3, 3)" + nl
+    assert scan_source(scroll, "app/desktop/uia_backend.py")
+
+
+def test_the_uia_scroll_pattern_may_be_called_once_inside_the_reviewed_method_and_nowhere_else() -> None:
+    good = (
+        "class E:\n    def scroll(self, step):\n        pattern = self._pattern(UIA_ScrollPatternId, IUIAutomationScrollPattern)\n"
+        "        pattern.Scroll(a, b)\n"
+    )
+    assert scan_source(good, "app/desktop/uia_backend.py") == []
+    assert scan_source("pattern.Scroll(a, b)", "app/desktop/uia_backend.py"), "a Scroll outside the method"
+    assert scan_source(good.replace("def scroll", "def nudge"), "app/desktop/uia_backend.py")
+    assert scan_source(good.replace("Scroll(a, b)", "Scroll(a)"), "app/desktop/uia_backend.py")
+    twice = good + "        pattern.Scroll(a, b)\n"
+    assert scan_source(twice, "app/desktop/uia_backend.py")
+    # The ScrollPattern id is not available to any other file.
+    assert scan_source("elem.QueryInterface(IUIAutomationScrollPattern)", "app/desktop/observer.py")
+    # And no other acting pattern was opened up by it.
+    for acting in ("IUIAutomationInvokePattern", "IUIAutomationWindowPattern", "IUIAutomationRangeValuePattern",
+                   "UIA_InvokePatternId", "UIA_WindowPatternId"):
+        assert scan_source(f"elem.QueryInterface({acting})", "app/desktop/uia_backend.py"), acting
+    for verb in ("pattern.Invoke()", "pattern.SetValue(x)", "pattern.Select()", "pattern.Toggle()"):
+        assert scan_source(verb, "app/desktop/uia_backend.py"), verb
+
+
+def test_production_has_exactly_one_scroll_call_and_one_process_start() -> None:
+    def count(file: str, attr: str) -> int:
+        tree = ast.parse((DESKTOP / file).read_text(encoding="utf-8"))
+        return sum(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr == attr for n in ast.walk(tree)
+        )
+
+    assert count("uia_backend.py", "Scroll") == 1
+    assert count("uia_backend.py", "SetFocus") == 1
+    for path in DESKTOP.glob("*.py"):
+        if path.name != "uia_backend.py":
+            assert count(path.name, "SetFocus") == 0 and count(path.name, "SetForegroundWindow") == 0, path.name
+    assert count("effects_win32.py", "Popen") == 1
+    assert count("managed.py", "Popen") == 1
+    for path in DESKTOP.glob("*.py"):
+        if path.name not in ("effects_win32.py", "managed.py"):
+            assert count(path.name, "Popen") == 0, path.name
+        if path.name != "uia_backend.py":
+            assert count(path.name, "Scroll") == 0, path.name
+
+
+def test_focus_scroll_and_launch_names_are_allowed_only_in_their_own_modules() -> None:
+    assert scan_source("def focus(self): ...", "app/desktop/effects.py") == []
+    assert scan_source("def launch(self): ...", "app/desktop/effects.py") == []
+    for name in ("focus", "scroll", "launch"):
+        for other in ("registry.py", "surfaces.py", "protocol.py", "managed.py", "win32.py", "errors.py"):
+            assert scan_source(f"def {name}(self): ...", f"app/desktop/{other}"), (name, other)
+
+
 def test_the_forbidden_list_covers_every_verb_the_slice_promises_not_to_have() -> None:
     promised = {
         "click", "double_click", "invoke", "setvalue", "select", "toggle", "scroll", "setfocus", "focus",
@@ -234,7 +386,7 @@ def test_the_scan_really_covers_every_desktop_module() -> None:
         ast.parse(path.read_text(encoding="utf-8"))  # every module is at least parseable
 
 
-def test_only_the_probe_touches_win32_and_only_the_backend_touches_com() -> None:
+def test_only_the_probe_and_the_effect_platform_touch_win32_and_only_the_backend_touches_com() -> None:
     def imports(name: str) -> set[str]:
         tree = ast.parse((DESKTOP / name).read_text(encoding="utf-8"))
         return {
@@ -246,7 +398,7 @@ def test_only_the_probe_touches_win32_and_only_the_backend_touches_com() -> None
 
     for path in DESKTOP.glob("*.py"):
         found = imports(path.name)
-        assert ("ctypes" in found) == (path.name == "win32.py"), path.name
+        assert ("ctypes" in found) == (path.name in ("win32.py", "effects_win32.py")), path.name
         assert ("comtypes" in found or "pywinauto" in found) == (path.name == "uia_backend.py"), path.name
 
 
@@ -335,6 +487,10 @@ def test_only_the_desktop_boundary_and_the_reviewed_s2_disclosure_path_import_de
         "services/desktop_disclosure.py",      # S2: the ONE reviewed path from an observation to a provider
         "domain/desktop_disclosure.py",        # S2: the projection, redaction and grounding rules
         "api/desktop_disclosure_schemas.py",   # S2: the closed wire shapes
+        "services/desktop_actions.py",         # S3: focus / scroll / launch through the action ledger
+        "domain/desktop_actions.py",           # S3: the closed proposal shapes and failure classification
+        "api/desktop_action_schemas.py",       # S3: the closed wire shapes
+        "config.py",                           # S3: validates the trusted registered-application list
     }, outside
 
 
@@ -346,7 +502,9 @@ def test_only_the_reviewed_disclosure_service_reads_an_observation_back() -> Non
         for path in APP.rglob("*.py")
         if ".get_observation(" in path.read_text(encoding="utf-8") and "desktop" in path.read_text(encoding="utf-8").lower()
     }
-    assert callers == {"services/desktop_disclosure.py"}, callers
+    # S3 adds one more reader, for a LOCAL card only: the runtime reads the observation the person is about to
+    # scroll to build the exact approval card (control role and name). It sends nothing to any provider.
+    assert callers == {"services/desktop_disclosure.py", "services/desktop_actions.py"}, callers
 
 
 def test_no_planner_answer_memory_research_or_task_module_can_see_desktop_data() -> None:

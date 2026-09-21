@@ -127,6 +127,8 @@ def test_migration_0013_adds_exactly_the_disclosure_tables_and_downgrades_cleanl
     truncate_all(url)
     try:
         # ---- clean at head ----
+        assert revision(url) == "0014"  # S3 sits on top; this test pins 0013 by stepping down to it
+        downgrade(url, "0013")
         assert revision(url) == "0013"
         assert all(exists(url, table) for table in NEW_TABLES)
         # Audit metadata only: no column can hold a title, handle, snapshot, question or desktop text.
@@ -148,7 +150,7 @@ def test_migration_0013_adds_exactly_the_disclosure_tables_and_downgrades_cleanl
         with pytest.raises(IntegrityError):  # the old kind set does not know the new kind
             insert_grant(url, task, "desktop_disclose")
         observation = insert_observation(url)
-        migrate(url)
+        migrate(url, "0013")
         assert revision(url) == "0013" and all(exists(url, table) for table in NEW_TABLES)
         assert run(url, "SELECT count(*) FROM desktop_observations WHERE id = :id AND classification = 'desktop_private'", id=observation) == 1
 
@@ -184,7 +186,7 @@ def test_migration_0013_adds_exactly_the_disclosure_tables_and_downgrades_cleanl
         assert revision(url) == "0013" and all(exists(url, table) for table in NEW_TABLES)
 
         # ---- with no desktop grant left, downgrade removes exactly the two tables and restores the kinds ----
-        truncate_all(url)
+        truncate_all(url, without=("desktop_dispatches",))
         downgrade(url, "0012")
         assert revision(url) == "0012" and not any(exists(url, table) for table in NEW_TABLES)
         assert exists(url, "desktop_observations") and exists(url, "desktop_worker_generations")
@@ -194,9 +196,9 @@ def test_migration_0013_adds_exactly_the_disclosure_tables_and_downgrades_cleanl
 
         # ---- re-upgrade restores ----
         run(url, "DELETE FROM task_grants")
-        migrate(url)
+        migrate(url, "0013")
         assert revision(url) == "0013" and all(exists(url, table) for table in NEW_TABLES)
     finally:
         migrate(url)
         truncate_all(url)
-    assert revision(url) == "0013"
+    assert revision(url) == "0014"

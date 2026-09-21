@@ -6,6 +6,7 @@ access and timeout poisoning. Fakes stand in for the desktop so this runs on any
 """
 
 import asyncio
+import os
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -23,8 +24,9 @@ from app.desktop.protocol import (
     WorkerErrorBody,
     WorkerIdentity,
 )
+from app.desktop.registry import AppRegistry
 from app.desktop.worker import WorkerSettings, create_worker_app
-from tests.desktop_fakes import FakeBackend, FakeProbe, Node, window_tree
+from tests.desktop_fakes import FakeBackend, FakePlatform, FakeProbe, Node, window_tree
 
 TOKEN = "worker-token-with-enough-entropy-1234"
 MARKER = "M9_S1_DESKTOP_PRIVATE_MARKER_71A"
@@ -39,12 +41,15 @@ class Harness:
         self.backend.trees[1] = window_tree("Notes", Node(control_type="Edit", name="Body", value=MARKER))
         self.exits: list[int] = []
         self.timeout = 0.5
+        self.platform = FakePlatform(self.probe, self.backend, worker_pid=os.getpid())
 
     def app(self) -> FastAPI:
         return create_worker_app(
             WorkerSettings(token=SecretStr(TOKEN), observation_timeout_seconds=self.timeout),
             probe_factory=lambda: self.probe,
             backend_factory=lambda: self.backend,
+            platform_factory=lambda: self.platform,
+            registry=AppRegistry(),
             exit_process=lambda code: self.exits.append(code),
         )
 
@@ -65,7 +70,7 @@ async def test_health_reports_the_generation_and_exactly_two_operations() -> Non
         response = await client.get("/health")
         identity = WorkerIdentity.model_validate(response.json())
         assert identity.worker_generation == state.generation
-        assert identity.operations == ["surfaces", "observe"]
+        assert identity.operations == ["surfaces", "observe", "input_baseline", "focus", "scroll", "launch"]
 
 
 async def test_no_credential_and_a_wrong_credential_are_refused_on_every_route() -> None:
@@ -109,7 +114,9 @@ async def test_the_credential_is_compared_in_constant_time(monkeypatch: pytest.M
     ("method", "path"),
     [
         ("GET", "/"), ("GET", "/docs"), ("GET", "/openapi.json"), ("POST", "/v1/desktop/execute"),
-        ("POST", "/v1/desktop/action"), ("POST", "/v1/desktop/automation"), ("POST", "/v1/desktop/focus"),
+        ("POST", "/v1/desktop/action"), ("POST", "/v1/desktop/automation"), ("POST", "/v1/desktop/invoke"),
+        ("POST", "/v1/desktop/set-value"), ("POST", "/v1/desktop/select"), ("POST", "/v1/desktop/mouse"),
+        ("POST", "/v1/desktop/keys"), ("POST", "/v1/desktop/run"), ("POST", "/v1/desktop/launch-path"),
         ("POST", "/v1/desktop/click"), ("POST", "/v1/desktop/type"), ("GET", "/v1/desktop/surfaces"),
         ("PUT", "/v1/desktop/observe"), ("POST", "/v1/dispatch"), ("POST", "/v1/sessions/open"),
     ],
@@ -121,12 +128,16 @@ async def test_unknown_routes_are_404_and_no_action_route_exists(method: str, pa
         assert response.status_code == 404 or path in ("/v1/desktop/surfaces", "/v1/desktop/observe")
 
 
-async def test_the_route_table_is_exactly_health_and_two_typed_operations() -> None:
+async def test_the_route_table_is_exactly_health_two_reads_and_three_reviewed_effects() -> None:
     schema = Harness().app().openapi()["paths"]
     assert {(path, tuple(sorted(methods))) for path, methods in schema.items()} == {
         ("/health", ("get",)),
         ("/v1/desktop/surfaces", ("post",)),
         ("/v1/desktop/observe", ("post",)),
+        ("/v1/desktop/input-baseline", ("post",)),
+        ("/v1/desktop/focus", ("post",)),
+        ("/v1/desktop/scroll", ("post",)),
+        ("/v1/desktop/launch", ("post",)),
     }
 
 

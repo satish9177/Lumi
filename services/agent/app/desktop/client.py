@@ -22,7 +22,15 @@ from app.desktop.errors import DesktopReason, DesktopRefusal
 from app.desktop.protocol import (
     WORKER_TOKEN_HEADER,
     DesktopObservation,
+    FocusRequest,
+    FocusResponse,
+    InputBaselineRequest,
+    InputBaselineResponse,
+    LaunchRequest,
+    LaunchResponse,
     ObserveRequest,
+    ScrollRequest,
+    ScrollResponse,
     SurfaceListRequest,
     SurfaceListResponse,
     WorkerErrorBody,
@@ -30,6 +38,10 @@ from app.desktop.protocol import (
 )
 
 _Response = TypeVar("_Response", bound=BaseModel)
+
+
+class StaleDesktopResult(Exception):
+    """An effect answer not addressed to the dispatch that was sent. The effect may have happened."""
 
 
 class DesktopWorkerClient:
@@ -78,6 +90,42 @@ class DesktopWorkerClient:
             or answer.surface_epoch < request.surface_epoch
         ):
             raise DesktopRefusal(DesktopReason.STALE_WORKER_GENERATION)
+        return answer
+
+    async def input_baseline(self, request: InputBaselineRequest) -> InputBaselineResponse:
+        response = await self._send("POST", "/v1/desktop/input-baseline", request)
+        answer = self._parse(response, InputBaselineResponse)
+        if answer.worker_generation != request.expected_worker_generation:
+            raise DesktopRefusal(DesktopReason.STALE_WORKER_GENERATION)
+        return answer
+
+    async def focus(self, request: FocusRequest) -> FocusResponse:
+        response = await self._send("POST", "/v1/desktop/focus", request)
+        answer = self._parse(response, FocusResponse)
+        if (
+            answer.worker_generation != request.expected_worker_generation
+            or answer.dispatch_id != request.dispatch_id
+            or (answer.surface_ref, answer.surface_epoch) != (request.surface_ref, request.surface_epoch)
+        ):
+            raise StaleDesktopResult
+        return answer
+
+    async def scroll(self, request: ScrollRequest) -> ScrollResponse:
+        response = await self._send("POST", "/v1/desktop/scroll", request)
+        answer = self._parse(response, ScrollResponse)
+        if answer.worker_generation != request.expected_worker_generation or answer.dispatch_id != request.dispatch_id:
+            raise StaleDesktopResult
+        return answer
+
+    async def launch(self, request: LaunchRequest) -> LaunchResponse:
+        response = await self._send("POST", "/v1/desktop/launch", request)
+        answer = self._parse(response, LaunchResponse)
+        if (
+            answer.worker_generation != request.expected_worker_generation
+            or answer.dispatch_id != request.dispatch_id
+            or answer.app_id != request.app_id
+        ):
+            raise StaleDesktopResult
         return answer
 
     async def _send(self, method: str, path: str, body: BaseModel | None = None) -> httpx.Response:

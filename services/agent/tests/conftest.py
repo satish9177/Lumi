@@ -31,7 +31,7 @@ class _TestEnvironment(BaseSettings):
 
 
 TRUNCATE_ALL = (
-    "TRUNCATE desktop_answers, desktop_disclosures, desktop_observations, desktop_worker_generations, form_drafts, protected_values, authenticated_answers, authenticated_observations, research_answers, "
+    "TRUNCATE desktop_dispatches, desktop_answers, desktop_disclosures, desktop_observations, desktop_worker_generations, form_drafts, protected_values, authenticated_answers, authenticated_observations, research_answers, "
     "research_observations, page_observations, browser_dispatches, "
     "research_sessions, step_authorizations, task_grants, login_attempts, browser_profiles, "
     "browser_worker_generations, action_attempts, approvals, "
@@ -40,14 +40,20 @@ TRUNCATE_ALL = (
 TEST_RUNTIME_TOKEN = SecretStr("test-runtime-token-with-at-least-32-bytes")
 
 
-def truncate_all(database_url: str) -> None:
-    """Synchronous reset, for tests that drive the runtime as a subprocess."""
+def truncate_all(database_url: str, *, without: tuple[str, ...] = ()) -> None:
+    """Synchronous reset, for tests that drive the runtime as a subprocess.
+
+    `without` names tables that do not exist at the (older) revision a migration test is standing on.
+    """
+    statement = TRUNCATE_ALL
+    for table in without:
+        statement = statement.replace(f"{table}, ", "")
 
     async def run() -> None:
         engine = create_async_engine(database_url)
         try:
             async with engine.begin() as connection:
-                await connection.execute(text(TRUNCATE_ALL))
+                await connection.execute(text(statement))
         finally:
             await engine.dispose()
 

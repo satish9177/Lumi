@@ -92,6 +92,21 @@ class DesktopRepository:
             delete(desktop_observations).where(or_(desktop_observations.c.id.not_in(newest), expired))
         )
 
+    async def latest_observation_id(self, worker_generation: uuid.UUID, surface_ref: str) -> uuid.UUID | None:
+        """The newest observation of this surface in this worker generation. Older ones are stale for action."""
+        row = (
+            await self._connection.execute(
+                select(desktop_observations.c.id)
+                .where(
+                    desktop_observations.c.worker_generation == worker_generation,
+                    desktop_observations.c.surface_ref == surface_ref,
+                )
+                .order_by(desktop_observations.c.created_at.desc(), desktop_observations.c.id.desc())
+                .limit(1)
+            )
+        ).first()
+        return row.id if row is not None else None
+
     async def get_observation(self, observation_id: uuid.UUID) -> DesktopObservationRecord | None:
         row = (
             await self._connection.execute(

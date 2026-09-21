@@ -127,7 +127,24 @@ const agentApi: AgentApi = {
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.grantDesktopDisclosure, grantId, expectedRevision),
   declineDesktopDisclosure: (grantId: string, expectedRevision: number) =>
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineDesktopDisclosure, grantId, expectedRevision),
-  runDesktopRead: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.runDesktopRead)
+  runDesktopRead: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.runDesktopRead),
+  // Milestone 9 S3: trusted focus, semantic scroll and registered-app launch. Eight exact methods. None
+  // takes a handle, a process, a path, an argument, a coordinate, a key or a selector: a surface identity
+  // the renderer was listed, a control of a fresh local observation, a closed scroll step, a registered
+  // app id, or the action id and revision the trusted card showed.
+  listDesktopApps: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.listDesktopApps),
+  findDesktopScrollTargets: (workerGeneration: string, surfaceRef: string, surfaceEpoch: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.findDesktopScrollTargets, workerGeneration, surfaceRef, surfaceEpoch),
+  proposeDesktopFocus: (workerGeneration: string, surfaceRef: string, surfaceEpoch: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.proposeDesktopFocus, workerGeneration, surfaceRef, surfaceEpoch),
+  proposeDesktopScroll: (workerGeneration: string, observationId: string, controlRef: string, step: string) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.proposeDesktopScroll, workerGeneration, observationId, controlRef, step),
+  proposeDesktopLaunch: (appId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.proposeDesktopLaunch, appId),
+  getDesktopAction: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getDesktopAction),
+  approveDesktopAction: (actionId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.approveDesktopAction, actionId, expectedRevision),
+  declineDesktopAction: (actionId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineDesktopAction, actionId, expectedRevision)
 }
 
 // The Gemini Live relay: fixed channels, closed message kinds, validated in

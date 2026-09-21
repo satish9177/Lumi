@@ -14,6 +14,7 @@ from app.domain.booking import BookingProposalError
 from app.domain.page_observation import AnswerNotGroundedError
 from app.domain.research import AnswerNotGroundedError as ResearchAnswerNotGroundedError
 from app.desktop.errors import DesktopRefusal
+from app.services.desktop_actions import DesktopActionError
 from app.domain.browser_profile import ProfileRefusal
 from app.domain.login_takeover import TakeoverRefusal
 from app.domain.research import ResearchRefusal
@@ -167,6 +168,15 @@ async def _desktop_refused(_: Request, exc: Exception) -> JSONResponse:
             message="That desktop operation was refused.",
             reason=exc.code.value,
         ),
+    )
+
+
+async def _desktop_action_refused(_: Request, exc: Exception) -> JSONResponse:
+    """Milestone 9 S3. A closed code, never a title, a name, a path or observed text."""
+    assert isinstance(exc, DesktopActionError)
+    return _error(
+        status.HTTP_409_CONFLICT,
+        ErrorDetail(code="desktop_action_refused", message="That desktop action was refused.", reason=exc.code),
     )
 
 
@@ -374,6 +384,7 @@ def register_error_handlers(app: FastAPI) -> None:
         ),
     )
     app.add_exception_handler(DesktopRefusal, _desktop_refused)
+    app.add_exception_handler(DesktopActionError, _desktop_action_refused)
     app.add_exception_handler(
         TakeoverRefusal,
         # Milestone 8a S2. Never page text, never a title, never a URL: a

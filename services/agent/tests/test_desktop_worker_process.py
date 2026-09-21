@@ -79,7 +79,7 @@ def test_the_worker_environment_is_built_from_an_allowlist_not_copied() -> None:
     assert set(environment) == {
         "SystemRoot", "TEMP", "PYTHONUTF8", "PYTHONUNBUFFERED", "LUMI_DESKTOP_TOKEN",
         "LUMI_DESKTOP_PARENT_PID", "LUMI_DESKTOP_EXCLUDED_PIDS", "LUMI_DESKTOP_TIMEOUT_SECONDS",
-        "LUMI_DESKTOP_TRUST_JOB",
+        "LUMI_DESKTOP_TRUST_JOB", "LUMI_DESKTOP_REGISTERED_APPS",
     }
     assert environment["LUMI_DESKTOP_EXCLUDED_PIDS"] == "10,30" and environment["LUMI_DESKTOP_TRUST_JOB"] == "0"
     assert worker_environment(token=SecretStr("t" * 32), parent_pid=1, root_pids=(), timeout_seconds=7, trust_job=True, source={})["LUMI_DESKTOP_TRUST_JOB"] == "1"

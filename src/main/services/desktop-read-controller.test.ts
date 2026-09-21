@@ -319,7 +319,8 @@ describe('the IPC surface', () => {
       ipcMain, assertTrustedSender: () => { checked += 1 }, controller: {} as never, voice: { handle: async () => ({ ok: true }) } as never,
       runtimeStatus: () => ({ state: 'running' }), restartRuntime: async () => ({ state: 'running' }), desktopRead: h.controller()
     })
-    const desktop = Object.entries(AGENT_IPC_CHANNELS).filter(([name]) => /Desktop/.test(name)).map(([, channel]) => channel)
+    const s2 = ['listDesktopSurfaces', 'createDesktopRead', 'getDesktopRead', 'grantDesktopDisclosure', 'declineDesktopDisclosure', 'runDesktopRead']
+    const desktop = Object.entries(AGENT_IPC_CHANNELS).filter(([name]) => s2.includes(name)).map(([, channel]) => channel)
     expect(desktop).toHaveLength(6)
     for (const channel of desktop) expect(handlers.has(channel), channel).toBe(true)
     // A renderer-supplied provider or recipient is not a parameter anywhere: extra arguments are ignored.

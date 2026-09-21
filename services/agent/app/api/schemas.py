@@ -62,7 +62,7 @@ class TaskRequestPayload(BaseModel):
     @classmethod
     def _not_reserved(cls, value: str) -> str:
         # Milestone 9 S2: a desktop read is created only by its own route, after a local observation.
-        if value == "desktop_read":
+        if value in ("desktop_read", "desktop_action"):
             raise ValueError("this task type is created only by its own route")
         return value
 
@@ -268,6 +268,17 @@ class AttemptResponse(BaseModel):
         )
 
 
+#: Card-only strings a desktop proposal keeps for the trusted approval card. They are another program's text
+#: (a window title, a control name); the generic action reads do not return them.
+_DESKTOP_CARD_STRINGS = frozenset({"window_title", "control_name", "application_label"})
+
+
+def _public_proposal(tool_name: str, proposal: dict[str, Any]) -> dict[str, Any]:
+    if tool_name.startswith("DESKTOP_"):
+        return {key: value for key, value in proposal.items() if key not in _DESKTOP_CARD_STRINGS}
+    return proposal
+
+
 class ActionResponse(BaseModel):
     id: uuid.UUID
     task_id: uuid.UUID
@@ -293,7 +304,7 @@ class ActionResponse(BaseModel):
             idempotency_key=action.idempotency_key,
             tool_name=action.tool_name,
             risk_tier=action.risk_tier,
-            proposal=action.proposal,
+            proposal=_public_proposal(action.tool_name, action.proposal),
             proposal_digest=action.proposal_digest,
             status=action.status,
             revision=action.revision,

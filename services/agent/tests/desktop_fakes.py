@@ -11,8 +11,9 @@ import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-from app.desktop.observer import ElementUnavailable, RawProps, UiaElement
-from app.desktop.protocol import CheckedState, DesktopPattern
+from app.desktop.observer import ElementUnavailable, RawProps, ScrollState, UiaElement
+from app.desktop.protocol import CheckedState, DesktopPattern, ScrollStep
+from app.desktop.registry import RegisteredApp
 from app.desktop.surfaces import (
     INTEGRITY_MEDIUM,
     ProcessIdentity,
@@ -28,6 +29,7 @@ class FakeProcess:
     integrity: int | None = INTEGRITY_MEDIUM
     parent: int | None = None
     alive: bool = True
+    path: str | None = None
 
 
 @dataclass
@@ -68,8 +70,11 @@ class FakeProbe:
         image: str = "editor.exe",
         integrity: int | None = INTEGRITY_MEDIUM,
         parent: int | None = None,
+        path: str | None = None,
     ) -> FakeProcess:
-        process = FakeProcess(pid=pid, created=created, image=image, integrity=integrity, parent=parent)
+        process = FakeProcess(
+            pid=pid, created=created, image=image, integrity=integrity, parent=parent, path=path
+        )
         self.processes[pid] = process
         return process
 
@@ -155,12 +160,27 @@ class Node:
     #: How many times anything but the control type and password flag was read.
     sensitive_reads: int = 0
     gone: bool = False
+    #: ScrollPattern script. `scroll_percent is None` with `scrollable` means UIA reports no position.
+    scrollable: bool = False
+    scroll_percent: float | None = 0.0
+    scroll_calls: list[ScrollStep] = field(default_factory=list)
+    scroll_moves: bool = True
 
 
 class FakeElement:
-    def __init__(self, node: Node, backend: "FakeBackend") -> None:
+    def __init__(self, node: Node, backend: "FakeBackend", hwnd: int | None = None) -> None:
         self.node = node
         self._backend = backend
+        self.hwnd = hwnd
+
+    def focus(self) -> None:
+        if self.node.gone:
+            raise ElementUnavailable
+        if self.hwnd is None:
+            raise AssertionError("focus is only ever called on a window root")
+        self._backend.focus_calls.append(self.hwnd)
+        if self._backend.on_focus is not None:
+            self._backend.on_focus(self.hwnd)
 
     def props(self, level: str) -> RawProps:
         node = self.node
@@ -203,6 +223,23 @@ class FakeElement:
             raise ElementUnavailable
         return [FakeElement(child, self._backend) for child in self.node.children]
 
+    def scroll_state(self) -> ScrollState | None:
+        if self.node.gone:
+            raise ElementUnavailable
+        if DesktopPattern.SCROLL not in self.node.patterns:
+            return None
+        return ScrollState(vertically_scrollable=self.node.scrollable, vertical_percent=self.node.scroll_percent)
+
+    def scroll(self, step: ScrollStep) -> None:
+        if self.node.gone:
+            raise ElementUnavailable
+        self.node.scroll_calls.append(step)
+        if not self.node.scroll_moves or self.node.scroll_percent is None:
+            return
+        delta = {ScrollStep.SMALL_DOWN: 10.0, ScrollStep.SMALL_UP: -10.0,
+                 ScrollStep.PAGE_DOWN: 40.0, ScrollStep.PAGE_UP: -40.0}[step]
+        self.node.scroll_percent = max(0.0, min(100.0, self.node.scroll_percent + delta))
+
 
 class FakeBackend:
     """A scripted `UiaBackend`: one tree per window handle."""
@@ -212,6 +249,8 @@ class FakeBackend:
         self.reads = 0
         self.on_read: Callable[[int], object] | None = None
         self.raise_on_root: Exception | None = None
+        self.focus_calls: list[int] = []
+        self.on_focus: Callable[[int], object] | None = None
 
     def root_for_window(self, hwnd: int) -> UiaElement:
         if self.raise_on_root is not None:
@@ -219,8 +258,68 @@ class FakeBackend:
         tree = self.trees.get(hwnd)
         if tree is None:
             raise ElementUnavailable
-        return FakeElement(tree, self)
+        return FakeElement(tree, self, hwnd)
 
 
 def window_tree(title: str = "A window", *children: Node) -> Node:
     return Node(control_type="Window", name=title, children=list(children), patterns=frozenset({DesktopPattern.WINDOW}))
+
+
+# ---- a scripted effect platform ---------------------------------------------------
+
+
+class FakePlatform:
+    """A scripted `EffectPlatform` over a `FakeProbe`.
+
+    Records every effect it is asked for, so a test can prove that a refused request performed none.
+    """
+
+    def __init__(self, probe: FakeProbe, backend: FakeBackend, *, worker_pid: int) -> None:
+        self.probe = probe
+        self.backend = backend
+        self.worker_pid = worker_pid
+        self.foreground: int | None = None
+        self.input_tick = 1000
+        #: When False the OS refuses to change the foreground (the foreground lock).
+        self.allow_foreground = True
+        self.foreground_calls: list[int] = []
+        self.spawned: list[tuple[str, tuple[str, ...]]] = []
+        self.next_pid = 9000
+        self.spawn_error: Exception | None = None
+        #: Whether a spawned application's window appears (a slow start is `False`).
+        self.spawn_shows_window = True
+        self.spawn_created = 500
+        self.on_foreground: Callable[[int], object] | None = None
+        backend.on_focus = self._on_focus
+
+    def foreground_hwnd(self) -> int | None:
+        return self.foreground
+
+    def last_input_tick(self) -> int:
+        return self.input_tick
+
+    def _on_focus(self, hwnd: int) -> None:
+        self.foreground_calls.append(hwnd)
+        if self.on_foreground is not None:
+            self.on_foreground(hwnd)
+        if self.allow_foreground:
+            self.foreground = hwnd
+
+    def process_path(self, pid: int) -> str | None:
+        process = self.probe.processes.get(pid)
+        return process.path if process and process.alive else None
+
+    def spawn(self, app: "RegisteredApp") -> int:
+        self.spawned.append((app.executable, app.args))
+        if self.spawn_error is not None:
+            raise self.spawn_error
+        pid = self.next_pid
+        self.next_pid += 1
+        self.probe.add_process(
+            pid, created=self.spawn_created, image=app.image, parent=self.worker_pid, path=app.executable
+        )
+        if self.spawn_shows_window:
+            hwnd = 50_000 + pid
+            self.probe.add_window(hwnd, pid, title=f"{app.label} window")
+            self.backend.trees[hwnd] = window_tree(f"{app.label} window", Node(control_type="Edit", name="Body"))
+        return pid

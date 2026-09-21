@@ -18,6 +18,7 @@ import { extractInspectionRequest } from '../agent/task-request-interpreter'
 import type { AgentTaskController } from './agent-tasks'
 import type { BrowserProfileController } from './browser-profile-controller'
 import type { DesktopReadController } from './desktop-read-controller'
+import type { DesktopActionController } from './desktop-action-controller'
 import type { VoiceTaskController } from './voice-task-controller'
 
 /**
@@ -57,6 +58,12 @@ export interface AgentIpcDependencies {
     DesktopReadController,
     'listDesktopSurfaces' | 'createDesktopRead' | 'getDesktopRead' | 'grantDesktopDisclosure' | 'declineDesktopDisclosure' | 'runDesktopRead'
   >
+  /** Milestone 9 S3. Absent in builds without the desktop capability. */
+  desktopActions?: Pick<
+    DesktopActionController,
+    | 'listDesktopApps' | 'findDesktopScrollTargets' | 'proposeDesktopFocus' | 'proposeDesktopScroll'
+    | 'proposeDesktopLaunch' | 'getDesktopAction' | 'approveDesktopAction' | 'declineDesktopAction'
+  >
 }
 
 const UNAVAILABLE = { code: 'request_failed', message: 'That is not available in this build.' } as const
@@ -75,7 +82,7 @@ function routeWithoutInterpreter(request: unknown): TypedRequestRoute {
 }
 
 export function registerAgentIpc({
-  ipcMain, assertTrustedSender, controller, voice, runtimeStatus, restartRuntime, text, memory, diagnostics, browserProfiles, desktopRead
+  ipcMain, assertTrustedSender, controller, voice, runtimeStatus, restartRuntime, text, memory, diagnostics, browserProfiles, desktopRead, desktopActions
 }: AgentIpcDependencies): void {
   const handle = (channel: string, listener: (...args: unknown[]) => unknown): void => {
     ipcMain.handle(channel, (event, ...args) => {
@@ -220,4 +227,23 @@ export function registerAgentIpc({
     desktopRead ? desktopRead.declineDesktopDisclosure(grantId, revision) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
   handle(AGENT_IPC_CHANNELS.runDesktopRead, () =>
     desktopRead ? desktopRead.runDesktopRead() : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  // Milestone 9 S3: trusted focus, semantic scroll and registered-app launch. Eight fixed channels, each
+  // checking the sender first. Not reachable from voice (`DesktopActionController` is not a member of the
+  // voice backend). None takes a handle, a process, a path, an argument, a coordinate, a key or a selector.
+  handle(AGENT_IPC_CHANNELS.listDesktopApps, () =>
+    desktopActions ? desktopActions.listDesktopApps() : Promise.resolve({ ok: true, value: [] }))
+  handle(AGENT_IPC_CHANNELS.findDesktopScrollTargets, (workerGeneration, surfaceRef, surfaceEpoch) =>
+    desktopActions ? desktopActions.findDesktopScrollTargets(workerGeneration, surfaceRef, surfaceEpoch) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.proposeDesktopFocus, (workerGeneration, surfaceRef, surfaceEpoch) =>
+    desktopActions ? desktopActions.proposeDesktopFocus(workerGeneration, surfaceRef, surfaceEpoch) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.proposeDesktopScroll, (workerGeneration, observationId, controlRef, step) =>
+    desktopActions ? desktopActions.proposeDesktopScroll(workerGeneration, observationId, controlRef, step) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.proposeDesktopLaunch, (appId) =>
+    desktopActions ? desktopActions.proposeDesktopLaunch(appId) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.getDesktopAction, () =>
+    desktopActions ? desktopActions.getDesktopAction() : Promise.resolve({ ok: true, value: null }))
+  handle(AGENT_IPC_CHANNELS.approveDesktopAction, (actionId, revision) =>
+    desktopActions ? desktopActions.approveDesktopAction(actionId, revision) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.declineDesktopAction, (actionId, revision) =>
+    desktopActions ? desktopActions.declineDesktopAction(actionId, revision) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
 }

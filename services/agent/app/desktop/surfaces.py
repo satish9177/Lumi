@@ -57,6 +57,7 @@ DENIED_IMAGES: Final = frozenset(
 )
 
 MAX_ANCESTRY_HOPS: Final = 64
+MAX_LAUNCHED: Final = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +130,15 @@ class ExclusionPolicy:
     #: worker). Job membership needs no parent chain, so it survives a short-lived launcher that
     #: exited between a trusted root and a Lumi window.
     trust_job: bool = False
+    #: Registered applications this worker started on the user's approved request. A launched process
+    #: descends from this worker, so ancestry alone would call it Lumi's own and it could never be
+    #: focused or read. Each entry is bound to a creation time; PID reuse cannot borrow it.
+    launched: list[ProcessIdentity] = field(default_factory=list, compare=False)
+
+    def remember_launch(self, identity: ProcessIdentity) -> None:
+        if identity not in self.launched:
+            self.launched.append(identity)
+            del self.launched[:-MAX_LAUNCHED]
 
     @classmethod
     def resolve(
@@ -160,10 +170,12 @@ class ExclusionPolicy:
         A live process that the process snapshot does not know at all has an unknowable
         lineage, and unknown is treated as Lumi's own rather than as somebody else's.
         """
+        current = probe.process_identity(pid)
+        if current is not None and current in self.launched:
+            return False
         if self.trust_job and pid in job:
             return True
         trusted = {identity.pid: identity for identity in self.roots}
-        current = probe.process_identity(pid)
         if current is None:
             return False
         if current.pid not in parents and current.pid not in trusted:
@@ -179,6 +191,9 @@ class ExclusionPolicy:
             if parent is None or parent.created > current.created:
                 return False
             current = parent
+            if current in self.launched:
+                # Reached a registered application we started: everything below it is that application's.
+                return False
         return False
 
 
@@ -227,6 +242,9 @@ class SurfaceTable:
         if not parents:
             raise DesktopRefusal(DesktopReason.BACKEND_FAILED)
         return parents, job
+
+    def process_snapshot(self) -> tuple[dict[int, int], frozenset[int]]:
+        return self._snapshot()
 
     @staticmethod
     def _ceiling(own_integrity: int | None) -> int | None:

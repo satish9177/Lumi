@@ -57,6 +57,7 @@ def worker_environment(
     root_pids: tuple[int, ...],
     timeout_seconds: float,
     trust_job: bool = False,
+    registered_apps: str = "",
     source: dict[str, str] | None = None,
 ) -> dict[str, str]:
     inherited = os.environ if source is None else source
@@ -69,6 +70,8 @@ def worker_environment(
         LUMI_DESKTOP_EXCLUDED_PIDS=",".join(str(pid) for pid in sorted(set(root_pids))),
         LUMI_DESKTOP_TIMEOUT_SECONDS=str(timeout_seconds),
         LUMI_DESKTOP_TRUST_JOB="1" if trust_job else "0",
+        # Trusted configuration (validated by the runtime's settings), never a request field.
+        LUMI_DESKTOP_REGISTERED_APPS=registered_apps,
     )
     return environment
 
@@ -106,6 +109,7 @@ class ManagedDesktopWorker:
         maximum_failed_starts: int = 4,
         failure_cooldown_seconds: float = 60.0,
         trust_job: bool = False,
+        registered_apps: str = "",
         spawn: Callable[[list[str], dict[str, str]], subprocess.Popen[bytes]] | None = None,
     ) -> None:
         self._root_pids = root_pids
@@ -114,6 +118,7 @@ class ManagedDesktopWorker:
         self._maximum_failed_starts = maximum_failed_starts
         self._cooldown = failure_cooldown_seconds
         self._trust_job = trust_job
+        self._registered_apps = registered_apps
         self._last_failure = 0.0
         self._spawn = spawn or _spawn
         self._lock = asyncio.Lock()
@@ -162,6 +167,7 @@ class ManagedDesktopWorker:
             root_pids=self._root_pids,
             timeout_seconds=self._timeout_seconds,
             trust_job=self._trust_job,
+            registered_apps=self._registered_apps,
         )
         self._failed_starts += 1
         self._last_failure = time.monotonic()

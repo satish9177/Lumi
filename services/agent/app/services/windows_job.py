@@ -10,6 +10,9 @@ from typing import Any
 _JOB_HANDLE: int | None = None
 _PROCESS_LOCK_HANDLE: int | None = None
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+# Lets a process that asks with CREATE_BREAKAWAY_FROM_JOB leave the job. Only the desktop worker's
+# registered-application launch asks; nothing else in the tree passes that flag.
+_JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x00000800
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 
 
@@ -76,7 +79,9 @@ def configure_runtime_process_tree() -> None:
     if not job:
         raise OSError(ctypes.get_last_error(), "could not create runtime process job")
     information = _ExtendedLimitInformation()
-    information.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    information.BasicLimitInformation.LimitFlags = (
+        _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | _JOB_OBJECT_LIMIT_BREAKAWAY_OK
+    )
     configured = kernel32.SetInformationJobObject(
         job,
         _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,

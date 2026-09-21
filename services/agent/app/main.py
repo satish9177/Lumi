@@ -25,6 +25,8 @@ from app.services.clinic_info import ClinicInfoService
 from app.services.page_inspection import PageInspectionService
 from app.services.browser_profiles import BrowserProfileService
 from app.services.desktop import DesktopService, desktop_exclusion_roots
+from app.desktop.registry import AppRegistry
+from app.services.desktop_actions import DesktopActionService
 from app.services.desktop_disclosure import DesktopDisclosureService
 from app.services.windows_job import runtime_job_is_active
 from app.services.browser_execution import (
@@ -248,6 +250,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         # Every process in the runtime's own kill-on-close job is Lumi's, whatever
                         # its parent chain looks like; only claimed when this runtime made that job.
                         trust_job=runtime_job_is_active(),
+                        registered_apps=resolved.desktop_registered_apps,
                     )
                 app.state.desktop_service = DesktopService(
                     engine,
@@ -268,6 +271,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     grant_ttl_seconds=resolved.desktop_disclosure_ttl_seconds,
                 )
                 await app.state.desktop_disclosure_service.recover_started()
+                # Milestone 9 S3: trusted focus, semantic scroll and registered-app launch, on the same action
+                # ledger as browser effects. An unfinished desktop dispatch a dead runtime left is closed as
+                # OUTCOME_UNKNOWN by RecoveryService (already run above) and is never repeated.
+                app.state.desktop_action_service = DesktopActionService(
+                    engine,
+                    actions=action_service,
+                    tasks=TaskService(engine),
+                    desktop=app.state.desktop_service,
+                    registry=AppRegistry.from_config(resolved.desktop_registered_apps),
+                )
                 # A research session belongs to the process that created it.
                 # Sessions a dead runtime left open describe browser contexts
                 # that no longer exist, so every semantic ref they issued has

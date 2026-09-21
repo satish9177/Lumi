@@ -33,6 +33,16 @@ class DesktopReason(StrEnum):
     ELEMENT_AMBIGUOUS = "element_ambiguous"
     ELEMENT_CHANGED = "element_changed"
     BACKEND_FAILED = "desktop_backend_failed"
+    # S3 effects. Every one of these is raised BEFORE an effect could begin, except where the
+    # worker's own response says otherwise.
+    HUMAN_INPUT_DETECTED = "human_input_detected"
+    SURFACE_NOT_FOCUSABLE = "surface_not_focusable"
+    NOT_SCROLLABLE = "not_scrollable"
+    APP_NOT_REGISTERED = "app_not_registered"
+    LAUNCH_REFUSED = "launch_refused"
+    DUPLICATE_DISPATCH = "duplicate_dispatch"
+    # Raised only from the part of an effect that runs after the OS call may have begun.
+    EFFECT_UNCERTAIN = "desktop_effect_uncertain"
 
 
 #: What the runtime maps a refusal to on its own HTTP surface.
@@ -53,6 +63,13 @@ HTTP_STATUS: dict[DesktopReason, int] = {
     DesktopReason.ELEMENT_AMBIGUOUS: 409,
     DesktopReason.ELEMENT_CHANGED: 409,
     DesktopReason.BACKEND_FAILED: 502,
+    DesktopReason.HUMAN_INPUT_DETECTED: 409,
+    DesktopReason.SURFACE_NOT_FOCUSABLE: 409,
+    DesktopReason.NOT_SCROLLABLE: 409,
+    DesktopReason.APP_NOT_REGISTERED: 404,
+    DesktopReason.LAUNCH_REFUSED: 409,
+    DesktopReason.DUPLICATE_DISPATCH: 409,
+    DesktopReason.EFFECT_UNCERTAIN: 502,
 }
 
 

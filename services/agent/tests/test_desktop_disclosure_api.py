@@ -84,7 +84,10 @@ async def open_and_grant(client: httpx.AsyncClient, fake: FakeDesktop) -> tuple[
 
 def test_the_runtime_exposes_exactly_these_desktop_routes_and_no_verb(quiet_settings: Settings) -> None:
     paths = create_app(quiet_settings).openapi()["paths"]
-    desktop = {path: sorted(methods) for path, methods in paths.items() if "desktop" in path}
+    # S3's action routes are pinned, exactly, by `test_desktop_runtime`; this pins the S1/S2 read/disclosure set.
+    desktop = {
+        path: sorted(methods) for path, methods in paths.items() if "desktop" in path and not path.startswith("/desktop/actions")
+    }
     assert desktop == {
         "/desktop/surfaces": ["get"],
         "/desktop/observations": ["post"],

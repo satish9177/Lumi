@@ -16,6 +16,11 @@ import { isAllowedRuntimeRoute } from '../services/agent-runtime-supervisor'
  *
  * "Reviewed" is a list of files below. A new file that names a desktop route, a desktop record or the
  * reader fails here until somebody reads it and adds it, on purpose.
+ *
+ * Milestone 9, slice 3 adds exactly three desktop EFFECTS (focus, semantic scroll, registered-app launch),
+ * each behind an exact trusted approval. They are listed here by name, on purpose: the renderer bridge may
+ * gain those eight methods and no others, and there is still no click, key, mouse, coordinate, value,
+ * selection, invoke, shell or path anywhere in Electron.
  */
 
 const ROOT = join(__dirname, '..', '..', '..')
@@ -62,10 +67,15 @@ describe('the desktop firewall', () => {
 
   it('confines the runtime wire words for a desktop record to the one reviewed parser and client', () => {
     expect(mentioning('surface_epoch')).toEqual([
+      'src/main/services/desktop-action-controller.ts',
       'src/main/services/desktop-read-controller.ts',
       'src/main/services/desktop-read-wire.ts'
     ])
     expect(mentioning('desktop_private')).toEqual(['src/main/services/desktop-read-wire.ts'])
+    expect(mentioning('/desktop/actions')).toEqual([
+      'src/main/services/agent-runtime-supervisor.ts',
+      'src/main/services/desktop-action-controller.ts'
+    ])
     expect(mentioning('/desktop/read-tasks')).toEqual([
       'src/main/services/agent-runtime-supervisor.ts',
       'src/main/services/desktop-read-controller.ts'
@@ -119,29 +129,65 @@ describe('the desktop firewall', () => {
     expect(voice).not.toMatch(/DesktopReadController|desktop-read/)
   })
 
-  it('exposes exactly six typed desktop methods on the renderer bridge and no desktop verb', () => {
+  const S2_METHODS = [
+    'createDesktopRead', 'declineDesktopDisclosure', 'getDesktopRead',
+    'grantDesktopDisclosure', 'listDesktopSurfaces', 'runDesktopRead'
+  ]
+  const S3_METHODS = [
+    'approveDesktopAction', 'declineDesktopAction', 'findDesktopScrollTargets', 'getDesktopAction',
+    'listDesktopApps', 'proposeDesktopFocus', 'proposeDesktopLaunch', 'proposeDesktopScroll'
+  ]
+
+  it('exposes exactly the six S2 and eight S3 typed desktop methods on the renderer bridge and no other verb', () => {
     const bridge = source(join(ROOT, 'src', 'preload', 'index.ts'))
     const methods = [...bridge.matchAll(/^\s{2}(\w*Desktop\w*):/gm)].map((match) => match[1]).sort()
-    expect(methods).toEqual([
-      'createDesktopRead', 'declineDesktopDisclosure', 'getDesktopRead',
-      'grantDesktopDisclosure', 'listDesktopSurfaces', 'runDesktopRead'
-    ])
-    expect(bridge).not.toMatch(/focus(Desktop|Window|Surface)|invoke(Desktop|Control)|setDesktopValue|scrollDesktop|clickDesktop|typeDesktop|selectDesktop|launch(Desktop|App)/i)
+    expect(methods).toEqual([...S2_METHODS, ...S3_METHODS].sort())
+    // Nothing that clicks, types, invokes, sets a value, selects, drags, or takes a handle/path/coordinate.
+    expect(bridge).not.toMatch(/invoke(Desktop|Control)|setDesktopValue|clickDesktop|typeDesktop|selectDesktop|dragDesktop|keyDesktop|mouseDesktop|pressDesktop|hotkey/i)
+    // Focus, scroll and launch exist ONLY as the three reviewed proposals (a card, never an effect by itself).
+    const effectNames = methods.filter((name) => /focus|scroll|launch/i.test(name)).sort()
+    expect(effectNames).toEqual(['findDesktopScrollTargets', 'proposeDesktopFocus', 'proposeDesktopLaunch', 'proposeDesktopScroll'])
     // No generic pass-through: nothing takes a method name, a route, a channel or a command object.
     expect(bridge).not.toMatch(/desktop\s*\(\s*(command|method|tool|route|channel)/i)
     expect(bridge).not.toMatch(/(executeDesktop|computer)\s*[:(]/)
   })
 
-  it('registers exactly six desktop channels, none of which can act', () => {
+  it('registers exactly the six S2 and eight S3 desktop channels, none of which can click, type or run anything', () => {
     const channels = Object.keys(AGENT_IPC_CHANNELS).filter((name) => /desktop/i.test(name)).sort()
-    expect(channels).toEqual([
-      'createDesktopRead', 'declineDesktopDisclosure', 'getDesktopRead',
-      'grantDesktopDisclosure', 'listDesktopSurfaces', 'runDesktopRead'
-    ])
-    for (const name of channels) expect(name).not.toMatch(/focus|invoke|type|select|scroll|click|launch|execute/i)
+    expect(channels).toEqual([...S2_METHODS, ...S3_METHODS].sort())
+    for (const name of channels) expect(name).not.toMatch(/invoke|type(?!s)|select|click|execute|key|mouse|drag|value/i)
   })
 
-  it('lets main reach only the five desktop routes, never a raw observation or a verb', () => {
+  it('keeps the desktop action controller out of voice, the conversation and every provider', () => {
+    const controller = source(join(ROOT, 'src', 'main', 'services', 'desktop-action-controller.ts'))
+    expect(controller).not.toMatch(/from '.*(task-request-interpreter|agent-memory|voice|context-builder|conversation|model-router|desktop-reader|models\/)/)
+    expect(controller).not.toMatch(/router|provider|prompt/i)
+    expect(source(join(ROOT, 'src', 'main', 'services', 'voice-task-controller.ts'))).not.toMatch(/DesktopActionController|desktop-action/)
+    expect(mentioning('DesktopActionController')).toEqual([
+      'src/main/index.ts',
+      'src/main/services/agent-ipc.ts',
+      'src/main/services/desktop-action-controller.ts'
+    ])
+    // Focus, scroll and launch are named nowhere in Electron main except the controller, wire, IPC and contracts.
+    expect(mentioning(/proposeDesktop(Focus|Scroll|Launch)/)).toEqual([
+      'src/main/services/agent-ipc.ts',
+      'src/main/services/desktop-action-controller.ts',
+      'src/preload/index.ts',
+      'src/renderer/src/components/DesktopActionPanel.tsx',
+      'src/shared/agent-contracts.ts'
+    ])
+  })
+
+  it('has no path from the desktop action panel or controller to a click, key, coordinate, value, shell or path', () => {
+    for (const name of ['src/main/services/desktop-action-controller.ts', 'src/main/services/desktop-action-wire.ts', 'src/renderer/src/components/DesktopActionPanel.tsx']) {
+      const text = source(join(ROOT, name))
+      // (User-facing sentences may say "mouse" or "keyboard"; what may never appear is code that could act.)
+      expect(text, name).not.toMatch(/sendInput|sendKeys|clientX|clientY|coordinate|hotkey|clipboard|child_process|spawn\(|exec\(|powershell|cmd\.exe|executable|dangerouslySetInnerHTML|innerHTML|ipcRenderer|require\(/i)
+      expect(text, name).not.toMatch(/desktopCapturer|screenshot|thumbnail|getUserMedia|\bocr\b/i)
+    }
+  })
+
+  it('lets main reach only the reviewed desktop routes, never a raw observation or a verb', () => {
     const id = '11111111-2222-4333-8444-555555555555'
     const allowed: Array<['GET' | 'POST', string]> = [
       ['GET', '/desktop/surfaces'],
@@ -151,7 +197,16 @@ describe('the desktop firewall', () => {
       ['POST', `/desktop/read-tasks/${id}/grant`],
       ['POST', `/desktop/read-tasks/${id}/revoke`],
       ['POST', `/desktop/read-tasks/${id}/disclosure`],
-      ['POST', `/desktop/read-tasks/${id}/result`]
+      ['POST', `/desktop/read-tasks/${id}/result`],
+      // S3: three proposals that only open a card, the scroll-target read, and the two card decisions.
+      ['GET', '/desktop/actions/apps'],
+      ['GET', '/desktop/actions/latest'],
+      ['POST', '/desktop/actions/focus'],
+      ['POST', '/desktop/actions/scroll'],
+      ['POST', '/desktop/actions/launch'],
+      ['POST', '/desktop/actions/scroll-targets'],
+      ['POST', `/desktop/actions/${id}/approve`],
+      ['POST', `/desktop/actions/${id}/decline`]
     ]
     for (const [method, path] of allowed) expect(isAllowedRuntimeRoute(method, path), path).toBe(true)
     const rejected: Array<['GET' | 'POST', string]> = [
@@ -165,7 +220,23 @@ describe('the desktop firewall', () => {
       ['POST', '/desktop/focus'],
       ['POST', '/desktop/invoke'],
       ['POST', '/desktop/execute'],
-      ['POST', '/desktop/read-tasks/latest']
+      ['POST', '/desktop/read-tasks/latest'],
+      // Still no verb: nothing that clicks, types, sets a value, selects, invokes, runs a command or names a path.
+      ['POST', '/desktop/actions/click'],
+      ['POST', '/desktop/actions/type'],
+      ['POST', '/desktop/actions/invoke'],
+      ['POST', '/desktop/actions/set-value'],
+      ['POST', '/desktop/actions/select'],
+      ['POST', '/desktop/actions/execute'],
+      ['POST', '/desktop/actions/launch-path'],
+      ['POST', '/desktop/actions/shell'],
+      ['POST', `/desktop/actions/${id}/execute`],
+      ['POST', `/desktop/actions/${id}/retry`],
+      ['POST', `/desktop/actions/${id}/reconcile`],
+      ['GET', `/desktop/actions/${id}/approve`],
+      ['GET', '/desktop/actions/focus'],
+      ['POST', '/desktop/actions/latest'],
+      ['POST', '/desktop/actions/apps']
     ]
     for (const [method, path] of rejected) expect(isAllowedRuntimeRoute(method, path), `${method} ${path}`).toBe(false)
   })
@@ -173,6 +244,7 @@ describe('the desktop firewall', () => {
   it('names the desktop error codes only in the generated contract and the reviewed wire projection', () => {
     const contract = production.filter((path) => source(path).includes('desktop_refused')).map(rel).sort()
     expect(contract).toEqual([
+      'src/main/services/desktop-action-wire.ts',
       'src/main/services/desktop-read-wire.ts',
       'src/shared/agent-contracts.ts',
       'src/shared/agent-runtime-contract.json'

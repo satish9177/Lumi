@@ -34,12 +34,13 @@ import comtypes  # noqa: E402
 import comtypes.client  # noqa: E402
 from pywinauto.uia_defines import IUIA  # noqa: E402
 
-from app.desktop.observer import ElementUnavailable, RawProps, UiaElement  # noqa: E402
+from app.desktop.observer import ElementUnavailable, RawProps, ScrollState, UiaElement  # noqa: E402
 from app.desktop.protocol import (  # noqa: E402
     MAX_SIBLINGS,
     MAX_TEXT_PER_NODE,
     CheckedState,
     DesktopPattern,
+    ScrollStep,
     clean_text,
 )
 
@@ -88,6 +89,14 @@ _GONE: Final = frozenset(
         0x80004005,  # E_FAIL from a torn-down provider
     }
 )
+#: UIA `ScrollAmount`. The whole vocabulary S3 may send; the horizontal axis is always NoAmount.
+_SCROLL_NO_AMOUNT: Final = 2
+_SCROLL_AMOUNT: Final[dict[ScrollStep, int]] = {
+    ScrollStep.SMALL_UP: 1,  # SmallDecrement
+    ScrollStep.SMALL_DOWN: 4,  # SmallIncrement
+    ScrollStep.PAGE_UP: 0,  # LargeDecrement
+    ScrollStep.PAGE_DOWN: 3,  # LargeIncrement
+}
 _TEXT_ROLES: Final = frozenset({"Edit", "Document"})
 _TOGGLE: Final = {0: CheckedState.OFF, 1: CheckedState.ON, 2: CheckedState.MIXED}
 
@@ -174,6 +183,41 @@ class _Element:
             selected=self._selected(patterns),
             expanded=self._expanded(patterns),
         )
+
+    # -- S3: the one reviewed pattern action ------------------------------------------
+
+    def scroll_state(self) -> ScrollState | None:
+        pattern = self._pattern(_uia.UIA_ScrollPatternId, _uia.IUIAutomationScrollPattern)
+        if pattern is None:
+            return None
+        try:
+            percent = float(pattern.CurrentVerticalScrollPercent)
+            return ScrollState(
+                vertically_scrollable=bool(pattern.CurrentVerticallyScrollable),
+                # UIA reports -1 (UIA_ScrollPatternNoScroll) when the axis does not scroll.
+                vertical_percent=percent if 0 <= percent <= 100 else None,
+            )
+        except comtypes.COMError:
+            return None
+
+    def scroll(self, step: ScrollStep) -> None:
+        pattern = self._pattern(_uia.UIA_ScrollPatternId, _uia.IUIAutomationScrollPattern)
+        if pattern is None:
+            raise ElementUnavailable
+        try:
+            pattern.Scroll(_SCROLL_NO_AMOUNT, _SCROLL_AMOUNT[step])
+        except comtypes.COMError as error:
+            if _unavailable(error):
+                raise ElementUnavailable from None
+            raise
+
+    def focus(self) -> None:
+        try:
+            self._element.SetFocus()
+        except comtypes.COMError as error:
+            if _unavailable(error):
+                raise ElementUnavailable from None
+            raise
 
     # Each pattern read is best-effort: a provider that advertises a pattern and then
     # fails to answer simply has no value, which is the honest result.

@@ -25,12 +25,19 @@ from datetime import datetime
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.desktop.client import DesktopWorkerClient
+from app.desktop.client import DesktopWorkerClient, StaleDesktopResult
 from app.desktop.errors import DesktopReason, DesktopRefusal
 from app.desktop.managed import DesktopEndpoint, ManagedDesktopWorker
 from app.desktop.protocol import (
     DesktopObservation,
+    FocusRequest,
+    FocusResponse,
+    InputBaselineRequest,
+    LaunchRequest,
+    LaunchResponse,
     ObserveRequest,
+    ScrollRequest,
+    ScrollResponse,
     SurfaceListRequest,
     SurfaceListResponse,
 )
@@ -53,6 +60,7 @@ _FENCING = frozenset(
         DesktopReason.WORKER_UNAVAILABLE,
         DesktopReason.STALE_WORKER_GENERATION,
         DesktopReason.BACKEND_FAILED,
+        DesktopReason.EFFECT_UNCERTAIN,
     }
 )
 
@@ -139,6 +147,45 @@ class DesktopService:
         await self._persist(observation)
         return observation
 
+    # -- S3 effects ---------------------------------------------------------------
+    #
+    # Each takes the worker generation the *proposal* was made under, checked before anything is sent: an
+    # approved action can never run in a different worker than the one whose refs it names. None of these
+    # is retried here. A lost answer is the caller's `OUTCOME_UNKNOWN`, not a second request.
+
+    async def input_baseline(self, worker_generation: uuid.UUID) -> int:
+        async def call(client: DesktopWorkerClient, generation: uuid.UUID) -> int:
+            if generation != worker_generation:
+                raise _CallerIsStale
+            answer = await client.input_baseline(InputBaselineRequest(expected_worker_generation=generation))
+            return answer.input_tick
+
+        return await self._run(call)
+
+    async def focus(self, request: FocusRequest) -> FocusResponse:
+        async def call(client: DesktopWorkerClient, generation: uuid.UUID) -> FocusResponse:
+            if generation != request.expected_worker_generation:
+                raise _CallerIsStale
+            return await client.focus(request)
+
+        return await self._run(call)
+
+    async def scroll(self, request: ScrollRequest) -> ScrollResponse:
+        async def call(client: DesktopWorkerClient, generation: uuid.UUID) -> ScrollResponse:
+            if generation != request.expected_worker_generation:
+                raise _CallerIsStale
+            return await client.scroll(request)
+
+        return await self._run(call)
+
+    async def launch(self, request: LaunchRequest) -> LaunchResponse:
+        async def call(client: DesktopWorkerClient, generation: uuid.UUID) -> LaunchResponse:
+            if generation != request.expected_worker_generation:
+                raise _CallerIsStale
+            return await client.launch(request)
+
+        return await self._run(call)
+
     # -- plumbing -----------------------------------------------------------------
 
     async def _run[T](
@@ -165,6 +212,11 @@ class DesktopService:
                 if refusal.code in _FENCING and not isinstance(refusal, _CallerIsStale):
                     await self._fence(worker)
                 raise
+            except StaleDesktopResult:
+                # An answer addressed to some other dispatch or generation: nothing this worker says is
+                # trustworthy now. The effect it was asked for may have happened.
+                await self._fence(worker)
+                raise DesktopRefusal(DesktopReason.EFFECT_UNCERTAIN) from None
 
     def _require_worker(self) -> ManagedDesktopWorker:
         if self._unsupported:

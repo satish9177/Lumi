@@ -301,6 +301,16 @@ if (!readdirSync(join(agentOut, 'alembic', 'versions')).some((name) => name.star
 if (!existsSync(join(agentOut, 'app', 'services', 'desktop_disclosure.py'))) {
   throw new Error('The desktop disclosure service is missing from the runtime bundle.')
 }
+// Milestone 9 S3: trusted focus, semantic scroll and registered-app launch, and their durable dispatch table.
+if (!readdirSync(join(agentOut, 'alembic', 'versions')).some((name) => name.startsWith('0014_'))) {
+  throw new Error('Migration 0014 is missing from the runtime bundle.')
+}
+for (const file of [
+  ['app', 'desktop', 'effects.py'], ['app', 'desktop', 'effects_win32.py'], ['app', 'desktop', 'registry.py'],
+  ['app', 'services', 'desktop_actions.py'], ['app', 'domain', 'desktop_actions.py']
+]) {
+  if (!existsSync(join(agentOut, ...file))) throw new Error(`${file.join('/')} is missing from the runtime bundle.`)
+}
 
 // 5. Byte-compile once, so an installed copy never needs to write beside itself.
 step('byte-compiling')

@@ -78,6 +78,11 @@ export interface AgentRuntimeSettings {
    * default, like the browser worker: a deployment cannot acquire the capability by accident.
    */
   desktopObservation?: boolean
+  /**
+   * Milestone 9 S3: the user's registered applications, a JSON list read once from main's own trusted
+   * configuration. Neither the renderer nor a model can add to it; the runtime validates it whole.
+   */
+  desktopRegisteredApps?: string
 }
 
 export type RuntimeMethod = 'GET' | 'POST'
@@ -170,7 +175,13 @@ const ALLOWED_ROUTES: ReadonlyArray<{ method: RuntimeMethod; pattern: RegExp }> 
   { method: 'POST', pattern: /^\/desktop\/read-tasks$/ },
   { method: 'GET', pattern: /^\/desktop\/read-tasks\/latest$/ },
   { method: 'GET', pattern: new RegExp(`^/desktop/read-tasks/${UUID_PART}$`) },
-  { method: 'POST', pattern: new RegExp(`^/desktop/read-tasks/${UUID_PART}/(grant|revoke|disclosure|result)$`) }
+  { method: 'POST', pattern: new RegExp(`^/desktop/read-tasks/${UUID_PART}/(grant|revoke|disclosure|result)$`) },
+  // Milestone 9 S3: trusted focus, semantic scroll and registered-app launch. Exactly these. Each proposal
+  // opens an exact approval card and performs nothing; only `approve` (the trusted click) can begin an effect.
+  { method: 'GET', pattern: /^\/desktop\/actions\/apps$/ },
+  { method: 'GET', pattern: /^\/desktop\/actions\/latest$/ },
+  { method: 'POST', pattern: /^\/desktop\/actions\/(focus|scroll|launch|scroll-targets)$/ },
+  { method: 'POST', pattern: new RegExp(`^/desktop/actions/${UUID_PART}/(approve|decline)$`) }
 ]
 
 export function isAllowedRuntimeRoute(method: RuntimeMethod, path: string): boolean {
@@ -226,6 +237,10 @@ export function validateRuntimeSettings(settings: AgentRuntimeSettings): Record<
     environment.LUMI_RESEARCH_SEARCH_ENDPOINT = endpoint
   }
   if (settings.desktopObservation === true) environment.LUMI_DESKTOP_OBSERVATION = 'true'
+  if (settings.desktopRegisteredApps !== undefined && settings.desktopRegisteredApps !== '') {
+    if (settings.desktopRegisteredApps.length > 8_000) throw new Error('The registered application list is too long.')
+    environment.LUMI_DESKTOP_REGISTERED_APPS = settings.desktopRegisteredApps
+  }
   if (settings.browsersPath !== undefined) {
     if (!isAbsolute(settings.browsersPath) || /["\r\n]/.test(settings.browsersPath) || settings.browsersPath.length > 500) {
       throw new Error('The bundled browser path is invalid.')

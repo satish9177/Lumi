@@ -117,6 +117,8 @@ ERROR_CODES = (
     "action_already_open",
     "action_not_found",
     "action_proposal_conflict",
+    # Milestone 9 S3: a desktop action refused with a closed reason.
+    "desktop_action_refused",
     "answer_not_grounded",
     "approval_not_usable",
     "authentication_required",

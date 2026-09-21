@@ -31,28 +31,34 @@ from typing import Annotated, Any, TypeVar
 
 from fastapi import APIRouter, Depends, FastAPI, Header, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import Field, SecretStr, field_validator
+from pydantic import BaseModel, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.browser.session import token_matches
+from app.desktop.effects import DesktopEffects, EffectPlatform
 from app.desktop.errors import HTTP_STATUS, DesktopReason, DesktopRefusal
 from app.desktop.observer import DEFAULT_TIME_BUDGET_SECONDS, DesktopObserver, UiaBackend
 from app.desktop.protocol import (
     WORKER_TOKEN_HEADER,
+    FocusRequest,
+    InputBaselineRequest,
+    LaunchRequest,
     ObserveRequest,
+    ScrollRequest,
     SurfaceListRequest,
     SurfaceListResponse,
     WorkerErrorBody,
     WorkerIdentity,
 )
+from app.desktop.registry import AppRegistry
 from app.desktop.surfaces import ExclusionPolicy, SurfaceTable, SystemProbe
 
 logger = logging.getLogger("lumi.desktop.worker")
 
 _T = TypeVar("_T")
-OPERATIONS = ["surfaces", "observe"]
+OPERATIONS = ["surfaces", "observe", "input_baseline", "focus", "scroll", "launch"]
 
 
 class WorkerSettings(BaseSettings):
@@ -73,6 +79,8 @@ class WorkerSettings(BaseSettings):
     )
     #: The runtime created a kill-on-close job that every Lumi process (including this worker) is in.
     trust_job: bool = Field(default=False, validation_alias="LUMI_DESKTOP_TRUST_JOB")
+    #: The user's registered applications (JSON), set by the runtime from trusted configuration.
+    registered_apps: str = Field(default="", validation_alias="LUMI_DESKTOP_REGISTERED_APPS", max_length=8192)
 
     @field_validator("excluded_pids")
     @classmethod
@@ -120,6 +128,7 @@ class _State:
     started_at: datetime
     uia: UiaThread
     observer: DesktopObserver
+    effects: DesktopEffects
     timeout: float
     poisoned: bool = False
 
@@ -160,28 +169,40 @@ def build_state(
     settings: WorkerSettings,
     probe_factory: Callable[[], SystemProbe],
     backend_factory: Callable[[], UiaBackend],
+    platform_factory: Callable[[], EffectPlatform],
+    registry: AppRegistry | None = None,
 ) -> _State:
     """Everything that touches COM or Win32 is created on the UIA thread, not the caller's."""
     uia = UiaThread()
 
-    def initialise() -> DesktopObserver:
+    def initialise() -> tuple[DesktopObserver, DesktopEffects]:
         probe = probe_factory()
         exclusion = ExclusionPolicy.resolve(probe, settings.root_pids, trust_job=settings.trust_job)
         generation = uuid.uuid4()
+        surfaces = SurfaceTable(probe=probe, exclusion=exclusion)
+        backend = backend_factory()
         observer = DesktopObserver(
-            surfaces=SurfaceTable(probe=probe, exclusion=exclusion),
-            backend=backend_factory(),
+            surfaces=surfaces,
+            backend=backend,
             worker_generation=generation,
             time_budget_seconds=min(DEFAULT_TIME_BUDGET_SECONDS, settings.observation_timeout_seconds * 0.4),
         )
-        return observer
+        effects = DesktopEffects(
+            surfaces=surfaces,
+            observer=observer,
+            backend=backend,
+            platform=platform_factory(),
+            registry=registry if registry is not None else AppRegistry.from_config(settings.registered_apps),
+        )
+        return observer, effects
 
-    observer = uia.submit(initialise).result(timeout=90)
+    observer, effects = uia.submit(initialise).result(timeout=90)
     return _State(
         generation=observer.worker_generation,
         started_at=datetime.now(UTC),
         uia=uia,
         observer=observer,
+        effects=effects,
         timeout=settings.observation_timeout_seconds,
     )
 
@@ -191,12 +212,14 @@ def create_worker_app(
     *,
     probe_factory: Callable[[], SystemProbe] | None = None,
     backend_factory: Callable[[], UiaBackend] | None = None,
+    platform_factory: Callable[[], EffectPlatform] | None = None,
+    registry: AppRegistry | None = None,
     exit_process: Callable[[int], object] = os._exit,
 ) -> FastAPI:
     """Uvicorn calls this with no arguments. The keyword seams exist for tests only, and
     nothing in the environment or on the wire can reach them."""
     resolved = settings if settings is not None else WorkerSettings()
-    if probe_factory is None or backend_factory is None:
+    if probe_factory is None or backend_factory is None or platform_factory is None:
         if os.name != "nt":
             raise DesktopRefusal(DesktopReason.UNSUPPORTED)
         from app.desktop.win32 import WindowsSystemProbe
@@ -210,11 +233,19 @@ def create_worker_app(
             return PywinautoBackend()
 
         backend_factory = backend_factory or real_backend
+        from app.desktop.effects_win32 import WindowsEffectPlatform
+
+        platform_factory = platform_factory or WindowsEffectPlatform
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         state = await asyncio.to_thread(
-            build_state, settings=resolved, probe_factory=probe_factory, backend_factory=backend_factory
+            build_state,
+            settings=resolved,
+            probe_factory=probe_factory,
+            backend_factory=backend_factory,
+            platform_factory=platform_factory,
+            registry=registry,
         )
         app.state.desktop = state
         logger.info("desktop worker ready generation=%s", state.generation)
@@ -312,6 +343,47 @@ def create_worker_app(
             stats.truncated, stats.duration_ms,
         )
         return JSONResponse(observation.model_dump(mode="json"))
+
+    async def effect(name: str, state: _State, call: Callable[[], BaseModel]) -> Response:
+        try:
+            answer = await run(state, call)
+        except DesktopRefusal as refusal:
+            logger.info("desktop %s refused generation=%s error_code=%s", name, state.generation, refusal.code.value)
+            return _refusal(refusal, state.generation)
+        logger.info("desktop %s generation=%s", name, state.generation)
+        return JSONResponse(answer.model_dump(mode="json"))
+
+    @router.post("/v1/desktop/input-baseline")
+    async def input_baseline(request: Request, body: InputBaselineRequest) -> Response:
+        state = current(request)
+        refused = guard(state, body.expected_worker_generation)
+        if refused is not None:
+            return refused
+        return await effect("input_baseline", state, state.effects.input_baseline)
+
+    @router.post("/v1/desktop/focus")
+    async def focus(request: Request, body: FocusRequest) -> Response:
+        state = current(request)
+        refused = guard(state, body.expected_worker_generation)
+        if refused is not None:
+            return refused
+        return await effect("focus", state, lambda: state.effects.focus(body))
+
+    @router.post("/v1/desktop/scroll")
+    async def scroll(request: Request, body: ScrollRequest) -> Response:
+        state = current(request)
+        refused = guard(state, body.expected_worker_generation)
+        if refused is not None:
+            return refused
+        return await effect("scroll", state, lambda: state.effects.scroll(body))
+
+    @router.post("/v1/desktop/launch")
+    async def launch(request: Request, body: LaunchRequest) -> Response:
+        state = current(request)
+        refused = guard(state, body.expected_worker_generation)
+        if refused is not None:
+            return refused
+        return await effect("launch", state, lambda: state.effects.launch(body))
 
     app = FastAPI(title="Lumi Desktop Worker", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.include_router(router)

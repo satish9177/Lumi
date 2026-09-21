@@ -30,6 +30,7 @@ import {
   AgentTaskPanel,
   BrowserProfilePanel,
   DesktopReadPanel,
+  DesktopActionPanel,
   BrandMark,
   ConfirmDialog,
   DragGrip,
@@ -129,6 +130,7 @@ export default function LifeLensApp() {
   // is its own overlay rather than a section of AgentTaskPanel.
   const [browserProfilesOpen, setBrowserProfilesOpen] = useState(false)
   const [desktopReadOpen, setDesktopReadOpen] = useState(false)
+  const [desktopActionOpen, setDesktopActionOpen] = useState(false)
   /** A voice outcome asking the trusted task UI to draw attention somewhere. */
   const [agentFocus, setAgentFocus] = useState<{ target: VoiceTaskFocus; serial: number }>()
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest>()
@@ -1823,6 +1825,9 @@ export default function LifeLensApp() {
             <button className="chip" type="button" onClick={() => setDesktopReadOpen(true)} data-testid="open-desktop-read">
               Ask about a window
             </button>
+            <button className="chip" type="button" onClick={() => setDesktopActionOpen(true)} data-testid="open-desktop-action">
+              Move around a window
+            </button>
           </div>
 
           <form className="composer" onSubmit={(event) => { event.preventDefault(); void askQuestion() }}>
@@ -1890,6 +1895,12 @@ export default function LifeLensApp() {
           {desktopReadOpen && (
             <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Ask about a window">
               <DesktopReadPanel agent={window.lifeLens.agent} onClose={() => setDesktopReadOpen(false)} />
+            </div>
+          )}
+
+          {desktopActionOpen && (
+            <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Move around a window">
+              <DesktopActionPanel agent={window.lifeLens.agent} onClose={() => setDesktopActionOpen(false)} />
             </div>
           )}
 

@@ -72,6 +72,7 @@ import { AuthenticatedPlanner } from './agent/authenticated-planner'
 import { FormPlanner } from './agent/form-planner'
 import { DesktopReader } from './agent/desktop-reader'
 import { DesktopReadController } from './services/desktop-read-controller'
+import { DesktopActionController } from './services/desktop-action-controller'
 import { ResearchAnswerer } from './agent/research-answer'
 import { ResearchPlanner } from './agent/research-planner'
 import {
@@ -380,6 +381,7 @@ function developmentAgentRuntimeSettings(): AgentRuntimeSettings {
   if (process.env.LUMI_AGENT_DATABASE_URL) settings.databaseUrl = process.env.LUMI_AGENT_DATABASE_URL
   // Milestone 9 S2: Windows semantic observation is opt-in, in development builds only for now.
   if (process.env.LUMI_DESKTOP_OBSERVATION === '1') settings.desktopObservation = true
+  if (process.env.LUMI_DESKTOP_REGISTERED_APPS) settings.desktopRegisteredApps = process.env.LUMI_DESKTOP_REGISTERED_APPS
   try {
     const hosts = parseAllowedHosts(process.env.LUMI_PUBLIC_INSPECTION_HOSTS ?? '')
     const testOrigins = parseTestOrigins(process.env.LUMI_INSPECTION_TEST_ORIGINS ?? '')
@@ -1192,6 +1194,13 @@ app.whenReady().then(async () => {
       ? agentRuntime.request(method, path, body, timeoutMs)
       : Promise.reject(new RuntimeUnavailableError())
   }, modelRouter ? new DesktopReader(modelRouter) : undefined)
+  // Milestone 9 S3: trusted focus, semantic scroll and registered-app launch. Its own controller, never a
+  // member of the voice backend, and it never touches a provider.
+  const desktopActions = new DesktopActionController({
+    request: (method, path, body, timeoutMs) => agentRuntime
+      ? agentRuntime.request(method, path, body, timeoutMs)
+      : Promise.reject(new RuntimeUnavailableError())
+  })
   // Milestone 8a S2: screen capture is refused from this process's first
   // instruction and stays refused until durable takeover state has been read.
   // A main-process restart during a live takeover therefore cannot produce a
@@ -1234,6 +1243,7 @@ app.whenReady().then(async () => {
     memory,
     browserProfiles,
     desktopRead,
+    desktopActions,
     diagnostics: () => diagnosticsVisible ? diagnostics.list() : [],
     runtimeStatus: () => agentRuntimeView(),
     restartRuntime: async () => {

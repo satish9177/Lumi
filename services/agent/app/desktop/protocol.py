@@ -8,8 +8,9 @@ Two things to notice about every model here.
   dictionary. `extra="forbid"` means a worker that tried to send one is refused
   by the parser rather than trusted. Those values may exist inside the worker so
   a future slice can re-derive a target; they do not cross this boundary.
-* **There is no verb.** Two operations exist, list surfaces and observe one. No
-  request names an action, a selector, coordinates, a script or a property.
+* **The verbs are a closed, reviewed list.** Observation (list surfaces, observe one) and, from S3,
+  exactly three effects (focus a surface, scroll a control by a closed step, open a registered
+  application). No request names a selector, coordinates, a key, a path, a script or a property.
 
 Everything here is `desktop_private` and `untrusted_environment`: text read from
 another application is data about the world, never an instruction, and in this
@@ -270,3 +271,96 @@ class WorkerErrorBody(_Wire):
 
     code: str
     worker_generation: uuid.UUID | None = None
+
+
+# ---- S3: three reviewed effects --------------------------------------------------
+#
+# The verbs the worker now has, and the only ones: bring one already-visible surface to the
+# foreground, scroll one control through UIA's ScrollPattern by a closed step, and open one
+# *registered* application. There is still no field for a handle, PID, path, argument, coordinate,
+# key, selector or script. `dispatch_id` names the runtime's durable dispatch so the worker can
+# refuse to perform one dispatch twice.
+
+APP_ID_PATTERN: Final = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+AppId = Annotated[str, Field(pattern=APP_ID_PATTERN.pattern)]
+#: `GetLastInputInfo` tick. Only its identity matters (it changed or it did not); it is never a time.
+InputTick = Annotated[int, Field(ge=0, le=0xFFFFFFFF)]
+
+
+class ScrollStep(StrEnum):
+    """The only scroll amounts that exist. A model never supplies a number."""
+
+    SMALL_UP = "small_up"
+    SMALL_DOWN = "small_down"
+    PAGE_UP = "page_up"
+    PAGE_DOWN = "page_down"
+
+
+class InputBaselineRequest(_Wire):
+    expected_worker_generation: uuid.UUID
+
+
+class InputBaselineResponse(_Wire):
+    worker_generation: uuid.UUID
+    input_tick: InputTick
+
+
+class FocusRequest(_Wire):
+    expected_worker_generation: uuid.UUID
+    dispatch_id: uuid.UUID
+    surface_ref: SurfaceRef
+    surface_epoch: int = Field(ge=1)
+    #: The human-input baseline taken when the user approved. A newer input refuses the effect.
+    input_tick: InputTick
+
+
+class FocusResponse(_Wire):
+    worker_generation: uuid.UUID
+    dispatch_id: uuid.UUID
+    surface_ref: SurfaceRef
+    surface_epoch: int = Field(ge=1)
+    outcome: Literal["focused", "not_focused"]
+    #: The user typed or clicked while the effect ran. Automation stops; the runtime re-observes.
+    input_changed: bool
+
+
+class ScrollRequest(_Wire):
+    expected_worker_generation: uuid.UUID
+    dispatch_id: uuid.UUID
+    surface_ref: SurfaceRef
+    surface_epoch: int = Field(ge=1)
+    observation_id: uuid.UUID
+    control_ref: ControlRef
+    step: ScrollStep
+    input_tick: InputTick
+
+
+class ScrollResponse(_Wire):
+    worker_generation: uuid.UUID
+    dispatch_id: uuid.UUID
+    outcome: Literal["scrolled", "unchanged"]
+    #: Vertical scroll position as a percentage, before and after (None when UIA reports none).
+    percent_before: float | None = Field(ge=0, le=100)
+    percent_after: float | None = Field(ge=0, le=100)
+    input_changed: bool
+
+
+class LaunchRequest(_Wire):
+    expected_worker_generation: uuid.UUID
+    dispatch_id: uuid.UUID
+    app_id: AppId
+    input_tick: InputTick
+
+
+class LaunchResponse(_Wire):
+    worker_generation: uuid.UUID
+    dispatch_id: uuid.UUID
+    app_id: AppId
+    #: `already_running`: a live instance of exactly this registered executable existed, so no process
+    #: was started and that instance was brought forward. `launched`: one process was started.
+    outcome: Literal["launched", "already_running"]
+    #: The registered instance's surface, when its window has appeared and is eligible.
+    surface_ref: SurfaceRef | None
+    surface_epoch: int | None = Field(ge=1)
+    focused: bool
+    input_changed: bool

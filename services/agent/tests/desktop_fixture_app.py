@@ -111,6 +111,13 @@ CB_GETCURSEL: Final = 0x0147
 CB_ADDSTRING: Final = 0x0143
 CB_SETCURSEL: Final = 0x014E
 LB_ADDSTRING: Final = 0x0180
+LVS_REPORT: Final = 0x0001
+LVS_SINGLESEL: Final = 0x0004
+LVS_NOCOLUMNHEADER: Final = 0x4000
+LVM_INSERTITEMW: Final = 0x104D
+LVM_INSERTCOLUMNW: Final = 0x1061
+LVIF_TEXT: Final = 0x0001
+LVCF_WIDTH: Final = 0x0002
 LB_SETCURSEL: Final = 0x0186
 LB_GETCURSEL: Final = 0x0188
 LB_SETTOPINDEX: Final = 0x0197
@@ -176,6 +183,7 @@ ID_MAIN_EDIT: Final = 110
 ID_HIDDEN_EDIT: Final = 111
 ID_PASSWORD_EDIT: Final = 112
 ID_OVERFLOW: Final = 114
+ID_SCROLL_LIST: Final = 115
 
 COUNTER_KEYS: Final = (
     "getobject",
@@ -400,6 +408,16 @@ def _get_text(hwnd: int) -> str:
     buf = ctypes.create_unicode_buffer(length + 1)
     user32.GetWindowTextW(hwnd, buf, length + 1)
     return buf.value
+
+
+class _LVITEM(ctypes.Structure):
+    _fields_ = [
+        ("mask", ctypes.c_uint32), ("iItem", ctypes.c_int), ("iSubItem", ctypes.c_int),
+        ("state", ctypes.c_uint32), ("stateMask", ctypes.c_uint32), ("pszText", ctypes.c_void_p),
+        ("cchTextMax", ctypes.c_int), ("iImage", ctypes.c_int), ("lParam", ctypes.c_void_p),
+        ("iIndent", ctypes.c_int), ("iGroupId", ctypes.c_int), ("cColumns", ctypes.c_uint32),
+        ("puColumns", ctypes.c_void_p), ("piColFmt", ctypes.c_void_p), ("iGroup", ctypes.c_int),
+    ]
 
 
 def _send(hwnd: int, msg: int, wparam: int = 0, lparam: int = 0) -> int:
@@ -679,7 +697,32 @@ def _build_standard(b: _Builder, args: argparse.Namespace) -> None:
         )
         y += 50
 
+    scroll_items: int = int(args.scroll_items)
+    scroll_list = 0
+    if scroll_items > 0:
+        # A real report-mode ListView: its UIA proxy exposes ScrollPattern (the plain LISTBOX does not).
+        ctypes.WinDLL("comctl32").InitCommonControls()
+        b.label("Scrollable", (x, y, W, 16))
+        y += 16
+        scroll_list = b.add(
+            "SysListView32", "", LVS_REPORT | LVS_NOCOLUMNHEADER | LVS_SINGLESEL | WS_TABSTOP, (x, y, 260, 60),
+            ctl_id=ID_SCROLL_LIST, ex_style=WS_EX_CLIENTEDGE,
+        )
+        y += 66
+
     # Initial control state (subclasses are installed later, so none of this counts).
+    if scroll_list:
+        column = (ctypes.c_uint32 * 12)()
+        column[0] = LVCF_WIDTH
+        column[2] = 240
+        _send(scroll_list, LVM_INSERTCOLUMNW, 0, ctypes.addressof(column))
+        for i in range(scroll_items):
+            row_text = ctypes.create_unicode_buffer(f"Scroll row {i + 1}")
+            row = _LVITEM()
+            row.mask = LVIF_TEXT
+            row.iItem = i
+            row.pszText = ctypes.addressof(row_text)
+            _send(scroll_list, LVM_INSERTITEMW, 0, ctypes.addressof(row))
     for i in range(overflow):
         _send_text(overflow_list, LB_ADDSTRING, f"Overflow {i + 1}")
     _send(rt.checkbox, BM_SETCHECK, 1)
@@ -827,6 +870,10 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument(
         "--overflow-items", type=int, default=0,
         help="opt-in: extra LISTBOX 'Overflow' with N items, ~3 visible (rest IsOffscreen=true)",
+    )
+    p.add_argument(
+        "--scroll-items", type=int, default=0,
+        help="opt-in: a report-mode ListView with N rows, whose UIA proxy exposes ScrollPattern",
     )
     p.add_argument("--password-text", default="M9_S1_PASSWORD_SECRET_77")
     p.add_argument(

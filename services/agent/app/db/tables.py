@@ -1182,3 +1182,72 @@ desktop_answers = Table(
         name="shape_matches_kind",
     ),
 )
+
+
+#: Milestone 9 S3. One row per request to the desktop worker for ONE effect (focus, scroll, launch), written
+#: and committed before the worker is called. `attempt_id` is UNIQUE. Identifiers, opaque refs, digests and
+#: closed codes only: never a title, control text, path, handle, coordinate or typed value.
+DESKTOP_DISPATCH_OPERATIONS = ("focus_surface", "scroll_control", "launch_app")
+DESKTOP_DISPATCH_STATUSES = ("DISPATCHED", "OK", "FAILED_BEFORE_EFFECT", "OUTCOME_UNKNOWN")
+
+desktop_dispatches = Table(
+    "desktop_dispatches",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("action_id", Uuid(), ForeignKey("actions.id", ondelete="RESTRICT", name="fk_desktop_dispatches_action_id_actions"), nullable=False),
+    Column(
+        "attempt_id",
+        Uuid(),
+        ForeignKey("action_attempts.id", ondelete="RESTRICT", name="fk_desktop_dispatches_attempt_id_action_attempts"),
+        nullable=False,
+    ),
+    Column(
+        "worker_generation",
+        Uuid(),
+        ForeignKey(
+            "desktop_worker_generations.id",
+            ondelete="RESTRICT",
+            name="fk_desktop_dispatches_worker_generation_desktop_worker_generations",
+        ),
+        nullable=False,
+    ),
+    Column("operation", String(24), nullable=False),
+    Column("surface_ref", String(4), nullable=True),
+    Column("surface_epoch", Integer(), nullable=True),
+    Column("observation_id", Uuid(), nullable=True),
+    Column("snapshot_digest", String(64), nullable=True),
+    Column("control_ref", String(4), nullable=True),
+    Column("app_id", String(32), nullable=True),
+    Column("input_tick", BigInteger(), nullable=False),
+    Column("status", String(24), nullable=False),
+    Column("error_code", String(64), nullable=True),
+    Column("result", JSONB(), nullable=True),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    UniqueConstraint("attempt_id", name="uq_desktop_dispatches_attempt_id"),
+    CheckConstraint("operation IN (" + ", ".join(f"'{v}'" for v in DESKTOP_DISPATCH_OPERATIONS) + ")", name="operation"),
+    CheckConstraint("status IN (" + ", ".join(f"'{v}'" for v in DESKTOP_DISPATCH_STATUSES) + ")", name="status"),
+    CheckConstraint("(finished_at IS NULL) = (status = 'DISPATCHED')", name="finished_matches_status"),
+    CheckConstraint("surface_ref IS NULL OR surface_ref ~ '^s([1-9]|1[0-6])$'", name="surface_ref_shape"),
+    CheckConstraint("control_ref IS NULL OR control_ref ~ '^u([1-9][0-9]?|1[0-9][0-9]|200)$'", name="control_ref_shape"),
+    CheckConstraint("app_id IS NULL OR app_id ~ '^[a-z][a-z0-9_-]{0,31}$'", name="app_id_shape"),
+    CheckConstraint("snapshot_digest IS NULL OR snapshot_digest ~ '^[0-9a-f]{64}$'", name="digest_format"),
+    CheckConstraint("input_tick >= 0 AND input_tick <= 4294967295", name="input_tick_range"),
+    CheckConstraint("result IS NULL OR jsonb_typeof(result) = 'object'", name="result_object"),
+    CheckConstraint(
+        "(operation = 'focus_surface' AND surface_ref IS NOT NULL AND surface_epoch IS NOT NULL "
+        "AND control_ref IS NULL AND app_id IS NULL) "
+        "OR (operation = 'scroll_control' AND surface_ref IS NOT NULL AND surface_epoch IS NOT NULL "
+        "AND observation_id IS NOT NULL AND snapshot_digest IS NOT NULL AND control_ref IS NOT NULL "
+        "AND app_id IS NULL) "
+        "OR (operation = 'launch_app' AND app_id IS NOT NULL AND surface_ref IS NULL "
+        "AND control_ref IS NULL AND observation_id IS NULL)",
+        name="operation_identity",
+    ),
+)
+Index("ix_desktop_dispatches_action_id", desktop_dispatches.c.action_id)
+Index(
+    "ix_desktop_dispatches_in_flight",
+    desktop_dispatches.c.status,
+    postgresql_where=text("status = 'DISPATCHED'"),
+)

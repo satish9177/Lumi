@@ -142,6 +142,7 @@
     "action_already_open",
     "action_not_found",
     "action_proposal_conflict",
+    "desktop_action_refused",
     "answer_not_grounded",
     "approval_not_usable",
     "authentication_required",

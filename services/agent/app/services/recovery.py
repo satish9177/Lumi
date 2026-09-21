@@ -10,6 +10,7 @@ from app.domain.local_form_draft import FILL_OPERATION, HANDOVER_OPERATION
 from app.domain.task_status import TaskEventType, TaskStatus, accepts_actions
 from app.repositories.actions import ActionRepository
 from app.repositories.browser import BrowserRepository
+from app.repositories.desktop_actions import DesktopActionRepository
 from app.repositories.form_drafts import FormDraftRepository
 from app.repositories.tasks import TaskRepository
 
@@ -105,6 +106,9 @@ class RecoveryService:
             # closed in the same transaction, so the audit trail never shows a
             # dispatch still in flight on a process that no longer exists.
             dispatch = await BrowserRepository(connection).close_orphaned_dispatch(attempt.id)
+            # Milestone 9 S3: a desktop dispatch the dead runtime left in flight is closed the same way.
+            # Nothing is claimed about what the desktop did and nothing is retried.
+            await DesktopActionRepository(connection).close_orphaned_dispatch(attempt.id)
             # Milestone 8b S6. A local draft lives only in the browser, and the browser died
             # with the runtime. `frozen_at` is the one fact that lets Lumi say anything about
             # the remote effect: set, it proves both network layers were frozen before any

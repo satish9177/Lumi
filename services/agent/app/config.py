@@ -105,6 +105,11 @@ class Settings(DatabaseSettings):
     desktop_observation_timeout_seconds: float = Field(
         default=30.0, gt=0, le=120, validation_alias="LUMI_DESKTOP_TIMEOUT_SECONDS"
     )
+    #: Milestone 9 S3: the user's registered applications, a JSON list of
+    #: `{"appId", "label", "executable", "args"?}`. Trusted configuration set by Electron main from the user's own
+    #: settings; no request, renderer field or model can add to it. Validated here so a bad document stops the
+    #: runtime at startup instead of being half applied.
+    desktop_registered_apps: str = Field(default="", max_length=8_192, validation_alias="LUMI_DESKTOP_REGISTERED_APPS")
     #: Milestone 9 S2: how long one desktop-disclosure approval stays usable. It is single-use either
     #: way; expiry never makes it reusable.
     desktop_disclosure_ttl_seconds: int = Field(
@@ -116,6 +121,17 @@ class Settings(DatabaseSettings):
     #: Supplied by Electron main from its own trusted configuration.
     public_inspection_hosts: str = Field(default="", validation_alias="LUMI_PUBLIC_INSPECTION_HOSTS")
     inspection_test_origins: str = Field(default="", validation_alias="LUMI_INSPECTION_TEST_ORIGINS")
+
+    @field_validator("desktop_registered_apps")
+    @classmethod
+    def _valid_registered_apps(cls, value: str) -> str:
+        from app.desktop.registry import AppRegistry
+
+        try:
+            AppRegistry.from_config(value)
+        except (ValueError, TypeError):
+            raise ValueError("LUMI_DESKTOP_REGISTERED_APPS is not a valid registered-application list") from None
+        return value
 
     @field_validator("public_inspection_hosts")
     @classmethod

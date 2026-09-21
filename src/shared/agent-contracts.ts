@@ -1022,6 +1022,76 @@ export interface AgentDesktopReadView {
   answer?: AgentDesktopAnswerView
 }
 
+// ---- Milestone 9 S3: trusted focus, semantic scroll and registered-application launch ---------
+//
+// Three effects only, each behind an exact trusted approval on the ordinary action ledger. Read these
+// as the whole of what the renderer can learn about a desktop action. What is missing stays missing: no
+// window handle, process id or path, no executable path or argument, no AutomationId or coordinate, no
+// snapshot, no digest. Application strings are `untrusted_environment` text, rendered inert. The renderer
+// never supplies a handle, a path, an argument, a coordinate or a key: it picks an opaque surface it was
+// listed, a scrollable control of a fresh local observation, a closed scroll step, or a registered app id.
+
+export const DESKTOP_ACTION_OPERATIONS = ['focus_surface', 'scroll_control', 'launch_app'] as const
+export type AgentDesktopActionOperation = typeof DESKTOP_ACTION_OPERATIONS[number]
+
+export const DESKTOP_SCROLL_STEPS = ['small_up', 'small_down', 'page_up', 'page_down'] as const
+export type AgentDesktopScrollStep = typeof DESKTOP_SCROLL_STEPS[number]
+
+export const DESKTOP_ACTION_STATUSES = [
+  'PROPOSED', 'WAITING_APPROVAL', 'APPROVED', 'AUTHORIZED', 'REJECTED', 'EXECUTING', 'SUCCEEDED', 'FAILED',
+  'OUTCOME_UNKNOWN', 'RECONCILING'
+] as const
+export type AgentDesktopActionStatus = typeof DESKTOP_ACTION_STATUSES[number]
+
+export interface AgentRegisteredApp {
+  appId: string
+  /** From the trusted registry. */
+  label: string
+}
+
+export interface AgentDesktopScrollTarget {
+  controlRef: string
+  role: string
+  /** Untrusted display text. */
+  name: string
+}
+
+export interface AgentDesktopScrollTargetList {
+  observationId: string
+  targets: AgentDesktopScrollTarget[]
+}
+
+export interface AgentDesktopActionResultView {
+  outcome?: string
+  percentBefore?: number
+  percentAfter?: number
+  /** The person used the machine while the effect ran. Automation stopped and re-read. */
+  humanInputDuring?: boolean
+  observationInvalidated?: boolean
+  followUpObservationId?: string
+  focused?: boolean
+}
+
+export interface AgentDesktopActionView {
+  actionId: string
+  revision: number
+  status: AgentDesktopActionStatus
+  operation: AgentDesktopActionOperation
+  /** Untrusted display text (from the trusted registry for a launch). */
+  applicationLabel: string
+  /** Untrusted display text. Absent for a launch. */
+  windowTitle?: string
+  controlRole?: string
+  /** Untrusted display text. */
+  controlName?: string
+  step?: AgentDesktopScrollStep
+  appId?: string
+  expiresAt?: string
+  attemptOutcome?: 'SUCCEEDED' | 'FAILED' | 'OUTCOME_UNKNOWN'
+  errorCode?: string
+  result?: AgentDesktopActionResultView
+}
+
 export const AGENT_ERROR_CODES = [
   'runtime_unavailable',
   'runtime_restarted',
@@ -1248,7 +1318,7 @@ export interface AgentApi {
   listDesktopSurfaces: () => Promise<AgentResult<AgentDesktopSurfaceList>>
   /**
    * Choose ONE surface and type a question. Lumi inspects it LOCALLY and opens the trusted disclosure
-   * card. Nothing is sent to any provider. The question never goes through the conversation model, and
+   * card. Nothing is sent anywhere. The question never goes through the conversation model, and
    * the renderer cannot choose the provider: main does, from its own configuration.
    */
   createDesktopRead: (objective: string, workerGeneration: string, surfaceRef: string, surfaceEpoch: number) => Promise<AgentResult<AgentDesktopReadView>>
@@ -1260,6 +1330,22 @@ export interface AgentApi {
   declineDesktopDisclosure: (grantId: string, expectedRevision: number) => Promise<AgentResult<AgentDesktopReadView>>
   /** Run the approved read: ONE call to the approved provider. There is no retry and no other provider. */
   runDesktopRead: () => Promise<AgentResult<AgentDesktopReadView>>
+  /** Milestone 9 S3. Read-only: the registered applications (ids and labels). */
+  listDesktopApps: () => Promise<AgentResult<AgentRegisteredApp[]>>
+  /** Observe one surface LOCALLY and list only its scrollable controls. Nothing is sent anywhere. */
+  findDesktopScrollTargets: (workerGeneration: string, surfaceRef: string, surfaceEpoch: number) => Promise<AgentResult<AgentDesktopScrollTargetList>>
+  /** Open the exact approval card for bringing ONE surface to the front. Nothing happens yet. */
+  proposeDesktopFocus: (workerGeneration: string, surfaceRef: string, surfaceEpoch: number) => Promise<AgentResult<AgentDesktopActionView>>
+  /** Open the exact approval card for ONE semantic scroll of a control of a fresh observation. */
+  proposeDesktopScroll: (workerGeneration: string, observationId: string, controlRef: string, step: AgentDesktopScrollStep) => Promise<AgentResult<AgentDesktopActionView>>
+  /** Open the exact approval card for opening ONE registered application by id. */
+  proposeDesktopLaunch: (appId: string) => Promise<AgentResult<AgentDesktopActionView>>
+  /** Read-only: the newest desktop action, or none. */
+  getDesktopAction: () => Promise<AgentResult<AgentDesktopActionView | null>>
+  /** The trusted "Approve" click: names the action and the revision the card showed. Performs ONE effect. */
+  approveDesktopAction: (actionId: string, expectedRevision: number) => Promise<AgentResult<AgentDesktopActionView>>
+  /** The trusted "Cancel" click. A declined action can never run. */
+  declineDesktopAction: (actionId: string, expectedRevision: number) => Promise<AgentResult<AgentDesktopActionView>>
 }
 
 /**
@@ -1335,7 +1421,15 @@ export const AGENT_IPC_CHANNELS = {
   getDesktopRead: 'lifelens:agent:get-desktop-read',
   grantDesktopDisclosure: 'lifelens:agent:grant-desktop-disclosure',
   declineDesktopDisclosure: 'lifelens:agent:decline-desktop-disclosure',
-  runDesktopRead: 'lifelens:agent:run-desktop-read'
+  runDesktopRead: 'lifelens:agent:run-desktop-read',
+  listDesktopApps: 'lifelens:agent:list-desktop-apps',
+  findDesktopScrollTargets: 'lifelens:agent:find-desktop-scroll-targets',
+  proposeDesktopFocus: 'lifelens:agent:propose-desktop-focus',
+  proposeDesktopScroll: 'lifelens:agent:propose-desktop-scroll',
+  proposeDesktopLaunch: 'lifelens:agent:propose-desktop-launch',
+  getDesktopAction: 'lifelens:agent:get-desktop-action',
+  approveDesktopAction: 'lifelens:agent:approve-desktop-action',
+  declineDesktopAction: 'lifelens:agent:decline-desktop-action'
 } as const
 
 /** Actions whose side effect is unresolved or in flight. */

@@ -111,6 +111,21 @@ from app.domain.login_takeover import TakeoverRefusal
 from app.desktop.protocol import DesktopObservation, SurfaceListResponse
 from app.services.browser_profiles import BrowserProfileService
 from app.services.desktop import DesktopService
+from app.domain.desktop_actions import TOOL_PREFIX
+from app.services.desktop_actions import DesktopActionError, DesktopActionService
+from app.api.desktop_action_schemas import (
+    DesktopActionDecisionBody,
+    DesktopActionResponse,
+    LatestDesktopActionResponse,
+    ProposeFocusBody,
+    ProposeLaunchBody,
+    ProposeScrollBody,
+    RegisteredAppResponse,
+    RegisteredAppsResponse,
+    ScrollTargetResponse,
+    ScrollTargetsBody,
+    ScrollTargetsResponse,
+)
 from app.services.desktop_disclosure import DesktopDisclosureService
 from app.api.desktop_disclosure_schemas import (
     CreateDesktopReadBody,
@@ -286,8 +301,14 @@ async def _refuse_disclosure_tool(service: ActionService, action_id: uuid.UUID) 
     re-checks every fact it depends on. Approving, claiming or finishing it through
     a generic route would skip that.
     """
-    if (await service.get_action(action_id)).action.tool_name in (FORM_PREPARE_TOOL, HANDOVER_TOOL):
+    tool = (await service.get_action(action_id)).action.tool_name
+    if tool in (FORM_PREPARE_TOOL, HANDOVER_TOOL):
         raise FormPrepareRefusal("use_disclosure_route")
+    if tool.upper().startswith(TOOL_PREFIX):
+        # Milestone 9 S3. A desktop effect exists only inside `DesktopActionService.approve`: the input baseline,
+        # the guard, the durable dispatch and the worker call are one ordered unit. A generic approve, attempt or
+        # finish would mint or settle an effect that skipped every one of them.
+        raise DesktopActionError("use_desktop_route")
 
 
 @router.post(
@@ -303,6 +324,8 @@ async def propose_action(
     response: Response,
 ) -> ActionResponse:
     """Record a proposal. Replaying the same idempotency key returns `200`."""
+    if body.tool_name.upper().startswith(TOOL_PREFIX):
+        raise DesktopActionError("use_desktop_route")
     if body.tool_name in (FORM_PREPARE_TOOL, HANDOVER_TOOL):
         # Only the form-preparation service, from a controller-built manifest, may
         # create this action. A generic caller cannot mint an approval for one.
@@ -1659,3 +1682,130 @@ async def record_desktop_result(
             task_id, disclosure_id=body.disclosure_id, result=body.result, failure=body.failure
         )
     )
+
+
+# --- Windows desktop actions (Milestone 9, slice 3) --------------------------------------
+#
+# Exactly three effects, each behind an exact trusted approval on the ordinary action ledger: focus one
+# surface, scroll one control by a closed step, open one registered application by id. There is no route
+# that takes a handle, a path, an argument, a coordinate, a key, a selector or a script.
+
+
+def get_desktop_action_service(request: Request) -> DesktopActionService:
+    service: DesktopActionService = request.app.state.desktop_action_service
+    return service
+
+
+DesktopActionServiceDep = Annotated[DesktopActionService, Depends(get_desktop_action_service)]
+_DESKTOP_ACTION_RESPONSES: dict[int | str, dict[str, Any]] = {
+    **_NOT_FOUND,
+    **_CONFLICT,
+    status.HTTP_403_FORBIDDEN: {"model": ErrorResponse},
+    status.HTTP_503_SERVICE_UNAVAILABLE: {"model": ErrorResponse},
+    status.HTTP_504_GATEWAY_TIMEOUT: {"model": ErrorResponse},
+}
+
+
+@router.get("/desktop/actions/apps", response_model=RegisteredAppsResponse, summary="The registered applications")
+async def list_registered_apps(service: DesktopActionServiceDep) -> RegisteredAppsResponse:
+    return RegisteredAppsResponse(apps=[RegisteredAppResponse(app_id=a, label=b) for a, b in service.registered_apps()])
+
+
+@router.post(
+    "/desktop/actions/focus",
+    status_code=status.HTTP_201_CREATED,
+    response_model=DesktopActionResponse,
+    responses=_DESKTOP_ACTION_RESPONSES,
+    summary="Open the exact approval card for bringing one surface to the front (nothing happens yet)",
+)
+async def propose_desktop_focus(body: ProposeFocusBody, service: DesktopActionServiceDep) -> DesktopActionResponse:
+    return DesktopActionResponse.from_view(
+        await service.propose_focus(
+            worker_generation=body.worker_generation, surface_ref=body.surface_ref, surface_epoch=body.surface_epoch
+        )
+    )
+
+
+@router.post(
+    "/desktop/actions/scroll",
+    status_code=status.HTTP_201_CREATED,
+    response_model=DesktopActionResponse,
+    responses=_DESKTOP_ACTION_RESPONSES,
+    summary="Open the exact approval card for one semantic scroll (nothing happens yet)",
+)
+async def propose_desktop_scroll(body: ProposeScrollBody, service: DesktopActionServiceDep) -> DesktopActionResponse:
+    return DesktopActionResponse.from_view(
+        await service.propose_scroll(
+            worker_generation=body.worker_generation,
+            observation_id=body.observation_id,
+            control_ref=body.control_ref,
+            step=body.step,
+        )
+    )
+
+
+@router.post(
+    "/desktop/actions/scroll-targets",
+    response_model=ScrollTargetsResponse,
+    responses=_DESKTOP_ACTION_RESPONSES,
+    summary="Observe one surface locally and list only its scrollable controls (nothing is sent anywhere)",
+)
+async def desktop_scroll_targets(body: ScrollTargetsBody, service: DesktopActionServiceDep) -> ScrollTargetsResponse:
+    observation_id, targets = await service.scroll_targets(
+        worker_generation=body.worker_generation, surface_ref=body.surface_ref, surface_epoch=body.surface_epoch
+    )
+    return ScrollTargetsResponse(
+        observation_id=observation_id,
+        targets=[ScrollTargetResponse(control_ref=ref, role=role, name=name) for ref, role, name in targets],
+    )
+
+
+@router.post(
+    "/desktop/actions/launch",
+    status_code=status.HTTP_201_CREATED,
+    response_model=DesktopActionResponse,
+    responses=_DESKTOP_ACTION_RESPONSES,
+    summary="Open the exact approval card for opening one registered application (nothing happens yet)",
+)
+async def propose_desktop_launch(body: ProposeLaunchBody, service: DesktopActionServiceDep) -> DesktopActionResponse:
+    return DesktopActionResponse.from_view(await service.propose_launch(app_id=body.app_id))
+
+
+@router.get("/desktop/actions/latest", response_model=LatestDesktopActionResponse, summary="The newest desktop action")
+async def latest_desktop_action(service: DesktopActionServiceDep) -> LatestDesktopActionResponse:
+    view = await service.latest()
+    return LatestDesktopActionResponse(action=None if view is None else DesktopActionResponse.from_view(view))
+
+
+@router.get(
+    "/desktop/actions/{action_id}",
+    response_model=DesktopActionResponse,
+    responses=_DESKTOP_ACTION_RESPONSES,
+    summary="One desktop action, as the trusted card shows it",
+)
+async def get_desktop_action(action_id: uuid.UUID, service: DesktopActionServiceDep) -> DesktopActionResponse:
+    return DesktopActionResponse.from_view(await service.get(action_id))
+
+
+@router.post(
+    "/desktop/actions/{action_id}/approve",
+    response_model=DesktopActionResponse,
+    responses=_DESKTOP_ACTION_RESPONSES,
+    summary="The exact approval click: claim it once and perform ONE effect",
+)
+async def approve_desktop_action(
+    action_id: uuid.UUID, body: DesktopActionDecisionBody, service: DesktopActionServiceDep
+) -> DesktopActionResponse:
+    return DesktopActionResponse.from_view(await service.approve(action_id, expected_revision=body.expected_revision))
+
+
+@router.post(
+    "/desktop/actions/{action_id}/decline",
+    response_model=DesktopActionResponse,
+    responses=_DESKTOP_ACTION_RESPONSES,
+    summary="Decline the card. A declined action can never run",
+)
+async def decline_desktop_action(
+    action_id: uuid.UUID, body: DesktopActionDecisionBody, service: DesktopActionServiceDep
+) -> DesktopActionResponse:
+    return DesktopActionResponse.from_view(await service.decline(action_id, expected_revision=body.expected_revision))
