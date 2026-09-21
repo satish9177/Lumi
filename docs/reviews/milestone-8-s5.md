@@ -2,7 +2,9 @@
 
 > **S5 is approval-only. It performs zero browser writes.** Lumi can know exactly what it *would* place into each approved field, but it still has no operation capable of placing anything into that field.
 
-Status: **S5 closed.** S6, M9 and M10 have **not** been started. M8b itself is not complete.
+Status: **S5 closed.** S6, M9 and M10 had **not** been started when this was written. M8b itself was not complete.
+
+> **Superseded in part by S6 (`docs/reviews/milestone-8-s6.md`).** Every statement below describes S5 *as it was closed*. Two of them are no longer true of the running product and are corrected where they appear: the saved value no longer stays in its row (S6 lets an approved value flow through trusted runtime and worker memory into the frozen browser), and approving a manifest no longer ends in `prepared_nothing` (it funds one network-frozen local draft). The historical `prepared_nothing` rows, and their `form-prepare-v1` manifests, are untouched and are **never executable**.
 
 Roadmap: M8b - S4 ✅; **S5 ✅ disclosure manifest / exact approval**; **S6 next** (frozen local form draft).
 
@@ -47,7 +49,7 @@ Raw values are plaintext task data in Lumi's local runtime database. This is **n
 
 ## 10. Raw-value exclusion surfaces
 
-After saving, the value never leaves its row in S5: the repository returns only kind, preview, digest and length. Tests plant `LEGAL_NAME_SECRET_S5_71A`, `EMAIL_SECRET_S5_82B@example.test`, `9300001234` and `PORTFOLIO_SECRET_S5_C4D` and assert zero occurrences in the planning context, the card, every table except `protected_values` (full-table text dumps: actions, approvals, events, observations, attempts, grants), captured logs, provider requests, the renderer snapshot, and the packaged artifact. The `PUT` response never echoes the value, and no route reads one.
+After saving, the value never left its row **in S5**: the repository returned only kind, preview, digest and length. **In S6 this is temporally superseded:** an approved value may flow only through trusted runtime memory and the loopback worker request into the locally frozen browser page (`ProtectedValueRepository.values_for_execution`, verified against the approved digest under a share lock in the approving transaction). It still never reaches the provider, the renderer, Electron main, an action proposal, an approval row, a dispatch row, a draft row, a task event, a diagnostic, a log line or an error payload. Tests plant `LEGAL_NAME_SECRET_S5_71A`, `EMAIL_SECRET_S5_82B@example.test`, `9300001234` and `PORTFOLIO_SECRET_S5_C4D` and assert zero occurrences in the planning context, the card, every table except `protected_values` (full-table text dumps: actions, approvals, events, observations, attempts, grants), captured logs, provider requests, the renderer snapshot, and the packaged artifact. The `PUT` response never echoes the value, and no route reads one.
 
 ## 11. The form-planning grant
 
@@ -123,7 +125,7 @@ None of the six names appear in the voice controller, its backend type, the tool
 
 ## 29. `prepared_nothing`
 
-No new action status. The approval is spent through `WAITING_APPROVAL -> APPROVED -> EXECUTING -> SUCCEEDED` in one transaction; the finished attempt's result is `{"code":"prepared_nothing","browser_dispatches":0}`. It creates no dispatch and is never given to a worker. `SUCCEEDED` means the approval was recorded and used, not that anything was done; the timeline and card say so.
+No new action status. The approval is spent through `WAITING_APPROVAL -> APPROVED -> EXECUTING -> SUCCEEDED` in one transaction; the finished attempt's result is `{"code":"prepared_nothing","browser_dispatches":0}`. (S5 only. Since S6 a new `form-prepare-v2` approval funds a local draft instead; a `prepared_nothing` result is historical and its approval is terminal.) It creates no dispatch and is never given to a worker. `SUCCEEDED` means the approval was recorded and used, not that anything was done; the timeline and card say so.
 
 ## 30. Proof of zero dispatch/write
 

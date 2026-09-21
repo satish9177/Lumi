@@ -493,8 +493,10 @@ rest and gives no protection against a live compromise of the same Windows user;
 protection is the operating-system account and database access controls, and nothing
 more is claimed. It is not a credential: browser sessions stay under the profile
 boundary. The database refuses a row whose `value_digest` is not `SHA-256(UTF-8(value))`.
-After it is saved the value **does not leave its row in S5**: every read returns only
-kind, masked preview, digest and length. Values are saved only through a narrow typed
+After it is saved the value **did not leave its row in S5**: every read returned only
+kind, masked preview, digest and length. **S6 changes this, and only this far:** one repository
+method (`values_for_execution`) returns the raw value to trusted runtime memory for one approved
+local draft (see the S6 section below). Every other read is unchanged. Values are saved only through a narrow typed
 route (`PUT /protected-values/{kind}`, one string, response never echoes it) that no
 model, voice turn or page can reach, and no product editor exists yet (see gaps).
 
@@ -569,12 +571,11 @@ counts only (`protected_value_count`, `allowed_data_ref_count`, `form_count`,
 manifest. The form plan, previews and manifest are `account_private`: they are excluded from
 other requests' contexts, episodic memory, public research and global diagnostics.
 
-**Structural no-write proof.** The S4 source scanner now also covers every S5 module and
-still forbids `fill type press click check select_option set_input_files dispatch_event
-request_submit ...`; the worker protocol, registry and operations contain none of
-`set_value set_checked select_option freeze unfreeze LOCAL_DRAFT frozen_at form_drafts
-handover form_is_dirty`, no route contains `freeze`, `draft`, `handover` or `fill`, and no
-`form_drafts` table, `frozen_at` column or `LOCAL_DRAFT` effect exists.
+**Structural no-write proof (as of S5).** The S4 source scanner covered every S5 module and
+forbade `fill type press click check select_option set_input_files dispatch_event
+request_submit ...` everywhere in the worker, and no `form_drafts` table, `frozen_at` column
+or `LOCAL_DRAFT` effect existed. **S6 replaces "none anywhere" with "exactly these three
+names, in exactly one file"** -- see the S6 section.
 
 **Residual limits.** Values are plaintext in the local database (above). A country preview
 is the value. Approval cannot detect a DOM change Lumi did not observe (S6's job). The
@@ -582,6 +583,105 @@ element identity hash uses the projected identity, not the worker-internal ordin
 product UI for entering saved details exists yet. Only a synthetic fixture was used: no
 real account, saved detail or form; the packaged `Lumi.exe` is `NotSigned`, so the
 Authenticode gate and the no-real-account gate remain open.
+
+## Network-frozen local form draft (Milestone 8b S6)
+
+> **Lumi fills the form in its own browser with the network frozen, verifies the values are in the
+> fields, and hands you the browser. Nothing was sent while Lumi was filling. If the form needs the
+> network to accept a value, Lumi stops and tells you. Lumi never submits.**
+
+It is *not* a claim that Lumi works on every form, submits applications, saves a draft on the
+website or knows whether a site accepted anything.
+
+**Two-layer freeze (the primary mechanism).**
+
+| Layer | What it does | What it closes |
+| --- | --- | --- |
+| Playwright guard (`AccountReadNetworkGuard`) | a `frozen` flag is checked **first** in `_handle`, before the request is inspected, fetched, resolved, proxied or followed; an exact in-flight count is taken from the moment a request enters (no `await` between the check and the increment) | every request the page could make, including redirects, beacons, images and third-party fetches |
+| Egress broker (`EgressBroker.freeze_and_drain`) | mode `FROZEN` is set **first** (nothing new resolves or dials; a connection that arrives is refused before it is registered), then every relay task is cancelled and the set is awaited to empty | DNS-name exfiltration (`https://<value>.exfil.invalid/`), and a CONNECT tunnel or keep-alive relay that was **already open** |
+
+`freeze()` alone is not enough: a relay opened before it keeps carrying bytes. A byte-counting server test
+opens a tunnel, freezes, and shows zero new bytes and zero new resolutions afterwards; a negative control
+shows that `freeze()` without the drain leaves the tunnel flowing. Entry order: page settle -> guard frozen
+-> guard `in_flight == 0` -> broker frozen -> every relay cancelled -> `active_connections == 0` -> proof.
+Any failure restores the open state (broker, then guard) and nothing was written. A request open before the
+freeze (a streaming fetch) gives `page_never_settles`: Lumi never freezes on top of an open request.
+
+**Ownership.** The broker is worker-global, so the freeze has one owner (profile, dispatch, worker
+generation). While it exists another profile, task, research session, public read or takeover is refused
+(`freeze_owned`, or `form_is_dirty` for the owner's own profile), and the release functions are bound to
+the owner's dispatch id: no task can thaw another's draft. There is no `setNetworkMode`, boolean or generic
+network call anywhere -- a test scans the worker for one.
+
+**Order (durable intent before effect).** exact approval claimed + attempt durable + action `EXECUTING` in ONE
+transaction -> dispatch row durable (`frozen_at NULL`) -> worker enters the freeze -> worker proves it ->
+runtime writes `browser_dispatches.frozen_at` (compare-and-set, only while `DISPATCHED`, on that worker
+generation, while NULL) -> account re-checked from the database -> ONE dispatch writes every field. The worker
+ALSO checks, immediately before every field write, that the owner is this dispatch, the guard is frozen, the
+broker is frozen, `guard.in_flight == 0` and `broker.active_connections == 0` (`not_frozen` otherwise). A test
+observes from the worker's side of the wire that `frozen_at` was already set when the write request arrived.
+
+**Three field primitives, one file.** `set_value` (`fill`), `select_option` (by reviewed option ordinal, never a
+raw `value=`) and `set_checked`, inside one approved dispatch, in `app/browser/local_form_draft.py` only. Before
+each write the element is re-derived from the LIVE DOM (same count, ordinal and semantic identity), its identity
+hash recomputed and compared with the manifest's, and the structure fingerprint compared; after each write the
+control is re-derived again, its value read back inside the worker, hashed, and required to equal the approved
+value; then the value-free structure is compared once more. A source scan allow-lists those names in that file and
+fails on any click, key press, typing, upload, submit, drag, hover, focus, dispatched event or script evaluation
+anywhere else in the worker, and on planted violations.
+
+**What stops a fill.** A value the page resets, a dependent select whose options need the network, asynchronous
+validation (`aria-invalid` on a control just written), a network-loaded option that is missing, or a form that
+re-renders itself: `unsupported_under_freeze` (or `element_changed` for a re-render that tried nothing). Lumi
+never turns the network on for one request and never types text into a select. A fill that stops after one or
+more verified writes leaves the page dirty and frozen (status `STALE`, task paused, card says the form needs
+manual review). A fill that stopped before any verified write destroys any page a primitive touched, while
+frozen, and only then thaws.
+
+**Dirty.** From the first primitive, the worker session is dirty: every agent read, navigation, history move, tab
+change and profile close is refused (`form_is_dirty`), the runtime refuses planning, reading, closing and
+takeover for that profile independently, and **no provider is called** in freeze entry, fill, verification,
+discard or handover, so protected values the page reflects in its text cannot reach one. `beforeunload` is never
+used as a control.
+
+**Discard never "lifts the freeze and reloads".** A dirty page thawed while alive can autosave the instant a
+request can leave. The tab is closed with `run_before_unload=False` while frozen, `is_closed()` is checked, draft
+ownership is cleared, and only then does the broker open, then the guard. A negative-control test shows the same
+fixture page, thawed alive, does autosave; the real discard test shows zero.
+
+**Handover is the disclosure boundary.** It restores the network while the dirty page is alive, so it needs a
+SECOND exact approval (`handover_form`, R2, bound to the draft digest) and re-verifies the live page immediately
+before thaw (`draft_changed`, still frozen, if a human changed a field in the visible window). The wide human-mode
+guard is installed first (while the broker is still frozen), then the broker opens, then the read guard is
+removed; the browser is never closed or reopened. Afterwards Lumi says only: "You took over in the browser window.
+Lumi did not submit anything and cannot tell you whether the site accepted or saved it." A lost handover response
+is `OUTCOME_UNKNOWN`, never retried, never reconciled.
+
+**Preparation mode (headless -> headed).** A local draft cannot be made in the headless read context and kept by
+reopening it headed (closing the context destroys the DOM). So before the manifest exists the worker captures the
+current in-site page into its own memory (never returned, never a renderer/model/IPC field), the profile is closed
+and reopened **headed**, the worker navigates back to that page internally under the read guard, and a completely
+fresh S4 observation is taken through the normal credential/identity gates. Every proposal and approval made from
+the headless document is rejected, and an observation the worker did not issue for the current form is refused
+(`stale_observation`). If the page cannot be returned to safely the user opens the form themselves.
+
+**Historical S5 approvals are terminal.** A `form-prepare-v1` manifest still parses and its digest still verifies,
+but it is never executable; a `prepared_nothing` result is never reinterpreted or replayed. Only a new
+`form-prepare-v2` approval created in preparation mode can fund one draft.
+
+**Recovery.** A draft is browser-local and is lost on any restart; the row says what Lumi prepared, not something
+restorable. A crash with `frozen_at` set may say the remote effect was impossible under the verified freeze (and
+`local_state: lost`); with `frozen_at` NULL nothing is claimed. Either way: `OUTCOME_UNKNOWN`, task paused
+`browser_lost`, no retry, no reconciliation. At startup every live draft row is closed as lost.
+
+**Residuals, stated plainly.** (1) The freeze is proven on a synthetic fixture, not real sites; a real site run
+demonstrates usability, never absence of effect. (2) A request whose bytes were sent before the freeze cannot carry
+values that did not yet exist, and a streaming request is refused outright -- but a request that was in the guard
+when it began is only *waited for*, bounded. (3) Handover ends the guarantee: the site may immediately autosave
+what is in the form, and the card says so before the click. (4) Values are plaintext in the local database (S5).
+(5) Screenshots and vision captures are never taken of a dirty form, but the headed window is visible to anyone at
+the machine. (6) Service workers stay blocked, so a queued Background Sync write cannot be flushed at handover.
+(7) The Authenticode gate and the no-real-account gate remain open (below).
 
 ## Known gaps
 
