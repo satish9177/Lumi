@@ -1,6 +1,6 @@
 # Delivery status
 
-## Milestone 9 (Windows semantic computer use): S1-S3 complete, S4-S5 not started
+## Milestone 9 (Windows semantic computer use): S1-S4 complete, S5 not started
 
 ```text
 M8b engineering                    COMPLETE
@@ -11,12 +11,12 @@ Real-account release               BLOCKED
 M9  S1 UIA observation             COMPLETE
     S2 disclosure/reasoning        COMPLETE
     S3 focus/scroll/app launch     COMPLETE  (engineering)
-    S4 semantic actions            NOT STARTED
+    S4 bounded semantic actions    COMPLETE  (engineering; all three primitives on real UIA)
     S5 visual fallback             NOT STARTED
 M10                                NOT STARTED
 ```
 
-S3 adds exactly three exact-approval desktop effects (focus a visible window, UIA-scroll a list by a closed step, open a registered application) and still no click, key, mouse, value, selection, shell or arbitrary launch. Details: [reviews/milestone-9-s3.md](reviews/milestone-9-s3.md), plan [plans/milestone-9.md](plans/milestone-9.md). Production-signed installed validation remains blocked by the missing Authenticode certificate.
+S3 adds exactly three exact-approval desktop effects (focus a visible window, UIA-scroll a list by a closed step, open a registered application) and still no click, key, mouse, value, selection, shell or arbitrary launch. S4 adds exactly three more, each behind a model-proposed-and-independently-reverified plan plus a second, separate exact execution approval: write one value (`ValuePattern.SetValue`), choose one option (`SelectionItem.Select`), or invoke one control for one closed, reviewed, deterministically-verified effect (`InvokePattern.Invoke`, currently `NAME_TOGGLE` only). Still no mouse, keyboard, hotkey, drag, clipboard, shell, coordinate or generic Invoke/SetValue/Select route. Details: [reviews/milestone-9-s4.md](reviews/milestone-9-s4.md), plan [plans/milestone-9.md](plans/milestone-9.md). Production-signed installed validation remains blocked by the missing Authenticode certificate.
 
 
 ## Milestone 6 — final hardening: complete (17 September 2026)

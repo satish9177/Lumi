@@ -353,6 +353,18 @@ real-account release remains **BLOCKED**.
 
 **M8a S3 packaging note.** Authenticated reading adds no new binary: it uses the bundled full Chromium and the S0 broker. Profiles live under the user data directory (`LUMI_BROWSER_PROFILE_ROOT`), not in the bundle. No new packaged-build run was performed for S3.
 
+### Desktop bounded semantic actions (Milestone 9 S4)
+
+No new native dependency and no new executable: `SetValue`/`Select`/`Invoke` are three more calls through
+the same UIA backend S1-S3 already bundle. `build-agent-runtime.mjs` additionally fails the build if
+migration `0015` (`desktop_dispatches`' widened operations/identity columns, the widened grant kind,
+`desktop_action_plans`) or any of the four new planning-service files (`app/services/desktop_planning.py`,
+`app/domain/desktop_planning.py`, `app/repositories/desktop_planning.py`,
+`app/api/desktop_planning_schemas.py`) is missing from the runtime bundle. Packaged output was verified
+(`package:dir`): the bundled UIA backend import check (S1's, unchanged) still passes from the bundle alone,
+and no new fixture, secret or unexpected executable appears anywhere in the packaged tree. No signing
+change.
+
 ### Desktop focus, scroll and registered launch (Milestone 9 S3)
 
 No new native dependency and **no new executable**: starting a registered application is `subprocess.Popen` of a program the user registered, not a bundled helper. `build-agent-runtime.mjs` additionally fails the build if migration `0014` (`desktop_dispatches`), `app/desktop/effects.py`, `effects_win32.py`, `registry.py`, `app/services/desktop_actions.py` or `app/domain/desktop_actions.py` is missing from the runtime bundle. The user's registered-application list (`LUMI_DESKTOP_REGISTERED_APPS`) is configuration and is never bundled; no fixture or test file ships. No signing change.

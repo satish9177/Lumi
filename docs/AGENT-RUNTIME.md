@@ -883,3 +883,41 @@ Needs `LUMI_DESKTOP_OBSERVATION=1`; the registered applications come from `LUMI_
 * **Worker** (`app.desktop.worker`): `POST /v1/desktop/input-baseline|focus|scroll|launch`, all behind the token and generation fence; a `dispatch_id` is performed at most once per generation and a finished one replays its stored answer.
 * **Ordering** and **classification** as in `docs/reviews/milestone-9-s3.md` (sections 3, 9-11). `desktop_dispatches`: `DISPATCHED -> OK | FAILED_BEFORE_EFFECT | OUTCOME_UNKNOWN`, `attempt_id` UNIQUE, DB-enforced identity per operation, no title/path/handle/coordinate/value columns. Startup recovery closes an orphaned dispatch as `OUTCOME_UNKNOWN` (`runtime_restart`).
 * **Freshness**: a scroll proposal must come from the newest observation of that surface, at most 60 seconds old, re-checked in the claim transaction.
+
+## Desktop bounded semantic actions (M9 S4, migration `0015`)
+
+Needs `LUMI_DESKTOP_OBSERVATION=1`, same as S1-S3. See `docs/plans/milestone-9.md`, `docs/SECURITY.md` and
+`docs/reviews/milestone-9-s4.md`.
+
+* **Two separate authorities.** A model may *propose* (never authorize) exactly one of `invoke(controlRef)`
+  / `set_value(controlRef, valueRef)` / `select(containerRef, optionRef)` from ONE exact, redacted
+  disclosure of ONE observation, through a private task class (`desktop_action_planning`, single
+  recipient, zero failover, no image) -- disclosure grant `kind = desktop_action_plan`, a new
+  `desktop_action_plans` table (`STARTED -> SUCCEEDED | FAILED | OUTCOME_UNKNOWN`, `grant_id`/`task_id`
+  UNIQUE, `proposed_action` JSONB opaque-refs-only). `DesktopActionService.propose_from_plan` then
+  independently re-verifies the whole proposal against a freshly rebuilt projection and opens an ordinary
+  desktop action (tools `DESKTOP_SET_VALUE`/`DESKTOP_SELECT`/`DESKTOP_INVOKE`, all R2) on the SAME S3
+  ledger, behind its own SECOND, separate exact approval. The model never sees a raw value, a coordinate,
+  a native id, a provider, a risk tier or an approval.
+* **Routes** (authenticated; Electron main only): `POST /desktop/action-plans` `{objective, recipient,
+  model, worker_generation, surface_ref, surface_epoch, values?}`, `POST /desktop/action-plans/{taskId}/grant|decline`,
+  `POST /desktop/action-plans/{taskId}/run` (claims + calls the one provider + records the result),
+  `GET /desktop/action-plans/latest|{taskId}`; `POST /desktop/actions/from-plan` `{planId}` (the ONLY way
+  an S4 mutation reaches the action ledger -- there is no direct `set-value`/`select`/`invoke` proposal
+  route); `POST /desktop/actions/{id}/reconcile` `{expected_revision, outcome}`. Errors:
+  `desktop_plan_refused` (422) / `desktop_plan_state_changed` (409) mirroring S2's disclosure errors;
+  `desktop_action_unresolved` (blocks a new plan, confirm, claim or execution proposal while a mutation
+  is `OUTCOME_UNKNOWN`/`RECONCILING`, in any task); `desktop_action_not_reconcilable`.
+* **Worker** (`app.desktop.worker`): `POST /v1/desktop/set-value|select|invoke`, same token/generation
+  fence and dispatch-replay-at-most-once-per-generation as S3. `set_control_value`/`select_control`/
+  `invoke_control` widen `desktop_dispatches`' operation set and identity columns (`value_ref`,
+  `option_container_ref`, `invoke_effect`) -- still no raw value, title, path, handle or coordinate column.
+* **Getting unstuck.** `OUTCOME_UNKNOWN`/`RECONCILING` on an S4 mutation blocks every other desktop action
+  until a person reports `succeeded`/`failed`/`still_unknown` through `reconcile`; nothing is retried or
+  re-derived automatically. `RecoveryService.recover_interrupted_reconciliations` (startup, unscoped by
+  `runtime_generation`) closes the case of a process dying between the two committed reconciliation
+  transactions, moving an action stuck at `RECONCILING` back to `OUTCOME_UNKNOWN` so it can be reconciled
+  again.
+* **Freshness**: `PLANNING_OBSERVATION_MAX_AGE_SECONDS = 20` for confirming a plan; S3's existing
+  `ACTION_OBSERVATION_MAX_AGE_SECONDS = 60` for opening and claiming the execution proposal. Live target
+  re-resolution immediately before the effect is mandatory regardless, by exact match only.

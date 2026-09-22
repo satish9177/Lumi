@@ -2,7 +2,7 @@
 
 > **Lumi can read a Windows application the way a screen reader does (roles, names, values and states from UI Automation) before it is ever allowed to touch one.**
 
-Status: **S1 (observation only), S2 (exact desktop disclosure and read-only reasoning) and S3 (trusted focus, semantic scroll, registered-app launch) are implemented. S4 and S5 are NOT started. M10 is NOT started.**
+Status: **S1 (observation only), S2 (exact desktop disclosure and read-only reasoning), S3 (trusted focus, semantic scroll, registered-app launch) and S4 (bounded set-value/select/invoke, behind a model-proposed-and-independently-reverified plan plus a second, separate execution approval) are implemented. S5 is NOT started. M10 is NOT started.**
 
 This plan refines the M9 entry in `docs/plans/general-computer-use-architecture.md`. That entry lists window inventory, focus, app launch, UIA observe/invoke/value/selection/scroll and a scoped visual fallback. M9 is delivered in slices, in the same order M8 used: **observation and target identity are reviewed before any write exists.** Each slice below is one reviewable change with its own tests and review report.
 
@@ -12,7 +12,8 @@ M9 - Windows semantic computer use
 S1  done            isolated UIA worker + surface inventory + bounded semantic observation. Zero input.
 S2  done            exact one-observation disclosure to ONE provider + read-only grounded reasoning. Zero input.
 S3  done            trusted focus + semantic UIA scroll + registered-app launch (three exact-approval effects)
-S4  later           bounded Invoke / Value / Selection actions on re-resolved targets
+S4  done            bounded Invoke / Value / Selection actions on re-resolved targets, from a model-proposed
+                     and independently-reverified plan, behind a second, separate exact execution approval
 S5  later           limited visual fallback, only where semantics are unavailable
 ```
 
@@ -76,7 +77,7 @@ Everything in S1 exists to make that sentence checkable rather than promised.
 
 *Original S3 text:* Trusted, user-initiated focus of a registered application, and scroll *observation*. Focus is a state change, so it takes a per-action approval, a stale-identity check before use, and human-input takeover detection. Registered-app launch belongs here or after, never as arbitrary paths.
 
-**S4, actions.** Bounded `Invoke`, `ValuePattern` set and `SelectionItem` select, each on a control re-resolved from the current tree, each with an exact approval, effect classification, `OUTCOME_UNKNOWN` handling and the existing action ledger. No hotkeys, drag, terminal typing or coordinates.
+**S4, actions (done; see `docs/reviews/milestone-9-s4.md`).** Bounded `Invoke`, `ValuePattern` set and `SelectionItem` select, each on a control re-resolved from the current tree, each with an exact approval, effect classification, `OUTCOME_UNKNOWN` handling and the existing action ledger. No hotkeys, drag, terminal typing or coordinates. A model may *propose* which control and which of the three, from a redacted snapshot disclosed exactly like S2's, through a parallel private task class (`desktop_action_planning`); the runtime independently re-verifies the whole proposal before it opens a SECOND, separate, exact execution approval -- disclosure authority is never execution authority. An `OUTCOME_UNKNOWN` mutation blocks every new desktop action (in any task) until a human reconciles it; nothing auto-retries.
 
 **S5, visual fallback.** Scoped region capture only where UIA exposes nothing, with the existing capture consent and guards, DPI/multi-monitor transforms, and no blind coordinate click.
 

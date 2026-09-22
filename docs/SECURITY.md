@@ -776,7 +776,7 @@ S2 changes **who may see an already-captured snapshot**, and nothing else. The d
 
 ## Desktop focus, semantic scroll and registered launch (Milestone 9 S3)
 
-S3 is the first Windows state-changing slice. It adds **exactly three effects**, each behind an exact, single-use, per-action trusted approval, and nothing else: no Invoke, SetValue, selection, mouse, keyboard, hotkey, drag, clipboard, screenshot, coordinate, shell, or arbitrary executable, path or argument. Desktop disclosure (S2) is not authority for any of them.
+S3 is the first Windows state-changing slice. It adds **exactly three effects**, each behind an exact, single-use, per-action trusted approval, and nothing else as of S3: no Invoke, SetValue, selection, mouse, keyboard, hotkey, drag, clipboard, screenshot, coordinate, shell, or arbitrary executable, path or argument. Desktop disclosure (S2) is not authority for any of them. (S4, below, adds exactly three more: Invoke, SetValue and selection. Mouse, keyboard, hotkey, drag, clipboard, screenshot, coordinate and shell remain absent through S4 too.)
 
 **Authority.** A desktop action is an ordinary `actions`/`approvals`/`action_attempts` row (tools `DESKTOP_FOCUS`, `DESKTOP_SCROLL`, `DESKTOP_LAUNCH`) plus a `desktop_dispatches` row. The proposal is built by the runtime from live facts the person chose, is immutable, and is re-parsed before it runs. The approval is claimed once inside one transaction with a guard; the input baseline is taken after the click; the dispatch is committed before the worker is called; nothing is retried. The generic action routes cannot approve, attempt, finish, reconcile or propose a desktop action (`use_desktop_route`).
 
