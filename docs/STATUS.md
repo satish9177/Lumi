@@ -1,6 +1,6 @@
 # Delivery status
 
-## Milestone 9 (Windows semantic computer use): S1-S5 complete, pending final cross-slice review
+## Milestone 9 (Windows semantic computer use): S1-S5 and the final cross-slice audit complete
 
 ```text
 M8b engineering                    COMPLETE
@@ -13,11 +13,12 @@ M9  S1 UIA observation             COMPLETE
     S3 focus/scroll/app launch     COMPLETE  (engineering)
     S4 bounded semantic actions    COMPLETE  (engineering; all three primitives on real UIA)
     S5 visual fallback             COMPLETE  (engineering; real capture on real UIA)
-M9 engineering implementation      COMPLETE pending final cross-slice review
+M9 engineering implementation      COMPLETE
+M9 final cross-slice audit         COMPLETE
 M10                                NOT STARTED
 ```
 
-S3 adds exactly three exact-approval desktop effects (focus a visible window, UIA-scroll a list by a closed step, open a registered application) and still no click, key, mouse, value, selection, shell or arbitrary launch. S4 adds exactly three more, each behind a model-proposed-and-independently-reverified plan plus a second, separate exact execution approval: write one value (`ValuePattern.SetValue`), choose one option (`SelectionItem.Select`), or invoke one control for one closed, reviewed, deterministically-verified effect (`InvokePattern.Invoke`, currently `NAME_TOGGLE` only). Still no mouse, keyboard, hotkey, drag, clipboard, shell, coordinate or generic Invoke/SetValue/Select route. S5 adds a scoped visual fallback: a screenshot is offered only when deterministic code finds UIA insufficient, behind its own trusted capture approval (local use only, never sent anywhere), and sending a fresh image to one named AI provider needs a SEPARATE trusted approval; the provider can only return labelled evidence, never a coordinate or a click, and there is still no generic screenshot route, no mouse and no keyboard anywhere in Lumi. Details: [reviews/milestone-9-s4.md](reviews/milestone-9-s4.md), [reviews/milestone-9-s5.md](reviews/milestone-9-s5.md), plan [plans/milestone-9.md](plans/milestone-9.md). Production-signed installed validation remains blocked by the missing Authenticode certificate.
+S3 adds exactly three exact-approval desktop effects (focus a visible window, UIA-scroll a list by a closed step, open a registered application) and still no click, key, mouse, value, selection, shell or arbitrary launch. S4 adds exactly three more, each behind a model-proposed-and-independently-reverified plan plus a second, separate exact execution approval: write one value (`ValuePattern.SetValue`), choose one option (`SelectionItem.Select`), or invoke one control for one closed, reviewed, deterministically-verified effect (`InvokePattern.Invoke`, currently `NAME_TOGGLE` only). Still no mouse, keyboard, hotkey, drag, clipboard, shell, coordinate or generic Invoke/SetValue/Select route. S5 adds a scoped visual fallback: a screenshot is offered only when deterministic code finds UIA insufficient, behind its own trusted capture approval (local use only, never sent anywhere), and sending a fresh image to one named AI provider needs a SEPARATE trusted approval; the provider can only return labelled evidence, never a coordinate or a click, and there is still no generic screenshot route, no mouse and no keyboard anywhere in Lumi. The final cross-slice audit (two independent adversarial reviews across all five slices together) found and fixed a High finding (`select_control` lacked the same reviewed-container safety layer `invoke_control` already had) and closed the S4 raw-value ledger residual outright, plus lower-severity fixes; two findings were confirmed and deliberately documented rather than fixed under audit time pressure. Details: [reviews/milestone-9-s4.md](reviews/milestone-9-s4.md), [reviews/milestone-9-s5.md](reviews/milestone-9-s5.md), [reviews/milestone-9-final.md](reviews/milestone-9-final.md), plan [plans/milestone-9.md](plans/milestone-9.md). Production-signed installed validation remains blocked by the missing Authenticode certificate.
 
 
 ## Milestone 6 — final hardening: complete (17 September 2026)
