@@ -20,6 +20,7 @@ import type { BrowserProfileController } from './browser-profile-controller'
 import type { DesktopReadController } from './desktop-read-controller'
 import type { DesktopActionController } from './desktop-action-controller'
 import type { DesktopPlanningController } from './desktop-planning-controller'
+import type { DesktopVisionController } from './desktop-vision-controller'
 import type { VoiceTaskController } from './voice-task-controller'
 
 /**
@@ -71,6 +72,12 @@ export interface AgentIpcDependencies {
     DesktopPlanningController,
     'createDesktopPlan' | 'getDesktopPlan' | 'grantDesktopPlan' | 'declineDesktopPlan' | 'runDesktopPlan'
   >
+  /** Milestone 9 S5. Absent in builds without the desktop capability. */
+  desktopVision?: Pick<
+    DesktopVisionController,
+    | 'createDesktopCapture' | 'getDesktopCapture' | 'grantDesktopCapture' | 'declineDesktopCapture' | 'runDesktopCapture'
+    | 'createDesktopVisionDisclosure' | 'grantDesktopVisionDisclosure' | 'declineDesktopVisionDisclosure' | 'runDesktopVisionDisclosure'
+  >
 }
 
 const UNAVAILABLE = { code: 'request_failed', message: 'That is not available in this build.' } as const
@@ -90,7 +97,7 @@ function routeWithoutInterpreter(request: unknown): TypedRequestRoute {
 
 export function registerAgentIpc({
   ipcMain, assertTrustedSender, controller, voice, runtimeStatus, restartRuntime, text, memory, diagnostics,
-  browserProfiles, desktopRead, desktopActions, desktopPlanning
+  browserProfiles, desktopRead, desktopActions, desktopPlanning, desktopVision
 }: AgentIpcDependencies): void {
   const handle = (channel: string, listener: (...args: unknown[]) => unknown): void => {
     ipcMain.handle(channel, (event, ...args) => {
@@ -270,4 +277,25 @@ export function registerAgentIpc({
     desktopPlanning ? desktopPlanning.declineDesktopPlan(grantId, revision) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
   handle(AGENT_IPC_CHANNELS.runDesktopPlan, () =>
     desktopPlanning ? desktopPlanning.runDesktopPlan() : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  // Milestone 9 S5: scoped desktop visual fallback. Nine exact channels. A capture requires its own
+  // approval before a single pixel is taken; a vision-provider disclosure requires a SEPARATE
+  // approval. Not reachable from voice.
+  handle(AGENT_IPC_CHANNELS.createDesktopCapture, (objective, workerGeneration, surfaceRef, surfaceEpoch, targetHint) =>
+    desktopVision ? desktopVision.createDesktopCapture(objective, workerGeneration, surfaceRef, surfaceEpoch, targetHint) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.getDesktopCapture, (taskId) =>
+    desktopVision ? desktopVision.getDesktopCapture(taskId) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.grantDesktopCapture, (taskId, grantId, revision) =>
+    desktopVision ? desktopVision.grantDesktopCapture(taskId, grantId, revision) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.declineDesktopCapture, (taskId, grantId, revision) =>
+    desktopVision ? desktopVision.declineDesktopCapture(taskId, grantId, revision) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.runDesktopCapture, (taskId) =>
+    desktopVision ? desktopVision.runDesktopCapture(taskId) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.createDesktopVisionDisclosure, (taskId, purpose) =>
+    desktopVision ? desktopVision.createDesktopVisionDisclosure(taskId, purpose) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.grantDesktopVisionDisclosure, (taskId, grantId, revision) =>
+    desktopVision ? desktopVision.grantDesktopVisionDisclosure(taskId, grantId, revision) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.declineDesktopVisionDisclosure, (taskId, grantId, revision) =>
+    desktopVision ? desktopVision.declineDesktopVisionDisclosure(taskId, grantId, revision) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.runDesktopVisionDisclosure, (taskId) =>
+    desktopVision ? desktopVision.runDesktopVisionDisclosure(taskId) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
 }

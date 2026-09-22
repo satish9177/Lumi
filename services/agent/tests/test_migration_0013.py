@@ -127,7 +127,7 @@ def test_migration_0013_adds_exactly_the_disclosure_tables_and_downgrades_cleanl
     truncate_all(url)
     try:
         # ---- clean at head ----
-        assert revision(url) == "0015"  # S3/S4 sit on top; this test pins 0013 by stepping down to it
+        assert revision(url) == "0016"  # S3/S4/S5 sit on top; this test pins 0013 by stepping down to it
         downgrade(url, "0013")
         assert revision(url) == "0013"
         assert all(exists(url, table) for table in NEW_TABLES)
@@ -186,7 +186,10 @@ def test_migration_0013_adds_exactly_the_disclosure_tables_and_downgrades_cleanl
         assert revision(url) == "0013" and all(exists(url, table) for table in NEW_TABLES)
 
         # ---- with no desktop grant left, downgrade removes exactly the two tables and restores the kinds ----
-        truncate_all(url, without=("desktop_dispatches", "desktop_action_plans"))
+        truncate_all(
+            url,
+            without=("desktop_dispatches", "desktop_action_plans", "desktop_vision_disclosures", "desktop_captures"),
+        )
         downgrade(url, "0012")
         assert revision(url) == "0012" and not any(exists(url, table) for table in NEW_TABLES)
         assert exists(url, "desktop_observations") and exists(url, "desktop_worker_generations")
@@ -201,4 +204,4 @@ def test_migration_0013_adds_exactly_the_disclosure_tables_and_downgrades_cleanl
     finally:
         migrate(url)
         truncate_all(url)
-    assert revision(url) == "0015"
+    assert revision(url) == "0016"

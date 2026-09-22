@@ -17,7 +17,7 @@ from app.domain.action_status import ActionStatus, ApprovalStatus, AttemptOutcom
 from app.domain.browser_dispatch import DispatchStatus
 from app.domain.task_status import TaskStatus
 from app.main import create_app
-from tests.conftest import TEST_RUNTIME_TOKEN, downgrade, migrate
+from tests.conftest import TEST_RUNTIME_TOKEN, downgrade, migrate, truncate_all
 
 
 def _diff(connection: Connection) -> list[object]:
@@ -86,6 +86,10 @@ def test_startup_refuses_an_unmigrated_database(migrated_database_url: str) -> N
     settings = Settings(
         database_url=SecretStr(migrated_database_url), runtime_token=TEST_RUNTIME_TOKEN
     )
+    # Other tests in this session may have left S5 vision grants behind, which migration 0016's
+    # downgrade refuses to discard (they are an audit record). This test exercises startup's refusal
+    # on an unmigrated database, not that guard, so clear the data first.
+    truncate_all(migrated_database_url)
     downgrade(migrated_database_url, "base")
     try:
         app = create_app(settings)

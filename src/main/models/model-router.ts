@@ -113,6 +113,14 @@ export const DEFAULT_ROUTES: RoutingTable = {
   desktop_action_planning: {
     providers: [{ provider: 'gemini', model: 'gemini-2.5-flash' }, { provider: 'openai' }, { provider: 'deepseek' }],
     maxInputTokens: 8_000, maxOutputTokens: 400, timeoutMs: 30_000
+  },
+  // Milestone 9 S5. A candidate list, never a failover chain, like `desktop_planning`/
+  // `desktop_action_planning`. The ONE class in this table with `vision: true`: see
+  // `PRIVATE_VISION_TASK_CLASSES` below for the structural rule that makes this the only class an
+  // image can ever reach.
+  desktop_vision: {
+    providers: [{ provider: 'gemini', model: 'gemini-2.5-flash' }, { provider: 'openai' }],
+    maxInputTokens: 4_000, maxOutputTokens: 500, timeoutMs: 30_000, vision: true
   }
 }
 
@@ -124,11 +132,25 @@ export const DEFAULT_ROUTES: RoutingTable = {
  *   provider actually attempted is the last: a failure, a timeout or output
  *   that fails validation ends the run rather than trying another company (or
  *   another model of the same one) with the same private page.
- * - **No image.** An authenticated screenshot never reaches any provider.
+ * - **No image, unless the class is also in `PRIVATE_VISION_TASK_CLASSES`.** An authenticated
+ *   screenshot never reaches any provider that is merely private; only the one, separately reviewed,
+ *   vision-capable class below may carry an image at all.
  */
 export const PRIVATE_TASK_CLASSES: readonly ModelTaskClass[] = [
-  'authenticated_planning', 'authenticated_answer', 'form_planning', 'desktop_planning', 'desktop_action_planning'
+  'authenticated_planning', 'authenticated_answer', 'form_planning', 'desktop_planning',
+  'desktop_action_planning', 'desktop_vision'
 ]
+
+/**
+ * The ONE narrow exception to `PRIVATE_TASK_CLASSES`'s "no image" rule. Milestone 9 S5's trusted
+ * vision-disclosure card is a SEPARATE approval from any text disclosure (S2/S4): naming a class here
+ * does not weaken the image rule for any other private class, and the caller (`desktop-vision.ts`) is
+ * the only place that ever sets `taskClass: 'desktop_vision'`, exactly the same trust boundary the five
+ * other private classes already rely on for their own task class. Being private already means this
+ * class gets `permits` + zero-failover for free (`isPrivate` breaks after one provider attempt
+ * regardless of outcome); this constant adds exactly one more thing: permission to carry `request.image`.
+ */
+export const PRIVATE_VISION_TASK_CLASSES: readonly ModelTaskClass[] = ['desktop_vision']
 
 /** A private request was made without the rule that names its one recipient. */
 export class PrivateRouteError extends Error {
@@ -274,7 +296,10 @@ export class ModelRouter {
     // Checked before a context is built and before any provider is resolved, so
     // a caller that forgot the recipient rule sends nothing to anybody.
     if (isPrivate && request.permits === undefined) throw new PrivateRouteError(request.taskClass, 'recipient_required')
-    if (isPrivate && (request.image !== undefined || config.vision)) throw new PrivateRouteError(request.taskClass, 'image_forbidden')
+    const allowsImage = PRIVATE_VISION_TASK_CLASSES.includes(request.taskClass)
+    if (isPrivate && (request.image !== undefined || config.vision) && !allowsImage) {
+      throw new PrivateRouteError(request.taskClass, 'image_forbidden')
+    }
     const context = buildContext(request.context, { maxInputTokens: config.maxInputTokens })
     const attempts: RouteAttempt[] = []
     let attemptNumber = 0

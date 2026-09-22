@@ -11,6 +11,8 @@ import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
+from app.desktop.capture_win32 import WindowGeometry
+from app.desktop.dpi import MonitorInfo, PhysicalRect
 from app.desktop.observer import ElementUnavailable, RawProps, ScrollState, UiaElement, ValueState
 from app.desktop.protocol import CheckedState, DesktopPattern, ScrollStep
 from app.desktop.registry import RegisteredApp
@@ -365,3 +367,58 @@ class FakePlatform:
             self.probe.add_window(hwnd, pid, title=f"{app.label} window")
             self.backend.trees[hwnd] = window_tree(f"{app.label} window", Node(control_type="Edit", name="Body"))
         return pid
+
+
+# ---- a scripted capture platform (S5) ----------------------------------------------------------
+
+_DEFAULT_MONITOR = MonitorInfo(monitor_id=1, rect=PhysicalRect(0, 0, 1920, 1080), primary=True)
+
+
+def solid_bgra(width: int, height: int, pixel: tuple[int, int, int, int] = (128, 128, 128, 255)) -> bytes:
+    return bytes(pixel) * (width * height)
+
+
+class FakeCapturePlatform:
+    """A scripted `CapturePlatform`. Mutate `geometries`/`pixels` between calls to script change."""
+
+    def __init__(self) -> None:
+        self.geometries: dict[int, WindowGeometry] = {}
+        self.pixels: dict[int, bytes] = {}
+        self.capture_calls: list[tuple[int, int, int]] = []
+        self.capture_error: Exception | None = None
+        self.capture_returns_none: bool = False
+        self.geometry_returns_none: bool = False
+        self.geometry_calls: int = 0
+        #: `capture()` in `effects.py` reads geometry twice per attempt (once to size/prove the crop,
+        #: once again immediately before the native call, to catch a mid-attempt move/resize/DPI/
+        #: monitor change). Called with the 1-based call number so a test can script "the SECOND read
+        #: differs from the first" by mutating `geometries` from inside the callback.
+        self.on_geometry_call: Callable[[int], None] | None = None
+
+    def add_window(
+        self, hwnd: int, *, window_rect: PhysicalRect, client_rect: PhysicalRect,
+        monitor: MonitorInfo = _DEFAULT_MONITOR, dpi: int = 96,
+    ) -> WindowGeometry:
+        geometry = WindowGeometry(window_rect=window_rect, client_rect=client_rect, monitor=monitor, dpi=dpi)
+        self.geometries[hwnd] = geometry
+        self.pixels[hwnd] = solid_bgra(client_rect.width, client_rect.height)
+        return geometry
+
+    def geometry(self, hwnd: int) -> WindowGeometry | None:
+        self.geometry_calls += 1
+        if self.on_geometry_call is not None:
+            self.on_geometry_call(self.geometry_calls)
+        if self.geometry_returns_none:
+            return None
+        return self.geometries.get(hwnd)
+
+    def capture(self, hwnd: int, width: int, height: int) -> bytes | None:
+        self.capture_calls.append((hwnd, width, height))
+        if self.capture_error is not None:
+            raise self.capture_error
+        if self.capture_returns_none:
+            return None
+        pixels = self.pixels.get(hwnd)
+        if pixels is not None and len(pixels) == width * height * 4:
+            return pixels
+        return solid_bgra(width, height)

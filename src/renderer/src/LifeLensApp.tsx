@@ -32,6 +32,7 @@ import {
   DesktopReadPanel,
   DesktopActionPanel,
   DesktopPlanningPanel,
+  DesktopVisionPanel,
   BrandMark,
   ConfirmDialog,
   DragGrip,
@@ -133,6 +134,7 @@ export default function LifeLensApp() {
   const [desktopReadOpen, setDesktopReadOpen] = useState(false)
   const [desktopActionOpen, setDesktopActionOpen] = useState(false)
   const [desktopPlanningOpen, setDesktopPlanningOpen] = useState(false)
+  const [desktopVisionOpen, setDesktopVisionOpen] = useState(false)
   /** A voice outcome asking the trusted task UI to draw attention somewhere. */
   const [agentFocus, setAgentFocus] = useState<{ target: VoiceTaskFocus; serial: number }>()
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest>()
@@ -1833,6 +1835,9 @@ export default function LifeLensApp() {
             <button className="chip" type="button" onClick={() => setDesktopPlanningOpen(true)} data-testid="open-desktop-planning">
               Ask Lumi to do something in a window
             </button>
+            <button className="chip" type="button" onClick={() => setDesktopVisionOpen(true)} data-testid="open-desktop-vision">
+              Look at a window Lumi cannot read
+            </button>
           </div>
 
           <form className="composer" onSubmit={(event) => { event.preventDefault(); void askQuestion() }}>
@@ -1912,6 +1917,12 @@ export default function LifeLensApp() {
           {desktopPlanningOpen && (
             <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Ask Lumi to do something in a window">
               <DesktopPlanningPanel agent={window.lifeLens.agent} onClose={() => setDesktopPlanningOpen(false)} />
+            </div>
+          )}
+
+          {desktopVisionOpen && (
+            <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Look at a window Lumi cannot read normally">
+              <DesktopVisionPanel agent={window.lifeLens.agent} onClose={() => setDesktopVisionOpen(false)} />
             </div>
           )}
 

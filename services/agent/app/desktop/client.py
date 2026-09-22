@@ -21,6 +21,8 @@ from pydantic import BaseModel, SecretStr, ValidationError
 from app.desktop.errors import DesktopReason, DesktopRefusal
 from app.desktop.protocol import (
     WORKER_TOKEN_HEADER,
+    CaptureRequest,
+    CaptureResponse,
     DesktopObservation,
     FocusRequest,
     FocusResponse,
@@ -154,6 +156,19 @@ class DesktopWorkerClient:
         response = await self._send("POST", "/v1/desktop/invoke", request)
         answer = self._parse(response, InvokeResponse)
         if answer.worker_generation != request.expected_worker_generation or answer.dispatch_id != request.dispatch_id:
+            raise StaleDesktopResult
+        return answer
+
+    async def capture(self, request: CaptureRequest) -> CaptureResponse:
+        # `request`/`answer` carry the image; this client never logs either, exactly like `set_value`
+        # never logs the value it sends.
+        response = await self._send("POST", "/v1/desktop/capture", request)
+        answer = self._parse(response, CaptureResponse)
+        if (
+            answer.worker_generation != request.expected_worker_generation
+            or answer.capture_id != request.capture_id
+            or (answer.surface_ref, answer.surface_epoch) != (request.surface_ref, request.surface_epoch)
+        ):
             raise StaleDesktopResult
         return answer
 

@@ -30,14 +30,25 @@ credential/consent broker and a credential input, but a value written, selected 
 terminal, script host or Windows security surface is dangerous by *what runs it*, not by the label on
 the field, so those process images (and file-picker window titles) are refused again here regardless
 of role or name.
+
+S5 adds one more effect, `capture`, and it is read-only: nothing about the target ever changes, so
+there is no `desktop_effect_uncertain`/`OUTCOME_UNKNOWN` story for it the way a write has one -- a
+failed native call simply means no pixels exist, not that an unknown mutation may have happened. It
+still follows the shared surface/credential/human-input ordering above, plus one check nothing else
+needs: the exact client-area crop must be provably certain (`capture_scope_uncertain` if not) before a
+single pixel is captured.
 """
 
+import base64
+import hashlib
 import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Callable
 from typing import Final, Literal, Protocol
 
+from app.desktop.capture_win32 import WindowGeometry as CaptureGeometry
+from app.desktop.dpi import GeometrySnapshot, capture_rect, capture_scope_certain, geometry_fingerprint
 from app.desktop.errors import DesktopReason, DesktopRefusal
 from app.desktop.observer import (
     DesktopObserver,
@@ -47,7 +58,11 @@ from app.desktop.observer import (
     _credential_scan,
     _guarded_walk,
 )
+from app.desktop.png_encode import encode_png_rgb
 from app.desktop.protocol import (
+    MAX_CAPTURE_PNG_BYTES,
+    CaptureRequest,
+    CaptureResponse,
     DesktopPattern,
     FocusRequest,
     FocusResponse,
@@ -115,6 +130,17 @@ class EffectPlatform(Protocol):
         """Start exactly `app.executable` with exactly `app.args`, no shell. Returns the new pid."""
 
 
+class CapturePlatform(Protocol):
+    """S5's whole native capture surface. Nothing else in the worker may read a pixel."""
+
+    def geometry(self, hwnd: int) -> CaptureGeometry | None:
+        """Window rect, client rect (screen coordinates), monitor and DPI. `None` on any torn read."""
+
+    def capture(self, hwnd: int, width: int, height: int) -> bytes | None:
+        """One `PrintWindow` call into a bitmap sized exactly `width` x `height`. Top-down BGRA, or
+        `None` if the OS call failed or produced nothing."""
+
+
 class _Dispatches:
     """Per-generation memory of which dispatch ids began, and what they answered."""
 
@@ -149,6 +175,7 @@ class DesktopEffects:
         backend: UiaBackend,
         platform: EffectPlatform,
         registry: AppRegistry,
+        capture_platform: CapturePlatform | None = None,
         clock: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -157,6 +184,7 @@ class DesktopEffects:
         self._backend = backend
         self._platform = platform
         self._registry = registry
+        self._capture_platform = capture_platform
         self._clock = clock
         self._sleep = sleep
         self._dispatches = _Dispatches()
@@ -661,6 +689,115 @@ class DesktopEffects:
             input_changed=self._input_changed(request.input_tick),
         )
         self._dispatches.finish(request.dispatch_id, response)
+        return response
+
+    # -- S5: scoped visual fallback -----------------------------------------------------------
+
+    def capture(self, request: CaptureRequest) -> CaptureResponse:
+        """One `PrintWindow` of one already-resolved surface's client area, and nothing else.
+
+        Read-only: unlike `set_value`/`select`/`invoke`, nothing about the target ever changes, so a
+        failure here is a plain refusal, never `desktop_effect_uncertain` -- there is no ambiguous
+        "did it happen" question for a capture the way there is for a write.
+        """
+        replay = self._dispatches.begin(request.capture_id)
+        if isinstance(replay, CaptureResponse):
+            return replay
+        if self._capture_platform is None:
+            raise DesktopRefusal(DesktopReason.UNSUPPORTED)
+        resolved = self._surfaces.resolve(request.surface_ref, request.surface_epoch)
+        self._refuse_if_credential_surface(resolved)
+        self._refuse_if_human_input(request.input_tick)
+        hwnd = resolved.identity.hwnd
+        geometry = self._capture_platform.geometry(hwnd)
+        if geometry is None:
+            raise DesktopRefusal(DesktopReason.CAPTURE_REFUSED)
+        snapshot = GeometrySnapshot(
+            window_rect=geometry.window_rect,
+            client_rect=geometry.client_rect,
+            monitor_id=geometry.monitor.monitor_id,
+            monitor_rect=geometry.monitor.rect,
+            dpi=geometry.dpi,
+            process_pid=resolved.identity.pid,
+            process_created=resolved.identity.created,
+        )
+        if not capture_scope_certain(snapshot):
+            raise DesktopRefusal(DesktopReason.CAPTURE_SCOPE_UNCERTAIN)
+        rect = capture_rect(snapshot)
+        expected_fingerprint = geometry_fingerprint(snapshot)
+        # Found by an independent adversarial review: `geometry()` is itself a separate, real Win32
+        # call sequence that takes measurable time, during which a credential field could appear or
+        # the window could be replaced -- both re-checked here, immediately before the actual OS call,
+        # exactly like the S4 mutations' own "second, narrower check" pattern. This cannot close the
+        # gap to zero (the native call still has to acquire its own device context), but it keeps the
+        # unchecked window to that one call rather than everything since surface resolution.
+        try:
+            self._surfaces.verify_unchanged(resolved)
+        except DesktopRefusal:
+            raise DesktopRefusal(DesktopReason.CAPTURE_REFUSED) from None
+        self._refuse_if_credential_surface(resolved)
+        self._refuse_if_human_input(request.input_tick)
+        # `verify_unchanged` above proves the SURFACE is still the same process/window; it says
+        # nothing about POSITION, SIZE, MONITOR or DPI. A window that moved, resized, or changed
+        # monitor/DPI in the gap since `geometry` was first read would still pass that check while
+        # invalidating the exact crop `capture_scope_certain` already proved -- the bitmap below is
+        # about to be sized and captured against the FIRST reading's numbers, so those numbers must
+        # still be current immediately before the native call, or the frame is stale and must be
+        # refused, never silently captured against whatever changed.
+        fresh_geometry = self._capture_platform.geometry(hwnd)
+        if fresh_geometry is None:
+            raise DesktopRefusal(DesktopReason.CAPTURE_REFUSED)
+        fresh_snapshot = GeometrySnapshot(
+            window_rect=fresh_geometry.window_rect,
+            client_rect=fresh_geometry.client_rect,
+            monitor_id=fresh_geometry.monitor.monitor_id,
+            monitor_rect=fresh_geometry.monitor.rect,
+            dpi=fresh_geometry.dpi,
+            process_pid=resolved.identity.pid,
+            process_created=resolved.identity.created,
+        )
+        if geometry_fingerprint(fresh_snapshot) != expected_fingerprint:
+            raise DesktopRefusal(DesktopReason.CAPTURE_SCOPE_UNCERTAIN)
+        # `geometry()` above is itself a second real Win32 call sequence (`GetWindowRect`,
+        # `GetClientRect`, `ClientToScreen`, `EnumDisplayMonitors`) with its own measurable duration,
+        # so the human-input check taken before it is no longer "immediately before" the native
+        # capture call by the time execution reaches here. A third, narrow check closes that reopened
+        # gap the same way S4's mutations close theirs: it cannot reach zero (the native call still has
+        # to acquire its own device context), but it keeps the unchecked window to that one call.
+        self._refuse_if_human_input(request.input_tick)
+        try:
+            pixels = self._capture_platform.capture(hwnd, rect.width, rect.height)
+        except Exception:  # noqa: BLE001 - a GDI failure carries private detail; none is kept.
+            raise DesktopRefusal(DesktopReason.CAPTURE_REFUSED) from None
+        if pixels is None:
+            raise DesktopRefusal(DesktopReason.CAPTURE_REFUSED)
+        try:
+            self._surfaces.verify_unchanged(resolved)
+        except DesktopRefusal:
+            # The window was replaced or closed during the capture: the pixels just taken cannot be
+            # trusted to belong to the surface the caller thinks they do.
+            raise DesktopRefusal(DesktopReason.CAPTURE_REFUSED) from None
+        try:
+            image = encode_png_rgb(rect.width, rect.height, pixels)
+        except ValueError:
+            raise DesktopRefusal(DesktopReason.CAPTURE_REFUSED) from None
+        if len(image) > MAX_CAPTURE_PNG_BYTES:
+            raise DesktopRefusal(DesktopReason.CAPTURE_REFUSED)
+        response = CaptureResponse(
+            worker_generation=self.generation,
+            capture_id=request.capture_id,
+            surface_ref=request.surface_ref,
+            surface_epoch=request.surface_epoch,
+            geometry_fingerprint=geometry_fingerprint(snapshot),
+            frame_digest=hashlib.sha256(image).hexdigest(),
+            width=rect.width,
+            height=rect.height,
+            dpi=geometry.dpi,
+            monitor_id=geometry.monitor.monitor_id,
+            image_base64=base64.b64encode(image).decode("ascii"),
+            input_changed=self._input_changed(request.input_tick),
+        )
+        self._dispatches.finish(request.capture_id, response)
         return response
 
 

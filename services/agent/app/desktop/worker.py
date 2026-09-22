@@ -37,11 +37,12 @@ from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.browser.session import token_matches
-from app.desktop.effects import DesktopEffects, EffectPlatform
+from app.desktop.effects import CapturePlatform, DesktopEffects, EffectPlatform
 from app.desktop.errors import HTTP_STATUS, DesktopReason, DesktopRefusal
 from app.desktop.observer import DEFAULT_TIME_BUDGET_SECONDS, DesktopObserver, UiaBackend
 from app.desktop.protocol import (
     WORKER_TOKEN_HEADER,
+    CaptureRequest,
     FocusRequest,
     InputBaselineRequest,
     InvokeRequest,
@@ -63,7 +64,7 @@ logger = logging.getLogger("lumi.desktop.worker")
 _T = TypeVar("_T")
 OPERATIONS = [
     "surfaces", "observe", "input_baseline", "focus", "scroll", "launch",
-    "set_value", "select", "invoke",
+    "set_value", "select", "invoke", "capture",
 ]
 
 
@@ -176,6 +177,7 @@ def build_state(
     probe_factory: Callable[[], SystemProbe],
     backend_factory: Callable[[], UiaBackend],
     platform_factory: Callable[[], EffectPlatform],
+    capture_platform_factory: Callable[[], CapturePlatform] | None = None,
     registry: AppRegistry | None = None,
 ) -> _State:
     """Everything that touches COM or Win32 is created on the UIA thread, not the caller's."""
@@ -199,6 +201,7 @@ def build_state(
             backend=backend,
             platform=platform_factory(),
             registry=registry if registry is not None else AppRegistry.from_config(settings.registered_apps),
+            capture_platform=capture_platform_factory() if capture_platform_factory is not None else None,
         )
         return observer, effects
 
@@ -219,6 +222,7 @@ def create_worker_app(
     probe_factory: Callable[[], SystemProbe] | None = None,
     backend_factory: Callable[[], UiaBackend] | None = None,
     platform_factory: Callable[[], EffectPlatform] | None = None,
+    capture_platform_factory: Callable[[], CapturePlatform] | None = None,
     registry: AppRegistry | None = None,
     exit_process: Callable[[int], object] = os._exit,
 ) -> FastAPI:
@@ -243,6 +247,14 @@ def create_worker_app(
 
         platform_factory = platform_factory or WindowsEffectPlatform
 
+        if capture_platform_factory is None:
+            def real_capture_platform() -> CapturePlatform:
+                from app.desktop.capture_win32 import WindowsCaptureBackend
+
+                return WindowsCaptureBackend()
+
+            capture_platform_factory = real_capture_platform
+
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         state = await asyncio.to_thread(
@@ -251,6 +263,7 @@ def create_worker_app(
             probe_factory=probe_factory,
             backend_factory=backend_factory,
             platform_factory=platform_factory,
+            capture_platform_factory=capture_platform_factory,
             registry=registry,
         )
         app.state.desktop = state
@@ -416,6 +429,16 @@ def create_worker_app(
         if refused is not None:
             return refused
         return await effect("invoke", state, lambda: state.effects.invoke(body))
+
+    @router.post("/v1/desktop/capture")
+    async def capture(request: Request, body: CaptureRequest) -> Response:
+        # `effect()` and this route never log the image: only the outcome and the generation are ever
+        # written down, exactly like `set_value` never logs the value it wrote.
+        state = current(request)
+        refused = guard(state, body.expected_worker_generation)
+        if refused is not None:
+            return refused
+        return await effect("capture", state, lambda: state.effects.capture(body))
 
     app = FastAPI(title="Lumi Desktop Worker", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.include_router(router)

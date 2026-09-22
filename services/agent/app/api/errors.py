@@ -23,6 +23,8 @@ from app.domain.desktop_disclosure import STATE_CODES as DESKTOP_DISCLOSURE_STAT
 from app.domain.desktop_disclosure import DesktopDisclosureRefusal
 from app.domain.desktop_planning import STATE_CODES as DESKTOP_PLAN_STATE_CODES
 from app.domain.desktop_planning import DesktopPlanRefusal
+from app.domain.desktop_vision import STATE_CODES as DESKTOP_VISION_STATE_CODES
+from app.domain.desktop_vision import DesktopVisionRefusal
 from app.domain.form_prepare import FORM_PREPARE_STATE_CODES, FormPrepareRefusal
 from app.domain.protected_values import ProtectedValueRefusal
 from app.services.research_search import SearchFailedError
@@ -592,6 +594,22 @@ def register_error_handlers(app: FastAPI) -> None:
         )
 
     app.add_exception_handler(DesktopPlanRefusal, desktop_plan_refused)
+
+    # --- Milestone 9 S5 scoped visual fallback --------------------------------------
+    # Codes only -- never a window title, a purpose string, a candidate label or pixels.
+    async def desktop_vision_refused(_: Request, exc: Exception) -> JSONResponse:
+        assert isinstance(exc, DesktopVisionRefusal)
+        stale = exc.code in DESKTOP_VISION_STATE_CODES
+        return _error(
+            status.HTTP_409_CONFLICT if stale else status.HTTP_422_UNPROCESSABLE_CONTENT,
+            ErrorDetail(
+                code="desktop_vision_state_changed" if stale else "desktop_vision_refused",
+                message="That desktop visual fallback is no longer available." if stale else "That desktop visual fallback request was refused.",
+                reason=exc.code,
+            ),
+        )
+
+    app.add_exception_handler(DesktopVisionRefusal, desktop_vision_refused)
     app.add_exception_handler(
         ProtectedValueRefusal,
         _reasoned(

@@ -491,7 +491,9 @@ def test_only_the_probe_and_the_effect_platform_touch_win32_and_only_the_backend
 
     for path in DESKTOP.glob("*.py"):
         found = imports(path.name)
-        assert ("ctypes" in found) == (path.name in ("win32.py", "effects_win32.py")), path.name
+        # S5 adds a third reviewed native file: `capture_win32.py`, the one place `PrintWindow` and its
+        # supporting GDI/geometry calls live, pinned by its own exact allowlist exactly like the other two.
+        assert ("ctypes" in found) == (path.name in ("win32.py", "effects_win32.py", "capture_win32.py")), path.name
         assert ("comtypes" in found or "pywinauto" in found) == (path.name == "uia_backend.py"), path.name
 
 
@@ -509,6 +511,10 @@ _FORBIDDEN_FIELD_PARTS = (
     "runtime_id", "rect", "bounding", "coordinate", "screen", "x", "y", "left", "top", "width", "height",
     "action", "selector", "script", "property", "verb", "click", "focus_target",
 )
+#: S5's `CaptureResponse.width`/`.height`, deliberately reviewed and excepted: the captured PNG's own
+#: pixel dimensions (needed to decode and display the image), never a UI element's bounding box or a
+#: coordinate to act on. No other model gets this exception.
+_CAPTURE_DIMENSION_FIELDS = {("CaptureResponse", "width"), ("CaptureResponse", "height")}
 
 
 def _all_models() -> list[type[BaseModel]]:
@@ -524,6 +530,8 @@ def test_no_wire_model_has_a_field_for_native_identity_geometry_or_an_action() -
     for model in models:
         assert model.model_config.get("extra") == "forbid", model.__name__
         for field in model.model_fields:
+            if (model.__name__, field) in _CAPTURE_DIMENSION_FIELDS:
+                continue
             assert field not in _FORBIDDEN_FIELD_PARTS and not any(
                 part in field.split("_") for part in _FORBIDDEN_FIELD_PARTS if part not in ("x", "y")
             ), (model.__name__, field)
@@ -587,6 +595,8 @@ def test_only_the_desktop_boundary_and_the_reviewed_s2_disclosure_path_import_de
         "services/desktop_planning.py",        # S4: the ONE reviewed path from an observation to a planner
         "domain/desktop_planning.py",          # S4: the projection reuse, value refs and action validation
         "api/desktop_planning_schemas.py",     # S4: the closed wire shapes
+        "services/desktop_vision.py",          # S5: capture consent, a fresh worker capture, vision disclosure
+        "domain/desktop_vision.py",            # S5: fallback eligibility, grant scopes, the closed vision result
     }, outside
 
 
@@ -602,8 +612,12 @@ def test_only_the_reviewed_disclosure_service_reads_an_observation_back() -> Non
     # scroll to build the exact approval card (control role and name). It sends nothing to any provider.
     # S4 adds the ONE reviewed planning-disclosure path, exactly like S2's: an approved, redacted,
     # bounded projection to ONE provider, never raw observation text.
+    # S5 adds one more LOCAL-only reader: re-fetching the classifying observation to prove the capture
+    # card's own record still matches what confirm_capture is about to approve. It is never projected
+    # or shown to any provider -- only its identity (id, digest, age) is checked.
     assert callers == {
         "services/desktop_disclosure.py", "services/desktop_actions.py", "services/desktop_planning.py",
+        "services/desktop_vision.py",
     }, callers
 
 

@@ -12,10 +12,12 @@ import uuid
 
 import pytest
 
+from app.desktop.dpi import PhysicalRect
 from app.desktop.effects import DesktopEffects
 from app.desktop.errors import DesktopReason, DesktopRefusal
 from app.desktop.observer import ControlTable, DesktopObserver
 from app.desktop.protocol import (
+    CaptureRequest,
     DesktopObservation,
     DesktopPattern,
     FocusRequest,
@@ -29,7 +31,7 @@ from app.desktop.protocol import (
 )
 from app.desktop.registry import AppRegistry, RegisteredApp, validate
 from app.desktop.surfaces import INTEGRITY_HIGH, ExclusionPolicy, SurfaceTable
-from tests.desktop_fakes import FakeBackend, FakePlatform, FakeProbe, Node, window_tree
+from tests.desktop_fakes import FakeBackend, FakeCapturePlatform, FakePlatform, FakeProbe, Node, window_tree
 
 APP_PATH = "C:\\Program Files\\Fake\\fake.exe"
 ROOTS = ("c:\\program files",)
@@ -51,12 +53,14 @@ class World:
         self.observer = DesktopObserver(
             surfaces=self.surfaces, backend=self.backend, worker_generation=self.generation
         )
+        self.capture_platform = FakeCapturePlatform()
         self.effects = DesktopEffects(
             surfaces=self.surfaces,
             observer=self.observer,
             backend=self.backend,
             platform=self.platform,
             registry=registry(),
+            capture_platform=self.capture_platform,
             sleep=lambda _: None,
         )
         self.list_node = Node(
@@ -87,6 +91,9 @@ class World:
         self.backend.trees[hwnd] = window_tree(
             title, self.list_node, self.value_node, self.readonly_node, self.combo_node, self.button_node,
             self.dead_button,
+        )
+        self.capture_platform.add_window(
+            hwnd, window_rect=PhysicalRect(0, 0, 820, 620), client_rect=PhysicalRect(8, 39, 812, 612)
         )
         return self.ref_for(title)
 
@@ -179,6 +186,17 @@ class World:
             dispatch_id=dispatch or uuid.uuid4(),
             app_id=app_id,
             input_tick=self.platform.input_tick,
+        )
+
+    def capture_request(
+        self, ref: str, epoch: int, *, capture_id: uuid.UUID | None = None, tick: int | None = None
+    ) -> CaptureRequest:
+        return CaptureRequest(
+            expected_worker_generation=self.generation,
+            capture_id=capture_id or uuid.uuid4(),
+            surface_ref=ref,
+            surface_epoch=epoch,
+            input_tick=self.platform.input_tick if tick is None else tick,
         )
 
 
@@ -1099,3 +1117,272 @@ def test_an_elevated_surface_refuses_every_s4_mutation() -> None:
         input_tick=world.platform.input_tick,
     )
     assert code(lambda: world.effects.set_value(request)) is DesktopReason.ELEVATED_WINDOW
+
+
+# ---- S5: scoped visual fallback (capture) --------------------------------------------------------
+
+
+def test_a_successful_capture_reports_exact_frame_binding() -> None:
+    world = World()
+    ref, epoch = world.window()
+    request = world.capture_request(ref, epoch)
+    response = world.effects.capture(request)
+    assert response.surface_ref == ref
+    assert response.surface_epoch == epoch
+    assert response.width == 804  # client rect: 812 - 8
+    assert response.height == 573  # client rect: 612 - 39
+    assert response.dpi == 96
+    assert response.monitor_id == 1
+    assert len(response.geometry_fingerprint) == 64
+    assert len(response.frame_digest) == 64
+    assert response.image_base64  # a real, non-empty PNG payload
+    assert world.capture_platform.capture_calls == [(10, 804, 573)]
+
+
+def test_capturing_the_same_geometry_twice_yields_the_same_fingerprint() -> None:
+    world = World()
+    ref, epoch = world.window()
+    first = world.effects.capture(world.capture_request(ref, epoch))
+    second = world.effects.capture(world.capture_request(ref, epoch))
+    assert first.geometry_fingerprint == second.geometry_fingerprint
+    assert first.frame_digest == second.frame_digest  # identical scripted pixels
+
+
+def test_a_repeated_capture_id_replays_without_a_second_native_call() -> None:
+    world = World()
+    ref, epoch = world.window()
+    capture_id = uuid.uuid4()
+    first = world.effects.capture(world.capture_request(ref, epoch, capture_id=capture_id))
+    second = world.effects.capture(world.capture_request(ref, epoch, capture_id=capture_id))
+    assert first == second
+    assert len(world.capture_platform.capture_calls) == 1
+
+
+def test_a_credential_surface_is_never_captured() -> None:
+    world = World()
+    ref, epoch = world.window()
+    world.value_node.name = "Password"
+    request = world.capture_request(ref, epoch)
+    assert code(lambda: world.effects.capture(request)) is DesktopReason.CREDENTIAL_SURFACE
+    assert world.capture_platform.capture_calls == []
+
+
+def test_an_elevated_surface_is_never_captured() -> None:
+    world = World()
+    ref, epoch = world.window()
+    world.probe.processes[4001].integrity = INTEGRITY_HIGH
+    request = world.capture_request(ref, epoch)
+    assert code(lambda: world.effects.capture(request)) is DesktopReason.ELEVATED_WINDOW
+    assert world.capture_platform.capture_calls == []
+
+
+def test_lumis_own_window_is_never_captured_even_with_a_forged_ref() -> None:
+    world = World()
+    world.probe.add_process(5000, image="lumi.exe", parent=os.getpid())
+    world.probe.add_window(30, 5000, title="Lumi")
+    assert [s.window_title for s in world.observer.list_surfaces().surfaces] == []
+    request = CaptureRequest(
+        expected_worker_generation=world.generation, capture_id=uuid.uuid4(), surface_ref="s1",
+        surface_epoch=1, input_tick=world.platform.input_tick,
+    )
+    assert code(lambda: world.effects.capture(request)) is DesktopReason.STALE_SURFACE
+    assert world.capture_platform.capture_calls == []
+
+
+def test_human_input_stops_capture_before_any_native_call() -> None:
+    world = World()
+    ref, epoch = world.window()
+    request = world.capture_request(ref, epoch, tick=world.platform.input_tick + 1)
+    assert code(lambda: world.effects.capture(request)) is DesktopReason.HUMAN_INPUT_DETECTED
+    assert world.capture_platform.capture_calls == []
+
+
+def test_unavailable_geometry_refuses_without_a_native_call() -> None:
+    world = World()
+    ref, epoch = world.window()
+    world.capture_platform.geometry_returns_none = True
+    request = world.capture_request(ref, epoch)
+    assert code(lambda: world.effects.capture(request)) is DesktopReason.CAPTURE_REFUSED
+    assert world.capture_platform.capture_calls == []
+
+
+def test_a_torn_client_rect_outside_the_window_is_scope_uncertain() -> None:
+    world = World()
+    ref, epoch = world.window()
+    world.capture_platform.add_window(
+        10, window_rect=PhysicalRect(0, 0, 820, 620), client_rect=PhysicalRect(2000, 2000, 2100, 2100)
+    )
+    request = world.capture_request(ref, epoch)
+    assert code(lambda: world.effects.capture(request)) is DesktopReason.CAPTURE_SCOPE_UNCERTAIN
+    assert world.capture_platform.capture_calls == []
+
+
+def test_a_failed_native_capture_is_refused_not_guessed() -> None:
+    world = World()
+    ref, epoch = world.window()
+    world.capture_platform.capture_returns_none = True
+    request = world.capture_request(ref, epoch)
+    assert code(lambda: world.effects.capture(request)) is DesktopReason.CAPTURE_REFUSED
+
+
+def test_a_native_capture_exception_is_refused_and_leaks_no_detail() -> None:
+    world = World()
+    ref, epoch = world.window()
+    world.capture_platform.capture_error = OSError("a private GDI failure")
+    request = world.capture_request(ref, epoch)
+    assert code(lambda: world.effects.capture(request)) is DesktopReason.CAPTURE_REFUSED
+
+
+def test_a_window_replaced_during_capture_is_refused() -> None:
+    world = World()
+    ref, epoch = world.window()
+
+    def swap(_width: int, _height: int, hwnd: int = 10) -> bytes | None:
+        # The window closes and a different process's window takes the same hwnd mid-capture.
+        world.probe.windows = [w for w in world.probe.windows if w.hwnd != 10]
+        world.probe.add_window(10, 9999, title="Different process")
+        world.probe.add_process(9999, image="other.exe", parent=1)
+        return world.capture_platform.pixels[10]
+
+    original = world.capture_platform.capture
+
+    def capture(hwnd: int, width: int, height: int) -> bytes | None:
+        world.capture_platform.capture_calls.append((hwnd, width, height))
+        return swap(width, height, hwnd)
+
+    world.capture_platform.capture = capture  # type: ignore[method-assign]
+    request = world.capture_request(ref, epoch)
+    assert code(lambda: world.effects.capture(request)) is DesktopReason.CAPTURE_REFUSED
+
+
+def test_capture_without_a_configured_platform_is_unsupported() -> None:
+    world = World()
+    ref, epoch = world.window()
+    world.effects._capture_platform = None  # simulate a build with no capture backend wired
+    request = world.capture_request(ref, epoch)
+    assert code(lambda: world.effects.capture(request)) is DesktopReason.UNSUPPORTED
+
+
+def test_a_credential_scan_that_cannot_finish_refuses_capture_rather_than_missing_a_password_field() -> None:
+    """Found by an independent adversarial review of M9 S5: `_credential_scan`'s per-parent sibling
+    cap (`MAX_SIBLINGS`) used to silently drop the rest of a large sibling list rather than proving it
+    credential-free. A password field placed past that cap would never be visited, and the scan would
+    return as if the surface were clean. The scan must now fail closed instead."""
+    world = World()
+    ref, epoch = world.window()
+    from app.desktop.protocol import MAX_SIBLINGS
+
+    password = Node(control_type="Edit", name="Password", is_password=True)
+    many_siblings = [Node(control_type="Text", name=f"Item {i}") for i in range(MAX_SIBLINGS)] + [password]
+    world.backend.trees[10].children.append(Node(control_type="Pane", name="Overflow panel", children=many_siblings))
+    request = world.capture_request(ref, epoch)
+    assert code(lambda: world.effects.capture(request)) is DesktopReason.CREDENTIAL_SCAN_INCOMPLETE
+    assert world.capture_platform.capture_calls == []
+
+
+def test_a_credential_scan_that_cannot_finish_also_refuses_an_s4_mutation() -> None:
+    """The same fix applies to S4's mutations, which reuse the identical scan: an incomplete scan was
+    never a proof of safety for them either, and this is a strictly more conservative change (a
+    previously-silent pass now refuses) rather than a narrowing of what S4 already allowed."""
+    world = World()
+    ref, epoch = world.window()
+    from app.desktop.protocol import MAX_SIBLINGS
+
+    password = Node(control_type="Edit", name="Password", is_password=True)
+    many_siblings = [Node(control_type="Text", name=f"Item {i}") for i in range(MAX_SIBLINGS)] + [password]
+    world.backend.trees[10].children.append(Node(control_type="Pane", name="Overflow panel", children=many_siblings))
+    observation = world.observe_full(ref, epoch)
+    control = world.ref_of(observation, "Field")
+    request = world.set_value_request(ref, epoch, observation.observation_id, control, "hello")
+    assert code(lambda: world.effects.set_value(request)) is DesktopReason.CREDENTIAL_SCAN_INCOMPLETE
+    assert world.value_node.set_value_calls == []
+
+
+def test_a_credential_field_added_during_the_geometry_lookup_refuses_capture() -> None:
+    """Found by an independent adversarial review of M9 S5: `geometry()` is its own real Win32 call
+    sequence that takes measurable time, during which a credential field could appear in the live tree
+    after the FIRST credential scan already passed. The second scan, immediately before the native
+    call, must catch it."""
+    world = World()
+    ref, epoch = world.window()
+    original_geometry = world.capture_platform.geometry
+
+    def geometry_with_late_credential(hwnd: int):  # type: ignore[no-untyped-def]
+        world.value_node.name = "Password"
+        return original_geometry(hwnd)
+
+    world.capture_platform.geometry = geometry_with_late_credential  # type: ignore[method-assign]
+    request = world.capture_request(ref, epoch)
+    assert code(lambda: world.effects.capture(request)) is DesktopReason.CREDENTIAL_SURFACE
+    assert world.capture_platform.capture_calls == []
+
+
+def test_a_window_replaced_during_the_geometry_lookup_refuses_capture() -> None:
+    world = World()
+    ref, epoch = world.window()
+    original_geometry = world.capture_platform.geometry
+
+    def geometry_with_replacement(hwnd: int):  # type: ignore[no-untyped-def]
+        world.probe.windows = [w for w in world.probe.windows if w.hwnd != hwnd]
+        world.probe.add_process(9999, image="other.exe", parent=1)
+        world.probe.add_window(hwnd, 9999, title="Different process")
+        return original_geometry(hwnd)
+
+    world.capture_platform.geometry = geometry_with_replacement  # type: ignore[method-assign]
+    request = world.capture_request(ref, epoch)
+    assert code(lambda: world.effects.capture(request)) is DesktopReason.CAPTURE_REFUSED
+    assert world.capture_platform.capture_calls == []
+
+
+def test_a_window_moved_between_the_two_geometry_reads_is_scope_uncertain() -> None:
+    """Sol Finding 5: `verify_unchanged` proves the SURFACE (process/window identity) is still the
+    same immediately before the native call, but says nothing about POSITION -- the window could move
+    (or resize, or change monitor/DPI) in the gap since the FIRST geometry read, which is what sized
+    the bitmap and is recorded as this attempt's `geometry_fingerprint`. The second, fresh geometry
+    read this fix adds must catch that and refuse, not silently capture against numbers the approval
+    never covered."""
+    world = World()
+    ref, epoch = world.window()
+    moved = PhysicalRect(50, 50, 870, 670)
+
+    def on_geometry_call(call_number: int) -> None:
+        if call_number == 2:
+            world.capture_platform.add_window(10, window_rect=moved, client_rect=PhysicalRect(58, 89, 862, 662))
+
+    world.capture_platform.on_geometry_call = on_geometry_call
+    request = world.capture_request(ref, epoch)
+    assert code(lambda: world.effects.capture(request)) is DesktopReason.CAPTURE_SCOPE_UNCERTAIN
+    assert world.capture_platform.capture_calls == []
+    assert world.capture_platform.geometry_calls == 2
+
+
+def test_human_input_between_the_second_geometry_read_and_the_native_call_stops_capture() -> None:
+    """Independent Claude review of M9 S5: the human-input check before the SECOND (fresh) geometry
+    read is not "immediately before" the native `PrintWindow` call -- `geometry()` is itself a real
+    Win32 call sequence with its own measurable duration, sandwiched between that check and the actual
+    capture. A person who starts touching the machine during that fresh geometry read (after the second
+    check passed, before the native call) must still stop the capture, not slip through uncaught."""
+    world = World()
+    ref, epoch = world.window()
+
+    def on_geometry_call(call_number: int) -> None:
+        if call_number == 2:
+            world.platform.input_tick += 1  # the person touched the machine during the fresh read
+
+    world.capture_platform.on_geometry_call = on_geometry_call
+    request = world.capture_request(ref, epoch)
+    assert code(lambda: world.effects.capture(request)) is DesktopReason.HUMAN_INPUT_DETECTED
+    assert world.capture_platform.capture_calls == []
+    assert world.capture_platform.geometry_calls == 2
+
+
+def test_a_window_unchanged_between_the_two_geometry_reads_still_captures() -> None:
+    """The fresh-geometry re-check must not be a no-op false-positive machine: an ordinary capture,
+    where nothing moved between the two reads, still succeeds."""
+    world = World()
+    ref, epoch = world.window()
+    request = world.capture_request(ref, epoch)
+    response = world.effects.capture(request)
+    assert response.width == 804 and response.height == 573
+    assert world.capture_platform.geometry_calls == 2
+    assert len(world.capture_platform.capture_calls) == 1

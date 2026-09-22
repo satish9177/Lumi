@@ -454,3 +454,53 @@ class InvokeResponse(_Wire):
     dispatch_id: uuid.UUID
     outcome: Literal["invoked", "no_change"]
     input_changed: bool
+
+
+# ---- S5: scoped visual fallback ---------------------------------------------------
+#
+# Exactly one more verb: capture the CLIENT area of one already-resolved surface as pixels, nothing
+# else. There is still no field for a handle, a coordinate, a key or a script, and nothing here can
+# move a mouse or synthesize input. What crosses this boundary is a PNG-encoded image (the worker
+# encodes it; no raw pixel buffer or native bitmap handle ever leaves `app/desktop/`) plus a
+# value-free geometry fingerprint and frame digest -- enough for the runtime to prove two captures are
+# (or are not) the same pixels of the same window in the same place, never the raw numbers themselves.
+
+#: Generous enough for a large, high-DPI single monitor; a demand for more is refused, not served.
+MAX_CAPTURE_DIMENSION: Final = 8192
+#: Bounds the encoded PNG payload itself (base64 text on the wire is ~4/3 of this).
+MAX_CAPTURE_PNG_BYTES: Final = 12 * 1024 * 1024
+
+
+class CaptureRequest(_Wire):
+    expected_worker_generation: uuid.UUID
+    capture_id: uuid.UUID
+    surface_ref: SurfaceRef
+    surface_epoch: int = Field(ge=1)
+    #: The human-input baseline taken when the capture was approved. A newer input refuses the capture:
+    #: screen content a person is actively interacting with must not be captured out from under them.
+    input_tick: InputTick
+
+
+class CaptureResponse(_Wire):
+    worker_generation: uuid.UUID
+    capture_id: uuid.UUID
+    surface_ref: SurfaceRef
+    surface_epoch: int = Field(ge=1)
+    #: A value-free digest of window rect + client rect + monitor + DPI + process creation identity.
+    #: Any material change (move, resize, monitor change, DPI change, the window being replaced)
+    #: changes this; it is what a later staleness check compares, never the raw numbers.
+    geometry_fingerprint: Sha256Hex
+    #: A digest of the encoded PNG bytes themselves: the frame's own content identity.
+    frame_digest: Sha256Hex
+    width: int = Field(ge=1, le=MAX_CAPTURE_DIMENSION)
+    height: int = Field(ge=1, le=MAX_CAPTURE_DIMENSION)
+    #: The window's effective DPI at capture time (96 = 100%). Opaque scale identity, not used to place
+    #: anything: the image is already exactly the client area's own pixels.
+    dpi: int = Field(ge=1)
+    #: An opaque per-refresh monitor identity (never an `HMONITOR`). Two captures with the same id were
+    #: taken from the same physical display; this alone does not prove anything else about the frame.
+    monitor_id: int
+    #: Base64-encoded PNG. The one thing on this boundary that is not opaque, by design -- it is the
+    #: whole point of a capture -- and it is exactly what a person approved seeing captured, once.
+    image_base64: str = Field(max_length=(MAX_CAPTURE_PNG_BYTES * 4) // 3 + 4)
+    input_changed: bool

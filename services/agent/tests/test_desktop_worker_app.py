@@ -6,6 +6,7 @@ access and timeout poisoning. Fakes stand in for the desktop so this runs on any
 """
 
 import asyncio
+import base64
 import os
 import time
 from collections.abc import AsyncIterator
@@ -24,9 +25,10 @@ from app.desktop.protocol import (
     WorkerErrorBody,
     WorkerIdentity,
 )
+from app.desktop.dpi import PhysicalRect
 from app.desktop.registry import AppRegistry
 from app.desktop.worker import WorkerSettings, create_worker_app
-from tests.desktop_fakes import FakeBackend, FakePlatform, FakeProbe, Node, window_tree
+from tests.desktop_fakes import FakeBackend, FakeCapturePlatform, FakePlatform, FakeProbe, Node, window_tree
 
 TOKEN = "worker-token-with-enough-entropy-1234"
 MARKER = "M9_S1_DESKTOP_PRIVATE_MARKER_71A"
@@ -42,6 +44,10 @@ class Harness:
         self.exits: list[int] = []
         self.timeout = 0.5
         self.platform = FakePlatform(self.probe, self.backend, worker_pid=os.getpid())
+        self.capture_platform = FakeCapturePlatform()
+        self.capture_platform.add_window(
+            1, window_rect=PhysicalRect(0, 0, 820, 620), client_rect=PhysicalRect(8, 39, 812, 612)
+        )
 
     def app(self) -> FastAPI:
         return create_worker_app(
@@ -49,6 +55,7 @@ class Harness:
             probe_factory=lambda: self.probe,
             backend_factory=lambda: self.backend,
             platform_factory=lambda: self.platform,
+            capture_platform_factory=lambda: self.capture_platform,
             registry=AppRegistry(),
             exit_process=lambda code: self.exits.append(code),
         )
@@ -72,7 +79,7 @@ async def test_health_reports_the_generation_and_exactly_the_reviewed_operations
         assert identity.worker_generation == state.generation
         assert identity.operations == [
             "surfaces", "observe", "input_baseline", "focus", "scroll", "launch",
-            "set_value", "select", "invoke",
+            "set_value", "select", "invoke", "capture",
         ]
 
 
@@ -131,16 +138,18 @@ async def test_unknown_routes_are_404_and_no_action_route_exists(method: str, pa
         assert response.status_code == 404 or path in ("/v1/desktop/surfaces", "/v1/desktop/observe")
 
 
-@pytest.mark.parametrize("path", ["/v1/desktop/invoke", "/v1/desktop/set-value", "/v1/desktop/select"])
+@pytest.mark.parametrize(
+    "path", ["/v1/desktop/invoke", "/v1/desktop/set-value", "/v1/desktop/select", "/v1/desktop/capture"]
+)
 async def test_s4_mutation_routes_exist_and_validate_their_body_but_nothing_else_desktop_shaped_does(path: str) -> None:
-    """S4 reviews and opens exactly these three routes (S3's `focus`/`scroll`/`launch` all already
+    """S4/S5 review and open exactly these four routes (S3's `focus`/`scroll`/`launch` all already
     exist too); an empty body is a validation error (422, the route is real and typed), never a 404."""
     async with running(Harness()) as (client, _):
         response = await client.post(path, json={})
         assert response.status_code == 422
 
 
-async def test_the_route_table_is_exactly_health_two_reads_and_six_reviewed_effects() -> None:
+async def test_the_route_table_is_exactly_health_two_reads_and_seven_reviewed_effects() -> None:
     schema = Harness().app().openapi()["paths"]
     assert {(path, tuple(sorted(methods))) for path, methods in schema.items()} == {
         ("/health", ("get",)),
@@ -153,7 +162,35 @@ async def test_the_route_table_is_exactly_health_two_reads_and_six_reviewed_effe
         ("/v1/desktop/set-value", ("post",)),
         ("/v1/desktop/select", ("post",)),
         ("/v1/desktop/invoke", ("post",)),
+        ("/v1/desktop/capture", ("post",)),
     }
+
+
+async def test_capture_round_trips_a_real_encoded_png() -> None:
+    async with running(Harness()) as (client, state):
+        listing = SurfaceListResponse.model_validate(
+            (await client.post("/v1/desktop/surfaces", json={"expected_worker_generation": str(state.generation)})).json()
+        )
+        surface = listing.surfaces[0]
+        baseline = await client.post(
+            "/v1/desktop/input-baseline", json={"expected_worker_generation": str(state.generation)}
+        )
+        tick = baseline.json()["input_tick"]
+        response = await client.post(
+            "/v1/desktop/capture",
+            json={
+                "expected_worker_generation": str(state.generation),
+                "capture_id": "11111111-1111-1111-1111-111111111111",
+                "surface_ref": surface.surface_ref,
+                "surface_epoch": surface.surface_epoch,
+                "input_tick": tick,
+            },
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["width"] > 0 and payload["height"] > 0
+        image = base64.b64decode(payload["image_base64"])
+        assert image[:8] == b"\x89PNG\r\n\x1a\n"
 
 
 async def test_surfaces_and_observe_round_trip() -> None:

@@ -29,6 +29,8 @@ from app.desktop.client import DesktopWorkerClient, StaleDesktopResult
 from app.desktop.errors import DesktopReason, DesktopRefusal
 from app.desktop.managed import DesktopEndpoint, ManagedDesktopWorker
 from app.desktop.protocol import (
+    CaptureRequest,
+    CaptureResponse,
     DesktopObservation,
     FocusRequest,
     FocusResponse,
@@ -215,6 +217,16 @@ class DesktopService:
             if generation != request.expected_worker_generation:
                 raise _CallerIsStale
             return await client.invoke(request)
+
+        return await self._run(call)
+
+    # -- S5: scoped visual fallback ---------------------------------------------------
+
+    async def capture(self, request: CaptureRequest) -> CaptureResponse:
+        async def call(client: DesktopWorkerClient, generation: uuid.UUID) -> CaptureResponse:
+            if generation != request.expected_worker_generation:
+                raise _CallerIsStale
+            return await client.capture(request)
 
         return await self._run(call)
 

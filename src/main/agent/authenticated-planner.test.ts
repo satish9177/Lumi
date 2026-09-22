@@ -7,7 +7,9 @@ import {
   scriptedAuthenticatedDecision
 } from './authenticated-planner'
 import { AUTHENTICATED_OPERATIONS, type AgentAuthenticatedObservationView } from '../../shared/agent-contracts'
-import { ModelRouter, DEFAULT_ROUTES, PRIVATE_TASK_CLASSES, PrivateRouteError } from '../models/model-router'
+import {
+  ModelRouter, DEFAULT_ROUTES, PRIVATE_TASK_CLASSES, PRIVATE_VISION_TASK_CLASSES, PrivateRouteError
+} from '../models/model-router'
 import type { ModelProvider, ModelRequest, ModelResponse } from '../models/provider'
 
 const ALL = { operations: [...AUTHENTICATED_OPERATIONS] }
@@ -142,12 +144,15 @@ class RecordingProvider implements ModelProvider {
 describe('the router, for account-private classes', () => {
   const context = { rules: 'rules', utterance: 'question', untrusted: { label: 'pages', lines: ['[o1 b1] private text'] } }
 
-  it('lists exactly the five private classes', () => {
+  it('lists exactly the six private classes, and exactly one is vision-capable', () => {
     expect([...PRIVATE_TASK_CLASSES].sort()).toEqual([
-      'authenticated_answer', 'authenticated_planning', 'desktop_action_planning', 'desktop_planning', 'form_planning'
+      'authenticated_answer', 'authenticated_planning', 'desktop_action_planning', 'desktop_planning',
+      'desktop_vision', 'form_planning'
     ])
+    expect([...PRIVATE_VISION_TASK_CLASSES]).toEqual(['desktop_vision'])
     for (const taskClass of PRIVATE_TASK_CLASSES) {
-      expect(DEFAULT_ROUTES[taskClass].vision).toBeUndefined()
+      const expectVision = PRIVATE_VISION_TASK_CLASSES.includes(taskClass) ? true : undefined
+      expect(DEFAULT_ROUTES[taskClass].vision).toBe(expectVision)
     }
   })
 
@@ -162,7 +167,11 @@ describe('the router, for account-private classes', () => {
     expect(a.calls.length + b.calls.length).toBe(0)
   })
 
-  it.each(PRIVATE_TASK_CLASSES)('refuses an image for %s, before any provider is called', async (taskClass) => {
+  const NON_VISION_PRIVATE_CLASSES = PRIVATE_TASK_CLASSES.filter(
+    (taskClass) => !PRIVATE_VISION_TASK_CLASSES.includes(taskClass)
+  )
+
+  it.each(NON_VISION_PRIVATE_CLASSES)('refuses an image for %s, before any provider is called', async (taskClass) => {
     const a = new RecordingProvider('gemini', 'gemini-2.5-flash')
     const router = new ModelRouter(() => a)
     await expect(router.run({
@@ -170,6 +179,33 @@ describe('the router, for account-private classes', () => {
       image: { mimeType: 'image/png', base64: 'AAAA' }
     })).rejects.toMatchObject({ reason: 'image_forbidden' })
     expect(a.calls).toHaveLength(0)
+  })
+
+  it('accepts an image only for desktop_vision, the one reviewed exception, and still tries just one provider', async () => {
+    const a = new RecordingProvider('gemini', 'gemini-2.5-flash')
+    const b = new RecordingProvider('openai', 'gpt')
+    const router = new ModelRouter((id) => (id === 'gemini' ? a : b))
+    await router.run({
+      taskClass: 'desktop_vision', context, responseFormat: 'json', validate: () => 1, permits: () => true,
+      image: { mimeType: 'image/png', base64: 'AAAA' }
+    })
+    expect(a.calls).toHaveLength(1)
+    expect(a.calls[0].image).toEqual({ mimeType: 'image/png', base64: 'AAAA' })
+    expect(b.calls).toHaveLength(0)
+  })
+
+  it('a text-only desktop_vision request is refused: this class is vision-capable, not vision-only, but the caller always supplies an image', async () => {
+    // Documents the actual invariant precisely: `config.vision: true` means the router will only try
+    // a vision-capable provider for this class, whether or not THIS request happens to carry an image.
+    // desktop-vision.ts is the only caller and always sets `image`; nothing here forces that at the
+    // router layer, so this test exists to make the boundary explicit rather than assumed.
+    const nonVisionOnly = new RecordingProvider('openai', 'gpt')
+    nonVisionOnly.capabilities.vision = false
+    const router = new ModelRouter(() => nonVisionOnly)
+    await expect(router.run({
+      taskClass: 'desktop_vision', context, responseFormat: 'json', validate: () => 1, permits: () => true
+    })).rejects.toBeInstanceOf(Error)
+    expect(nonVisionOnly.calls).toHaveLength(0)
   })
 
   it('attempts at most one provider for a private class even when the rule permits several', async () => {

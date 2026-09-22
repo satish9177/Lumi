@@ -29,6 +29,7 @@ from app.desktop.registry import AppRegistry
 from app.services.desktop_actions import DesktopActionService
 from app.services.desktop_disclosure import DesktopDisclosureService
 from app.services.desktop_planning import DesktopPlanningService
+from app.services.desktop_vision import DesktopVisionService
 from app.services.windows_job import runtime_job_is_active
 from app.services.browser_execution import (
     BrowserExecutionService,
@@ -288,6 +289,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     grant_ttl_seconds=resolved.desktop_disclosure_ttl_seconds,
                 )
                 await app.state.desktop_planning_service.recover_started()
+                # Milestone 9 S5: scoped visual fallback. Shares S1's two read-only calls and adds ONE
+                # native capability of its own -- the worker's capture route -- gated by its own two
+                # grant kinds. A capture or disclosure a dead runtime left STARTED is OUTCOME_UNKNOWN:
+                # Lumi cannot know whether a screenshot was taken or an image reached a provider, so
+                # neither is ever repeated automatically.
+                app.state.desktop_vision_service = DesktopVisionService(
+                    engine,
+                    desktop=app.state.desktop_service,
+                    grant_ttl_seconds=resolved.desktop_disclosure_ttl_seconds,
+                )
+                await app.state.desktop_vision_service.recover_started()
                 # Milestone 9 S3/S4: trusted focus, semantic scroll, registered-app launch, and (S4) bounded
                 # set-value/select/invoke mutations, on the same action ledger as browser effects. An
                 # unfinished desktop dispatch a dead runtime left is closed as OUTCOME_UNKNOWN by

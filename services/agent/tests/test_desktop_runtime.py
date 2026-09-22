@@ -122,6 +122,19 @@ def test_the_runtime_exposes_exactly_the_reviewed_desktop_routes_and_no_verbs(qu
         "/desktop/actions/{action_id}/approve": ["post"],
         "/desktop/actions/{action_id}/decline": ["post"],
         "/desktop/actions/{action_id}/reconcile": ["post"],
+        # S5: scoped visual fallback. A capture card, then a SEPARATE vision-disclosure card for the
+        # same task -- still no coordinate, no generic capture route and no route that turns a
+        # candidate into a click.
+        "/desktop/captures": ["post"],
+        "/desktop/captures/{task_id}": ["get"],
+        "/desktop/captures/{task_id}/grant": ["post"],
+        "/desktop/captures/{task_id}/revoke": ["post"],
+        "/desktop/captures/{task_id}/claim": ["post"],
+        "/desktop/captures/{task_id}/disclosure": ["post"],
+        "/desktop/captures/{task_id}/disclosure/grant": ["post"],
+        "/desktop/captures/{task_id}/disclosure/revoke": ["post"],
+        "/desktop/captures/{task_id}/disclosure/claim": ["post"],
+        "/desktop/captures/{task_id}/disclosure/result": ["post"],
     }
 
 

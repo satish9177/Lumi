@@ -271,6 +271,24 @@ export function describeEvent(event: AgentEventView): string {
     case 'task.desktop_plan_action_recorded': return 'The AI provider proposed one step — nothing has run'
     case 'task.desktop_plan_failed': return 'The AI provider could not propose a step — nothing was retried'
     case 'task.desktop_plan_outcome_unknown': return 'Lumi cannot tell whether the snapshot reached the AI provider — it was not repeated'
+    // Milestone 9 S5. A capture/vision-disclosure task has its own trusted view (DesktopVisionPanel)
+    // and is never shown in this timeline either, for the same reason as the S2/S4 events above: the
+    // words exist so the switch stays exhaustive. They carry no pixel, coordinate, window title,
+    // purpose string or candidate label.
+    case 'task.desktop_capture_requested': return 'Screenshot ready for your approval — nothing was captured'
+    case 'task.desktop_capture_granted': return 'You allowed one screenshot of this window'
+    case 'task.desktop_capture_revoked': return 'Screenshot capture cancelled'
+    case 'task.desktop_capture_started': return 'Taking the approved screenshot'
+    case 'task.desktop_capture_succeeded': return 'Screenshot taken, for local use only'
+    case 'task.desktop_capture_failed': return 'The screenshot could not be taken'
+    case 'task.desktop_capture_outcome_unknown': return 'Lumi cannot tell whether the screenshot was taken — it was not repeated'
+    case 'task.desktop_vision_disclosure_requested': return 'Sending the screenshot to an AI provider needs a separate approval'
+    case 'task.desktop_vision_disclosure_granted': return 'You allowed one fresh screenshot to be sent once'
+    case 'task.desktop_vision_disclosure_revoked': return 'Vision disclosure cancelled'
+    case 'task.desktop_vision_disclosure_started': return 'A fresh screenshot was released to one AI provider'
+    case 'task.desktop_vision_candidates_recorded': return 'The AI provider returned visual evidence — nothing was clicked'
+    case 'task.desktop_vision_disclosure_failed': return 'The AI provider could not analyse the screenshot — nothing was retried'
+    case 'task.desktop_vision_disclosure_outcome_unknown': return 'Lumi cannot tell whether the screenshot reached the AI provider — it was not repeated'
     case 'task.cancelled': return 'Task cancelled'
     case 'task.criteria_updated':
       return event.invalidatedActionIds?.length

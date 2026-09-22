@@ -58,7 +58,11 @@ _CONCEPTS: Final = (
     "createprocess", "createprocessw", "createprocessasuser", "winexec", "popen", "system",
     # Clipboard.
     "openclipboard", "setclipboarddata", "emptyclipboard", "setclipboard", "copy", "paste",
-    # Capture (screenshots, OCR and coordinates are a later slice).
+    # Capture. S5 unlocks exactly `capture`, `printwindow` and `getwindowdc` -- each pinned to one
+    # reviewed file below (`FILE_ALLOWANCES`/`PINNED_CAPTURE_WIN32`) -- and forbids them everywhere
+    # else. A blind full-desktop screen grab, OCR and coordinates are still not implemented anywhere:
+    # OCR and the vision-provider call are Electron-main concerns; nothing under this package ever
+    # holds a raw screenshot library (see `FORBIDDEN_MODULES`).
     "grabwindow", "grab", "screenshot", "capture", "bitblt", "printwindow", "getdc",
     "getwindowdc", "capture_as_image",
     # Reading or writing another process, hooks, injection.
@@ -140,13 +144,29 @@ PINNED_COM: Final = frozenset(
         "CurrentIsReadOnly", "SetValue", "Select", "IUIAutomationInvokePattern", "Invoke", "UIA_InvokePatternId",
     }
 )
+#: The exact user32/gdi32 entry points `capture_win32.py` may call. Every one is either a geometry
+#: query or part of the single reviewed `PrintWindow` capture call site (pinned separately below by
+#: `_capture_call_violations`); there is no `BitBlt`, no `GetDC` and no coordinate-input primitive here.
+PINNED_CAPTURE_WIN32: Final = frozenset(
+    {
+        "SetProcessDpiAwarenessContext", "GetWindowRect", "GetClientRect", "ClientToScreen",
+        "GetDpiForWindow", "EnumDisplayMonitors", "GetMonitorInfoW", "PrintWindow", "GetWindowDC",
+        "ReleaseDC", "CreateCompatibleDC", "CreateCompatibleBitmap", "SelectObject", "DeleteDC",
+        "DeleteObject", "GetDIBits",
+    }
+)
 #: Action-bearing pattern names that ONE reviewed file may reference. Nothing else, nowhere else.
 ACTION_PATTERN_ALLOWANCES: Final[dict[str, frozenset[str]]] = {
     "uia_backend.py": frozenset(
         {"IUIAutomationScrollPattern", "UIA_ScrollPatternId", "IUIAutomationInvokePattern", "UIA_InvokePatternId"}
     ),
 }
-_DLL_VARIABLES: Final = frozenset({"kernel32", "user32", "advapi32", "dwmapi", "_kernel32", "_user32", "_advapi32", "_dwmapi"})
+_DLL_VARIABLES: Final = frozenset(
+    {
+        "kernel32", "user32", "advapi32", "dwmapi", "_kernel32", "_user32", "_advapi32", "_dwmapi",
+        "gdi32", "_gdi32",
+    }
+)
 _PROTOTYPE_ATTRIBUTES: Final = frozenset({"argtypes", "restype"})
 #: UIA control-pattern interfaces and ids whose purpose is to *act*. Reading state needs only Value,
 #: Toggle, SelectionItem, ExpandCollapse and Text, so the action-bearing ones are not even referenced.
@@ -164,18 +184,23 @@ _MEMORY_OR_THREAD: Final = re.compile(r"(VM_READ|VM_WRITE|VM_OPERATION|CREATE_TH
 #: S4's three mutation names, allowed only in the files that legitimately own them -- exactly the
 #: same reviewed set as S3's `focus`/`scroll`/`launch`, extended.
 _S4_NAMES: Final = frozenset({"set_value", "setvalue", "select", "invoke"})
+#: S5's one new effect name, allowed only in the files that legitimately own it. `printwindow` and
+#: `getwindowdc` are allowed only in `capture_win32.py`, the one file that calls them.
+_S5_NAMES: Final = frozenset({"capture"})
+_CAPTURE_WIN32_NAMES: Final = _S5_NAMES | frozenset({"printwindow", "getwindowdc"})
 FILE_ALLOWANCES: Final[dict[str, frozenset[str]]] = {
     "managed.py": frozenset({"popen", "terminate", "kill", "close", "start"}),
     # S3/S4 effects. Each name is allowed only in the file that legitimately owns it.
-    "effects.py": frozenset({"focus", "scroll", "launch"} | _S4_NAMES),
+    "effects.py": frozenset({"focus", "scroll", "launch"} | _S4_NAMES | _S5_NAMES),
     "effects_win32.py": frozenset({"popen"}),
     "observer.py": frozenset({"scroll", "focus"} | _S4_NAMES),
     "uia_backend.py": frozenset({"scroll", "focus", "setfocus"} | _S4_NAMES),
-    "client.py": frozenset({"focus", "scroll", "launch"} | _S4_NAMES),
+    "client.py": frozenset({"focus", "scroll", "launch"} | _S4_NAMES | _S5_NAMES),
+    "capture_win32.py": _CAPTURE_WIN32_NAMES,
     # `os.close` on the file descriptors of the readiness pipe. Nothing to do with a window.
     "main.py": frozenset({"close"}),
     # `Thread.start()` runs the dedicated UIA thread inside the worker; it starts no other process.
-    "worker.py": frozenset({"start", "focus", "scroll", "launch"} | _S4_NAMES),
+    "worker.py": frozenset({"start", "focus", "scroll", "launch"} | _S4_NAMES | _S5_NAMES),
 }
 MODULE_ALLOWANCES: Final[dict[str, frozenset[str]]] = {
     "managed.py": frozenset({"subprocess"}),
@@ -343,6 +368,16 @@ def _pinned_surface_violations(tree: ast.AST, filename: str, base: str) -> list[
                 and node.attr not in PINNED_COM
             ):
                 found.append(Violation(filename, node.lineno, "unpinned-com-member", node.attr))
+    elif base == "capture_win32.py":
+        found.extend(_capture_call_violations(tree, filename))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and _base_name(node.value) in _DLL_VARIABLES
+                and node.attr not in _PROTOTYPE_ATTRIBUTES
+                and node.attr not in PINNED_CAPTURE_WIN32
+            ):
+                found.append(Violation(filename, node.lineno, "unpinned-win32-call", node.attr))
     return found
 
 
@@ -426,10 +461,26 @@ def _single_call_violations(tree: ast.AST, filename: str, attr: str, function: s
     for node in calls:
         if id(node) not in reviewed:
             found.append(Violation(filename, getattr(node, "lineno", 0), f"{attr.lower()}-call", "outside the reviewed method"))
-    # `f = element.SetFocus; f()` names the member without calling it here: every mention must BE the call.
+    # `f = element.SetFocus; f()` names the member without calling it here: every mention must BE the
+    # call -- except `dll.Attr.argtypes = ...` / `dll.Attr.restype = ...`, the ctypes prototype
+    # declaration a raw DLL function (unlike a comtypes COM method) needs before it can be called at
+    # all; that reference names the member without calling it too, and is the one legitimate exception.
     called_members = {id(node.func) for node in calls if isinstance(node, ast.Call)}
+    prototype_declarations = {
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr in _PROTOTYPE_ATTRIBUTES
+        and isinstance(node.value, ast.Attribute)
+        and node.value.attr == attr
+    }
     for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and node.attr == attr and id(node) not in called_members:
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == attr
+            and id(node) not in called_members
+            and id(node) not in prototype_declarations
+        ):
             found.append(Violation(filename, node.lineno, f"{attr.lower()}-reference", "the member may only be called"))
     if len(calls) > 1:
         found.append(Violation(filename, 0, f"{attr.lower()}-count", str(len(calls))))
@@ -464,6 +515,13 @@ def _mutation_call_violations(tree: ast.AST, filename: str) -> list[Violation]:
         *_single_call_violations(tree, filename, "Select", "select", 0),
         *_single_call_violations(tree, filename, "Invoke", "invoke", 0),
     ]
+
+
+def _capture_call_violations(tree: ast.AST, filename: str) -> list[Violation]:
+    """S5: `PrintWindow` may be called exactly once, inside `capture`, with exactly its three
+    arguments (`hwnd`, the destination DC, the render-flags expression). The same exact-shape pinning
+    S3/S4 already apply to `Scroll`/`SetFocus`/`SetValue`/`Select`/`Invoke`."""
+    return _single_call_violations(tree, filename, "PrintWindow", "capture", 3)
 
 
 def breakaway_violations(app_root: Path) -> list[Violation]:

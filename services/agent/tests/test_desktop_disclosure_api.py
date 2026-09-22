@@ -84,12 +84,15 @@ async def open_and_grant(client: httpx.AsyncClient, fake: FakeDesktop) -> tuple[
 
 def test_the_runtime_exposes_exactly_these_desktop_routes_and_no_verb(quiet_settings: Settings) -> None:
     paths = create_app(quiet_settings).openapi()["paths"]
-    # S3/S4's action and action-plan routes are pinned, exactly, by `test_desktop_runtime`; this pins
-    # the S1/S2 read/disclosure set only.
+    # S3/S4's action and action-plan routes, and S5's capture routes, are pinned, exactly, by
+    # `test_desktop_runtime`; this pins the S1/S2 read/disclosure set only.
     desktop = {
         path: sorted(methods)
         for path, methods in paths.items()
-        if "desktop" in path and not path.startswith("/desktop/actions") and not path.startswith("/desktop/action-plans")
+        if "desktop" in path
+        and not path.startswith("/desktop/actions")
+        and not path.startswith("/desktop/action-plans")
+        and not path.startswith("/desktop/captures")
     }
     assert desktop == {
         "/desktop/surfaces": ["get"],

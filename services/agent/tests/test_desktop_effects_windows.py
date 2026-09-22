@@ -27,6 +27,8 @@ from app.desktop.effects import DesktopEffects
 from app.desktop.errors import DesktopReason, DesktopRefusal
 from app.desktop.observer import DesktopObserver
 from app.desktop.protocol import (
+    CaptureRequest,
+    CaptureResponse,
     FocusRequest,
     InvokeEffect,
     InvokeRequest,
@@ -65,6 +67,7 @@ class RealWorld:
         self.observer, self.effects, self.platform = self._uia.submit(self._build).result(timeout=90)
 
     def _build(self) -> tuple[DesktopObserver, DesktopEffects, Any]:
+        from app.desktop.capture_win32 import WindowsCaptureBackend
         from app.desktop.effects_win32 import WindowsEffectPlatform
         from app.desktop.uia_backend import PywinautoBackend
         from app.desktop.win32 import WindowsSystemProbe
@@ -78,7 +81,8 @@ class RealWorld:
         observer = DesktopObserver(surfaces=surfaces, backend=backend, worker_generation=self.generation)
         platform = WindowsEffectPlatform()
         effects = DesktopEffects(
-            surfaces=surfaces, observer=observer, backend=backend, platform=platform, registry=self._registry
+            surfaces=surfaces, observer=observer, backend=backend, platform=platform, registry=self._registry,
+            capture_platform=WindowsCaptureBackend(),
         )
         return observer, effects, platform
 
@@ -380,3 +384,43 @@ def test_invoking_a_control_that_does_not_change_is_a_known_failure_never_a_gues
         # key, window-move/close and password-read -- must still be exactly zero.
         counters = untouched_except(app, ("button_clicks", "bm_click_msgs", "mouse_msgs", "activations"))
         assert counters["button_clicks"] == 1
+
+
+def test_capturing_the_fixture_window_produces_a_real_client_area_png(tmp_path: Path, world: RealWorld) -> None:
+    """A real `PrintWindow` capture of the fixture's own window: proves the whole S5 pipeline against
+    real Windows (DPI-aware geometry, GDI capture, the stdlib PNG encoder) end to end, and that nothing
+    about the target window moved, clicked or changed -- capture is passive."""
+    import base64
+
+    with fixture(tmp_path) as app:
+        ref, epoch = world.surface(app.title)
+        tick = world.quiet_baseline()
+        request = CaptureRequest(
+            expected_worker_generation=world.generation, capture_id=uuid.uuid4(),
+            surface_ref=ref, surface_epoch=epoch, input_tick=tick,
+        )
+        response = world.run(lambda: world.effects.capture(request))
+        assert response.width > 0 and response.height > 0
+        assert response.dpi >= 96
+        image = base64.b64decode(response.image_base64)
+        assert image[:8] == b"\x89PNG\r\n\x1a\n"
+        assert len(image) > 100  # a real, non-trivial image, not an empty/degenerate PNG
+        untouched(app)
+
+
+def test_capturing_the_same_still_window_twice_yields_the_same_fingerprint(tmp_path: Path, world: RealWorld) -> None:
+    with fixture(tmp_path) as app:
+        ref, epoch = world.surface(app.title)
+        tick = world.quiet_baseline()
+
+        def capture_once() -> CaptureResponse:
+            return world.effects.capture(
+                CaptureRequest(
+                    expected_worker_generation=world.generation, capture_id=uuid.uuid4(),
+                    surface_ref=ref, surface_epoch=epoch, input_tick=tick,
+                )
+            )
+
+        first = world.run(capture_once)
+        second = world.run(capture_once)
+        assert first.geometry_fingerprint == second.geometry_fingerprint

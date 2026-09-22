@@ -439,13 +439,19 @@ task_grants = Table(
         nullable=True,
     ),
     Column("profile_revoke_epoch", BigInteger(), nullable=True),
+    # Milestone 9 S5. The `GetLastInputInfo` tick read at CONFIRM time (the trusted click) for a
+    # `desktop_vision_capture` or `desktop_vision_disclose` grant, set atomically in the same
+    # PENDING -> ACTIVE compare-and-swap as `confirm_grant`. Never re-read fresh at claim time,
+    # which would trivially always match "now" and detect no human-input takeover. Deliberately not
+    # part of the immutable `scope` JSON: a fact about the approval, not what was approved.
+    Column("approval_input_tick", BigInteger(), nullable=True),
     CheckConstraint(
         "status IN (" + ", ".join(f"'{status}'" for status in GRANT_STATUSES) + ")",
         name="status",
     ),
     CheckConstraint(
         "kind IN ('public_research', 'authenticated_read', 'form_prepare', 'desktop_disclose', "
-        "'desktop_action_plan')",
+        "'desktop_action_plan', 'desktop_vision_capture', 'desktop_vision_disclose')",
         name="kind",
     ),
     CheckConstraint(
@@ -458,6 +464,10 @@ task_grants = Table(
     CheckConstraint("scope_digest ~ '^[0-9a-f]{64}$'", name="scope_digest_format"),
     CheckConstraint("jsonb_typeof(scope) = 'object'", name="scope_is_object"),
     CheckConstraint("planner_calls >= 0", name="planner_calls_positive"),
+    CheckConstraint(
+        "approval_input_tick IS NULL OR (approval_input_tick >= 0 AND approval_input_tick <= 4294967295)",
+        name="approval_input_tick_range",
+    ),
     # A grant only authorises while ACTIVE, and only an active grant has both a
     # confirmation and a window. Nothing can be active without an expiry.
     CheckConstraint(
@@ -1326,5 +1336,114 @@ desktop_action_plans = Table(
     CheckConstraint("(status = 'SUCCEEDED') = (proposed_action IS NOT NULL)", name="proposal_when_succeeded"),
     CheckConstraint(
         "proposed_action IS NULL OR jsonb_typeof(proposed_action) = 'object'", name="proposal_is_object"
+    ),
+)
+
+
+#: Milestone 9 S5. One row per `desktop_vision_capture` grant claim: a single scoped screenshot taken
+#: for LOCAL use only (on-device display, local OCR) -- no provider is ever contacted for this grant
+#: kind. Only identity/geometry digests, pixel dimensions and DPI are kept; the image itself never
+#: reaches this table or any other durable store.
+DESKTOP_CAPTURE_STATUSES = ("STARTED", "SUCCEEDED", "FAILED", "OUTCOME_UNKNOWN")
+
+desktop_captures = Table(
+    "desktop_captures",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False),
+    Column("grant_id", Uuid(), ForeignKey("task_grants.id", ondelete="RESTRICT"), nullable=False),
+    Column("surface_ref", String(4), nullable=False),
+    Column("surface_epoch", Integer(), nullable=False),
+    # The `GetLastInputInfo` tick read at CONFIRM time (the trusted click), stored so the later
+    # claim compares against the approval moment itself, never a tick freshly read at claim time
+    # (which would trivially always match "now" and detect nothing).
+    Column("approval_input_tick", BigInteger(), nullable=False),
+    Column("geometry_fingerprint", String(64), nullable=True),
+    Column("frame_digest", String(64), nullable=True),
+    Column("width", Integer(), nullable=True),
+    Column("height", Integer(), nullable=True),
+    Column("dpi", Integer(), nullable=True),
+    Column("monitor_id", BigInteger(), nullable=True),
+    Column("status", String(20), nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("error_code", String(40), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("grant_id", name="uq_desktop_captures_grant_id"),
+    UniqueConstraint("task_id", name="uq_desktop_captures_task_id"),
+    CheckConstraint(
+        "status IN (" + ", ".join(f"'{status}'" for status in DESKTOP_CAPTURE_STATUSES) + ")", name="status"
+    ),
+    CheckConstraint("surface_ref ~ '^s([1-9]|1[0-6])$'", name="surface_ref_shape"),
+    CheckConstraint(
+        "geometry_fingerprint IS NULL OR geometry_fingerprint ~ '^[0-9a-f]{64}$'",
+        name="geometry_fingerprint_format",
+    ),
+    CheckConstraint("frame_digest IS NULL OR frame_digest ~ '^[0-9a-f]{64}$'", name="frame_digest_format"),
+    CheckConstraint("(status = 'STARTED') = (finished_at IS NULL)", name="finished_when_not_started"),
+    CheckConstraint(
+        "(status IN ('FAILED', 'OUTCOME_UNKNOWN')) = (error_code IS NOT NULL)", name="error_code_when_not_ok"
+    ),
+    CheckConstraint(
+        "(status = 'SUCCEEDED') = (geometry_fingerprint IS NOT NULL AND frame_digest IS NOT NULL "
+        "AND width IS NOT NULL AND height IS NOT NULL AND dpi IS NOT NULL AND monitor_id IS NOT NULL)",
+        name="frame_fields_when_succeeded",
+    ),
+    CheckConstraint("width IS NULL OR width > 0", name="width_positive"),
+    CheckConstraint("height IS NULL OR height > 0", name="height_positive"),
+    CheckConstraint("dpi IS NULL OR dpi > 0", name="dpi_positive"),
+    CheckConstraint(
+        "approval_input_tick >= 0 AND approval_input_tick <= 4294967295", name="approval_input_tick_range"
+    ),
+)
+
+
+#: Milestone 9 S5. One row per `desktop_vision_disclose` grant claim: ONE freshly-recaptured image (not
+#: the linked capture's own bytes, which were never persisted) sent to ONE named provider/model for ONE
+#: stated purpose. `candidates` is the closed evidence list the provider returned -- never an
+#: authorization, a coordinate or a click; nothing reads it as one.
+desktop_vision_disclosures = Table(
+    "desktop_vision_disclosures",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False),
+    Column("grant_id", Uuid(), ForeignKey("task_grants.id", ondelete="RESTRICT"), nullable=False),
+    Column("capture_id", Uuid(), ForeignKey("desktop_captures.id", ondelete="RESTRICT"), nullable=False),
+    Column("provider", String(16), nullable=False),
+    Column("model", String(64), nullable=False),
+    Column("purpose", String(400), nullable=False),
+    # The `GetLastInputInfo` tick read at CONFIRM time (the trusted click), same reasoning as
+    # `desktop_captures.approval_input_tick`.
+    Column("approval_input_tick", BigInteger(), nullable=False),
+    Column("geometry_fingerprint", String(64), nullable=True),
+    Column("frame_digest", String(64), nullable=True),
+    Column("width", Integer(), nullable=True),
+    Column("height", Integer(), nullable=True),
+    Column("dpi", Integer(), nullable=True),
+    Column("monitor_id", BigInteger(), nullable=True),
+    Column("candidates", JSONB(), nullable=True),
+    Column("status", String(20), nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("error_code", String(40), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("grant_id", name="uq_desktop_vision_disclosures_grant_id"),
+    UniqueConstraint("task_id", name="uq_desktop_vision_disclosures_task_id"),
+    CheckConstraint(
+        "status IN (" + ", ".join(f"'{status}'" for status in DESKTOP_CAPTURE_STATUSES) + ")", name="status"
+    ),
+    CheckConstraint(
+        "geometry_fingerprint IS NULL OR geometry_fingerprint ~ '^[0-9a-f]{64}$'",
+        name="geometry_fingerprint_format",
+    ),
+    CheckConstraint("frame_digest IS NULL OR frame_digest ~ '^[0-9a-f]{64}$'", name="frame_digest_format"),
+    CheckConstraint("(status = 'STARTED') = (finished_at IS NULL)", name="finished_when_not_started"),
+    CheckConstraint(
+        "(status IN ('FAILED', 'OUTCOME_UNKNOWN')) = (error_code IS NOT NULL)", name="error_code_when_not_ok"
+    ),
+    CheckConstraint("candidates IS NULL OR jsonb_typeof(candidates) = 'array'", name="candidates_is_array"),
+    CheckConstraint("(status = 'SUCCEEDED') = (candidates IS NOT NULL)", name="candidates_when_succeeded"),
+    CheckConstraint(
+        "approval_input_tick >= 0 AND approval_input_tick <= 4294967295", name="approval_input_tick_range"
     ),
 )

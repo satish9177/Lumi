@@ -74,6 +74,10 @@ import { DesktopReader } from './agent/desktop-reader'
 import { DesktopReadController } from './services/desktop-read-controller'
 import { DesktopPlanner } from './agent/desktop-planner'
 import { DesktopPlanningController } from './services/desktop-planning-controller'
+import { DesktopVisionReasoner } from './agent/desktop-vision'
+import { DesktopVisionController } from './services/desktop-vision-controller'
+import { LocalOcrEngine } from './vision/ocr-engine'
+import { extrasLanguageDirectory, isExtrasPackInstalled } from './vision/model-pack'
 import { DesktopActionController } from './services/desktop-action-controller'
 import { ResearchAnswerer } from './agent/research-answer'
 import { ResearchPlanner } from './agent/research-planner'
@@ -1213,6 +1217,21 @@ app.whenReady().then(async () => {
       ? agentRuntime.request(method, path, body, timeoutMs)
       : Promise.reject(new RuntimeUnavailableError())
   }, modelRouter ? new DesktopPlanner(modelRouter) : undefined)
+  // Milestone 9 S5: scoped desktop visual fallback. Its own controller and its own reasoner, exactly
+  // like S2/S4: a screenshot goes to the local runtime for local-only use (capture), and to the ONE
+  // approved provider only after a SEPARATE trusted click (disclosure). Local OCR is best-effort and
+  // only ever runs if the optional extras pack the person already installed is present; Lumi never
+  // downloads anything to get it, matching the same fail-closed rule the photo indexer's own OCR use
+  // already follows.
+  let desktopOcrEngine: LocalOcrEngine | undefined
+  isExtrasPackInstalled(app.getPath('userData')).then((installed) => {
+    if (installed) desktopOcrEngine = new LocalOcrEngine({ languageDirectory: extrasLanguageDirectory(app.getPath('userData')) })
+  }).catch(() => { desktopOcrEngine = undefined })
+  const desktopVision = new DesktopVisionController({
+    request: (method, path, body, timeoutMs) => agentRuntime
+      ? agentRuntime.request(method, path, body, timeoutMs)
+      : Promise.reject(new RuntimeUnavailableError())
+  }, modelRouter ? new DesktopVisionReasoner(modelRouter) : undefined, () => desktopOcrEngine)
   // Milestone 8a S2: screen capture is refused from this process's first
   // instruction and stays refused until durable takeover state has been read.
   // A main-process restart during a live takeover therefore cannot produce a
@@ -1257,6 +1276,7 @@ app.whenReady().then(async () => {
     desktopRead,
     desktopActions,
     desktopPlanning,
+    desktopVision,
     diagnostics: () => diagnosticsVisible ? diagnostics.list() : [],
     runtimeStatus: () => agentRuntimeView(),
     restartRuntime: async () => {

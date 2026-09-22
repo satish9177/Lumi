@@ -29,8 +29,11 @@ PLAN_COLUMNS = {
 def test_migration_0015_widens_dispatches_and_adds_desktop_action_plans(migrated_database_url: str) -> None:
     url = migrated_database_url
     truncate_all(url)
+    # `migrated_database_url` is at head, which S5 (0016) moved past 0015; this test is specifically
+    # about 0015's own shape, so it stands on 0015 explicitly rather than assuming head == 0015.
+    downgrade(url, "0015")
     try:
-        # ---- clean at head ----
+        # ---- clean at 0015 ----
         assert revision(url) == "0015"
         assert exists(url, "desktop_action_plans")
         assert columns(url, "desktop_action_plans") == PLAN_COLUMNS
@@ -58,7 +61,9 @@ def test_migration_0015_widens_dispatches_and_adds_desktop_action_plans(migrated
         assert revision(url) == "0015" and exists(url, "desktop_action_plans")
 
         # ---- with no plan grant left, downgrade removes exactly what 0015 added ----
-        truncate_all(url)
+        # Standing at 0015 (S5's tables do not exist here), so they must be excluded from the shared
+        # TRUNCATE_ALL list, exactly like S3/S4's own tables are excluded in `test_migration_0013.py`.
+        truncate_all(url, without=("desktop_vision_disclosures", "desktop_captures"))
         downgrade(url, "0014")
         assert revision(url) == "0014"
         assert not exists(url, "desktop_action_plans")
@@ -76,4 +81,4 @@ def test_migration_0015_widens_dispatches_and_adds_desktop_action_plans(migrated
     finally:
         migrate(url)
         truncate_all(url)
-    assert revision(url) == "0015"
+    assert revision(url) == "0016"

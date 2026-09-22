@@ -85,6 +85,22 @@ export const TASK_EVENT_TYPES = [
   'task.desktop_plan_action_recorded',
   'task.desktop_plan_failed',
   'task.desktop_plan_outcome_unknown',
+  // Milestone 9 S5. Ids, digests, dimensions, DPI, monitor identity and closed codes only -- never a
+  // pixel, a coordinate, a window title, a purpose string or a candidate's label/text.
+  'task.desktop_capture_requested',
+  'task.desktop_capture_granted',
+  'task.desktop_capture_revoked',
+  'task.desktop_capture_started',
+  'task.desktop_capture_succeeded',
+  'task.desktop_capture_failed',
+  'task.desktop_capture_outcome_unknown',
+  'task.desktop_vision_disclosure_requested',
+  'task.desktop_vision_disclosure_granted',
+  'task.desktop_vision_disclosure_revoked',
+  'task.desktop_vision_disclosure_started',
+  'task.desktop_vision_candidates_recorded',
+  'task.desktop_vision_disclosure_failed',
+  'task.desktop_vision_disclosure_outcome_unknown',
   'action.proposed', 'action.approval_requested',
   'action.approved', 'action.authorized', 'action.rejected', 'action.execution_started', 'action.succeeded',
   'action.failed', 'action.outcome_unknown', 'action.reconciliation_started', 'action.reconciled'
@@ -1204,6 +1220,100 @@ export interface AgentDesktopPlanView {
   actionId?: string
 }
 
+// ---- Milestone 9 S5: scoped desktop visual fallback -----------------------------------------
+//
+// Two SEPARATE trusted cards for one task: a capture card (no provider named) and, only after a
+// capture succeeds, a disclosure card (one provider/model/purpose). A vision result is evidence
+// only -- there is no field anywhere in this section for a click, a key, a coordinate or an action.
+
+export const DESKTOP_FALLBACK_REASONS = [
+  'uia_empty', 'uia_missing_required_semantics', 'uia_truncated_without_target'
+] as const
+export type AgentDesktopFallbackReason = typeof DESKTOP_FALLBACK_REASONS[number]
+
+export const DESKTOP_VISION_PHASES = [
+  'awaiting_approval', 'approved', 'capturing', 'captured', 'capture_failed', 'capture_outcome_unknown',
+  'awaiting_disclosure_approval', 'disclosure_approved', 'sending_to_provider', 'candidates_ready',
+  'disclosure_failed', 'disclosure_outcome_unknown', 'declined'
+] as const
+export type AgentDesktopVisionPhase = typeof DESKTOP_VISION_PHASES[number]
+
+type AgentVisionAttemptStatus = 'STARTED' | 'SUCCEEDED' | 'FAILED' | 'OUTCOME_UNKNOWN'
+
+export interface AgentDesktopCaptureCardView {
+  grantId: string
+  grantRevision: number
+  grantStatus: AgentGrantStatus
+  expiresAt?: string
+  applicationLabel: string
+  windowTitle: string
+  /** The deterministic, locally-computed reason UIA was insufficient. Never model-chosen. */
+  fallbackReason: AgentDesktopFallbackReason
+}
+
+export interface AgentDesktopCaptureStateView {
+  captureId: string
+  status: AgentVisionAttemptStatus
+  errorCode?: string
+  startedAt: string
+  finishedAt?: string
+  width?: number
+  height?: number
+  dpi?: number
+}
+
+export interface AgentDesktopDisclosureCardView {
+  grantId: string
+  grantRevision: number
+  grantStatus: AgentGrantStatus
+  expiresAt?: string
+  applicationLabel: string
+  windowTitle: string
+  provider: AgentDisclosureRecipient
+  model: string
+  /** The person's own typed purpose for sending this image. */
+  purpose: string
+}
+
+/** A region normalised to the captured crop (0..1). Never a screen or window coordinate. */
+export interface AgentVisionRegion {
+  x: number
+  y: number
+  w: number
+  h: number
+}
+
+/** One piece of visual evidence. Never authority: nothing here can express a click or an action. */
+export interface AgentVisionCandidate {
+  label: string
+  region: AgentVisionRegion
+  confidence: number
+  observedText?: string
+}
+
+export interface AgentDesktopDisclosureStateView {
+  disclosureId: string
+  status: AgentVisionAttemptStatus
+  errorCode?: string
+  startedAt: string
+  finishedAt?: string
+  candidateCount?: number
+}
+
+export interface AgentDesktopVisionView {
+  taskId: string
+  taskStatus: AgentTaskStatus
+  taskRevision: number
+  /** The user's own typed objective: why this fallback was requested. */
+  objective: string
+  phase: AgentDesktopVisionPhase
+  captureCard?: AgentDesktopCaptureCardView
+  capture?: AgentDesktopCaptureStateView
+  disclosureCard?: AgentDesktopDisclosureCardView
+  disclosure?: AgentDesktopDisclosureStateView
+  candidates?: AgentVisionCandidate[]
+}
+
 export const AGENT_ERROR_CODES = [
   'runtime_unavailable',
   'runtime_restarted',
@@ -1484,6 +1594,36 @@ export interface AgentApi {
    * yet: this is the moment disclosure authority ends and execution review begins.
    */
   proposeDesktopActionFromPlan: (planId: string) => Promise<AgentResult<AgentDesktopActionView>>
+
+  // ---- Milestone 9 S5: scoped desktop visual fallback -------------------------------------------
+  //
+  // UIA-first, always: this is offered only when deterministic local code already found UIA
+  // insufficient. A capture requires its own trusted approval before a single pixel is taken;
+  // sending an image to a provider requires a SECOND, separate approval, naming the provider, model
+  // and purpose, and always takes a brand-new screenshot rather than reusing the first one.
+  /** Open the capture card for ONE surface, only if UIA was deterministically insufficient. */
+  createDesktopCapture: (
+    objective: string, workerGeneration: string, surfaceRef: string, surfaceEpoch: number, targetHint?: string
+  ) => Promise<AgentResult<AgentDesktopVisionView>>
+  /** Read-only: the current desktop visual-fallback task, or none. */
+  getDesktopCapture: (taskId: string) => Promise<AgentResult<AgentDesktopVisionView>>
+  /** The trusted "Allow once" click on the capture card. */
+  grantDesktopCapture: (taskId: string, grantId: string, expectedRevision: number) => Promise<AgentResult<AgentDesktopVisionView>>
+  /** The trusted "Cancel" click. Before the claim, nothing was captured. */
+  declineDesktopCapture: (taskId: string, grantId: string, expectedRevision: number) => Promise<AgentResult<AgentDesktopVisionView>>
+  /** Claim the capture approval: ONE screenshot, for local use only (on-device display, local OCR). */
+  runDesktopCapture: (taskId: string) => Promise<AgentResult<AgentDesktopVisionView>>
+  /**
+   * Open a SEPARATE trusted card naming one provider/model (main's own choice, never a renderer
+   * field) and the person's own typed purpose, for the already-succeeded capture.
+   */
+  createDesktopVisionDisclosure: (taskId: string, purpose: string) => Promise<AgentResult<AgentDesktopVisionView>>
+  /** The trusted "Allow once" click on the vision-disclosure card. */
+  grantDesktopVisionDisclosure: (taskId: string, grantId: string, expectedRevision: number) => Promise<AgentResult<AgentDesktopVisionView>>
+  /** The trusted "Cancel" click. Before the claim, no image was sent. */
+  declineDesktopVisionDisclosure: (taskId: string, grantId: string, expectedRevision: number) => Promise<AgentResult<AgentDesktopVisionView>>
+  /** Claim the disclosure approval: ONE brand-new screenshot, sent once to the one approved provider. */
+  runDesktopVisionDisclosure: (taskId: string) => Promise<AgentResult<AgentDesktopVisionView>>
 }
 
 /**
@@ -1576,7 +1716,19 @@ export const AGENT_IPC_CHANNELS = {
   grantDesktopPlan: 'lifelens:agent:grant-desktop-plan',
   declineDesktopPlan: 'lifelens:agent:decline-desktop-plan',
   runDesktopPlan: 'lifelens:agent:run-desktop-plan',
-  proposeDesktopActionFromPlan: 'lifelens:agent:propose-desktop-action-from-plan'
+  proposeDesktopActionFromPlan: 'lifelens:agent:propose-desktop-action-from-plan',
+  // Milestone 9 S5: scoped desktop visual fallback. A capture requires its own approval before a
+  // single pixel is taken; a vision-provider disclosure requires a SEPARATE approval and always
+  // takes a brand-new screenshot.
+  createDesktopCapture: 'lifelens:agent:create-desktop-capture',
+  getDesktopCapture: 'lifelens:agent:get-desktop-capture',
+  grantDesktopCapture: 'lifelens:agent:grant-desktop-capture',
+  declineDesktopCapture: 'lifelens:agent:decline-desktop-capture',
+  runDesktopCapture: 'lifelens:agent:run-desktop-capture',
+  createDesktopVisionDisclosure: 'lifelens:agent:create-desktop-vision-disclosure',
+  grantDesktopVisionDisclosure: 'lifelens:agent:grant-desktop-vision-disclosure',
+  declineDesktopVisionDisclosure: 'lifelens:agent:decline-desktop-vision-disclosure',
+  runDesktopVisionDisclosure: 'lifelens:agent:run-desktop-vision-disclosure'
 } as const
 
 /** Actions whose side effect is unresolved or in flight. */

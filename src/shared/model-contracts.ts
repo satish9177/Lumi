@@ -44,7 +44,15 @@ export const MODEL_TASK_CLASSES = [
    * answers): this class's output is validated and still needs its own separate, exact execution
    * approval before anything runs -- disclosure authority, never execution authority.
    */
-  'desktop_action_planning'
+  'desktop_action_planning',
+  /**
+   * Milestone 9 S5: a scoped visual fallback. From ONE trusted, freshly-captured screenshot of ONE
+   * approved window plus the person's own typed purpose, propose a bounded list of visual
+   * evidence/candidates -- never an action, a click or a coordinate. Private, one recipient, no
+   * failover, and the ONE class in the whole router allowed to carry an image: text disclosure
+   * authority (S2/S4) never extends to this, and a fresh image needs a fresh, separate approval.
+   */
+  'desktop_vision'
 ] as const
 export type ModelTaskClass = typeof MODEL_TASK_CLASSES[number]
 

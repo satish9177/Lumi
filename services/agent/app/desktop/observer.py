@@ -293,21 +293,26 @@ def _guarded_walk(
 
 
 def _credential_scan(root: UiaElement, *, deadline: float) -> None:
-    """A lenient, credential-only re-scan of a live tree, for one purpose: does the surface contain a
-    credential input ANYWHERE, right now. Unlike `_walk`/`_guarded_walk`, a node that has become
-    unavailable mid-scan is simply skipped, not treated as proof the whole surface changed -- a node
-    that is gone cannot itself be a live credential input a person could type into, so its own
-    disappearance is never a reason to refuse a mutation aimed at a completely different, still-live
-    control. `_walk`'s stricter "stable or refused" rule exists to protect an OBSERVATION's fidelity as
-    a snapshot; this is not one -- it is a yes/no safety net run again immediately before a mutation,
-    and ordinary transient UI churn elsewhere in the tree must never be the reason it refuses. A
-    genuine backend failure (anything other than the element having disappeared) still fails closed.
+    """A lenient-about-churn, but NEVER lenient-about-coverage, credential-only re-scan of a live tree:
+    does the surface contain a credential input ANYWHERE, right now. Unlike `_walk`/`_guarded_walk`, a
+    node that has become unavailable mid-scan is simply skipped, not treated as proof the whole surface
+    changed -- a node that is gone cannot itself be a live credential input a person could type into, so
+    its own disappearance is never a reason to refuse. `_walk`'s stricter "stable or refused" rule
+    exists to protect an OBSERVATION's fidelity as a snapshot; this is not one -- it is a yes/no safety
+    net run again immediately before a mutation or a capture.
+
+    A scan that runs out of its element or time budget before it finishes walking the tree is a
+    DIFFERENT thing from a node disappearing, and is never treated the same way: an incomplete scan has
+    not proven the surface is credential-free, so it fails closed
+    (`DesktopReason.CREDENTIAL_SCAN_INCOMPLETE`) exactly as if a credential field had actually been
+    found -- never silently treated as "nothing found". A genuine backend failure (anything other than
+    the element having disappeared) still fails closed too.
     """
     stack: list[tuple[UiaElement, int]] = [(root, 0)]
     visited = 0
     while stack:
         if visited >= MAX_SCAN_ELEMENTS or time.monotonic() > deadline:
-            return
+            raise DesktopRefusal(DesktopReason.CREDENTIAL_SCAN_INCOMPLETE)
         element, depth = stack.pop()
         visited += 1
         try:
@@ -319,14 +324,20 @@ def _credential_scan(root: UiaElement, *, deadline: float) -> None:
         if is_credential(props):
             raise DesktopRefusal(DesktopReason.CREDENTIAL_SURFACE)
         if depth >= MAX_SCAN_DEPTH:
-            continue
+            # A subtree deeper than this scan will ever look is unscanned, not proven clean.
+            raise DesktopRefusal(DesktopReason.CREDENTIAL_SCAN_INCOMPLETE)
         try:
             children = element.children()
         except ElementUnavailable:
             continue
         except Exception:  # noqa: BLE001 - a COM error carries private detail; none is kept.
             raise DesktopRefusal(DesktopReason.BACKEND_FAILED) from None
-        stack.extend((child, depth + 1) for child in children[:MAX_SIBLINGS])
+        # More children than this scan will ever visit at one parent is the same "coverage" problem as
+        # running out of the overall time/element budget: silently dropping the rest would mean this
+        # scan never actually looked at them, so it cannot say the surface is credential-free.
+        if len(children) > MAX_SIBLINGS:
+            raise DesktopRefusal(DesktopReason.CREDENTIAL_SCAN_INCOMPLETE)
+        stack.extend((child, depth + 1) for child in children)
 
 
 def structure_records(walk: _Walk) -> tuple[str, ...]:

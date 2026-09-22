@@ -322,6 +322,18 @@ for (const file of [
 ]) {
   if (!existsSync(join(agentOut, ...file))) throw new Error(`${file.join('/')} is missing from the runtime bundle.`)
 }
+// Milestone 9 S5: the scoped visual fallback (capture + a separate vision-disclosure approval). No new
+// native dependency: `capture_win32.py`/`dpi.py`/`png_encode.py` are ctypes/stdlib only.
+if (!readdirSync(join(agentOut, 'alembic', 'versions')).some((name) => name.startsWith('0016_'))) {
+  throw new Error('Migration 0016 is missing from the runtime bundle.')
+}
+for (const file of [
+  ['app', 'desktop', 'capture_win32.py'], ['app', 'desktop', 'dpi.py'], ['app', 'desktop', 'png_encode.py'],
+  ['app', 'services', 'desktop_vision.py'], ['app', 'domain', 'desktop_vision.py'],
+  ['app', 'repositories', 'desktop_vision.py'], ['app', 'api', 'desktop_vision_schemas.py']
+]) {
+  if (!existsSync(join(agentOut, ...file))) throw new Error(`${file.join('/')} is missing from the runtime bundle.`)
+}
 
 // 5. Byte-compile once, so an installed copy never needs to write beside itself.
 step('byte-compiling')

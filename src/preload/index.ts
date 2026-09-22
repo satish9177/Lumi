@@ -161,7 +161,27 @@ const agentApi: AgentApi = {
   declineDesktopPlan: (grantId: string, expectedRevision: number) =>
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineDesktopPlan, grantId, expectedRevision),
   runDesktopPlan: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.runDesktopPlan),
-  proposeDesktopActionFromPlan: (planId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.proposeDesktopActionFromPlan, planId)
+  proposeDesktopActionFromPlan: (planId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.proposeDesktopActionFromPlan, planId),
+  // Milestone 9 S5: scoped desktop visual fallback. Nine exact methods. A capture requires its own
+  // approval before a single pixel is taken; a vision-provider disclosure requires a SEPARATE
+  // approval naming the provider, model and purpose. The renderer never supplies an image, a
+  // coordinate or a candidate: it only ever reviews and approves what the runtime already narrowed.
+  createDesktopCapture: (
+    objective: string, workerGeneration: string, surfaceRef: string, surfaceEpoch: number, targetHint?: string
+  ) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.createDesktopCapture, objective, workerGeneration, surfaceRef, surfaceEpoch, targetHint),
+  getDesktopCapture: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getDesktopCapture, taskId),
+  grantDesktopCapture: (taskId: string, grantId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.grantDesktopCapture, taskId, grantId, expectedRevision),
+  declineDesktopCapture: (taskId: string, grantId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineDesktopCapture, taskId, grantId, expectedRevision),
+  runDesktopCapture: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.runDesktopCapture, taskId),
+  createDesktopVisionDisclosure: (taskId: string, purpose: string) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.createDesktopVisionDisclosure, taskId, purpose),
+  grantDesktopVisionDisclosure: (taskId: string, grantId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.grantDesktopVisionDisclosure, taskId, grantId, expectedRevision),
+  declineDesktopVisionDisclosure: (taskId: string, grantId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineDesktopVisionDisclosure, taskId, grantId, expectedRevision),
+  runDesktopVisionDisclosure: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.runDesktopVisionDisclosure, taskId)
 }
 
 // The Gemini Live relay: fixed channels, closed message kinds, validated in

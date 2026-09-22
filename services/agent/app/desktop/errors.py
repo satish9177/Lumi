@@ -28,6 +28,11 @@ class DesktopReason(StrEnum):
     ELEVATED_WINDOW = "elevated_window_refused"
     INTEGRITY_UNVERIFIABLE = "integrity_unverifiable"
     CREDENTIAL_SURFACE = "credential_surface"
+    #: The whole-surface credential scan hit its time/element budget before it could prove the WHOLE
+    #: surface is credential-free. An incomplete scan is never treated as a clean one: whatever asked
+    #: for it (an S4 mutation or an S5 capture) is refused, fail-closed, exactly as if a credential
+    #: field had actually been found.
+    CREDENTIAL_SCAN_INCOMPLETE = "credential_scan_incomplete"
     # Re-resolving a control from the live tree (no action uses it yet).
     ELEMENT_MISSING = "element_missing"
     ELEMENT_AMBIGUOUS = "element_ambiguous"
@@ -51,6 +56,18 @@ class DesktopReason(StrEnum):
     UNSUPPORTED_OR_UNKNOWN_EFFECT = "unsupported_or_unknown_effect"
     # Raised only from the part of an effect that runs after the OS call may have begun.
     EFFECT_UNCERTAIN = "desktop_effect_uncertain"
+    # S5 visual fallback. Every one of these is raised BEFORE a capture could begin, except
+    # `CAPTURE_UNCERTAIN` (after the one native call) and `CAPTURE_SCOPE_UNCERTAIN` (the crop itself
+    # could not be proven exact, so the worker stops rather than guess).
+    FALLBACK_NOT_ELIGIBLE = "fallback_not_eligible"
+    CAPTURE_BLOCKED = "capture_blocked"
+    CAPTURE_SCOPE_UNCERTAIN = "capture_scope_uncertain"
+    CAPTURE_REFUSED = "capture_refused"
+    CAPTURE_UNCERTAIN = "desktop_capture_uncertain"
+    FRAME_STALE = "frame_stale"
+    FRAME_EXPIRED = "frame_expired"
+    VISION_GRANT_NOT_ACTIVE = "vision_grant_not_active"
+    VISION_IMAGE_ALREADY_USED = "vision_image_already_used"
 
 
 #: What the runtime maps a refusal to on its own HTTP surface.
@@ -85,6 +102,16 @@ HTTP_STATUS: dict[DesktopReason, int] = {
     DesktopReason.NOT_INVOKABLE: 409,
     DesktopReason.UNSUPPORTED_OR_UNKNOWN_EFFECT: 409,
     DesktopReason.EFFECT_UNCERTAIN: 502,
+    DesktopReason.FALLBACK_NOT_ELIGIBLE: 409,
+    DesktopReason.CAPTURE_BLOCKED: 403,
+    DesktopReason.CAPTURE_SCOPE_UNCERTAIN: 409,
+    DesktopReason.CAPTURE_REFUSED: 502,
+    DesktopReason.CAPTURE_UNCERTAIN: 502,
+    DesktopReason.FRAME_STALE: 409,
+    DesktopReason.FRAME_EXPIRED: 409,
+    DesktopReason.VISION_GRANT_NOT_ACTIVE: 409,
+    DesktopReason.VISION_IMAGE_ALREADY_USED: 409,
+    DesktopReason.CREDENTIAL_SCAN_INCOMPLETE: 403,
 }
 
 

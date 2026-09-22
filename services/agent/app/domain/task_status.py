@@ -86,6 +86,23 @@ class TaskEventType(StrEnum):
     TASK_DESKTOP_PLAN_ACTION_RECORDED = "task.desktop_plan_action_recorded"
     TASK_DESKTOP_PLAN_FAILED = "task.desktop_plan_failed"
     TASK_DESKTOP_PLAN_OUTCOME_UNKNOWN = "task.desktop_plan_outcome_unknown"
+    #: Milestone 9 S5 scoped visual fallback. Ids, digests, dimensions, DPI, monitor identity and
+    #: closed codes only -- never a pixel, a coordinate, a window title, a purpose string or a
+    #: candidate's label/text.
+    TASK_DESKTOP_CAPTURE_REQUESTED = "task.desktop_capture_requested"
+    TASK_DESKTOP_CAPTURE_GRANTED = "task.desktop_capture_granted"
+    TASK_DESKTOP_CAPTURE_REVOKED = "task.desktop_capture_revoked"
+    TASK_DESKTOP_CAPTURE_STARTED = "task.desktop_capture_started"
+    TASK_DESKTOP_CAPTURE_SUCCEEDED = "task.desktop_capture_succeeded"
+    TASK_DESKTOP_CAPTURE_FAILED = "task.desktop_capture_failed"
+    TASK_DESKTOP_CAPTURE_OUTCOME_UNKNOWN = "task.desktop_capture_outcome_unknown"
+    TASK_DESKTOP_VISION_DISCLOSURE_REQUESTED = "task.desktop_vision_disclosure_requested"
+    TASK_DESKTOP_VISION_DISCLOSURE_GRANTED = "task.desktop_vision_disclosure_granted"
+    TASK_DESKTOP_VISION_DISCLOSURE_REVOKED = "task.desktop_vision_disclosure_revoked"
+    TASK_DESKTOP_VISION_DISCLOSURE_STARTED = "task.desktop_vision_disclosure_started"
+    TASK_DESKTOP_VISION_CANDIDATES_RECORDED = "task.desktop_vision_candidates_recorded"
+    TASK_DESKTOP_VISION_DISCLOSURE_FAILED = "task.desktop_vision_disclosure_failed"
+    TASK_DESKTOP_VISION_DISCLOSURE_OUTCOME_UNKNOWN = "task.desktop_vision_disclosure_outcome_unknown"
     ACTION_PROPOSED = "action.proposed"
     ACTION_APPROVAL_REQUESTED = "action.approval_requested"
     ACTION_APPROVED = "action.approved"

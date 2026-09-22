@@ -190,7 +190,14 @@ const ALLOWED_ROUTES: ReadonlyArray<{ method: RuntimeMethod; pattern: RegExp }> 
   { method: 'POST', pattern: /^\/desktop\/action-plans$/ },
   { method: 'GET', pattern: /^\/desktop\/action-plans\/latest$/ },
   { method: 'GET', pattern: new RegExp(`^/desktop/action-plans/${UUID_PART}$`) },
-  { method: 'POST', pattern: new RegExp(`^/desktop/action-plans/${UUID_PART}/(grant|revoke|claim|result)$`) }
+  { method: 'POST', pattern: new RegExp(`^/desktop/action-plans/${UUID_PART}/(grant|revoke|claim|result)$`) },
+  // Milestone 9 S5: scoped desktop visual fallback. A capture card, then a SEPARATE vision-disclosure
+  // card for the same task. `claim`/`result` are internal, exactly like S2/S4's own claim/result
+  // routes. No route here takes or returns a pixel, a coordinate or an action.
+  { method: 'POST', pattern: /^\/desktop\/captures$/ },
+  { method: 'GET', pattern: new RegExp(`^/desktop/captures/${UUID_PART}$`) },
+  { method: 'POST', pattern: new RegExp(`^/desktop/captures/${UUID_PART}/(grant|revoke|claim|disclosure)$`) },
+  { method: 'POST', pattern: new RegExp(`^/desktop/captures/${UUID_PART}/disclosure/(grant|revoke|claim|result)$`) }
 ]
 
 export function isAllowedRuntimeRoute(method: RuntimeMethod, path: string): boolean {

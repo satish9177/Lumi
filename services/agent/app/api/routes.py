@@ -148,6 +148,17 @@ from app.api.desktop_planning_schemas import (
     PlanProviderContextResponse,
     RecordDesktopPlanResultBody,
 )
+from app.services.desktop_vision import DesktopVisionService
+from app.api.desktop_vision_schemas import (
+    CreateDesktopCaptureBody,
+    CreateDesktopDisclosureBody,
+    DesktopVisionGrantBody,
+    DesktopVisionResponse,
+    DesktopVisionRevokeBody,
+    DisclosureProviderContextResponse,
+    RawCaptureResponse,
+    RecordDesktopCandidatesBody,
+)
 from app.services.login_takeover import LoginTakeoverService
 from app.services.page_inspection import PageInspectionService
 from app.services.page_inspection import validate_request as validate_inspection_request
@@ -1808,6 +1819,166 @@ async def record_desktop_plan_result(
 ) -> DesktopPlanResponse:
     return DesktopPlanResponse.from_view(
         await service.record_result(task_id, plan_id=body.plan_id, result=body.result, failure=body.failure)
+    )
+
+
+# --- Windows scoped visual fallback (Milestone 9, slice 5) --------------------------------
+#
+# Still no coordinate, no screenshot library import outside `app/desktop/`, no keyboard, no mouse and
+# no generic capture route. A capture requires ITS OWN trusted approval (separate from any text
+# disclosure or plan) before a single pixel is taken, and a vision-provider disclosure requires a
+# SECOND, separate approval before an image is ever sent anywhere -- and that claim always takes a
+# BRAND NEW screenshot, never reusing the first capture's own bytes. The provider's reply is evidence
+# only (`candidates`): there is no route, here or anywhere else, that turns one into a click.
+
+
+def get_desktop_vision_service(request: Request) -> DesktopVisionService:
+    service: DesktopVisionService = request.app.state.desktop_vision_service
+    return service
+
+
+DesktopVisionServiceDep = Annotated[DesktopVisionService, Depends(get_desktop_vision_service)]
+
+
+@router.post(
+    "/desktop/captures",
+    status_code=status.HTTP_201_CREATED,
+    response_model=DesktopVisionResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="Observe one surface locally and open the capture card, only if UIA is deterministically insufficient",
+)
+async def create_desktop_capture(
+    body: CreateDesktopCaptureBody, service: DesktopVisionServiceDep
+) -> DesktopVisionResponse:
+    return DesktopVisionResponse.from_view(
+        await service.create_capture(
+            objective=body.objective,
+            worker_generation=body.worker_generation,
+            surface_ref=body.surface_ref,
+            surface_epoch=body.surface_epoch,
+            target_hint=body.target_hint,
+        )
+    )
+
+
+@router.get(
+    "/desktop/captures/{task_id}",
+    response_model=DesktopVisionResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="One desktop visual-fallback task, as the trusted cards show it",
+)
+async def get_desktop_capture(task_id: uuid.UUID, service: DesktopVisionServiceDep) -> DesktopVisionResponse:
+    return DesktopVisionResponse.from_view(await service.describe(task_id))
+
+
+@router.post(
+    "/desktop/captures/{task_id}/grant",
+    response_model=DesktopVisionResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="Confirm the exact capture shown on the trusted card (single use)",
+)
+async def grant_desktop_capture(
+    task_id: uuid.UUID, body: DesktopVisionGrantBody, service: DesktopVisionServiceDep
+) -> DesktopVisionResponse:
+    return DesktopVisionResponse.from_view(
+        await service.confirm_capture(task_id, grant_id=body.grant_id, expected_revision=body.expected_revision)
+    )
+
+
+@router.post(
+    "/desktop/captures/{task_id}/revoke",
+    response_model=DesktopVisionResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="Decline or withdraw the capture approval (cannot un-capture after a claim)",
+)
+async def revoke_desktop_capture(
+    task_id: uuid.UUID, body: DesktopVisionRevokeBody, service: DesktopVisionServiceDep
+) -> DesktopVisionResponse:
+    return DesktopVisionResponse.from_view(
+        await service.revoke_capture(task_id, grant_id=body.grant_id, expected_revision=body.expected_revision)
+    )
+
+
+@router.post(
+    "/desktop/captures/{task_id}/claim",
+    response_model=RawCaptureResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="Claim the single-use approval and take ONE screenshot, for local use only (internal)",
+)
+async def claim_desktop_capture(task_id: uuid.UUID, service: DesktopVisionServiceDep) -> RawCaptureResponse:
+    return RawCaptureResponse.from_capture(await service.claim_capture(task_id))
+
+
+@router.post(
+    "/desktop/captures/{task_id}/disclosure",
+    status_code=status.HTTP_201_CREATED,
+    response_model=DesktopVisionResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="Open a SEPARATE trusted card naming one provider/model/purpose for the already-succeeded capture",
+)
+async def create_desktop_vision_disclosure(
+    task_id: uuid.UUID, body: CreateDesktopDisclosureBody, service: DesktopVisionServiceDep
+) -> DesktopVisionResponse:
+    return DesktopVisionResponse.from_view(
+        await service.create_disclosure(
+            task_id, recipient=body.recipient, model=body.model, purpose=body.purpose
+        )
+    )
+
+
+@router.post(
+    "/desktop/captures/{task_id}/disclosure/grant",
+    response_model=DesktopVisionResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="Confirm the exact vision disclosure shown on the trusted card (single use)",
+)
+async def grant_desktop_vision_disclosure(
+    task_id: uuid.UUID, body: DesktopVisionGrantBody, service: DesktopVisionServiceDep
+) -> DesktopVisionResponse:
+    return DesktopVisionResponse.from_view(
+        await service.confirm_disclosure(task_id, grant_id=body.grant_id, expected_revision=body.expected_revision)
+    )
+
+
+@router.post(
+    "/desktop/captures/{task_id}/disclosure/revoke",
+    response_model=DesktopVisionResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="Decline or withdraw the vision disclosure (cannot un-send after a claim)",
+)
+async def revoke_desktop_vision_disclosure(
+    task_id: uuid.UUID, body: DesktopVisionRevokeBody, service: DesktopVisionServiceDep
+) -> DesktopVisionResponse:
+    return DesktopVisionResponse.from_view(
+        await service.revoke_disclosure(task_id, grant_id=body.grant_id, expected_revision=body.expected_revision)
+    )
+
+
+@router.post(
+    "/desktop/captures/{task_id}/disclosure/claim",
+    response_model=DisclosureProviderContextResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="Claim the single-use approval and take a BRAND NEW screenshot for ONE provider call (internal)",
+)
+async def claim_desktop_vision_disclosure(
+    task_id: uuid.UUID, service: DesktopVisionServiceDep
+) -> DisclosureProviderContextResponse:
+    return DisclosureProviderContextResponse.from_context(await service.claim_disclosure(task_id))
+
+
+@router.post(
+    "/desktop/captures/{task_id}/disclosure/result",
+    response_model=DesktopVisionResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="Record the one provider attempt's closed candidate list or failure (internal)",
+)
+async def record_desktop_vision_candidates(
+    task_id: uuid.UUID, body: RecordDesktopCandidatesBody, service: DesktopVisionServiceDep
+) -> DesktopVisionResponse:
+    return DesktopVisionResponse.from_view(
+        await service.record_candidates(
+            task_id, disclosure_id=body.disclosure_id, result=body.result, failure=body.failure
+        )
     )
 
 
