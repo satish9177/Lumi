@@ -110,6 +110,23 @@ SAFE_INVOKE_LABELS: Final = frozenset(
     }
 )
 
+#: Found by the final M9 cross-slice audit: unlike `invoke_control`, `select_control` had no
+#: equivalent of the allowlist above -- only a referential check that the refs exist. A
+#: `SelectionItem.Select` is frequently activation, not mere highlighting: a browser/Electron
+#: `<select>`-style control commonly fires an immediate change handler, and a custom ARIA
+#: `listbox`/`role="option"` "quick pick" widget (a command palette, for instance) can treat
+#: selecting an entry as running it -- exactly the class of risk that made Invoke's own label
+#: allowlist necessary, applied here to the CONTAINER's role instead of the option's label,
+#: because an option's own text is arbitrary application data (a filename, a search result), never
+#: a small reviewed set of UI-chrome phrases the way a button's label can be. `combo_box` and
+#: `radio_button` are classic closed-set value pickers (an ordinary form field), not a standalone
+#: action list; a `list`/`pane`-rooted container -- where a command-palette-style widget lives --
+#: is refused. This is additional, reviewed defence, not the only thing standing between a model's
+#: proposal and an effect: `validate_planned_action` remains a referential check otherwise, and the
+#: worker's own live re-derivation (exact match, no nearest-label fallback) is what actually makes
+#: the approved target impossible to substitute.
+SAFE_SELECT_CONTAINER_ROLES: Final = frozenset({"combo_box", "radio_button"})
+
 
 class DesktopPlanRefusal(ValueError):
     """A refused desktop-plan input or state. `code` is stable and text-free."""
@@ -296,6 +313,11 @@ def _is_reviewed_safe_invoke(node: dict[str, object]) -> bool:
     return name in SAFE_INVOKE_LABELS
 
 
+def _is_reviewed_safe_select_container(node: dict[str, object]) -> bool:
+    role = str(node.get("role") or "").strip().lower()
+    return role in SAFE_SELECT_CONTAINER_ROLES
+
+
 def validate_planned_action(
     projection: Projection, scope: DesktopPlanScope, action: PlannedAction
 ) -> None:
@@ -325,6 +347,8 @@ def validate_planned_action(
             raise DesktopPlanRefusal("unknown_control")
         if action.container_ref == action.option_ref:
             raise DesktopPlanRefusal("unknown_control")
+        if not _is_reviewed_safe_select_container(container):
+            raise DesktopPlanRefusal("unsupported_or_unknown_effect")
 
 
 def validate_objective(value: object) -> str:

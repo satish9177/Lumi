@@ -142,19 +142,35 @@ class CapturePlatform(Protocol):
 
 
 class _Dispatches:
-    """Per-generation memory of which dispatch ids began, and what they answered."""
+    """Per-generation memory of which dispatch ids began, and what they answered.
+
+    Every one of the seven effects (S3's focus/scroll/launch, S4's set_value/select/invoke, S5's
+    capture) shares this ONE table, keyed only by a bare UUID (`dispatch_id` for S3/S4,
+    `capture_id` for S5) -- today always a fresh server-generated `uuid.uuid4()`, never
+    renderer-supplied, so a collision is not attacker-reachable. Found by the final M9 cross-slice
+    audit as a genuine identity/ref-recycling gap (item 14) rather than a live exploit: `begin()`
+    used to return whatever object was stored under an id with no record of which OPERATION KIND
+    produced it, so the SAME id reused across two different effects would silently fall through
+    `isinstance(replay, ExpectedResponse)` at the call site and run the second operation for real,
+    instead of refusing -- fail-open on a same-id-wrong-type collision. `begin()` now takes the
+    caller's own expected response type and refuses (fail-closed) rather than replaying, or
+    proceeding, on any mismatch.
+    """
 
     def __init__(self) -> None:
         self._seen: OrderedDict[uuid.UUID, object | None] = OrderedDict()
 
-    def begin(self, dispatch_id: uuid.UUID) -> object | None:
+    def begin(self, dispatch_id: uuid.UUID, expected_type: type[object]) -> object | None:
         """None: first time. Otherwise the stored answer of a finished dispatch (replay).
 
-        An in-flight or failed dispatch is refused: it may already have had its effect.
+        An in-flight or failed dispatch is refused: it may already have had its effect. So is a
+        finished dispatch whose stored answer is not of the caller's own expected type: the same id
+        was used for a different kind of effect, and neither replaying that answer nor treating this
+        as a fresh id (and performing THIS effect for real) is safe.
         """
         if dispatch_id in self._seen:
             answer = self._seen[dispatch_id]
-            if answer is None:
+            if answer is None or not isinstance(answer, expected_type):
                 raise DesktopRefusal(DesktopReason.DUPLICATE_DISPATCH)
             return answer
         self._seen[dispatch_id] = None
@@ -212,7 +228,7 @@ class DesktopEffects:
     # -- focus -------------------------------------------------------------------
 
     def focus(self, request: FocusRequest) -> FocusResponse:
-        replay = self._dispatches.begin(request.dispatch_id)
+        replay = self._dispatches.begin(request.dispatch_id, FocusResponse)
         if isinstance(replay, FocusResponse):
             return replay
         resolved = self._focusable(request.surface_ref, request.surface_epoch)
@@ -242,7 +258,20 @@ class DesktopEffects:
         return resolved
 
     def _focus_resolved(self, resolved: ResolvedSurface) -> bool:
-        """ONE foreground request, then verify. Any doubt after the call is uncertainty, not failure."""
+        """ONE foreground request, then verify. Any doubt after the call is uncertainty, not failure.
+
+        Found by the final M9 cross-slice audit, documented rather than narrowed this audit (see the
+        residual note in `docs/reviews/milestone-9-final.md`): `root_for` is a genuinely fresh
+        cross-process COM round-trip, so the gap between `focus()`'s one human-input check and the
+        native `SetFocus` call includes that extra round-trip -- wider than `scroll`/`set_value`/
+        `select`/`invoke`'s own second checks, whose element/pattern is already held before their
+        final check runs, leaving only the native call's own unavoidable pattern acquisition
+        unchecked. Splitting this call to hold the root across an added second check would break the
+        source scanner's own `focus-target` pin -- `.focus()` may be called only in the exact shape
+        `root_for(...).focus()`, specifically to make a held-reference dodge impossible -- and
+        loosening that pin under audit time pressure, for an already-bounded Medium-severity gap, was
+        judged riskier than the gap itself.
+        """
         hwnd = resolved.identity.hwnd
         try:
             # UI Automation's own SetFocus on the window root. Unlike a raw foreground request from a
@@ -270,7 +299,7 @@ class DesktopEffects:
     # -- scroll ------------------------------------------------------------------
 
     def scroll(self, request: ScrollRequest) -> ScrollResponse:
-        replay = self._dispatches.begin(request.dispatch_id)
+        replay = self._dispatches.begin(request.dispatch_id, ScrollResponse)
         if isinstance(replay, ScrollResponse):
             return replay
         resolved = self._surfaces.resolve(request.surface_ref, request.surface_epoch)
@@ -322,7 +351,7 @@ class DesktopEffects:
     # -- registered application launch -------------------------------------------
 
     def launch(self, request: LaunchRequest) -> LaunchResponse:
-        replay = self._dispatches.begin(request.dispatch_id)
+        replay = self._dispatches.begin(request.dispatch_id, LaunchResponse)
         if isinstance(replay, LaunchResponse):
             return replay
         app = self._registry.get(request.app_id)
@@ -525,7 +554,7 @@ class DesktopEffects:
         resolved.slot.controls = None
 
     def set_value(self, request: SetValueRequest) -> SetValueResponse:
-        replay = self._dispatches.begin(request.dispatch_id)
+        replay = self._dispatches.begin(request.dispatch_id, SetValueResponse)
         if isinstance(replay, SetValueResponse):
             return replay
         resolved, control = self._mutation_target(
@@ -582,7 +611,7 @@ class DesktopEffects:
         return response
 
     def select(self, request: SelectRequest) -> SelectResponse:
-        replay = self._dispatches.begin(request.dispatch_id)
+        replay = self._dispatches.begin(request.dispatch_id, SelectResponse)
         if isinstance(replay, SelectResponse):
             return replay
         resolved, container = self._mutation_target(
@@ -649,7 +678,7 @@ class DesktopEffects:
         return bool(props.selected)
 
     def invoke(self, request: InvokeRequest) -> InvokeResponse:
-        replay = self._dispatches.begin(request.dispatch_id)
+        replay = self._dispatches.begin(request.dispatch_id, InvokeResponse)
         if isinstance(replay, InvokeResponse):
             return replay
         resolved, control = self._mutation_target(
@@ -700,7 +729,7 @@ class DesktopEffects:
         failure here is a plain refusal, never `desktop_effect_uncertain` -- there is no ambiguous
         "did it happen" question for a capture the way there is for a write.
         """
-        replay = self._dispatches.begin(request.capture_id)
+        replay = self._dispatches.begin(request.capture_id, CaptureResponse)
         if isinstance(replay, CaptureResponse):
             return replay
         if self._capture_platform is None:

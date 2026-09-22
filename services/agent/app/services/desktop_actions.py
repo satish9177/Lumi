@@ -332,7 +332,7 @@ class DesktopActionService:
             action_id, result=mapped, evidence={"source": "user_observed"},
             expected_revision=started.action.revision,
         )
-        return self._view(finished)
+        return await self._view(finished)
 
     async def _surface_facts(self, worker_generation: uuid.UUID, ref: str, epoch: int) -> tuple[str, str]:
         listing = await self._desktop.list_surfaces()
@@ -386,7 +386,7 @@ class DesktopActionService:
             task.id, tool_name=TOOL_FOR[operation], risk_tier=RISK_FOR[operation], proposal=dump_proposal(proposal)
         )
         requested = await self._actions.request_approval(created.action.id, expected_revision=created.action.revision)
-        return self._view(requested)
+        return await self._view(requested)
 
     # ---- reads -------------------------------------------------------------------------------------------
 
@@ -394,7 +394,7 @@ class DesktopActionService:
         view = await self._actions.get_action(action_id)
         if view.action.tool_name not in OPERATION_FOR_TOOL:
             raise DesktopActionError("desktop_action_not_found")
-        return self._view(view)
+        return await self._view(view)
 
     async def latest(self) -> DesktopActionView | None:
         async with self._engine.connect() as connection:
@@ -408,7 +408,7 @@ class DesktopActionService:
         rejected = await self._actions.reject_action(
             action_id, expected_revision=expected_revision, reason="declined_by_user"
         )
-        return self._view(rejected)
+        return await self._view(rejected)
 
     # ---- approval and execution ----------------------------------------------------------------------------
 
@@ -453,13 +453,13 @@ class DesktopActionService:
                     action_id, attempt, dispatch_id, dispatched=False,
                     outcome=AttemptOutcome.FAILED, error_code="dispatch_not_recorded", result={},
                 )
-                return self._view(done)
+                return await self._view(done)
 
             # The effect and its bookkeeping run as ONE task that a cancelled request cannot interrupt: a caller that
             # goes away mid-call must not leave an action EXECUTING (which would block every other desktop action).
             settle = asyncio.ensure_future(self._settle(action_id, attempt, dispatch_id, proposal, baseline))
             done = await asyncio.shield(settle)
-            return self._view(done)
+            return await self._view(done)
 
     async def _settle(
         self, action_id: uuid.UUID, attempt: AttemptRecord, dispatch_id: uuid.UUID, proposal: DesktopProposal, baseline: int
@@ -698,10 +698,29 @@ class DesktopActionService:
         except Exception:  # noqa: BLE001 - it stays waiting and expires; no effect either way.
             logger.warning("a desktop action could not be rejected after its worker went away")
 
-    @staticmethod
-    def _view(view: ActionView) -> DesktopActionView:
+    async def _resolve_set_value(self, proposal: SetValueProposal) -> SetValueProposal:
+        """`dump_proposal()` never persists a `SetValueProposal`'s raw text (see the field's own
+        docstring in `app.domain.desktop_actions`): the durable ledger row only ever carries
+        `value_ref`. Every read of a set-value action -- the initial card, a later status poll, and
+        the actual `approve()` call that performs the write -- re-resolves the text fresh from
+        `task_grants.scope` (`StoredValue.raw`), the one place S4 keeps it at rest, by `plan_id` and
+        `value_ref`. The grant row is immutable and never deleted, so this resolves identically
+        whether the mutation already ran or not; if it ever cannot resolve, that is treated as
+        `desktop_action_invalid` rather than silently writing or displaying an empty value."""
+        async with self._engine.connect() as connection:
+            plan_repository = DesktopPlanningRepository(connection)
+            plan = await plan_repository.get_plan(proposal.plan_id)
+            grant = await plan_repository.get_grant(plan.grant_id) if plan is not None else None
+        resolved = grant.scope.resolve_value(proposal.value_ref) if grant is not None else None
+        if resolved is None:
+            raise DesktopActionError("desktop_action_invalid")
+        return proposal.model_copy(update={"value": resolved})
+
+    async def _view(self, view: ActionView) -> DesktopActionView:
         action = view.action
         proposal = parse_proposal(action.proposal)
+        if isinstance(proposal, SetValueProposal):
+            proposal = await self._resolve_set_value(proposal)
         attempt = view.attempts[-1] if view.attempts else None
         return DesktopActionView(
             action_id=action.id,

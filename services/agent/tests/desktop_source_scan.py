@@ -236,8 +236,8 @@ def _spellings(name: str) -> set[str]:
     return spellings
 
 
-def _forbidden_name(name: str, allowed: frozenset[str]) -> bool:
-    if _is_constant(name):
+def _forbidden_name(name: str, allowed: frozenset[str], *, exempt_constants: bool = True) -> bool:
+    if exempt_constants and _is_constant(name):
         return False
     return any(spelling in FORBIDDEN and spelling not in allowed for spelling in _spellings(name))
 
@@ -278,7 +278,14 @@ def scan_source(source: str, filename: str = "<memory>") -> list[Violation]:
             if _ACTION_PATTERN_NAME.fullmatch(node.id) and node.id not in allowed_patterns:
                 add(node, "action-pattern", node.id)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if _forbidden_name(node.name, allowed_names):
+            # Found by the final M9 cross-slice audit: unlike a reference (`Foo.SCROLL`, a legitimate
+            # enum member access), a DEFINITION is never legitimately SCREAMING_CASE anywhere in this
+            # codebase's own style (every real method here is `focus`/`scroll`/`set_value`/... in
+            # lower_snake_case) -- exempting all-caps definitions from the forbidden-name check let a
+            # cosmetically renamed wrapper (`def INVOKE(self): ...`) hide from this scan, even though
+            # the real, correctly-spelled primitive it would have to call to do anything is still
+            # caught by every other check. Definitions are never exempted, only references are.
+            if _forbidden_name(node.name, allowed_names, exempt_constants=False):
                 add(node, "definition", node.name)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             modules = (

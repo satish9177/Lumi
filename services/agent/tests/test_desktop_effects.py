@@ -340,6 +340,42 @@ def test_a_dispatch_is_performed_at_most_once_and_a_finished_one_replays_its_ans
     assert world.platform.foreground_calls == [10], "a lost reply is recovered from the stored answer, not by a second effect"
 
 
+def test_the_same_dispatch_id_reused_for_a_different_effect_kind_is_refused_not_replayed_or_run() -> None:
+    """Final M9 cross-slice audit (Pass A, Low): S3/S4's `dispatch_id` and S5's `capture_id` share
+    one in-worker table keyed only by a bare UUID, distinguished at each call site by an
+    `isinstance(replay, ExpectedResponse)` check. Before this fix, a stored answer of the WRONG type
+    for the same id fell through that check silently and let the second effect run for real -- fail
+    open, guarded today only by both ids always being fresh, unguessable, server-generated UUID4s
+    (not by any code). `begin()` must refuse a same-id-wrong-type collision instead."""
+    world = World()
+    ref, epoch = world.window(10)
+    reused = uuid.uuid4()
+    focused = world.effects.focus(world.focus_request(ref, epoch, dispatch=reused))
+    assert focused.outcome == "focused"
+    assert code(lambda: world.effects.capture(world.capture_request(ref, epoch, capture_id=reused))) is DesktopReason.DUPLICATE_DISPATCH
+    assert world.capture_platform.capture_calls == [], "the capture must never actually have run"
+
+
+def test_root_for_is_reacquired_fresh_for_every_focus_and_the_second_call_is_not_a_reuse() -> None:
+    """Documents the residual the final M9 cross-slice audit found and deliberately did not narrow
+    (see `docs/reviews/milestone-9-final.md`): `root_for` is a genuinely fresh cross-process
+    round-trip, called again on every `focus()`, never a cached reference from an earlier scan --
+    the gap between `focus()`'s one human-input check and the native `SetFocus` call therefore
+    includes that fresh acquisition, wider than every other S4/S5 effect's own second-check gap
+    (whose element/pattern is already held before their final check runs). Splitting the call to
+    hold the root across an added check would break the source scanner's own `focus-target` pin,
+    which requires `.focus()` to be called in the exact shape `root_for(...).focus()` so a held
+    reference can never dodge it; loosening that pin was judged riskier than this bounded gap."""
+    world = World()
+    ref, epoch = world.window(10)
+    calls: list[int] = []
+    world.backend.on_root = calls.append
+    world.effects.focus(world.focus_request(ref, epoch))
+    # Twice: once inside `_focusable`'s own credential/stability scan, once inside `_focus_resolved`
+    # immediately before `.focus()` -- both fresh acquisitions, neither a cached reference.
+    assert calls == [10, 10]
+
+
 def test_a_refused_dispatch_id_cannot_be_reused() -> None:
     world = World()
     ref, epoch = world.window(10)

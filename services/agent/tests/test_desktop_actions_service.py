@@ -68,6 +68,14 @@ class FakeEffectDesktop(FakeDesktop):
             node(7, name="Show details", role=DesktopRole.BUTTON, parent=1).model_copy(
                 update={"patterns": [DesktopPattern.INVOKE]}
             ),
+            # A LIST-rooted single-select container, exactly the shape a command-palette-style
+            # "quick pick" widget uses (a `list`/`list_item` pair with the SelectionItem pattern,
+            # not a `combo_box`): selecting an item like this is commonly activation, not mere
+            # highlighting, so `select_control` must refuse it (`SAFE_SELECT_CONTAINER_ROLES`).
+            node(8, name="Commands", role=DesktopRole.LIST, parent=1),
+            node(9, name="Delete Everything", role=DesktopRole.LIST_ITEM, parent=8).model_copy(
+                update={"patterns": [DesktopPattern.SELECTION_ITEM]}
+            ),
         ])
         self.baseline = 5000
         self.calls: list[str] = []
@@ -736,6 +744,44 @@ async def test_propose_from_plan_opens_a_set_value_card_with_the_resolved_truste
     assert proposal.value == "hello world"  # type: ignore[union-attr]
 
 
+async def test_the_raw_set_value_text_is_never_persisted_in_the_durable_action_row(
+    service: DesktopActionService, planning: DesktopPlanningService, desktop: FakeEffectDesktop, engine: AsyncEngine
+) -> None:
+    """The final M9 cross-slice audit's disposition of the S4-deferred raw-value-ledger residual
+    (`docs/reviews/milestone-9-s4.md` section 13 finding 3): the trusted text a `SetValue` will write
+    lives durably in exactly one place, `task_grants.scope` (S4's own immutable plan-grant scope), never
+    a second time in the ordinary `actions` row. A later, separate read (simulating a status poll long
+    after the card was opened, and again after the effect has actually run) must still show the exact
+    approved text -- proving it is re-resolved fresh each time, not merely absent by accident."""
+    secret = "trusted text 9f2a should never sit in actions.proposal"
+    plan_id = await build_plan(
+        planning, desktop,
+        result={"schema_version": 1, "action": "set_value", "control_ref": "u4", "value_ref": "v1"},
+        values=[("field", secret)],
+    )
+    view = await service.propose_from_plan(plan_id)
+
+    (persisted,) = await rows(engine, "SELECT proposal FROM actions WHERE id = :a", a=view.action_id)
+    assert secret not in str(persisted.proposal)
+    assert persisted.proposal.get("value_ref") == "v1"
+    assert "value" not in persisted.proposal
+
+    # A later, separate read must still resolve the real text -- not a cached in-memory copy from the
+    # call above, a fresh reconstruction from the ledger row plus the immutable grant scope.
+    reread = await service.get(view.action_id)
+    assert reread.proposal.value == secret  # type: ignore[union-attr]
+
+    done = await service.approve(view.action_id, expected_revision=reread.revision)
+    assert done.status is ActionStatus.SUCCEEDED
+    assert desktop.requests[0].value == secret
+
+    # Post-effect, the grant is COMPLETED but its row and scope are never deleted: resolution still works.
+    after = await service.get(view.action_id)
+    assert after.proposal.value == secret  # type: ignore[union-attr]
+    (dispatch,) = await rows(engine, "SELECT result FROM desktop_dispatches WHERE action_id = :a", a=view.action_id)
+    assert secret not in str(dispatch.result)
+
+
 async def test_propose_from_plan_opens_a_select_card(
     service: DesktopActionService, planning: DesktopPlanningService, desktop: FakeEffectDesktop
 ) -> None:
@@ -771,6 +817,33 @@ async def test_a_plan_proposing_an_unknown_control_is_refused_before_any_executi
 ) -> None:
     plan_id = await build_ungrounded_plan(planning, desktop, {"schema_version": 1, "action": "invoke", "control_ref": "u999"})
     assert plan_id is None
+
+
+async def test_a_select_naming_a_list_rooted_container_is_refused_as_unreviewed(
+    planning: DesktopPlanningService, desktop: FakeEffectDesktop
+) -> None:
+    """M9 final cross-slice audit finding (Pass B, High): `select_control` had no equivalent of
+    `invoke_control`'s `SAFE_INVOKE_LABELS` allowlist -- a `list`/`pane`-rooted single-select
+    container is exactly the shape a command-palette-style "quick pick" widget uses, where
+    `SelectionItem.Select` is commonly activation, not mere highlighting. Only `combo_box` and
+    `radio_button` containers (ordinary, closed-set value pickers) are reviewed as safe; a `list`
+    container is refused before any execution card exists, the same way an unreviewed Invoke
+    label already was."""
+    plan_id = await build_ungrounded_plan(
+        planning, desktop, {"schema_version": 1, "action": "select", "container_ref": "u8", "option_ref": "u9"}
+    )
+    assert plan_id is None
+
+
+async def test_a_select_naming_a_combo_box_container_is_still_accepted(
+    service: DesktopActionService, planning: DesktopPlanningService, desktop: FakeEffectDesktop
+) -> None:
+    """A false-positive guard: the reviewed container roles are not refused."""
+    plan_id = await build_plan(
+        planning, desktop, result={"schema_version": 1, "action": "select", "container_ref": "u5", "option_ref": "u6"}
+    )
+    view = await service.propose_from_plan(plan_id)
+    assert view.operation.value == "select_control"
 
 
 async def test_a_plan_naming_an_unoffered_value_ref_is_refused(planning: DesktopPlanningService, desktop: FakeEffectDesktop) -> None:

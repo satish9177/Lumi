@@ -295,10 +295,16 @@ class FakeBackend:
         self.raise_on_root: Exception | None = None
         self.focus_calls: list[int] = []
         self.on_focus: Callable[[int], object] | None = None
+        #: Fires on every `root_for_window` call, simulating that it is a real cross-process COM
+        #: round-trip with its own duration -- lets a test mutate human-input state exactly there,
+        #: between resolution and the native `.focus()` call, the way `on_geometry_call` does for capture.
+        self.on_root: Callable[[int], object] | None = None
 
     def root_for_window(self, hwnd: int) -> UiaElement:
         if self.raise_on_root is not None:
             raise self.raise_on_root
+        if self.on_root is not None:
+            self.on_root(hwnd)
         tree = self.trees.get(hwnd)
         if tree is None:
             raise ElementUnavailable

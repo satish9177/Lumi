@@ -145,6 +145,12 @@ APP = AGENT / "app"
         "def invoke(self): ...",
         "class Focus: ...",
         "class launch: ...",
+        # Final M9 cross-slice audit: a SCREAMING_CASE definition must not hide behind the
+        # constant-name exemption meant for enum-member references (`Foo.SCROLL`), unlike an
+        # ordinary reference to the same spelling, which legitimately is exempt (below).
+        "def INVOKE(self): ...",
+        "def SET_VALUE(self): ...",
+        "class SCROLL: ...",
     ],
 )
 def test_the_scanner_detects_planted_violations(snippet: str) -> None:

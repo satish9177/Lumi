@@ -137,8 +137,14 @@ class SetValueProposal(_Proposal):
     #: The opaque local value ref this was resolved from (`v1`..`v10`). Safe to keep in the durable
     #: dispatch row as an identifier; the actual text below never is.
     value_ref: Annotated[str, Field(pattern=r"^v([1-9]|10)$")]
-    #: The exact text that will be written. Shown on the trusted card verbatim; never logged.
-    value: str = Field(max_length=MAX_SET_VALUE_LENGTH)
+    #: The exact text that will be written. Shown on the trusted card verbatim; never logged, and
+    #: `exclude=True` so `dump_proposal()` never writes it into the durable `actions.proposal` JSONB
+    #: column -- the one place S4 keeps it at rest is `task_grants.scope` (`StoredValue.raw`), which
+    #: `DesktopActionService._resolve_set_value` re-reads fresh, by `plan_id` + `value_ref`, every time
+    #: a `SetValueProposal` is read back or executed. A caller constructing one directly (only
+    #: `propose_from_plan`) may still pass the real text for its own immediate use; it is simply never
+    #: the text a later, separate read or the `approve()` call is trusted to have retained.
+    value: str = Field(default="", max_length=MAX_SET_VALUE_LENGTH, exclude=True)
     application_label: str = Field(max_length=MAX_APPLICATION_LABEL)
     window_title: str = Field(max_length=MAX_TITLE)
     control_role: str = Field(max_length=32)
