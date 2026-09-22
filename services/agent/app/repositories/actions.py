@@ -396,6 +396,15 @@ class ActionRepository:
         row = updated.one_or_none()
         return _attempt(row) if row is not None else None
 
+    async def list_actions_by_status(self, status: ActionStatus) -> list[ActionRecord]:
+        """Every action currently at `status`, oldest first. Used at startup to find actions a dead
+        process left mid-transition -- e.g. `RECONCILING`, which only a crash between
+        `begin_reconciliation` and `finish_reconciliation` committing can leave behind."""
+        result = await self._connection.execute(
+            select(actions).where(actions.c.status == status.value).order_by(actions.c.created_at, actions.c.id)
+        )
+        return [_action(row) for row in result]
+
     async def list_attempts_from_other_generations(
         self, current_generation: uuid.UUID
     ) -> list[AttemptRecord]:

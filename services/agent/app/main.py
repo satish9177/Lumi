@@ -28,6 +28,7 @@ from app.services.desktop import DesktopService, desktop_exclusion_roots
 from app.desktop.registry import AppRegistry
 from app.services.desktop_actions import DesktopActionService
 from app.services.desktop_disclosure import DesktopDisclosureService
+from app.services.desktop_planning import DesktopPlanningService
 from app.services.windows_job import runtime_job_is_active
 from app.services.browser_execution import (
     BrowserExecutionService,
@@ -125,7 +126,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 generation = await register_runtime_generation(engine)
                 # Acquire exclusive ownership before recovery. Otherwise a
                 # second live runtime could mark the first one's work unknown.
-                await RecoveryService(engine).recover_unfinished_attempts(generation.id)
+                recovery_service = RecoveryService(engine)
+                await recovery_service.recover_unfinished_attempts(generation.id)
+                # An action a dead process left mid-reconciliation (crashed between
+                # `begin_reconciliation` and `finish_reconciliation` committing) goes back to
+                # OUTCOME_UNKNOWN so it can be reconciled again, instead of being stuck at
+                # RECONCILING forever. Not generation-scoped: reconciliation never touches the
+                # desktop, so it does not matter which process asked the question.
+                await recovery_service.recover_interrupted_reconciliations()
                 # Milestone 8b S6: a local form draft is browser state and the browser died
                 # with the last runtime. Its row is closed, never restored or re-filled.
                 await FormDraftRecovery(engine).discard_lost_drafts()
@@ -271,9 +279,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     grant_ttl_seconds=resolved.desktop_disclosure_ttl_seconds,
                 )
                 await app.state.desktop_disclosure_service.recover_started()
-                # Milestone 9 S3: trusted focus, semantic scroll and registered-app launch, on the same action
-                # ledger as browser effects. An unfinished desktop dispatch a dead runtime left is closed as
-                # OUTCOME_UNKNOWN by RecoveryService (already run above) and is never repeated.
+                # Milestone 9 S4: bounded desktop-action planning. Shares S1's two read-only calls, like
+                # S2's disclosure service, and adds no desktop capability of its own. It never opens or
+                # approves an execution action -- see `DesktopActionService.propose_from_plan` below.
+                app.state.desktop_planning_service = DesktopPlanningService(
+                    engine,
+                    desktop=app.state.desktop_service,
+                    grant_ttl_seconds=resolved.desktop_disclosure_ttl_seconds,
+                )
+                await app.state.desktop_planning_service.recover_started()
+                # Milestone 9 S3/S4: trusted focus, semantic scroll, registered-app launch, and (S4) bounded
+                # set-value/select/invoke mutations, on the same action ledger as browser effects. An
+                # unfinished desktop dispatch a dead runtime left is closed as OUTCOME_UNKNOWN by
+                # RecoveryService (already run above) and is never repeated; an unresolved S4 mutation
+                # additionally blocks every new desktop action until reconciled.
                 app.state.desktop_action_service = DesktopActionService(
                     engine,
                     actions=action_service,

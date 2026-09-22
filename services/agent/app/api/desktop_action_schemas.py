@@ -15,7 +15,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.desktop.protocol import APP_ID_PATTERN, CONTROL_REF_PATTERN, SURFACE_REF_PATTERN, ScrollStep
-from app.domain.desktop_actions import LaunchProposal, ScrollProposal
+from app.domain.desktop_actions import InvokeProposal, LaunchProposal, ScrollProposal, SelectProposal, SetValueProposal
 from app.services.desktop_actions import DesktopActionView
 
 
@@ -62,6 +62,18 @@ class DesktopActionDecisionBody(_Body):
     expected_revision: int = Field(ge=1)
 
 
+class DesktopActionReconcileBody(_Body):
+    """S4. The person's own report of what they observed after an unresolved mutation, and nothing
+    else: no operation, target, value or provider is namable here."""
+
+    expected_revision: int = Field(ge=1)
+    outcome: Literal["succeeded", "failed", "still_unknown"]
+
+
+class ProposeFromPlanBody(_Body):
+    plan_id: uuid.UUID
+
+
 class DesktopActionResultResponse(BaseModel):
     """The whitelist of result fields the trusted UI may show. Nothing else is ever copied across."""
 
@@ -81,7 +93,9 @@ class DesktopActionResponse(BaseModel):
     task_id: uuid.UUID
     revision: int
     status: str
-    operation: Literal["focus_surface", "scroll_control", "launch_app"]
+    operation: Literal[
+        "focus_surface", "scroll_control", "launch_app", "set_control_value", "select_control", "invoke_control"
+    ]
     worker_generation: uuid.UUID
     #: Untrusted application strings, shown inert on the trusted card.
     application_label: str
@@ -90,6 +104,14 @@ class DesktopActionResponse(BaseModel):
     control_name: str | None
     step: str | None
     app_id: str | None
+    #: S4 `set_control_value` only: the exact trusted text that will be written. The person's own
+    #: input, shown back to them verbatim; never returned by a generic (non-desktop) action read.
+    value: str | None
+    container_role: str | None
+    container_name: str | None
+    option_role: str | None
+    option_name: str | None
+    effect: str | None
     expires_at: datetime | None
     attempt_outcome: str | None
     error_code: str | None
@@ -108,10 +130,20 @@ class DesktopActionResponse(BaseModel):
             worker_generation=proposal.worker_generation,
             application_label=proposal.application_label,
             window_title=None if isinstance(proposal, LaunchProposal) else proposal.window_title,
-            control_role=proposal.control_role if isinstance(proposal, ScrollProposal) else None,
-            control_name=proposal.control_name if isinstance(proposal, ScrollProposal) else None,
+            control_role=proposal.control_role
+            if isinstance(proposal, ScrollProposal | SetValueProposal | InvokeProposal)
+            else None,
+            control_name=proposal.control_name
+            if isinstance(proposal, ScrollProposal | SetValueProposal | InvokeProposal)
+            else None,
             step=proposal.step.value if isinstance(proposal, ScrollProposal) else None,
             app_id=proposal.app_id if isinstance(proposal, LaunchProposal) else None,
+            value=proposal.value if isinstance(proposal, SetValueProposal) else None,
+            container_role=proposal.container_role if isinstance(proposal, SelectProposal) else None,
+            container_name=proposal.container_name if isinstance(proposal, SelectProposal) else None,
+            option_role=proposal.option_role if isinstance(proposal, SelectProposal) else None,
+            option_name=proposal.option_name if isinstance(proposal, SelectProposal) else None,
+            effect=proposal.effect.value if isinstance(proposal, InvokeProposal) else None,
             expires_at=view.approval_expires_at,
             attempt_outcome=view.attempt_outcome.value if view.attempt_outcome is not None else None,
             error_code=view.error_code,

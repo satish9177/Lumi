@@ -145,8 +145,17 @@ export function DesktopActionPanel({ agent, onClose }: DesktopActionPanelProps) 
     })
   }
 
+  function reconcile(view: AgentDesktopActionView, outcome: 'succeeded' | 'failed' | 'still_unknown'): void {
+    void run('reconcile', async () => {
+      accept(await agent.reconcileDesktopAction(view.actionId, view.revision, outcome))
+    })
+  }
+
   const waiting = action?.status === 'WAITING_APPROVAL'
-  const chooserOpen = !waiting
+  const blockedByUnresolvedMutation = Boolean(
+    action && action.status === 'OUTCOME_UNKNOWN' && RECONCILABLE_OPERATIONS.has(action.operation)
+  )
+  const chooserOpen = !waiting && !blockedByUnresolvedMutation
   const surfaceChosen = Boolean(selected) && !busy
 
   return (
@@ -162,7 +171,9 @@ export function DesktopActionPanel({ agent, onClose }: DesktopActionPanelProps) 
         </p>
         {message && <p className="workspace-note" role="status" data-testid="desktop-action-message">{message}</p>}
 
-        {action && <DesktopActionCard view={action} busy={Boolean(busy)} onApprove={approve} onCancel={cancel} />}
+        {action && (
+          <DesktopActionCard view={action} busy={Boolean(busy)} onApprove={approve} onCancel={cancel} onReconcile={reconcile} />
+        )}
 
         {chooserOpen && (
           <section className="agent-booking-card" aria-label="Choose what to do" data-testid="desktop-action-chooser">
@@ -238,6 +249,7 @@ export interface DesktopActionCardProps {
   busy: boolean
   onApprove: (view: AgentDesktopActionView) => void
   onCancel: (view: AgentDesktopActionView) => void
+  onReconcile?: (view: AgentDesktopActionView, outcome: 'succeeded' | 'failed' | 'still_unknown') => void
 }
 
 function describe(view: AgentDesktopActionView): { eyebrow: string; effect: string; side: string } {
@@ -260,6 +272,24 @@ function describe(view: AgentDesktopActionView): { eyebrow: string; effect: stri
         effect: 'Lumi will open this application. If it is already running, Lumi will bring that one forward instead.',
         side: 'It opens the application only, with nothing to open in it.'
       }
+    case 'set_control_value':
+      return {
+        eyebrow: 'SET THIS VALUE?',
+        effect: 'Lumi will write the exact text shown below into this control, using the application’s own value field, not the keyboard.',
+        side: 'Lumi verifies the exact text was set before calling this done. It refuses password, sign-in, terminal and file-picker fields.'
+      }
+    case 'select_control':
+      return {
+        eyebrow: 'SELECT THIS OPTION?',
+        effect: 'Lumi will select this exact option in this list, using the application’s own selection, not a click.',
+        side: 'Lumi verifies the option now shows as selected before calling this done.'
+      }
+    case 'invoke_control':
+      return {
+        eyebrow: 'USE THIS CONTROL?',
+        effect: 'Lumi will invoke this control directly, not by clicking it.',
+        side: 'Lumi only calls this done if the control’s own state changes afterwards in the specific way it checked for beforehand.'
+      }
   }
 }
 
@@ -270,22 +300,35 @@ function outcomeText(view: AgentDesktopActionView): string {
     if (view.operation === 'scroll_control') {
       return 'Lumi scrolled it and read the window again. That does not mean what you wanted is now showing.'
     }
-    return result?.outcome === 'already_running' ? 'It was already running, so Lumi brought it forward.' : 'Lumi opened it.'
+    if (view.operation === 'launch_app') {
+      return result?.outcome === 'already_running' ? 'It was already running, so Lumi brought it forward.' : 'Lumi opened it.'
+    }
+    if (view.operation === 'set_control_value') return 'Lumi set that value and verified it reads back exactly.'
+    if (view.operation === 'select_control') return 'Lumi selected that option and verified it.'
+    return 'Lumi used that control and verified its state changed.'
   }
   if (view.status === 'FAILED') {
     if (view.errorCode === 'not_focused') return 'Windows did not bring that window forward. Nothing else was changed.'
     if (view.errorCode === 'scroll_no_change') return 'Lumi asked it to scroll, but it did not move. Nothing else was changed.'
+    if (view.errorCode === 'not_set') return 'Lumi tried, but a fresh read shows the value did not change. Nothing else was changed.'
+    if (view.errorCode === 'not_selected') return 'Lumi tried, but a fresh read shows that option is not selected. Nothing else was changed.'
+    if (view.errorCode === 'no_change') return 'Lumi used the control, but its state did not change in the way Lumi checked for. Nothing else was changed.'
     if (view.errorCode === 'human_input_detected') return 'You used the keyboard or mouse, so Lumi stopped. Nothing was changed.'
     return 'Lumi did not do that. Nothing was changed.'
   }
   if (view.status === 'OUTCOME_UNKNOWN') {
+    if (view.operation === 'set_control_value' || view.operation === 'select_control' || view.operation === 'invoke_control') {
+      return 'Lumi cannot confirm whether that happened, and will not try again or start anything else until you report what you actually saw.'
+    }
     return 'Lumi cannot confirm whether that happened. It will not try again on its own. Look at the window, then start a new step if you still want it.'
   }
   if (view.status === 'REJECTED') return 'Cancelled. Nothing was changed.'
   return ''
 }
 
-export function DesktopActionCard({ view, busy, onApprove, onCancel }: DesktopActionCardProps) {
+const RECONCILABLE_OPERATIONS = new Set(['set_control_value', 'select_control', 'invoke_control'])
+
+export function DesktopActionCard({ view, busy, onApprove, onCancel, onReconcile }: DesktopActionCardProps) {
   if (view.status === 'WAITING_APPROVAL') {
     const text = describe(view)
     return (
@@ -295,13 +338,25 @@ export function DesktopActionCard({ view, busy, onApprove, onCancel }: DesktopAc
         <p data-testid="desktop-action-target">
           <span className="visually-hidden">Text from the application, not from Lumi: </span>
           <q><bdi>{view.applicationLabel || 'Application'}{view.windowTitle !== undefined ? `: ${view.windowTitle || '(no title)'}` : ''}</bdi></q>
-          {view.controlName !== undefined && (
+          {view.operation === 'select_control' ? (
+            <>
+              {' → '}
+              <q><bdi data-testid="desktop-action-control">{view.containerName || view.containerRole || 'list'}</bdi></q>
+              {' → '}
+              <q><bdi data-testid="desktop-action-option">{view.optionName || view.optionRole || 'option'}</bdi></q>
+            </>
+          ) : view.controlName !== undefined ? (
             <>
               {' → '}
               <q><bdi data-testid="desktop-action-control">{view.controlName || view.controlRole || 'control'}</bdi></q>
             </>
-          )}
+          ) : null}
         </p>
+        {view.operation === 'set_control_value' && (
+          <p data-testid="desktop-action-value">
+            New value: <q><bdi>{view.value ?? ''}</bdi></q>
+          </p>
+        )}
         <p>{text.effect}</p>
         <p>{text.side}</p>
         <p>This approval is for this one step, once. Lumi stops if you use the keyboard or mouse.</p>
@@ -324,6 +379,28 @@ export function DesktopActionCard({ view, busy, onApprove, onCancel }: DesktopAc
   }
   const tone = view.status === 'SUCCEEDED' ? 'tone-success' : 'tone-uncertain'
   const text = outcomeText(view)
+  if (view.status === 'OUTCOME_UNKNOWN' && onReconcile && RECONCILABLE_OPERATIONS.has(view.operation)) {
+    return (
+      <article className={`agent-booking-card ${tone}`} role="group" aria-label="Report what you saw"
+        data-testid="desktop-action-reconcile" data-status={view.status}>
+        <p className="lifelens-card-eyebrow">NOT SURE</p>
+        <p>{text}</p>
+        <p>Every other desktop step is blocked until you report what actually happened. Look at the application, then choose one:</p>
+        <button className="text-button" type="button" disabled={busy} data-testid="desktop-action-reconcile-succeeded"
+          onClick={() => onReconcile(view, 'succeeded')}>
+          It did happen
+        </button>
+        <button className="text-button" type="button" disabled={busy} data-testid="desktop-action-reconcile-failed"
+          onClick={() => onReconcile(view, 'failed')}>
+          It did not happen
+        </button>
+        <button className="text-button" type="button" disabled={busy} data-testid="desktop-action-reconcile-unknown"
+          onClick={() => onReconcile(view, 'still_unknown')}>
+          I still can’t tell
+        </button>
+      </article>
+    )
+  }
   if (!text) return null
   return (
     <article className={`agent-booking-card ${tone}`} role="group" aria-label="Desktop action result"

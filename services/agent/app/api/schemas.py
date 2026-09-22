@@ -268,9 +268,16 @@ class AttemptResponse(BaseModel):
         )
 
 
-#: Card-only strings a desktop proposal keeps for the trusted approval card. They are another program's text
-#: (a window title, a control name); the generic action reads do not return them.
-_DESKTOP_CARD_STRINGS = frozenset({"window_title", "control_name", "application_label"})
+#: Card-only strings a desktop proposal keeps for the trusted approval card. Most are another program's
+#: text (a window title, a control name); `value` (S4) is the person's own trusted text to be written,
+#: which is exactly as sensitive and is never returned by a generic read either. The generic action
+#: reads do not return any of them.
+_DESKTOP_CARD_STRINGS = frozenset(
+    {
+        "window_title", "control_name", "application_label",
+        "container_name", "option_name", "value",
+    }
+)
 
 
 def _public_proposal(tool_name: str, proposal: dict[str, Any]) -> dict[str, Any]:

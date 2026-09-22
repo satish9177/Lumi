@@ -34,7 +34,7 @@ import comtypes  # noqa: E402
 import comtypes.client  # noqa: E402
 from pywinauto.uia_defines import IUIA  # noqa: E402
 
-from app.desktop.observer import ElementUnavailable, RawProps, ScrollState, UiaElement  # noqa: E402
+from app.desktop.observer import ElementUnavailable, RawProps, ScrollState, UiaElement, ValueState  # noqa: E402
 from app.desktop.protocol import (  # noqa: E402
     MAX_SIBLINGS,
     MAX_TEXT_PER_NODE,
@@ -214,6 +214,53 @@ class _Element:
     def focus(self) -> None:
         try:
             self._element.SetFocus()
+        except comtypes.COMError as error:
+            if _unavailable(error):
+                raise ElementUnavailable from None
+            raise
+
+    # -- S4: the three reviewed mutation patterns -------------------------------------
+
+    def value_state(self) -> ValueState | None:
+        pattern = self._pattern(_uia.UIA_ValuePatternId, _uia.IUIAutomationValuePattern)
+        if pattern is None:
+            return None
+        try:
+            return ValueState(
+                read_only=bool(pattern.CurrentIsReadOnly),
+                value=clean_text(str(pattern.CurrentValue or "")),
+            )
+        except comtypes.COMError:
+            return None
+
+    def set_value(self, value: str) -> None:
+        pattern = self._pattern(_uia.UIA_ValuePatternId, _uia.IUIAutomationValuePattern)
+        if pattern is None:
+            raise ElementUnavailable
+        try:
+            pattern.SetValue(value)
+        except comtypes.COMError as error:
+            if _unavailable(error):
+                raise ElementUnavailable from None
+            raise
+
+    def select(self) -> None:
+        pattern = self._pattern(_uia.UIA_SelectionItemPatternId, _uia.IUIAutomationSelectionItemPattern)
+        if pattern is None:
+            raise ElementUnavailable
+        try:
+            pattern.Select()
+        except comtypes.COMError as error:
+            if _unavailable(error):
+                raise ElementUnavailable from None
+            raise
+
+    def invoke(self) -> None:
+        pattern = self._pattern(_uia.UIA_InvokePatternId, _uia.IUIAutomationInvokePattern)
+        if pattern is None:
+            raise ElementUnavailable
+        try:
+            pattern.Invoke()
         except comtypes.COMError as error:
             if _unavailable(error):
                 raise ElementUnavailable from None

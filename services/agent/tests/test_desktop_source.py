@@ -324,12 +324,105 @@ def test_the_uia_scroll_pattern_may_be_called_once_inside_the_reviewed_method_an
     assert scan_source(twice, "app/desktop/uia_backend.py")
     # The ScrollPattern id is not available to any other file.
     assert scan_source("elem.QueryInterface(IUIAutomationScrollPattern)", "app/desktop/observer.py")
-    # And no other acting pattern was opened up by it.
-    for acting in ("IUIAutomationInvokePattern", "IUIAutomationWindowPattern", "IUIAutomationRangeValuePattern",
-                   "UIA_InvokePatternId", "UIA_WindowPatternId"):
+    # And no other acting pattern was opened up by it (S4 reviewed exactly Invoke, on its own single
+    # pinned call site below -- not Window, RangeValue or any other acting pattern).
+    for acting in ("IUIAutomationWindowPattern", "IUIAutomationRangeValuePattern", "UIA_WindowPatternId"):
         assert scan_source(f"elem.QueryInterface({acting})", "app/desktop/uia_backend.py"), acting
-    for verb in ("pattern.Invoke()", "pattern.SetValue(x)", "pattern.Select()", "pattern.Toggle()"):
+    # S4's InvokePattern id/interface may be referenced in uia_backend.py (to obtain the pattern), but
+    # not anywhere else.
+    assert scan_source("elem.QueryInterface(IUIAutomationInvokePattern)", "app/desktop/observer.py")
+    assert scan_source("elem.QueryInterface(IUIAutomationInvokePattern)", "app/desktop/effects.py")
+    for verb in ("pattern.SetValue(x)", "pattern.Select()", "pattern.Invoke()", "pattern.Toggle()"):
         assert scan_source(verb, "app/desktop/uia_backend.py"), verb
+
+
+def test_s4_mutations_are_pinned_to_one_call_site_each_and_nowhere_else() -> None:
+    """`SetValue`/`Select`/`Invoke`, exactly like S3's `Scroll`/`SetFocus`: one call, in the one
+    reviewed method, with the exact argument count; a member reference cannot dodge the pin; the
+    member name is not usable at all outside `uia_backend.py`."""
+    good = (
+        "class E:\n"
+        "    def set_value(self, value):\n"
+        "        pattern = self._pattern(UIA_ValuePatternId, IUIAutomationValuePattern)\n"
+        "        pattern.SetValue(value)\n"
+        "    def select(self):\n"
+        "        pattern = self._pattern(UIA_SelectionItemPatternId, IUIAutomationSelectionItemPattern)\n"
+        "        pattern.Select()\n"
+        "    def invoke(self):\n"
+        "        pattern = self._pattern(UIA_InvokePatternId, IUIAutomationInvokePattern)\n"
+        "        pattern.Invoke()\n"
+    )
+    assert scan_source(good, "app/desktop/uia_backend.py") == []
+    # Wrong method name.
+    assert scan_source(good.replace("def set_value", "def write_value"), "app/desktop/uia_backend.py")
+    assert scan_source(good.replace("def select", "def pick"), "app/desktop/uia_backend.py")
+    assert scan_source(good.replace("def invoke", "def press"), "app/desktop/uia_backend.py")
+    # Wrong argument count.
+    assert scan_source(good.replace("SetValue(value)", "SetValue()"), "app/desktop/uia_backend.py")
+    assert scan_source(good.replace("Select()", "Select(0)"), "app/desktop/uia_backend.py")
+    assert scan_source(good.replace("Invoke()", "Invoke(True)"), "app/desktop/uia_backend.py")
+    # Called twice.
+    assert scan_source(good + "        pattern.SetValue(value)\n", "app/desktop/uia_backend.py")
+    # A member reference dodges the call-site pin.
+    dodge_set_value = "class E:\n    def set_value(self, value):\n        f = pattern.SetValue\n        f(value)\n"
+    dodge_select = "class E:\n    def select(self):\n        f = pattern.Select\n        f()\n"
+    dodge_invoke = "class E:\n    def invoke(self):\n        f = pattern.Invoke\n        f()\n"
+    for dodge in (dodge_set_value, dodge_select, dodge_invoke):
+        assert scan_source(dodge, "app/desktop/uia_backend.py"), dodge
+    # `set_value`/`select`/`invoke` being name-allowed in effects.py/worker.py/client.py/observer.py
+    # (for their OWN Python methods, exactly like `scroll`/`focus` already are) cannot reach a real
+    # `SetValue`/`Select`/`Invoke` COM call there: none of them holds a live `comtypes` pattern object,
+    # only the `UiaElement` abstraction (`control.element.set_value(...)`). Only `uia_backend.py`
+    # imports `comtypes` at all, and this is what makes that true, not the member-name check.
+    for other_file in ("observer.py", "effects.py", "worker.py", "client.py"):
+        assert "import comtypes" not in (DESKTOP / other_file).read_text(encoding="utf-8"), other_file
+
+
+def test_a_loop_around_a_pinned_single_call_is_still_caught() -> None:
+    """Found by an independent adversarial review of M9 S4: `len(calls) > 1` only counts distinct AST
+    call SITES, so one call site inside a loop -- `for _ in range(2): pattern.Invoke()` -- executes
+    twice at runtime while still passing that check. A genuinely single call never needs a loop."""
+    looped = (
+        "class E:\n"
+        "    def invoke(self):\n"
+        "        pattern = self._pattern(UIA_InvokePatternId, IUIAutomationInvokePattern)\n"
+        "        for _ in range(2):\n"
+        "            pattern.Invoke()\n"
+    )
+    violations = scan_source(looped, "app/desktop/uia_backend.py")
+    assert any(v.kind == "invoke-in-loop" for v in violations), violations
+
+
+def test_a_computed_export_name_on_a_win32_dll_binding_is_caught() -> None:
+    """Found by the same review: `user32[literal_string]` is checked against the forbidden list, but
+    `user32[computed_name]` (string concatenation, a variable, a function call, ...) reaches an export
+    whose name never appears anywhere in the source as a plain string, past every literal-string check."""
+    computed = 'entrypoint = "Set" + "CursorPos"\nuser32[entrypoint](0, 0)\n'
+    violations = scan_source(computed, "app/desktop/effects_win32.py")
+    assert any(v.kind == "computed-dll-subscript" for v in violations), violations
+    # An ordinary, allowed, literal-string subscript on the same binding is untouched.
+    assert scan_source('user32["IsWindowVisible"]', "app/desktop/effects_win32.py") == []
+
+
+def test_s4_planted_violations_still_caught_by_the_general_deny_list() -> None:
+    """S4 opens exactly three new members; every other input/mutation primitive stays forbidden
+    everywhere in `app/desktop/`, including in the three files S4 touched."""
+    planted = (
+        "pattern.Toggle()",
+        "win32.SendInput(inputs)",
+        "ctypes.windll.user32.mouse_event(0, 0, 0, 0, 0)",
+        "ctypes.windll.user32.keybd_event(0, 0, 0, 0)",
+        "pywinauto.keyboard.send_keys('hello')",
+        "app.type_keys('secret')",
+        "element.click()",
+        "win32clipboard.SetClipboardData(fmt, data)",
+        "subprocess.Popen(['powershell.exe'])",
+        "os.system('cmd /c dir')",
+        "win32gui.ShellExecute(0, 'open', path, None, None, 1)",
+    )
+    for file_touched_by_s4 in ("app/desktop/effects.py", "app/desktop/uia_backend.py", "app/desktop/worker.py"):
+        for snippet in planted:
+            assert scan_source(snippet, file_touched_by_s4), (file_touched_by_s4, snippet)
 
 
 def test_production_has_exactly_one_scroll_call_and_one_process_start() -> None:
@@ -488,9 +581,12 @@ def test_only_the_desktop_boundary_and_the_reviewed_s2_disclosure_path_import_de
         "domain/desktop_disclosure.py",        # S2: the projection, redaction and grounding rules
         "api/desktop_disclosure_schemas.py",   # S2: the closed wire shapes
         "services/desktop_actions.py",         # S3: focus / scroll / launch through the action ledger
-        "domain/desktop_actions.py",           # S3: the closed proposal shapes and failure classification
-        "api/desktop_action_schemas.py",       # S3: the closed wire shapes
+        "domain/desktop_actions.py",           # S3/S4: the closed proposal shapes and failure classification
+        "api/desktop_action_schemas.py",       # S3/S4: the closed wire shapes
         "config.py",                           # S3: validates the trusted registered-application list
+        "services/desktop_planning.py",        # S4: the ONE reviewed path from an observation to a planner
+        "domain/desktop_planning.py",          # S4: the projection reuse, value refs and action validation
+        "api/desktop_planning_schemas.py",     # S4: the closed wire shapes
     }, outside
 
 
@@ -504,7 +600,11 @@ def test_only_the_reviewed_disclosure_service_reads_an_observation_back() -> Non
     }
     # S3 adds one more reader, for a LOCAL card only: the runtime reads the observation the person is about to
     # scroll to build the exact approval card (control role and name). It sends nothing to any provider.
-    assert callers == {"services/desktop_disclosure.py", "services/desktop_actions.py"}, callers
+    # S4 adds the ONE reviewed planning-disclosure path, exactly like S2's: an approved, redacted,
+    # bounded projection to ONE provider, never raw observation text.
+    assert callers == {
+        "services/desktop_disclosure.py", "services/desktop_actions.py", "services/desktop_planning.py",
+    }, callers
 
 
 def test_no_planner_answer_memory_research_or_task_module_can_see_desktop_data() -> None:

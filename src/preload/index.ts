@@ -144,7 +144,24 @@ const agentApi: AgentApi = {
   approveDesktopAction: (actionId: string, expectedRevision: number) =>
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.approveDesktopAction, actionId, expectedRevision),
   declineDesktopAction: (actionId: string, expectedRevision: number) =>
-    ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineDesktopAction, actionId, expectedRevision)
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineDesktopAction, actionId, expectedRevision),
+  reconcileDesktopAction: (actionId: string, expectedRevision: number, outcome: 'succeeded' | 'failed' | 'still_unknown') =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.reconcileDesktopAction, actionId, expectedRevision, outcome),
+  // Milestone 9 S4: bounded desktop-action planning. Six exact methods (plus the execution-side
+  // `proposeDesktopActionFromPlan` above). Disclosure authority only: none of these performs a
+  // desktop action. The renderer supplies an objective, a surface identity and its own typed
+  // candidate values; the provider is never a parameter.
+  createDesktopPlan: (
+    objective: string, workerGeneration: string, surfaceRef: string, surfaceEpoch: number,
+    values: Array<{ classification: string; value: string }>
+  ) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.createDesktopPlan, objective, workerGeneration, surfaceRef, surfaceEpoch, values),
+  getDesktopPlan: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getDesktopPlan),
+  grantDesktopPlan: (grantId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.grantDesktopPlan, grantId, expectedRevision),
+  declineDesktopPlan: (grantId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineDesktopPlan, grantId, expectedRevision),
+  runDesktopPlan: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.runDesktopPlan),
+  proposeDesktopActionFromPlan: (planId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.proposeDesktopActionFromPlan, planId)
 }
 
 // The Gemini Live relay: fixed channels, closed message kinds, validated in

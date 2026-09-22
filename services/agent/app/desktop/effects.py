@@ -1,8 +1,12 @@
-"""The three reviewed desktop effects and the rules that surround every one of them.
+"""The six reviewed desktop effects and the rules that surround every one of them.
 
-    focus_surface   UIA `SetFocus` on one already-visible, ordinary top-level window
-    scroll_control  one UIA `ScrollPattern.Scroll` by a closed step on one re-resolved control
-    launch_app      start (or bring forward) one registered application
+    focus_surface       UIA `SetFocus` on one already-visible, ordinary top-level window
+    scroll_control      one UIA `ScrollPattern.Scroll` by a closed step on one re-resolved control
+    launch_app          start (or bring forward) one registered application
+    set_control_value   one UIA `ValuePattern.SetValue` on one re-resolved control (S4)
+    select_control      one UIA `SelectionItem.Select` on one re-resolved control (S4)
+    invoke_control       one UIA `InvokePattern.Invoke` on one re-resolved control, for one closed,
+                          reviewed, deterministically-verifiable effect (S4)
 
 Everything else stays forbidden: no text injection, pointer or wheel input, coordinate, shortcut, shell,
 path or argument supplied by a caller. The OS calls themselves live behind `EffectPlatform`, whose members
@@ -19,6 +23,13 @@ Every effect obeys the same order:
 5. verify from fresh evidence and report what is actually known.
 
 Anything that fails in step 4 or 5 is `desktop_effect_uncertain`, never a guess.
+
+S4 adds a second identity check before step 4 for all three mutation effects: the control's own
+re-resolution and the surface's own trust checks already refuse Lumi, an elevated process, a
+credential/consent broker and a credential input, but a value written, selected or invoked in a shell,
+terminal, script host or Windows security surface is dangerous by *what runs it*, not by the label on
+the field, so those process images (and file-picker window titles) are refused again here regardless
+of role or name.
 """
 
 import time
@@ -28,24 +39,65 @@ from collections.abc import Callable
 from typing import Final, Literal, Protocol
 
 from app.desktop.errors import DesktopReason, DesktopRefusal
-from app.desktop.observer import DesktopObserver, ElementUnavailable, UiaBackend, _guarded_walk
+from app.desktop.observer import (
+    DesktopObserver,
+    ElementUnavailable,
+    ResolvedControl,
+    UiaBackend,
+    _credential_scan,
+    _guarded_walk,
+)
 from app.desktop.protocol import (
+    DesktopPattern,
     FocusRequest,
     FocusResponse,
     InputBaselineResponse,
+    InvokeEffect,
+    InvokeRequest,
+    InvokeResponse,
     LaunchRequest,
     LaunchResponse,
     ScrollRequest,
     ScrollResponse,
     ScrollStep,
+    SelectRequest,
+    SelectResponse,
+    SetValueRequest,
+    SetValueResponse,
 )
 from app.desktop.registry import AppRegistry, RegisteredApp, same_file
-from app.desktop.surfaces import ProcessIdentity, ResolvedSurface, SurfaceTable
+from app.desktop.surfaces import DENIED_IMAGES, ProcessIdentity, ResolvedSurface, SurfaceTable
 
 MAX_REMEMBERED_DISPATCHES: Final = 256
 #: How long a launch waits for the new application's window before reporting `surface: None`.
 LAUNCH_WINDOW_SECONDS: Final = 4.0
 LAUNCH_POLL_SECONDS: Final = 0.25
+#: Bound for the fresh whole-surface credential re-scan every S4 mutation performs immediately before
+#: acting. Short: this only needs to find a credential input if one exists, not project the whole tree.
+MUTATION_CREDENTIAL_SCAN_SECONDS: Final = 5.0
+
+#: Process images an S4 mutation may never target, whatever the control's role or name says: terminals,
+#: shells and script hosts (a value typed there is arbitrary code, not app input -- the brief's own
+#: "terminal/console/PowerShell/cmd" denial list), the credential/consent broker images S1 already
+#: withholds as whole surfaces, and the Windows security app itself (readable, unlike the broker
+#: dialogs, but not a place Lumi writes into). Deliberately narrower than the launch registry's
+#: `FORBIDDEN_EXECUTABLES`: that set also denies ordinary interpreter/runtime hosts (python.exe,
+#: node.exe, java.exe, ...) and admin tools that are not themselves a command surface -- appropriate to
+#: refuse as a *launch target* (nothing should start a bare interpreter) but not a reason to refuse
+#: writing into an ordinary GUI app that merely happens to run on one of those runtimes.
+_SENSITIVE_TARGET_IMAGES: Final = DENIED_IMAGES | frozenset(
+    {
+        "cmd.exe", "powershell.exe", "pwsh.exe", "powershell_ise.exe", "wscript.exe", "cscript.exe",
+        "mshta.exe", "bash.exe", "wsl.exe", "conhost.exe", "wt.exe", "ssh.exe", "scp.exe", "sftp.exe",
+        "telnet.exe", "winrs.exe", "wsmprovhost.exe", "securityhealthservice.exe", "sechealthui.exe",
+    }
+)
+#: Best-effort title match for a Windows common-dialog (file open/save/browse) surface. UIA exposes no
+#: reliable "this is a file picker" signal; a window titled like one is refused for `set_control_value`
+#: regardless of role. English-centric, like the credential-name heuristic; documented as a residual.
+_FILE_DIALOG_TITLES: Final = frozenset(
+    {"open", "save as", "save", "browse for folder", "select folder", "choose file", "choose files"}
+)
 
 
 class EffectPlatform(Protocol):
@@ -383,6 +435,233 @@ class DesktopEffects:
             if found is not None or self._clock() >= deadline:
                 return found
             self._sleep(LAUNCH_POLL_SECONDS)
+
+    # -- S4: bounded semantic mutations -------------------------------------------
+
+    def _mutation_target(
+        self, surface_ref: str, surface_epoch: int, observation_id: uuid.UUID, control_ref: str
+    ) -> tuple[ResolvedSurface, ResolvedControl]:
+        """Re-prove the surface and re-derive the control, exactly as `scroll` does.
+
+        Killed refs, Lumi/elevation re-checks and exact-match re-resolution are all inherited from
+        `SurfaceTable.resolve` and `DesktopObserver.resolve_control`; nothing here re-implements them.
+        Credential exclusion is re-checked TWICE: `resolve_control` -> `_rederive` re-checks it only
+        along the target's own ancestor path (itself and each ancestor's siblings), the same bound a
+        read-only re-resolution needs; a whole-surface mutation gets the STRONGER, S1-grade guarantee
+        below as well, because an application can add a credential field anywhere in the live tree
+        between the approved observation and this exact moment, not only beside the target's own path.
+        The specific target is resolved FIRST, so an ordinary vanished/replaced/ambiguous target still
+        reports its own specific reason; the broader whole-surface scan runs only once the target
+        itself is known to still exist, so it is never the thing that masks a plain stale-target case.
+        """
+        resolved = self._surfaces.resolve(surface_ref, surface_epoch)
+        control = self._observer.resolve_control(surface_ref, surface_epoch, observation_id, control_ref)
+        if control.element is None or control.locator is None:
+            raise DesktopRefusal(DesktopReason.ELEMENT_MISSING)
+        self._refuse_if_credential_surface(resolved)
+        return resolved, control
+
+    def _refuse_if_credential_surface(self, resolved: ResolvedSurface) -> None:
+        """A fresh, whole-tree credential scan of the LIVE surface, immediately before any S4 mutation.
+
+        `resolve_control`'s own re-derivation only re-checks credential exclusion along the target
+        control's own ancestor path (each ancestor and that ancestor's siblings) -- enough for an
+        ordinary stale-target check, but not enough to prove the WHOLE surface is still credential-free
+        the way the original observation was: a credential field added inside some unrelated sibling
+        subtree since the approved observation would never appear on that path. This runs a dedicated,
+        lenient scan (`_credential_scan`, not `observe()`'s own stricter walk): unrelated transient UI
+        churn elsewhere in the tree must never be the reason a mutation aimed at a specific, still-live
+        control is refused, so a node that disappears mid-scan is skipped rather than treated as proof
+        the whole surface changed. It still refuses on the first credential input actually found.
+        """
+        root = self._observer.root_for(resolved)
+        _credential_scan(root, deadline=time.monotonic() + MUTATION_CREDENTIAL_SCAN_SECONDS)
+
+    def _refuse_if_sensitive_target(self, resolved: ResolvedSurface) -> None:
+        """A second, role-independent refusal for `set_control_value` and `invoke_control`.
+
+        Checked against the CURRENT process image (not a cached one): a target re-verified a moment
+        earlier as an ordinary window is refused again here if it is a shell, script host, terminal or
+        the Windows security app, and again if its current window title looks like a file picker.
+        """
+        image = self._surfaces.probe.process_image(resolved.identity.pid)
+        if image is not None and image.lower() in _SENSITIVE_TARGET_IMAGES:
+            raise DesktopRefusal(DesktopReason.SENSITIVE_TARGET_REFUSED)
+        title = self._surfaces.probe.window_title(resolved.identity.hwnd).strip().lower()
+        if title in _FILE_DIALOG_TITLES:
+            raise DesktopRefusal(DesktopReason.SENSITIVE_TARGET_REFUSED)
+
+    def _kill_old_refs(self, resolved: ResolvedSurface) -> None:
+        """Before any S4 effect: whatever it does, no `uN` of the observation it was proposed
+        against may be used again (the same rule `scroll` follows)."""
+        resolved.slot.controls = None
+
+    def set_value(self, request: SetValueRequest) -> SetValueResponse:
+        replay = self._dispatches.begin(request.dispatch_id)
+        if isinstance(replay, SetValueResponse):
+            return replay
+        resolved, control = self._mutation_target(
+            request.surface_ref, request.surface_epoch, request.observation_id, request.control_ref
+        )
+        assert control.element is not None and control.locator is not None
+        self._refuse_if_sensitive_target(resolved)
+        if DesktopPattern.VALUE not in control.patterns:
+            raise DesktopRefusal(DesktopReason.NOT_A_VALUE_CONTROL)
+        try:
+            state = control.element.value_state()
+        except ElementUnavailable:
+            raise DesktopRefusal(DesktopReason.ELEMENT_MISSING) from None
+        if state is None:
+            raise DesktopRefusal(DesktopReason.NOT_A_VALUE_CONTROL)
+        if state.read_only:
+            raise DesktopRefusal(DesktopReason.READ_ONLY_CONTROL)
+        self._refuse_if_human_input(request.input_tick)
+        self._kill_old_refs(resolved)
+        locator = control.locator
+        # A second, narrower check immediately before the actual OS call: the gap this closes is COM
+        # pattern acquisition inside `set_value` itself, which can block for a moment the person spends
+        # touching the machine. It cannot be closed to zero -- the native call still has to acquire its
+        # own pattern reference -- but this keeps the unchecked window to that one call, not everything
+        # since the surface/control re-resolution above.
+        self._refuse_if_human_input(request.input_tick)
+        try:
+            control.element.set_value(request.value)
+            after = self._observer.rederive(resolved, locator)
+            self._surfaces.verify_unchanged(resolved)
+            after_state = after.element.value_state() if after.element is not None else None
+        except (ElementUnavailable, DesktopRefusal):
+            raise DesktopRefusal(DesktopReason.EFFECT_UNCERTAIN) from None
+        except Exception:  # noqa: BLE001 - a COM error carries private detail; none is kept.
+            raise DesktopRefusal(DesktopReason.EFFECT_UNCERTAIN) from None
+        # Known success only if a fresh, re-resolved read of the CANONICAL value equals exactly what
+        # was approved. `SetValue` returning without an exception is never trusted on its own. A read
+        # that comes back empty (`after_state is None`, e.g. a transient COM failure inside
+        # `value_state()`) is NOT the same as a read that came back with a genuinely different value:
+        # the former means the write's real effect is unknown, not that it is known to have failed.
+        if after_state is None:
+            outcome: Literal["set", "not_set", "uncertain"] = "uncertain"
+        elif after_state.value == request.value:
+            outcome = "set"
+        else:
+            outcome = "not_set"
+        response = SetValueResponse(
+            worker_generation=self.generation,
+            dispatch_id=request.dispatch_id,
+            outcome=outcome,
+            input_changed=self._input_changed(request.input_tick),
+        )
+        self._dispatches.finish(request.dispatch_id, response)
+        return response
+
+    def select(self, request: SelectRequest) -> SelectResponse:
+        replay = self._dispatches.begin(request.dispatch_id)
+        if isinstance(replay, SelectResponse):
+            return replay
+        resolved, container = self._mutation_target(
+            request.surface_ref, request.surface_epoch, request.observation_id, request.container_ref
+        )
+        _, option = self._mutation_target(
+            request.surface_ref, request.surface_epoch, request.observation_id, request.option_ref
+        )
+        assert option.element is not None and option.locator is not None and container.locator is not None
+        # Found by an independent integration review: `set_control_value` and `invoke_control` both
+        # refuse a shell/terminal/script-host/security-app target or a file-picker window; `select`
+        # had no such check, even though selecting a file inside a real Open/Save common dialog's file
+        # list populates the filename edit control, and selecting inside a terminal's own UI is the
+        # same class of risk the other two effects already refuse.
+        self._refuse_if_sensitive_target(resolved)
+        # A second, LIVE proof of containment: `_mutation_target` already proved `container` and
+        # `option` each still independently match their OWN previously-recorded path, but that alone
+        # does not prove `option` is actually found hanging off the live element `container` resolves
+        # to, right now -- a same-shaped replacement container could have been swapped in with the
+        # option reparented into it. `rederive_descendant` re-resolves `option` a second time starting
+        # FROM the live `container` element, so only a genuinely still-nested option passes.
+        live_option = self._observer.rederive_descendant(resolved, container.locator, option.locator)
+        if live_option.element is None or live_option.locator is None:
+            raise DesktopRefusal(DesktopReason.ELEMENT_MISSING)
+        if DesktopPattern.SELECTION_ITEM not in live_option.patterns:
+            raise DesktopRefusal(DesktopReason.NOT_SELECTABLE)
+        self._refuse_if_human_input(request.input_tick)
+        self._kill_old_refs(resolved)
+        locator = live_option.locator
+        # See `set_value`'s matching check: narrows the unchecked window to the native call's own
+        # pattern acquisition, which cannot itself be checked mid-flight.
+        self._refuse_if_human_input(request.input_tick)
+        try:
+            live_option.element.select()
+            after = self._observer.rederive(resolved, locator)
+            self._surfaces.verify_unchanged(resolved)
+            # The actual selected STATE, not merely that the pattern is still advertised: `Select()`
+            # returning is never trusted on its own.
+            is_selected = self._is_selected(after)
+        except (ElementUnavailable, DesktopRefusal):
+            raise DesktopRefusal(DesktopReason.EFFECT_UNCERTAIN) from None
+        except Exception:  # noqa: BLE001 - a COM error carries private detail; none is kept.
+            raise DesktopRefusal(DesktopReason.EFFECT_UNCERTAIN) from None
+        # `is_selected is None`: the verifying read itself did not produce an answer (`element is None`
+        # after re-derivation with no exception raised) -- unknown, never the same as a verified "no".
+        if is_selected is None:
+            outcome: Literal["selected", "not_selected", "uncertain"] = "uncertain"
+        else:
+            outcome = "selected" if is_selected else "not_selected"
+        response = SelectResponse(
+            worker_generation=self.generation,
+            dispatch_id=request.dispatch_id,
+            outcome=outcome,
+            input_changed=self._input_changed(request.input_tick),
+        )
+        self._dispatches.finish(request.dispatch_id, response)
+        return response
+
+    @staticmethod
+    def _is_selected(control: ResolvedControl) -> bool | None:
+        if control.element is None:
+            return None
+        props = control.element.props("full")
+        return bool(props.selected)
+
+    def invoke(self, request: InvokeRequest) -> InvokeResponse:
+        replay = self._dispatches.begin(request.dispatch_id)
+        if isinstance(replay, InvokeResponse):
+            return replay
+        resolved, control = self._mutation_target(
+            request.surface_ref, request.surface_epoch, request.observation_id, request.control_ref
+        )
+        assert control.element is not None and control.locator is not None
+        self._refuse_if_sensitive_target(resolved)
+        if DesktopPattern.INVOKE not in control.patterns:
+            raise DesktopRefusal(DesktopReason.NOT_INVOKABLE)
+        if request.effect is not InvokeEffect.NAME_TOGGLE:
+            # Every closed effect this worker knows how to verify is listed above; anything else is
+            # refused rather than invoked and hoped for.
+            raise DesktopRefusal(DesktopReason.UNSUPPORTED_OR_UNKNOWN_EFFECT)
+        name_before = control.name
+        self._refuse_if_human_input(request.input_tick)
+        self._kill_old_refs(resolved)
+        locator = control.locator
+        # See `set_value`'s matching check: narrows the unchecked window to the native call's own
+        # pattern acquisition, which cannot itself be checked mid-flight.
+        self._refuse_if_human_input(request.input_tick)
+        try:
+            control.element.invoke()
+            # NAME_TOGGLE expects the control's own name to have changed: re-deriving by the pre-effect
+            # locator step (which includes that name) would always miss it, so the last hop matches by
+            # identity instead. Every ancestor step is still matched structurally.
+            after = self._observer.rederive_after_mutation(resolved, locator)
+            self._surfaces.verify_unchanged(resolved)
+        except (ElementUnavailable, DesktopRefusal):
+            raise DesktopRefusal(DesktopReason.EFFECT_UNCERTAIN) from None
+        except Exception:  # noqa: BLE001 - a COM error carries private detail; none is kept.
+            raise DesktopRefusal(DesktopReason.EFFECT_UNCERTAIN) from None
+        changed = after.name != name_before
+        response = InvokeResponse(
+            worker_generation=self.generation,
+            dispatch_id=request.dispatch_id,
+            outcome="invoked" if changed else "no_change",
+            input_changed=self._input_changed(request.input_tick),
+        )
+        self._dispatches.finish(request.dispatch_id, response)
+        return response
 
 
 def _ref_of(resolved: ResolvedSurface) -> str:

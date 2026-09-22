@@ -227,4 +227,45 @@ export class DesktopActionController {
       return parseDesktopAction(reply.body)
     })
   }
+
+  /**
+   * S4. Open the SECOND, separate exact execution approval card from one SUCCEEDED plan. This is the
+   * moment disclosure authority ends and execution review begins: the runtime independently
+   * re-verifies everything about the plan before any card exists, and nothing runs until a further,
+   * separate `approveDesktopAction` click.
+   */
+  proposeDesktopActionFromPlan(planIdValue: unknown): Promise<AgentResult<AgentDesktopActionView>> {
+    let planId = ''
+    return this.guarded('desktop-action:propose', () => {
+      planId = id(planIdValue, 'plan')
+    }, async () => {
+      const reply = await this.call('POST', '/desktop/actions/from-plan', { plan_id: planId }, TIMEOUTS.propose)
+      return parseDesktopAction(reply.body)
+    })
+  }
+
+  /**
+   * The only way out of an unresolved S4 mutation. Names the action, the revision the card showed,
+   * and what the person themselves observed -- never retries or re-derives the effect.
+   */
+  reconcileDesktopAction(
+    actionIdValue: unknown, revisionValue: unknown, outcomeValue: unknown
+  ): Promise<AgentResult<AgentDesktopActionView>> {
+    let actionId = ''
+    let expected = 0
+    let outcome: 'succeeded' | 'failed' | 'still_unknown' = 'still_unknown'
+    return this.guarded('desktop-action:reconcile', () => {
+      actionId = id(actionIdValue, 'action')
+      expected = revision(revisionValue)
+      if (outcomeValue !== 'succeeded' && outcomeValue !== 'failed' && outcomeValue !== 'still_unknown') {
+        fail('invalid_request', 'Report exactly what you observed.')
+      }
+      outcome = outcomeValue
+    }, async () => {
+      const reply = await this.call(
+        'POST', `/desktop/actions/${actionId}/reconcile`, { expected_revision: expected, outcome }, TIMEOUTS.write
+      )
+      return parseDesktopAction(reply.body)
+    })
+  }
 }

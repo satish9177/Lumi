@@ -1,6 +1,7 @@
 import {
   DESKTOP_ACTION_OPERATIONS,
   DESKTOP_ACTION_STATUSES,
+  DESKTOP_INVOKE_EFFECTS,
   DESKTOP_SCROLL_STEPS,
   type AgentDesktopActionResultView,
   type AgentDesktopActionView,
@@ -114,6 +115,24 @@ export function parseDesktopAction(value: unknown): AgentDesktopActionView {
     return item
   })
   if (appId !== undefined) view.appId = appId
+  const trustedValue = optional(body.value, (item) => bounded(item, 'desktop.action.value', 4_000))
+  if (trustedValue !== undefined) view.value = trustedValue
+  const containerRole = optional(body.container_role, (item) => {
+    if (typeof item !== 'string' || !ROLE.test(item)) throw new WireError('desktop.action.container_role')
+    return item
+  })
+  if (containerRole !== undefined) view.containerRole = containerRole
+  const containerName = optional(body.container_name, (item) => bounded(item, 'desktop.action.container_name', 120))
+  if (containerName !== undefined) view.containerName = containerName
+  const optionRole = optional(body.option_role, (item) => {
+    if (typeof item !== 'string' || !ROLE.test(item)) throw new WireError('desktop.action.option_role')
+    return item
+  })
+  if (optionRole !== undefined) view.optionRole = optionRole
+  const optionName = optional(body.option_name, (item) => bounded(item, 'desktop.action.option_name', 120))
+  if (optionName !== undefined) view.optionName = optionName
+  const effect = optional(body.effect, (item) => member(DESKTOP_INVOKE_EFFECTS, item, 'desktop.action.effect'))
+  if (effect !== undefined) view.effect = effect
   const expires = optional(body.expires_at, (item) => {
     if (typeof item !== 'string' || !INSTANT.test(item) || Number.isNaN(Date.parse(item))) throw new WireError('desktop.action.expires')
     return item
@@ -202,6 +221,26 @@ export function describeDesktopActionRefusal(reason: string | undefined): string
     case 'desktop_automation_unsupported':
     case 'desktop_worker_unavailable':
       return 'Lumi’s desktop helper is not available. Nothing was changed.'
+    case 'not_a_value_control':
+    case 'read_only_control':
+      return 'That control cannot be set. Nothing was changed.'
+    case 'sensitive_target_refused':
+      return 'Lumi will not write into a terminal, security window or file picker. Nothing was changed.'
+    case 'not_selectable':
+    case 'option_wrong_container':
+      return 'That option could not be selected. Nothing was changed.'
+    case 'not_invokable':
+    case 'unsupported_or_unknown_effect':
+      return 'Lumi does not yet support that control. Nothing was changed.'
+    case 'desktop_action_unresolved':
+      return 'Lumi does not know whether a previous step happened. Report what you saw before doing anything else.'
+    case 'desktop_action_not_reconcilable':
+      return 'That action is not waiting on a report. Nothing was changed.'
+    case 'desktop_plan_not_ready':
+    case 'desktop_plan_already_opened':
+      return 'That plan is not ready to review. Nothing was changed.'
+    case 'desktop_action_invalid':
+      return 'That plan no longer matches the window. Inspect it again. Nothing was changed.'
     default:
       return 'Lumi could not do that. Nothing was changed.'
   }

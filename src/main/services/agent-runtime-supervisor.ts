@@ -176,12 +176,21 @@ const ALLOWED_ROUTES: ReadonlyArray<{ method: RuntimeMethod; pattern: RegExp }> 
   { method: 'GET', pattern: /^\/desktop\/read-tasks\/latest$/ },
   { method: 'GET', pattern: new RegExp(`^/desktop/read-tasks/${UUID_PART}$`) },
   { method: 'POST', pattern: new RegExp(`^/desktop/read-tasks/${UUID_PART}/(grant|revoke|disclosure|result)$`) },
-  // Milestone 9 S3: trusted focus, semantic scroll and registered-app launch. Exactly these. Each proposal
-  // opens an exact approval card and performs nothing; only `approve` (the trusted click) can begin an effect.
+  // Milestone 9 S3/S4: trusted focus, semantic scroll, registered-app launch and (S4) the SECOND,
+  // separate execution card built from a validated plan. Each proposal opens an exact approval card
+  // and performs nothing; only `approve` (the trusted click) can begin an effect. `reconcile` is the
+  // only way out of an unresolved S4 mutation and never performs an effect either.
   { method: 'GET', pattern: /^\/desktop\/actions\/apps$/ },
   { method: 'GET', pattern: /^\/desktop\/actions\/latest$/ },
-  { method: 'POST', pattern: /^\/desktop\/actions\/(focus|scroll|launch|scroll-targets)$/ },
-  { method: 'POST', pattern: new RegExp(`^/desktop/actions/${UUID_PART}/(approve|decline)$`) }
+  { method: 'POST', pattern: /^\/desktop\/actions\/(focus|scroll|launch|scroll-targets|from-plan)$/ },
+  { method: 'POST', pattern: new RegExp(`^/desktop/actions/${UUID_PART}/(approve|decline|reconcile)$`) },
+  // Milestone 9 S4: exact desktop action-planning disclosure. Disclosure authority only; nothing here
+  // performs a desktop action, and `claim`/`result` are internal (main calls them, never the renderer
+  // directly).
+  { method: 'POST', pattern: /^\/desktop\/action-plans$/ },
+  { method: 'GET', pattern: /^\/desktop\/action-plans\/latest$/ },
+  { method: 'GET', pattern: new RegExp(`^/desktop/action-plans/${UUID_PART}$`) },
+  { method: 'POST', pattern: new RegExp(`^/desktop/action-plans/${UUID_PART}/(grant|revoke|claim|result)$`) }
 ]
 
 export function isAllowedRuntimeRoute(method: RuntimeMethod, path: string): boolean {

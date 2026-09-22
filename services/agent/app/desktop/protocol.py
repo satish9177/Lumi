@@ -364,3 +364,93 @@ class LaunchResponse(_Wire):
     surface_epoch: int | None = Field(ge=1)
     focused: bool
     input_changed: bool
+
+
+# ---- S4: three bounded semantic mutations ----------------------------------------
+#
+# Exactly three more verbs, each on one control re-resolved from the current tree: set a value
+# (`ValuePattern.SetValue`), select an item (`SelectionItem.Select`), invoke a control whose effect
+# the controller already classified (`InvokePattern.Invoke`). No keyboard, mouse, pasted text, hotkey,
+# drag or coordinate exists anywhere. The raw value a `SetValueRequest` carries is the one thing on
+# this boundary that is not opaque: it is the trusted, user-supplied text to write, and it is never
+# echoed back, logged or stored beyond this one request/response pair.
+
+MAX_SET_VALUE_LENGTH: Final = 4_000
+
+
+class InvokeEffect(StrEnum):
+    """The closed, reviewed set of Invoke effects the worker will verify. One effect for now.
+
+    `NAME_TOGGLE`: pressing the control is expected to change ITS OWN accessible name (a
+    disclosure/expand/reveal-style button whose label reflects its own state, e.g. "Show details" /
+    "Hide details"). Nothing about the button's *label text* is trusted; what is verified is that the
+    control's semantic name differs, by exact re-resolved identity, from the name recorded when the
+    action was proposed. A control whose name does not change is a known failure, not a guess.
+    """
+
+    NAME_TOGGLE = "name_toggle"
+
+
+class SetValueRequest(_Wire):
+    expected_worker_generation: uuid.UUID
+    dispatch_id: uuid.UUID
+    surface_ref: SurfaceRef
+    surface_epoch: int = Field(ge=1)
+    observation_id: uuid.UUID
+    control_ref: ControlRef
+    #: The trusted value to write. Never a model's text: the runtime places this here only from the
+    #: durable, user-supplied value the plan approval named.
+    value: str = Field(max_length=MAX_SET_VALUE_LENGTH)
+    input_tick: InputTick
+
+
+class SetValueResponse(_Wire):
+    worker_generation: uuid.UUID
+    dispatch_id: uuid.UUID
+    #: `set`: the call returned and the re-read canonical value equals the approved value, exactly.
+    #: `not_set`: the call returned and a re-read canonical value is available but does not match --
+    #: a known, verified non-effect, not a guess. `uncertain`: the call returned but the verifying
+    #: re-read itself did not produce a value (e.g. a transient COM failure) -- whether the write took
+    #: is genuinely unknown, which is never treated the same as a known non-effect. Never carries the
+    #: value itself either way.
+    outcome: Literal["set", "not_set", "uncertain"]
+    input_changed: bool
+
+
+class SelectRequest(_Wire):
+    expected_worker_generation: uuid.UUID
+    dispatch_id: uuid.UUID
+    surface_ref: SurfaceRef
+    surface_epoch: int = Field(ge=1)
+    observation_id: uuid.UUID
+    #: The list/combo/tree the option must belong to, re-verified at effect time.
+    container_ref: ControlRef
+    option_ref: ControlRef
+    input_tick: InputTick
+
+
+class SelectResponse(_Wire):
+    worker_generation: uuid.UUID
+    dispatch_id: uuid.UUID
+    #: `uncertain`: the verifying re-read of selected state itself did not produce an answer -- see
+    #: `SetValueResponse.outcome`, the same distinction applies here.
+    outcome: Literal["selected", "not_selected", "uncertain"]
+    input_changed: bool
+
+
+class InvokeRequest(_Wire):
+    expected_worker_generation: uuid.UUID
+    dispatch_id: uuid.UUID
+    surface_ref: SurfaceRef
+    surface_epoch: int = Field(ge=1)
+    observation_id: uuid.UUID
+    control_ref: ControlRef
+    effect: InvokeEffect
+    input_tick: InputTick
+
+
+class InvokeResponse(_Wire):
+    worker_generation: uuid.UUID
+    dispatch_id: uuid.UUID
+    outcome: Literal["invoked", "no_change"]
+    input_changed: bool

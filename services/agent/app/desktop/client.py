@@ -26,11 +26,17 @@ from app.desktop.protocol import (
     FocusResponse,
     InputBaselineRequest,
     InputBaselineResponse,
+    InvokeRequest,
+    InvokeResponse,
     LaunchRequest,
     LaunchResponse,
     ObserveRequest,
     ScrollRequest,
     ScrollResponse,
+    SelectRequest,
+    SelectResponse,
+    SetValueRequest,
+    SetValueResponse,
     SurfaceListRequest,
     SurfaceListResponse,
     WorkerErrorBody,
@@ -125,6 +131,29 @@ class DesktopWorkerClient:
             or answer.dispatch_id != request.dispatch_id
             or answer.app_id != request.app_id
         ):
+            raise StaleDesktopResult
+        return answer
+
+    async def set_value(self, request: SetValueRequest) -> SetValueResponse:
+        # `request.value` is sent in this ONE authenticated body and nowhere else: not logged by this
+        # client, not retried, and never included in the exception this method can raise.
+        response = await self._send("POST", "/v1/desktop/set-value", request)
+        answer = self._parse(response, SetValueResponse)
+        if answer.worker_generation != request.expected_worker_generation or answer.dispatch_id != request.dispatch_id:
+            raise StaleDesktopResult
+        return answer
+
+    async def select(self, request: SelectRequest) -> SelectResponse:
+        response = await self._send("POST", "/v1/desktop/select", request)
+        answer = self._parse(response, SelectResponse)
+        if answer.worker_generation != request.expected_worker_generation or answer.dispatch_id != request.dispatch_id:
+            raise StaleDesktopResult
+        return answer
+
+    async def invoke(self, request: InvokeRequest) -> InvokeResponse:
+        response = await self._send("POST", "/v1/desktop/invoke", request)
+        answer = self._parse(response, InvokeResponse)
+        if answer.worker_generation != request.expected_worker_generation or answer.dispatch_id != request.dispatch_id:
             raise StaleDesktopResult
         return answer
 

@@ -133,11 +133,18 @@ PINNED_COM: Final = frozenset(
         # S3: the ScrollPattern, and only its vertical state and its single `Scroll` method.
         "CurrentVerticalScrollPercent", "CurrentVerticallyScrollable", "IUIAutomationScrollPattern",
         "Scroll", "UIA_ScrollPatternId", "SetFocus",
+        # S4: the three reviewed mutation patterns (`IUIAutomationSelectionItemPattern` is already
+        # pinned above, for reading `CurrentIsSelected`). `SetValue`/`Select`/`Invoke` are each pinned
+        # to exactly one call site by `_mutation_call_violations` below; being listed here only lets
+        # the member NAME be referenced (member checks elsewhere still require the file allowance too).
+        "CurrentIsReadOnly", "SetValue", "Select", "IUIAutomationInvokePattern", "Invoke", "UIA_InvokePatternId",
     }
 )
 #: Action-bearing pattern names that ONE reviewed file may reference. Nothing else, nowhere else.
 ACTION_PATTERN_ALLOWANCES: Final[dict[str, frozenset[str]]] = {
-    "uia_backend.py": frozenset({"IUIAutomationScrollPattern", "UIA_ScrollPatternId"}),
+    "uia_backend.py": frozenset(
+        {"IUIAutomationScrollPattern", "UIA_ScrollPatternId", "IUIAutomationInvokePattern", "UIA_InvokePatternId"}
+    ),
 }
 _DLL_VARIABLES: Final = frozenset({"kernel32", "user32", "advapi32", "dwmapi", "_kernel32", "_user32", "_advapi32", "_dwmapi"})
 _PROTOTYPE_ATTRIBUTES: Final = frozenset({"argtypes", "restype"})
@@ -154,18 +161,21 @@ _MEMORY_OR_THREAD: Final = re.compile(r"(VM_READ|VM_WRITE|VM_OPERATION|CREATE_TH
 
 #: Where a file may legitimately do something the rest of the package may not. `managed.py` starts
 #: (and stops) the worker process itself; nothing else does.
+#: S4's three mutation names, allowed only in the files that legitimately own them -- exactly the
+#: same reviewed set as S3's `focus`/`scroll`/`launch`, extended.
+_S4_NAMES: Final = frozenset({"set_value", "setvalue", "select", "invoke"})
 FILE_ALLOWANCES: Final[dict[str, frozenset[str]]] = {
     "managed.py": frozenset({"popen", "terminate", "kill", "close", "start"}),
-    # S3 effects. Each name is allowed only in the file that legitimately owns it.
-    "effects.py": frozenset({"focus", "scroll", "launch"}),
+    # S3/S4 effects. Each name is allowed only in the file that legitimately owns it.
+    "effects.py": frozenset({"focus", "scroll", "launch"} | _S4_NAMES),
     "effects_win32.py": frozenset({"popen"}),
-    "observer.py": frozenset({"scroll", "focus"}),
-    "uia_backend.py": frozenset({"scroll", "focus", "setfocus"}),
-    "client.py": frozenset({"focus", "scroll", "launch"}),
+    "observer.py": frozenset({"scroll", "focus"} | _S4_NAMES),
+    "uia_backend.py": frozenset({"scroll", "focus", "setfocus"} | _S4_NAMES),
+    "client.py": frozenset({"focus", "scroll", "launch"} | _S4_NAMES),
     # `os.close` on the file descriptors of the readiness pipe. Nothing to do with a window.
     "main.py": frozenset({"close"}),
     # `Thread.start()` runs the dedicated UIA thread inside the worker; it starts no other process.
-    "worker.py": frozenset({"start", "focus", "scroll", "launch"}),
+    "worker.py": frozenset({"start", "focus", "scroll", "launch"} | _S4_NAMES),
 }
 MODULE_ALLOWANCES: Final[dict[str, frozenset[str]]] = {
     "managed.py": frozenset({"subprocess"}),
@@ -275,6 +285,13 @@ def scan_source(source: str, filename: str = "<memory>") -> list[Violation]:
                 if index.value >= 256:
                     # `dll[1234]` reaches an export by ordinal, past every name check.
                     add(node, "ordinal-subscript", str(index.value))
+            if _base_name(node.value) in _DLL_VARIABLES and not (
+                isinstance(index, ast.Constant) and isinstance(index.value, str)
+            ):
+                # `user32[computed_name](...)` reaches an export by a name built at runtime (string
+                # concatenation, a variable, a function call, ...), past every literal-string check
+                # above: the export name never appears anywhere in the source as a plain string.
+                add(node, "computed-dll-subscript", _base_name(node.value) or "")
     found.extend(_pinned_surface_violations(tree, filename, base))
     return sorted(set(found), key=lambda violation: (violation.file, violation.line, violation.kind, violation.name))
 
@@ -317,6 +334,7 @@ def _pinned_surface_violations(tree: ast.AST, filename: str, base: str) -> list[
         found.extend(_spawn_violations(tree, filename))
     elif base == "uia_backend.py":
         found.extend(_scroll_call_violations(tree, filename))
+        found.extend(_mutation_call_violations(tree, filename))
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Attribute)
@@ -415,6 +433,18 @@ def _single_call_violations(tree: ast.AST, filename: str, attr: str, function: s
             found.append(Violation(filename, node.lineno, f"{attr.lower()}-reference", "the member may only be called"))
     if len(calls) > 1:
         found.append(Violation(filename, 0, f"{attr.lower()}-count", str(len(calls))))
+    # A single AST call site inside a loop still executes more than once at runtime -- `len(calls) > 1`
+    # only counts distinct source locations, so `for _ in range(2): pattern.Invoke()` has exactly one
+    # call site and would otherwise pass. A genuinely single call never needs a loop around it.
+    for item in ast.walk(tree):
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == function:
+            for loop in ast.walk(item):
+                if isinstance(loop, (ast.For, ast.AsyncFor, ast.While)):
+                    for node in ast.walk(loop):
+                        if is_call(node):
+                            found.append(
+                                Violation(filename, getattr(node, "lineno", 0), f"{attr.lower()}-in-loop", "a pinned single call may not be inside a loop")
+                            )
     return found
 
 
@@ -422,6 +452,17 @@ def _scroll_call_violations(tree: ast.AST, filename: str) -> list[Violation]:
     return [
         *_single_call_violations(tree, filename, "Scroll", "scroll", 2),
         *_single_call_violations(tree, filename, "SetFocus", "focus", 0),
+    ]
+
+
+def _mutation_call_violations(tree: ast.AST, filename: str) -> list[Violation]:
+    """S4: `SetValue`/`Select`/`Invoke` may each be called exactly once, inside the one method named
+    for it, with exactly the arguments the reviewed effect uses. The same exact-shape pinning S3 already
+    applies to `Scroll`/`SetFocus`."""
+    return [
+        *_single_call_violations(tree, filename, "SetValue", "set_value", 1),
+        *_single_call_violations(tree, filename, "Select", "select", 0),
+        *_single_call_violations(tree, filename, "Invoke", "invoke", 0),
     ]
 
 

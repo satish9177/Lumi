@@ -33,11 +33,17 @@ from app.desktop.protocol import (
     FocusRequest,
     FocusResponse,
     InputBaselineRequest,
+    InvokeRequest,
+    InvokeResponse,
     LaunchRequest,
     LaunchResponse,
     ObserveRequest,
     ScrollRequest,
     ScrollResponse,
+    SelectRequest,
+    SelectResponse,
+    SetValueRequest,
+    SetValueResponse,
     SurfaceListRequest,
     SurfaceListResponse,
 )
@@ -183,6 +189,32 @@ class DesktopService:
             if generation != request.expected_worker_generation:
                 raise _CallerIsStale
             return await client.launch(request)
+
+        return await self._run(call)
+
+    # -- S4 effects -----------------------------------------------------------------
+
+    async def set_value(self, request: SetValueRequest) -> SetValueResponse:
+        async def call(client: DesktopWorkerClient, generation: uuid.UUID) -> SetValueResponse:
+            if generation != request.expected_worker_generation:
+                raise _CallerIsStale
+            return await client.set_value(request)
+
+        return await self._run(call)
+
+    async def select(self, request: SelectRequest) -> SelectResponse:
+        async def call(client: DesktopWorkerClient, generation: uuid.UUID) -> SelectResponse:
+            if generation != request.expected_worker_generation:
+                raise _CallerIsStale
+            return await client.select(request)
+
+        return await self._run(call)
+
+    async def invoke(self, request: InvokeRequest) -> InvokeResponse:
+        async def call(client: DesktopWorkerClient, generation: uuid.UUID) -> InvokeResponse:
+            if generation != request.expected_worker_generation:
+                raise _CallerIsStale
+            return await client.invoke(request)
 
         return await self._run(call)
 

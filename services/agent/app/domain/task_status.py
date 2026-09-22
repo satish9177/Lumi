@@ -77,6 +77,15 @@ class TaskEventType(StrEnum):
     TASK_DESKTOP_ANSWER_RECORDED = "task.desktop_answer_recorded"
     TASK_DESKTOP_DISCLOSURE_FAILED = "task.desktop_disclosure_failed"
     TASK_DESKTOP_DISCLOSURE_OUTCOME_UNKNOWN = "task.desktop_disclosure_outcome_unknown"
+    #: Milestone 9 S4 desktop action planning. Ids, digests, counts and closed codes only -- never
+    #: desktop text, a window title, an objective, a value or a proposed action's target names.
+    TASK_DESKTOP_PLAN_REQUESTED = "task.desktop_plan_requested"
+    TASK_DESKTOP_PLAN_GRANTED = "task.desktop_plan_granted"
+    TASK_DESKTOP_PLAN_REVOKED = "task.desktop_plan_revoked"
+    TASK_DESKTOP_PLAN_STARTED = "task.desktop_plan_started"
+    TASK_DESKTOP_PLAN_ACTION_RECORDED = "task.desktop_plan_action_recorded"
+    TASK_DESKTOP_PLAN_FAILED = "task.desktop_plan_failed"
+    TASK_DESKTOP_PLAN_OUTCOME_UNKNOWN = "task.desktop_plan_outcome_unknown"
     ACTION_PROPOSED = "action.proposed"
     ACTION_APPROVAL_REQUESTED = "action.approval_requested"
     ACTION_APPROVED = "action.approved"

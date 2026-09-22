@@ -261,6 +261,16 @@ export function describeEvent(event: AgentEventView): string {
     case 'task.desktop_answer_recorded': return 'A grounded answer about the snapshot was recorded'
     case 'task.desktop_disclosure_failed': return 'The AI provider could not answer — nothing was retried'
     case 'task.desktop_disclosure_outcome_unknown': return 'Lumi cannot tell whether the snapshot reached the AI provider — it was not repeated'
+    // Milestone 9 S4. A desktop action plan has its own trusted view (DesktopPlanningPanel) and is
+    // never shown in this timeline either, for the same reason as the S2 disclosure events above: the
+    // words exist so the switch stays exhaustive. They carry no desktop text or raw value.
+    case 'task.desktop_plan_requested': return 'Desktop action plan ready for your approval — nothing was sent'
+    case 'task.desktop_plan_granted': return 'You allowed this one snapshot to be sent once, to propose a step'
+    case 'task.desktop_plan_revoked': return 'Desktop action plan cancelled'
+    case 'task.desktop_plan_started': return 'The approved snapshot was released to one AI provider'
+    case 'task.desktop_plan_action_recorded': return 'The AI provider proposed one step — nothing has run'
+    case 'task.desktop_plan_failed': return 'The AI provider could not propose a step — nothing was retried'
+    case 'task.desktop_plan_outcome_unknown': return 'Lumi cannot tell whether the snapshot reached the AI provider — it was not repeated'
     case 'task.cancelled': return 'Task cancelled'
     case 'task.criteria_updated':
       return event.invalidatedActionIds?.length

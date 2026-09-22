@@ -19,6 +19,7 @@ import type { AgentTaskController } from './agent-tasks'
 import type { BrowserProfileController } from './browser-profile-controller'
 import type { DesktopReadController } from './desktop-read-controller'
 import type { DesktopActionController } from './desktop-action-controller'
+import type { DesktopPlanningController } from './desktop-planning-controller'
 import type { VoiceTaskController } from './voice-task-controller'
 
 /**
@@ -58,11 +59,17 @@ export interface AgentIpcDependencies {
     DesktopReadController,
     'listDesktopSurfaces' | 'createDesktopRead' | 'getDesktopRead' | 'grantDesktopDisclosure' | 'declineDesktopDisclosure' | 'runDesktopRead'
   >
-  /** Milestone 9 S3. Absent in builds without the desktop capability. */
+  /** Milestone 9 S3/S4. Absent in builds without the desktop capability. */
   desktopActions?: Pick<
     DesktopActionController,
     | 'listDesktopApps' | 'findDesktopScrollTargets' | 'proposeDesktopFocus' | 'proposeDesktopScroll'
     | 'proposeDesktopLaunch' | 'getDesktopAction' | 'approveDesktopAction' | 'declineDesktopAction'
+    | 'proposeDesktopActionFromPlan' | 'reconcileDesktopAction'
+  >
+  /** Milestone 9 S4. Absent in builds without the desktop capability. */
+  desktopPlanning?: Pick<
+    DesktopPlanningController,
+    'createDesktopPlan' | 'getDesktopPlan' | 'grantDesktopPlan' | 'declineDesktopPlan' | 'runDesktopPlan'
   >
 }
 
@@ -82,7 +89,8 @@ function routeWithoutInterpreter(request: unknown): TypedRequestRoute {
 }
 
 export function registerAgentIpc({
-  ipcMain, assertTrustedSender, controller, voice, runtimeStatus, restartRuntime, text, memory, diagnostics, browserProfiles, desktopRead, desktopActions
+  ipcMain, assertTrustedSender, controller, voice, runtimeStatus, restartRuntime, text, memory, diagnostics,
+  browserProfiles, desktopRead, desktopActions, desktopPlanning
 }: AgentIpcDependencies): void {
   const handle = (channel: string, listener: (...args: unknown[]) => unknown): void => {
     ipcMain.handle(channel, (event, ...args) => {
@@ -246,4 +254,20 @@ export function registerAgentIpc({
     desktopActions ? desktopActions.approveDesktopAction(actionId, revision) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
   handle(AGENT_IPC_CHANNELS.declineDesktopAction, (actionId, revision) =>
     desktopActions ? desktopActions.declineDesktopAction(actionId, revision) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.reconcileDesktopAction, (actionId, revision, outcome) =>
+    desktopActions ? desktopActions.reconcileDesktopAction(actionId, revision, outcome) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.proposeDesktopActionFromPlan, (planId) =>
+    desktopActions ? desktopActions.proposeDesktopActionFromPlan(planId) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  // Milestone 9 S4: bounded desktop-action planning. Disclosure authority only -- none of these six
+  // channels performs any desktop action. Not reachable from voice.
+  handle(AGENT_IPC_CHANNELS.createDesktopPlan, (objective, workerGeneration, surfaceRef, surfaceEpoch, values) =>
+    desktopPlanning ? desktopPlanning.createDesktopPlan(objective, workerGeneration, surfaceRef, surfaceEpoch, values) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.getDesktopPlan, () =>
+    desktopPlanning ? desktopPlanning.getDesktopPlan() : Promise.resolve({ ok: true, value: null }))
+  handle(AGENT_IPC_CHANNELS.grantDesktopPlan, (grantId, revision) =>
+    desktopPlanning ? desktopPlanning.grantDesktopPlan(grantId, revision) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.declineDesktopPlan, (grantId, revision) =>
+    desktopPlanning ? desktopPlanning.declineDesktopPlan(grantId, revision) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  handle(AGENT_IPC_CHANNELS.runDesktopPlan, () =>
+    desktopPlanning ? desktopPlanning.runDesktopPlan() : Promise.resolve({ ok: false, error: UNAVAILABLE }))
 }

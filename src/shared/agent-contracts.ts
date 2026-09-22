@@ -77,6 +77,14 @@ export const TASK_EVENT_TYPES = [
   'task.desktop_answer_recorded',
   'task.desktop_disclosure_failed',
   'task.desktop_disclosure_outcome_unknown',
+  // Milestone 9 S4. Ids, digests, counts and closed codes only -- never desktop text or a raw value.
+  'task.desktop_plan_requested',
+  'task.desktop_plan_granted',
+  'task.desktop_plan_revoked',
+  'task.desktop_plan_started',
+  'task.desktop_plan_action_recorded',
+  'task.desktop_plan_failed',
+  'task.desktop_plan_outcome_unknown',
   'action.proposed', 'action.approval_requested',
   'action.approved', 'action.authorized', 'action.rejected', 'action.execution_started', 'action.succeeded',
   'action.failed', 'action.outcome_unknown', 'action.reconciliation_started', 'action.reconciled'
@@ -1031,7 +1039,9 @@ export interface AgentDesktopReadView {
 // never supplies a handle, a path, an argument, a coordinate or a key: it picks an opaque surface it was
 // listed, a scrollable control of a fresh local observation, a closed scroll step, or a registered app id.
 
-export const DESKTOP_ACTION_OPERATIONS = ['focus_surface', 'scroll_control', 'launch_app'] as const
+export const DESKTOP_ACTION_OPERATIONS = [
+  'focus_surface', 'scroll_control', 'launch_app', 'set_control_value', 'select_control', 'invoke_control'
+] as const
 export type AgentDesktopActionOperation = typeof DESKTOP_ACTION_OPERATIONS[number]
 
 export const DESKTOP_SCROLL_STEPS = ['small_up', 'small_down', 'page_up', 'page_down'] as const
@@ -1086,10 +1096,112 @@ export interface AgentDesktopActionView {
   controlName?: string
   step?: AgentDesktopScrollStep
   appId?: string
+  /**
+   * S4 `set_control_value` only: the exact trusted text that will be written. The person's own input,
+   * shown back to them verbatim.
+   */
+  value?: string
+  containerRole?: string
+  /** Untrusted display text. */
+  containerName?: string
+  optionRole?: string
+  /** Untrusted display text. */
+  optionName?: string
+  /** S4 `invoke_control` only: the closed, controller-derived effect being invoked. */
+  effect?: AgentDesktopInvokeEffect
   expiresAt?: string
   attemptOutcome?: 'SUCCEEDED' | 'FAILED' | 'OUTCOME_UNKNOWN'
   errorCode?: string
   result?: AgentDesktopActionResultView
+}
+
+// ---- Milestone 9 S4: bounded semantic desktop actions ------------------------------------------
+//
+// Three more effects, each on one control re-resolved from the current tree, each behind its OWN
+// separate exact trusted approval -- never the same click that approved seeing the snapshot. The
+// renderer never picks the operation, the target or (for `set_control_value`) the value directly: it
+// only ever reviews and approves what a validated model proposal, re-verified by the controller,
+// already narrowed to one closed action.
+
+export const DESKTOP_INVOKE_EFFECTS = ['name_toggle'] as const
+export type AgentDesktopInvokeEffect = typeof DESKTOP_INVOKE_EFFECTS[number]
+
+export const DESKTOP_PLAN_PHASES = [
+  'awaiting_approval', 'approved', 'reasoning', 'proposed', 'failed', 'outcome_unknown', 'declined', 'expired'
+] as const
+export type AgentDesktopPlanPhase = typeof DESKTOP_PLAN_PHASES[number]
+
+/** One candidate value the person typed directly in the trusted panel, before any plan is created. */
+export interface AgentPlanValueInput {
+  /** A short label the person chose for their own value (e.g. "search text"). Never inferred. */
+  classification: string
+  value: string
+}
+
+/** What the model is shown for one candidate value: never the text itself. */
+export interface AgentDesktopValueDescriptor {
+  valueRef: string
+  classification: string
+  length: number
+}
+
+/** Card-only: the person's own value, shown back to them. Never sent to a provider raw. */
+export interface AgentDesktopPlanValueView extends AgentDesktopValueDescriptor {
+  value: string
+}
+
+export interface AgentDesktopPlanCardView {
+  grantId: string
+  grantRevision: number
+  grantStatus: 'PENDING' | 'ACTIVE' | 'REVOKED' | 'EXPIRED' | 'COMPLETED'
+  expiresAt?: string
+  recipient: AgentDisclosureRecipient
+  model: string
+  observedAt: string
+  applicationLabel: string
+  windowTitle: string
+  maxNodes: number
+  maxTextBytes: number
+  redactionPolicy: string
+  observationAvailable: boolean
+  nodeCount?: number
+  textBytes?: number
+  redactionCount?: number
+  truncated?: boolean
+  truncation: string[]
+  values: AgentDesktopPlanValueView[]
+}
+
+/** The ONE closed action a provider proposed. Opaque refs only -- never a raw value. */
+export type AgentProposedAction =
+  | { action: 'invoke'; controlRef: string }
+  | { action: 'set_value'; controlRef: string; valueRef: string }
+  | { action: 'select'; containerRef: string; optionRef: string }
+
+export interface AgentDesktopPlanStateView {
+  planId: string
+  status: 'STARTED' | 'SUCCEEDED' | 'FAILED' | 'OUTCOME_UNKNOWN'
+  errorCode?: string
+  startedAt: string
+  finishedAt?: string
+  nodeCount: number
+  textBytes: number
+  redactionCount: number
+  truncated: boolean
+  proposedAction?: AgentProposedAction
+}
+
+export interface AgentDesktopPlanView {
+  taskId: string
+  taskStatus: AgentTaskStatus
+  taskRevision: number
+  /** The user's own typed objective. */
+  objective: string
+  phase: AgentDesktopPlanPhase
+  card?: AgentDesktopPlanCardView
+  plan?: AgentDesktopPlanStateView
+  /** Set once a plan succeeded and the execution card has been opened. */
+  actionId?: string
 }
 
 export const AGENT_ERROR_CODES = [
@@ -1346,6 +1458,32 @@ export interface AgentApi {
   approveDesktopAction: (actionId: string, expectedRevision: number) => Promise<AgentResult<AgentDesktopActionView>>
   /** The trusted "Cancel" click. A declined action can never run. */
   declineDesktopAction: (actionId: string, expectedRevision: number) => Promise<AgentResult<AgentDesktopActionView>>
+  /** The only way out of an unresolved S4 mutation: what the person actually observed. Never retries. */
+  reconcileDesktopAction: (
+    actionId: string, expectedRevision: number, outcome: 'succeeded' | 'failed' | 'still_unknown'
+  ) => Promise<AgentResult<AgentDesktopActionView>>
+
+  // ---- Milestone 9 S4: bounded desktop-action planning ------------------------------------------
+  //
+  // Disclosure authority only: nothing here runs anything. Choose ONE surface, type an objective and
+  // (optionally) up to 4 candidate values, and Lumi inspects it locally and opens the planning card.
+  /** Choose ONE surface, type an objective and candidate values: opens the planning card. Nothing is sent. */
+  createDesktopPlan: (
+    objective: string, workerGeneration: string, surfaceRef: string, surfaceEpoch: number, values: AgentPlanValueInput[]
+  ) => Promise<AgentResult<AgentDesktopPlanView>>
+  /** Read-only: the newest desktop action plan, or none. */
+  getDesktopPlan: () => Promise<AgentResult<AgentDesktopPlanView | null>>
+  /** The trusted "Allow once" click on the planning card. */
+  grantDesktopPlan: (grantId: string, expectedRevision: number) => Promise<AgentResult<AgentDesktopPlanView>>
+  /** The trusted "Cancel" click. Before the claim, nothing was sent. */
+  declineDesktopPlan: (grantId: string, expectedRevision: number) => Promise<AgentResult<AgentDesktopPlanView>>
+  /** Run the approved plan: ONE call to the approved provider. There is no retry and no other provider. */
+  runDesktopPlan: () => Promise<AgentResult<AgentDesktopPlanView>>
+  /**
+   * Open the SECOND, separate exact execution approval card from one SUCCEEDED plan. Nothing happens
+   * yet: this is the moment disclosure authority ends and execution review begins.
+   */
+  proposeDesktopActionFromPlan: (planId: string) => Promise<AgentResult<AgentDesktopActionView>>
 }
 
 /**
@@ -1429,7 +1567,16 @@ export const AGENT_IPC_CHANNELS = {
   proposeDesktopLaunch: 'lifelens:agent:propose-desktop-launch',
   getDesktopAction: 'lifelens:agent:get-desktop-action',
   approveDesktopAction: 'lifelens:agent:approve-desktop-action',
-  declineDesktopAction: 'lifelens:agent:decline-desktop-action'
+  declineDesktopAction: 'lifelens:agent:decline-desktop-action',
+  reconcileDesktopAction: 'lifelens:agent:reconcile-desktop-action',
+  // Milestone 9 S4: bounded desktop-action planning. Disclosure authority only; none of these
+  // channels performs any desktop action.
+  createDesktopPlan: 'lifelens:agent:create-desktop-plan',
+  getDesktopPlan: 'lifelens:agent:get-desktop-plan',
+  grantDesktopPlan: 'lifelens:agent:grant-desktop-plan',
+  declineDesktopPlan: 'lifelens:agent:decline-desktop-plan',
+  runDesktopPlan: 'lifelens:agent:run-desktop-plan',
+  proposeDesktopActionFromPlan: 'lifelens:agent:propose-desktop-action-from-plan'
 } as const
 
 /** Actions whose side effect is unresolved or in flight. */

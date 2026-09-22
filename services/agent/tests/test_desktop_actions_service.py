@@ -23,11 +23,18 @@ from app.desktop.protocol import (
     DesktopRole,
     FocusRequest,
     FocusResponse,
+    InvokeEffect,
+    InvokeRequest,
+    InvokeResponse,
     LaunchRequest,
     LaunchResponse,
     ScrollRequest,
     ScrollResponse,
     ScrollStep,
+    SelectRequest,
+    SelectResponse,
+    SetValueRequest,
+    SetValueResponse,
 )
 from app.desktop.registry import AppRegistry, RegisteredApp
 from app.domain.action_status import ActionStatus
@@ -37,6 +44,8 @@ from app.services.desktop import DesktopService
 from app.services.desktop_actions import DesktopActionError, DesktopActionService, DesktopActionView
 from app.services.recovery import RecoveryService
 from app.services.runtime import RuntimeGeneration
+from app.domain.desktop_planning import DesktopPlanRefusal
+from app.services.desktop_planning import DesktopPlanningService
 from app.services.tasks import TaskService
 from tests.desktop_disclosure_support import FakeDesktop, node, observation, persist
 
@@ -51,6 +60,14 @@ class FakeEffectDesktop(FakeDesktop):
             node(1, name="Editor", role=DesktopRole.WINDOW),
             node(2, name="Results", role=DesktopRole.LIST, parent=1).model_copy(update={"patterns": [DesktopPattern.SCROLL]}),
             node(3, name="Save", role=DesktopRole.BUTTON, parent=1),
+            node(4, name="Field", role=DesktopRole.EDIT, parent=1).model_copy(update={"patterns": [DesktopPattern.VALUE]}),
+            node(5, name="Combo", role=DesktopRole.COMBO_BOX, parent=1),
+            node(6, name="Option A", role=DesktopRole.LIST_ITEM, parent=5).model_copy(
+                update={"patterns": [DesktopPattern.SELECTION_ITEM]}
+            ),
+            node(7, name="Show details", role=DesktopRole.BUTTON, parent=1).model_copy(
+                update={"patterns": [DesktopPattern.INVOKE]}
+            ),
         ])
         self.baseline = 5000
         self.calls: list[str] = []
@@ -59,6 +76,9 @@ class FakeEffectDesktop(FakeDesktop):
         self.effect_error: BaseException | None = None
         self.focus_outcome = "focused"
         self.scroll_outcome = "scrolled"
+        self.set_value_outcome = "set"
+        self.select_outcome = "selected"
+        self.invoke_outcome = "invoked"
         self.wrong_dispatch = False
         self.gate: asyncio.Event | None = None
 
@@ -119,6 +139,33 @@ class FakeEffectDesktop(FakeDesktop):
             input_changed=False,
         )
 
+    async def set_value(self, request: SetValueRequest) -> SetValueResponse:
+        await self._effect("set_value", request)
+        return SetValueResponse(
+            worker_generation=request.expected_worker_generation,
+            dispatch_id=request.dispatch_id,
+            outcome=cast(Any, self.set_value_outcome),
+            input_changed=False,
+        )
+
+    async def select(self, request: SelectRequest) -> SelectResponse:
+        await self._effect("select", request)
+        return SelectResponse(
+            worker_generation=request.expected_worker_generation,
+            dispatch_id=request.dispatch_id,
+            outcome=cast(Any, self.select_outcome),
+            input_changed=False,
+        )
+
+    async def invoke(self, request: InvokeRequest) -> InvokeResponse:
+        await self._effect("invoke", request)
+        return InvokeResponse(
+            worker_generation=request.expected_worker_generation,
+            dispatch_id=request.dispatch_id,
+            outcome=cast(Any, self.invoke_outcome),
+            input_changed=False,
+        )
+
 
 @pytest.fixture
 def desktop(engine: AsyncEngine, runtime_generation: RuntimeGeneration) -> FakeEffectDesktop:
@@ -136,6 +183,34 @@ def service(
         desktop=cast(DesktopService, desktop),
         registry=AppRegistry([APP]),
     )
+
+
+@pytest.fixture
+def planning(engine: AsyncEngine, desktop: FakeEffectDesktop) -> DesktopPlanningService:
+    return DesktopPlanningService(engine, desktop=cast(DesktopService, desktop), grant_ttl_seconds=600)
+
+
+async def build_plan(
+    planning: DesktopPlanningService,
+    desktop: FakeEffectDesktop,
+    *,
+    result: dict[str, Any],
+    values: list[tuple[str, str]] | None = None,
+) -> uuid.UUID:
+    """Drive `DesktopPlanningService` through create -> confirm -> claim -> record_result, exactly as
+    Electron main would after ONE (here, hand-supplied) provider attempt. Returns the plan id."""
+    created = await planning.create(
+        objective="Fill in the field", recipient="openai", model="gpt-test",
+        worker_generation=desktop.worker_generation, surface_ref="s1", surface_epoch=1,
+        values=values or [],
+    )
+    assert created.card is not None
+    granted = await planning.confirm(created.task_id, grant_id=created.card.grant_id, expected_revision=created.card.grant_revision)
+    assert granted.phase == "approved"
+    context = await planning.claim(created.task_id)
+    recorded = await planning.record_result(created.task_id, plan_id=context.plan_id, result=result, failure=None)
+    assert recorded.phase == "proposed", recorded.plan.error_code if recorded.plan else None
+    return context.plan_id
 
 
 async def rows(engine: AsyncEngine, sql: str, **params: Any) -> list[Any]:
@@ -631,3 +706,347 @@ async def test_the_generic_action_reads_do_not_return_another_programs_window_te
     assert response.status_code == 200
     assert "notes.txt" not in response.text and "window_title" not in body["proposal"]
     assert body["proposal"]["surface_ref"] == "s1"
+
+
+# ---- S4: from a validated plan to a SEPARATE execution approval ------------------------------------------
+
+
+async def test_propose_from_plan_opens_an_invoke_card_and_performs_no_effect(
+    service: DesktopActionService, planning: DesktopPlanningService, desktop: FakeEffectDesktop, engine: AsyncEngine
+) -> None:
+    plan_id = await build_plan(planning, desktop, result={"schema_version": 1, "action": "invoke", "control_ref": "u7"})
+    view = await service.propose_from_plan(plan_id)
+    assert view.status is ActionStatus.WAITING_APPROVAL
+    assert view.operation.value == "invoke_control"
+    assert desktop.calls == []
+    assert await scalar(engine, "SELECT count(*) FROM desktop_dispatches") == 0
+
+
+async def test_propose_from_plan_opens_a_set_value_card_with_the_resolved_trusted_value(
+    service: DesktopActionService, planning: DesktopPlanningService, desktop: FakeEffectDesktop
+) -> None:
+    plan_id = await build_plan(
+        planning, desktop,
+        result={"schema_version": 1, "action": "set_value", "control_ref": "u4", "value_ref": "v1"},
+        values=[("search text", "hello world")],
+    )
+    view = await service.propose_from_plan(plan_id)
+    assert view.operation.value == "set_control_value"
+    proposal = view.proposal
+    assert proposal.value == "hello world"  # type: ignore[union-attr]
+
+
+async def test_propose_from_plan_opens_a_select_card(
+    service: DesktopActionService, planning: DesktopPlanningService, desktop: FakeEffectDesktop
+) -> None:
+    plan_id = await build_plan(
+        planning, desktop, result={"schema_version": 1, "action": "select", "container_ref": "u5", "option_ref": "u6"}
+    )
+    view = await service.propose_from_plan(plan_id)
+    assert view.operation.value == "select_control"
+
+
+async def test_approving_a_plan_derived_card_performs_exactly_one_effect(
+    service: DesktopActionService, planning: DesktopPlanningService, desktop: FakeEffectDesktop, engine: AsyncEngine
+) -> None:
+    plan_id = await build_plan(
+        planning, desktop,
+        result={"schema_version": 1, "action": "set_value", "control_ref": "u4", "value_ref": "v1"},
+        values=[("greeting", "hi")],
+    )
+    view = await service.propose_from_plan(plan_id)
+    done = await service.approve(view.action_id, expected_revision=view.revision)
+    assert done.status is ActionStatus.SUCCEEDED
+    assert desktop.calls == ["set_value"]
+    request = desktop.requests[0]
+    assert request.value == "hi"
+    # The raw value never reaches the durable dispatch row: only the opaque ref does.
+    (dispatch,) = await rows(engine, "SELECT operation, value_ref, result FROM desktop_dispatches")
+    assert dispatch.value_ref == "v1"
+    assert "hi" not in str(dispatch.result)
+
+
+async def test_a_plan_proposing_an_unknown_control_is_refused_before_any_execution_card(
+    planning: DesktopPlanningService, desktop: FakeEffectDesktop
+) -> None:
+    plan_id = await build_ungrounded_plan(planning, desktop, {"schema_version": 1, "action": "invoke", "control_ref": "u999"})
+    assert plan_id is None
+
+
+async def test_a_plan_naming_an_unoffered_value_ref_is_refused(planning: DesktopPlanningService, desktop: FakeEffectDesktop) -> None:
+    plan_id = await build_ungrounded_plan(
+        planning, desktop, {"schema_version": 1, "action": "set_value", "control_ref": "u4", "value_ref": "v9"}
+    )
+    assert plan_id is None
+
+
+async def test_propose_from_plan_is_idempotent_a_plan_funds_at_most_one_execution_card(
+    service: DesktopActionService, planning: DesktopPlanningService, desktop: FakeEffectDesktop
+) -> None:
+    plan_id = await build_plan(planning, desktop, result={"schema_version": 1, "action": "invoke", "control_ref": "u7"})
+    first = await service.propose_from_plan(plan_id)
+    with pytest.raises(DesktopActionError):
+        await service.propose_from_plan(plan_id)
+    # The action from the first call is still exactly there, untouched.
+    again = await service.get(first.action_id)
+    assert again.action_id == first.action_id and again.revision == first.revision
+
+
+async def test_propose_from_plan_refuses_a_plan_that_never_succeeded(
+    service: DesktopActionService, planning: DesktopPlanningService, desktop: FakeEffectDesktop
+) -> None:
+    created = await planning.create(
+        objective="Fill in the field", recipient="openai", model="gpt-test",
+        worker_generation=desktop.worker_generation, surface_ref="s1", surface_epoch=1, values=[],
+    )
+    with pytest.raises(DesktopActionError):
+        await service.propose_from_plan(uuid.uuid4())  # not even a real plan
+    assert created.plan is None  # still STARTED-or-absent; never SUCCEEDED
+
+
+# ---- S4: an unresolved mutation blocks every new desktop action --------------------------------------------
+
+
+async def test_an_unresolved_mutation_blocks_a_new_focus_scroll_launch_or_plan_proposal(
+    service: DesktopActionService, planning: DesktopPlanningService, desktop: FakeEffectDesktop
+) -> None:
+    plan_id = await build_plan(planning, desktop, result={"schema_version": 1, "action": "invoke", "control_ref": "u7"})
+    view = await service.propose_from_plan(plan_id)
+    desktop.effect_error = RuntimeError("the answer never came back")
+    stuck = await service.approve(view.action_id, expected_revision=view.revision)
+    assert stuck.status is ActionStatus.OUTCOME_UNKNOWN
+
+    with pytest.raises(DesktopActionError) as info:
+        await propose_focus(service, desktop)
+    assert info.value.code == "desktop_action_unresolved"
+
+    with pytest.raises(DesktopActionError):
+        await service.propose_launch(app_id="fake")
+
+    # A new PLAN (a new observation, a new provider call) is refused too -- before Lumi even inspects
+    # the window -- not only later when it would try to fund an execution card.
+    with pytest.raises(DesktopPlanRefusal) as plan_info:
+        await planning.create(
+            objective="Fill in the field", recipient="openai", model="gpt-test",
+            worker_generation=desktop.worker_generation, surface_ref="s1", surface_epoch=1, values=[],
+        )
+    assert plan_info.value.code == "desktop_action_unresolved"
+
+
+async def test_reconcile_succeeded_unblocks_every_other_desktop_action(
+    service: DesktopActionService, planning: DesktopPlanningService, desktop: FakeEffectDesktop
+) -> None:
+    plan_id = await build_plan(planning, desktop, result={"schema_version": 1, "action": "invoke", "control_ref": "u7"})
+    view = await service.propose_from_plan(plan_id)
+    desktop.effect_error = RuntimeError("lost")
+    stuck = await service.approve(view.action_id, expected_revision=view.revision)
+    resolved = await service.reconcile(stuck.action_id, expected_revision=stuck.revision, outcome="succeeded")
+    assert resolved.status is ActionStatus.SUCCEEDED
+    # Now an ordinary proposal works again.
+    fresh = await propose_focus(service, desktop)
+    assert fresh.status is ActionStatus.WAITING_APPROVAL
+
+
+async def test_reconcile_still_unknown_leaves_the_block_in_place(
+    service: DesktopActionService, planning: DesktopPlanningService, desktop: FakeEffectDesktop
+) -> None:
+    plan_id = await build_plan(planning, desktop, result={"schema_version": 1, "action": "invoke", "control_ref": "u7"})
+    view = await service.propose_from_plan(plan_id)
+    desktop.effect_error = RuntimeError("lost")
+    stuck = await service.approve(view.action_id, expected_revision=view.revision)
+    still = await service.reconcile(stuck.action_id, expected_revision=stuck.revision, outcome="still_unknown")
+    assert still.status is ActionStatus.OUTCOME_UNKNOWN
+    with pytest.raises(DesktopActionError):
+        await propose_focus(service, desktop)
+
+
+async def test_reconcile_never_retries_the_effect(
+    service: DesktopActionService, planning: DesktopPlanningService, desktop: FakeEffectDesktop
+) -> None:
+    plan_id = await build_plan(planning, desktop, result={"schema_version": 1, "action": "invoke", "control_ref": "u7"})
+    view = await service.propose_from_plan(plan_id)
+    desktop.effect_error = RuntimeError("lost")
+    stuck = await service.approve(view.action_id, expected_revision=view.revision)
+    await service.reconcile(stuck.action_id, expected_revision=stuck.revision, outcome="failed")
+    assert desktop.calls == ["invoke"], "reconciliation must never call the worker again"
+
+
+async def test_reconcile_refuses_an_outcome_unknown_focus_it_is_not_the_escape_hatch_for(
+    service: DesktopActionService, desktop: FakeEffectDesktop
+) -> None:
+    """Focus/scroll/launch never block on their own `OUTCOME_UNKNOWN` (S3, unchanged), so `reconcile`
+    -- the escape hatch for S4 mutations specifically -- refuses to touch one even if a caller tries."""
+    view = await propose_focus(service, desktop)
+    desktop.effect_error = RuntimeError("lost")
+    stuck = await service.approve(view.action_id, expected_revision=view.revision)
+    assert stuck.status is ActionStatus.OUTCOME_UNKNOWN
+    with pytest.raises(DesktopActionError):
+        await service.reconcile(stuck.action_id, expected_revision=stuck.revision, outcome="succeeded")
+
+
+async def test_reconcile_refuses_an_action_that_is_not_outcome_unknown(
+    service: DesktopActionService, desktop: FakeEffectDesktop
+) -> None:
+    view = await propose_focus(service, desktop)
+    with pytest.raises(DesktopActionError):
+        await service.reconcile(view.action_id, expected_revision=view.revision, outcome="succeeded")
+
+
+# ---- S4: a verification read that itself fails is unknown, never a known non-effect ------------------------
+
+
+async def test_a_set_value_whose_verifying_read_itself_fails_is_outcome_unknown_not_failed(
+    service: DesktopActionService, planning: DesktopPlanningService, desktop: FakeEffectDesktop
+) -> None:
+    """Found by an independent adversarial review of M9 S4: the write itself may have gone through --
+    only the RE-READ that verifies it failed. Reporting that as a known `not_set`/FAILED would let a
+    write whose real effect is genuinely unknown skip the `OUTCOME_UNKNOWN` block entirely."""
+    plan_id = await build_plan(
+        planning, desktop,
+        result={"schema_version": 1, "action": "set_value", "control_ref": "u4", "value_ref": "v1"},
+        values=[("greeting", "hi")],
+    )
+    view = await service.propose_from_plan(plan_id)
+    desktop.set_value_outcome = "uncertain"
+    stuck = await service.approve(view.action_id, expected_revision=view.revision)
+    assert stuck.status is ActionStatus.OUTCOME_UNKNOWN
+    with pytest.raises(DesktopActionError) as info:
+        await propose_focus(service, desktop)
+    assert info.value.code == "desktop_action_unresolved"
+
+
+async def test_a_select_whose_verifying_read_itself_fails_is_outcome_unknown_not_failed(
+    service: DesktopActionService, planning: DesktopPlanningService, desktop: FakeEffectDesktop
+) -> None:
+    plan_id = await build_plan(
+        planning, desktop, result={"schema_version": 1, "action": "select", "container_ref": "u5", "option_ref": "u6"}
+    )
+    view = await service.propose_from_plan(plan_id)
+    desktop.select_outcome = "uncertain"
+    stuck = await service.approve(view.action_id, expected_revision=view.revision)
+    assert stuck.status is ActionStatus.OUTCOME_UNKNOWN
+
+
+# ---- S4: the unresolved-mutation lock also covers confirm/claim, not only plan creation ---------------------
+
+
+async def test_an_unresolved_mutation_blocks_confirming_an_already_created_plan(
+    service: DesktopActionService, planning: DesktopPlanningService, desktop: FakeEffectDesktop
+) -> None:
+    """Found by the same review: the lock was originally checked only at plan `create` and at
+    `propose_from_plan`. A DIFFERENT action can become unresolved in the time between a plan being
+    created and the person clicking to confirm it; confirming anyway would arm a grant `claim` is about
+    to release a real snapshot through."""
+    created = await planning.create(
+        objective="Fill in the field", recipient="openai", model="gpt-test",
+        worker_generation=desktop.worker_generation, surface_ref="s1", surface_epoch=1, values=[],
+    )
+    assert created.card is not None
+    plan_id = await build_plan(planning, desktop, result={"schema_version": 1, "action": "invoke", "control_ref": "u7"})
+    view = await service.propose_from_plan(plan_id)
+    desktop.effect_error = RuntimeError("lost")
+    stuck = await service.approve(view.action_id, expected_revision=view.revision)
+    assert stuck.status is ActionStatus.OUTCOME_UNKNOWN
+
+    with pytest.raises(DesktopPlanRefusal) as info:
+        await planning.confirm(
+            created.task_id, grant_id=created.card.grant_id, expected_revision=created.card.grant_revision
+        )
+    assert info.value.code == "desktop_action_unresolved"
+
+
+async def test_an_unresolved_mutation_blocks_claiming_an_already_confirmed_plan(
+    service: DesktopActionService, planning: DesktopPlanningService, desktop: FakeEffectDesktop
+) -> None:
+    """`claim` is what actually releases the redacted snapshot to a provider; it is the last, and most
+    important, place this must be checked."""
+    created = await planning.create(
+        objective="Fill in the field", recipient="openai", model="gpt-test",
+        worker_generation=desktop.worker_generation, surface_ref="s1", surface_epoch=1, values=[],
+    )
+    assert created.card is not None
+    granted = await planning.confirm(
+        created.task_id, grant_id=created.card.grant_id, expected_revision=created.card.grant_revision
+    )
+    assert granted.phase == "approved"
+
+    plan_id = await build_plan(planning, desktop, result={"schema_version": 1, "action": "invoke", "control_ref": "u7"})
+    view = await service.propose_from_plan(plan_id)
+    desktop.effect_error = RuntimeError("lost")
+    stuck = await service.approve(view.action_id, expected_revision=view.revision)
+    assert stuck.status is ActionStatus.OUTCOME_UNKNOWN
+
+    with pytest.raises(DesktopPlanRefusal) as info:
+        await planning.claim(created.task_id)
+    assert info.value.code == "desktop_action_unresolved"
+
+
+# ---- S4: a value the HTTP schema allows but the domain rejects never surfaces raw ----------------------------
+
+
+async def test_recovery_unsticks_an_action_a_dead_process_left_mid_reconciliation(
+    service: DesktopActionService,
+    planning: DesktopPlanningService,
+    desktop: FakeEffectDesktop,
+    action_service: ActionService,
+    engine: AsyncEngine,
+) -> None:
+    """Found by an independent adversarial review of M9 S4: `begin_reconciliation` and
+    `finish_reconciliation` are two separate committed transactions. A crash between them left an
+    action stuck at `RECONCILING` -- a status the ordinary `reconcile` entrypoint refuses to touch
+    (only `OUTCOME_UNKNOWN` is accepted) and startup recovery never looked for -- so it could never be
+    unstuck by any route. This drives an action to `RECONCILING` and stops, exactly where a crash
+    would leave it, then runs the new startup recovery step directly."""
+    plan_id = await build_plan(planning, desktop, result={"schema_version": 1, "action": "invoke", "control_ref": "u7"})
+    view = await service.propose_from_plan(plan_id)
+    desktop.effect_error = RuntimeError("lost")
+    stuck = await service.approve(view.action_id, expected_revision=view.revision)
+    assert stuck.status is ActionStatus.OUTCOME_UNKNOWN
+
+    # `service.reconcile` would call both steps; only the first is driven here, simulating the crash.
+    await action_service.begin_reconciliation(stuck.action_id, expected_revision=stuck.revision)
+    (mid_status,) = await rows(engine, "SELECT status FROM actions WHERE id = :id", id=stuck.action_id)
+    assert mid_status.status == "RECONCILING"
+
+    recovered = await RecoveryService(engine).recover_interrupted_reconciliations()
+    assert stuck.action_id in recovered
+
+    after = await service.get(stuck.action_id)
+    assert after.status is ActionStatus.OUTCOME_UNKNOWN
+    # The ordinary reconciliation route works again -- it was refused while stuck at RECONCILING.
+    resolved = await service.reconcile(stuck.action_id, expected_revision=after.revision, outcome="succeeded")
+    assert resolved.status is ActionStatus.SUCCEEDED
+
+
+async def test_a_value_with_control_characters_is_refused_without_leaking_it_in_an_exception(
+    planning: DesktopPlanningService, desktop: FakeEffectDesktop
+) -> None:
+    """Found by the same review: `PlanValueBody` only bounds length, so a value containing a control
+    character (a newline, say) reaches `StoredValue`'s own stricter validator, whose raw
+    `pydantic.ValidationError` embeds the offending text. That must never escape as an unhandled
+    exception -- it would otherwise reach a generic error handler and the server's own logs."""
+    with pytest.raises(DesktopPlanRefusal) as info:
+        await planning.create(
+            objective="Fill in the field", recipient="openai", model="gpt-test",
+            worker_generation=desktop.worker_generation, surface_ref="s1", surface_epoch=1,
+            values=[("note", "RAW_CANARY_ORCHID\n")],
+        )
+    assert info.value.code == "value_invalid"
+    assert "RAW_CANARY_ORCHID" not in str(info.value)
+
+
+async def build_ungrounded_plan(
+    planning: DesktopPlanningService, desktop: FakeEffectDesktop, result: dict[str, Any]
+) -> uuid.UUID | None:
+    """Drive the plan to `record_result` and assert it was refused (FAILED), never SUCCEEDED."""
+    created = await planning.create(
+        objective="Fill in the field", recipient="openai", model="gpt-test",
+        worker_generation=desktop.worker_generation, surface_ref="s1", surface_epoch=1,
+        values=[("search text", "hello")],
+    )
+    assert created.card is not None
+    await planning.confirm(created.task_id, grant_id=created.card.grant_id, expected_revision=created.card.grant_revision)
+    context = await planning.claim(created.task_id)
+    recorded = await planning.record_result(created.task_id, plan_id=context.plan_id, result=result, failure=None)
+    assert recorded.phase == "failed"
+    return None

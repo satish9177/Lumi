@@ -44,9 +44,12 @@ from app.desktop.protocol import (
     WORKER_TOKEN_HEADER,
     FocusRequest,
     InputBaselineRequest,
+    InvokeRequest,
     LaunchRequest,
     ObserveRequest,
     ScrollRequest,
+    SelectRequest,
+    SetValueRequest,
     SurfaceListRequest,
     SurfaceListResponse,
     WorkerErrorBody,
@@ -58,7 +61,10 @@ from app.desktop.surfaces import ExclusionPolicy, SurfaceTable, SystemProbe
 logger = logging.getLogger("lumi.desktop.worker")
 
 _T = TypeVar("_T")
-OPERATIONS = ["surfaces", "observe", "input_baseline", "focus", "scroll", "launch"]
+OPERATIONS = [
+    "surfaces", "observe", "input_baseline", "focus", "scroll", "launch",
+    "set_value", "select", "invoke",
+]
 
 
 class WorkerSettings(BaseSettings):
@@ -384,6 +390,32 @@ def create_worker_app(
         if refused is not None:
             return refused
         return await effect("launch", state, lambda: state.effects.launch(body))
+
+    @router.post("/v1/desktop/set-value")
+    async def set_value(request: Request, body: SetValueRequest) -> Response:
+        # `effect()` and this route never log or echo `body.value`: only the outcome enum and the
+        # generation are ever written down.
+        state = current(request)
+        refused = guard(state, body.expected_worker_generation)
+        if refused is not None:
+            return refused
+        return await effect("set_value", state, lambda: state.effects.set_value(body))
+
+    @router.post("/v1/desktop/select")
+    async def select(request: Request, body: SelectRequest) -> Response:
+        state = current(request)
+        refused = guard(state, body.expected_worker_generation)
+        if refused is not None:
+            return refused
+        return await effect("select", state, lambda: state.effects.select(body))
+
+    @router.post("/v1/desktop/invoke")
+    async def invoke(request: Request, body: InvokeRequest) -> Response:
+        state = current(request)
+        refused = guard(state, body.expected_worker_generation)
+        if refused is not None:
+            return refused
+        return await effect("invoke", state, lambda: state.effects.invoke(body))
 
     app = FastAPI(title="Lumi Desktop Worker", version="0.1.0", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.include_router(router)

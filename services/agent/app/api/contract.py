@@ -146,6 +146,9 @@ ERROR_CODES = (
     # Milestone 9 S2: exact desktop disclosure. A refusal, or a state that moved on since the card.
     "desktop_disclosure_refused",
     "desktop_disclosure_state_changed",
+    # Milestone 9 S4: desktop action-planning disclosure. A refusal, or a state that moved on since the card.
+    "desktop_plan_refused",
+    "desktop_plan_state_changed",
     "destination_not_allowed",
     "invalid_action_transition",
     "invalid_booking_criteria",

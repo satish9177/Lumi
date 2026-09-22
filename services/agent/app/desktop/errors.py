@@ -41,6 +41,14 @@ class DesktopReason(StrEnum):
     APP_NOT_REGISTERED = "app_not_registered"
     LAUNCH_REFUSED = "launch_refused"
     DUPLICATE_DISPATCH = "duplicate_dispatch"
+    # S4 effects. Also raised BEFORE an effect could begin.
+    NOT_A_VALUE_CONTROL = "not_a_value_control"
+    READ_ONLY_CONTROL = "read_only_control"
+    SENSITIVE_TARGET_REFUSED = "sensitive_target_refused"
+    NOT_SELECTABLE = "not_selectable"
+    OPTION_WRONG_CONTAINER = "option_wrong_container"
+    NOT_INVOKABLE = "not_invokable"
+    UNSUPPORTED_OR_UNKNOWN_EFFECT = "unsupported_or_unknown_effect"
     # Raised only from the part of an effect that runs after the OS call may have begun.
     EFFECT_UNCERTAIN = "desktop_effect_uncertain"
 
@@ -69,6 +77,13 @@ HTTP_STATUS: dict[DesktopReason, int] = {
     DesktopReason.APP_NOT_REGISTERED: 404,
     DesktopReason.LAUNCH_REFUSED: 409,
     DesktopReason.DUPLICATE_DISPATCH: 409,
+    DesktopReason.NOT_A_VALUE_CONTROL: 409,
+    DesktopReason.READ_ONLY_CONTROL: 409,
+    DesktopReason.SENSITIVE_TARGET_REFUSED: 403,
+    DesktopReason.NOT_SELECTABLE: 409,
+    DesktopReason.OPTION_WRONG_CONTAINER: 409,
+    DesktopReason.NOT_INVOKABLE: 409,
+    DesktopReason.UNSUPPORTED_OR_UNKNOWN_EFFECT: 409,
     DesktopReason.EFFECT_UNCERTAIN: 502,
 }
 

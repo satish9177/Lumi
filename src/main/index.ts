@@ -72,6 +72,8 @@ import { AuthenticatedPlanner } from './agent/authenticated-planner'
 import { FormPlanner } from './agent/form-planner'
 import { DesktopReader } from './agent/desktop-reader'
 import { DesktopReadController } from './services/desktop-read-controller'
+import { DesktopPlanner } from './agent/desktop-planner'
+import { DesktopPlanningController } from './services/desktop-planning-controller'
 import { DesktopActionController } from './services/desktop-action-controller'
 import { ResearchAnswerer } from './agent/research-answer'
 import { ResearchPlanner } from './agent/research-planner'
@@ -1194,13 +1196,23 @@ app.whenReady().then(async () => {
       ? agentRuntime.request(method, path, body, timeoutMs)
       : Promise.reject(new RuntimeUnavailableError())
   }, modelRouter ? new DesktopReader(modelRouter) : undefined)
-  // Milestone 9 S3: trusted focus, semantic scroll and registered-app launch. Its own controller, never a
-  // member of the voice backend, and it never touches a provider.
+  // Milestone 9 S3/S4: trusted focus, semantic scroll, registered-app launch and (S4) the SECOND,
+  // separate execution approval for a validated plan's set-value/select/invoke. Its own controller,
+  // never a member of the voice backend, and it never touches a provider.
   const desktopActions = new DesktopActionController({
     request: (method, path, body, timeoutMs) => agentRuntime
       ? agentRuntime.request(method, path, body, timeoutMs)
       : Promise.reject(new RuntimeUnavailableError())
   })
+  // Milestone 9 S4: bounded desktop-action planning. Its own controller and its own planner, exactly
+  // like S2's reader: the objective and candidate values go to the local runtime, and to the ONE
+  // approved provider only after the trusted click. Disclosure authority only -- see
+  // `DesktopActionController.proposeDesktopActionFromPlan` for where execution review begins.
+  const desktopPlanning = new DesktopPlanningController({
+    request: (method, path, body, timeoutMs) => agentRuntime
+      ? agentRuntime.request(method, path, body, timeoutMs)
+      : Promise.reject(new RuntimeUnavailableError())
+  }, modelRouter ? new DesktopPlanner(modelRouter) : undefined)
   // Milestone 8a S2: screen capture is refused from this process's first
   // instruction and stays refused until durable takeover state has been read.
   // A main-process restart during a live takeover therefore cannot produce a
@@ -1244,6 +1256,7 @@ app.whenReady().then(async () => {
     browserProfiles,
     desktopRead,
     desktopActions,
+    desktopPlanning,
     diagnostics: () => diagnosticsVisible ? diagnostics.list() : [],
     runtimeStatus: () => agentRuntimeView(),
     restartRuntime: async () => {

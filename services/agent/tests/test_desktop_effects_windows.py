@@ -26,7 +26,16 @@ import pytest
 from app.desktop.effects import DesktopEffects
 from app.desktop.errors import DesktopReason, DesktopRefusal
 from app.desktop.observer import DesktopObserver
-from app.desktop.protocol import FocusRequest, LaunchRequest, ScrollRequest, ScrollStep
+from app.desktop.protocol import (
+    FocusRequest,
+    InvokeEffect,
+    InvokeRequest,
+    LaunchRequest,
+    ScrollRequest,
+    ScrollStep,
+    SelectRequest,
+    SetValueRequest,
+)
 from app.desktop.registry import AppRegistry, RegisteredApp
 from app.desktop.surfaces import ExclusionPolicy, SurfaceTable
 from app.desktop.worker import UiaThread
@@ -107,6 +116,17 @@ def focus_request(world: RealWorld, ref: str, epoch: int, tick: int) -> FocusReq
 def untouched(app: FixtureApp) -> None:
     counters = app.dump()
     assert {key: counters[key] for key in UNTOUCHED} == dict.fromkeys(UNTOUCHED, 0), counters
+
+
+def untouched_except(app: FixtureApp, allowed: tuple[str, ...]) -> dict[str, int]:
+    """Every counter in `UNTOUCHED` is zero except the ones named (which the caller checks itself, with
+    whatever lower bound is meaningful for that message). Proves an S4 effect caused only the kind of
+    change it names and nothing else: no click beyond the one asked for, no key, mouse, focus theft or
+    extra edit/selection. Returns the full dump so the caller can assert on the allowed counters."""
+    counters = app.dump()
+    zero_expected = {key: 0 for key in UNTOUCHED if key not in allowed}
+    assert {key: counters[key] for key in zero_expected} == zero_expected, counters
+    return counters
 
 
 def test_focus_brings_a_background_window_to_the_front_through_ui_automation_only(tmp_path: Path, world: RealWorld) -> None:
@@ -261,3 +281,102 @@ def test_the_launched_application_did_not_inherit_the_worker_credentials(tmp_pat
         assert "LUMI_DESKTOP_TOKEN" not in launch_environment()
     finally:
         del os.environ["LUMI_DESKTOP_TOKEN"]
+
+
+# ---- S4: bounded semantic mutations, against the real fixture and real UIA ---------------------------------
+#
+# The fixture's main EDIT and LISTBOX already exist (S1); nothing here needed a fixture change. Its
+# message counters (`edit_changes`, `selection_changes`, `button_clicks`) were already wired to the exact
+# Win32 notifications (`EN_CHANGE`, `LBN_SELCHANGE`, `BN_CLICKED`) a real `SetValue`/`Select`/`Invoke`
+# causes, so a real effect can be told apart from every other kind of message with the same rigor S3 used.
+
+
+def test_set_value_writes_the_exact_text_through_valuepattern_and_verifies_it(tmp_path: Path, world: RealWorld) -> None:
+    with fixture(tmp_path) as app:
+        ref, epoch = world.surface(app.title)
+        observation = world.run(lambda: world.observer.observe(ref, epoch))
+        field = next(n for n in observation.nodes if n.role.value == "edit" and "value" in {p.value for p in n.patterns})
+        tick = world.quiet_baseline()
+        request = SetValueRequest(
+            expected_worker_generation=world.generation, dispatch_id=uuid.uuid4(), surface_ref=ref,
+            surface_epoch=epoch, observation_id=observation.observation_id, control_ref=field.control_ref,
+            value="Lumi wrote this", input_tick=tick,
+        )
+        answer = world.run(lambda: world.effects.set_value(request))
+        assert answer.outcome == "set"
+        # Read back through a FRESH observation (control refs are only valid within the observation
+        # they came from, so the old ref is never compared against the new one) and through real UIA.
+        fresh = world.run(lambda: world.observer.observe(ref, epoch))
+        written = next(n for n in fresh.nodes if n.role.value == "edit" and n.text == "Lumi wrote this")
+        assert written.text == "Lumi wrote this"
+        # A real edit-changed notification and a real text-set message; nothing else moved.
+        counters = untouched_except(app, ("edit_changes", "settext_msgs"))
+        assert counters["edit_changes"] >= 1 and counters["settext_msgs"] >= 1
+        # The old observation's refs are dead: the effect kills the control table before it acts
+        # (`_kill_old_refs`). Against a real window, the very next real observation can independently
+        # decide the surface itself moved to a new epoch (`observer.py`'s `_project`/
+        # `structurally_different`, driven by whatever the live tree actually looked like at that
+        # moment -- not something this test controls). Either refusal proves the same security property
+        # -- this exact (surface_ref, surface_epoch, observation_id, control_ref) tuple can never be
+        # replayed -- so both are accepted rather than pinning one incidental real-world ordering.
+        with pytest.raises(DesktopRefusal) as info:
+            world.run(lambda: world.effects.set_value(request.model_copy(update={"dispatch_id": uuid.uuid4()})))
+        assert info.value.code in (DesktopReason.STALE_CONTROL, DesktopReason.STALE_SURFACE)
+
+
+def test_select_chooses_the_exact_listbox_item_through_selectionitem_and_verifies_it(tmp_path: Path, world: RealWorld) -> None:
+    with fixture(tmp_path) as app:
+        ref, epoch = world.surface(app.title)
+        observation = world.run(lambda: world.observer.observe(ref, epoch))
+        items = [n for n in observation.nodes if n.role.value == "list_item" and n.name in ("One", "Two", "Three")]
+        assert {n.name for n in items} == {"One", "Two", "Three"}, [(n.role.value, n.name) for n in observation.nodes]
+        container = next(n for n in observation.nodes if n.control_ref == items[0].parent_ref)
+        target = next(n for n in items if n.name == "Three")
+        tick = world.quiet_baseline()
+        request = SelectRequest(
+            expected_worker_generation=world.generation, dispatch_id=uuid.uuid4(), surface_ref=ref,
+            surface_epoch=epoch, observation_id=observation.observation_id, container_ref=container.control_ref,
+            option_ref=target.control_ref, input_tick=tick,
+        )
+        answer = world.run(lambda: world.effects.select(request))
+        assert answer.outcome == "selected"
+        fresh = world.run(lambda: world.observer.observe(ref, epoch))
+        now_selected = next(n for n in fresh.nodes if n.role.value == "list_item" and n.selected is True)
+        assert now_selected.name == "Three"
+        counters = untouched_except(app, ("selection_changes",))
+        assert counters["selection_changes"] >= 1
+
+
+def test_invoking_a_control_that_does_not_change_is_a_known_failure_never_a_guess(tmp_path: Path, world: RealWorld) -> None:
+    """The fixture's Submit button really is pressed (proving Invoke fired for real) but does not
+    rename itself, so `NAME_TOGGLE` reports the known, honest `no_change` outcome -- never `invoked`.
+    A control whose Invoke effect is genuinely verifiable end to end needs a fixture control that
+    renames itself on press, which this fixture does not yet have; that path stays fake-tested only
+    (see `test_desktop_effects.py`), a documented residual.
+
+    The fixture's Submit button is a plain Win32 BUTTON with no native UI Automation provider, so
+    Windows itself services `InvokePattern.Invoke()` through its legacy/MSAA accessibility bridge --
+    and that bridge's own implementation, not any code of Lumi's, brings the window to the foreground
+    and synthesizes the click messages a real mouse click would produce (see
+    `docs/reviews/milestone-9-s4.md`'s Invoke residual section). `uia_backend.py`'s `invoke()` makes
+    exactly one COM call, `pattern.Invoke()`; it is the OS's own legacy provider, not Lumi, that turns
+    that into `bm_click_msgs`/`mouse_msgs`/`activations` here. A control with a native UIA provider
+    (most modern WinUI/WPF/UWP apps) does not need this bridge and would not show these counters move."""
+    with fixture(tmp_path) as app:
+        ref, epoch = world.surface(app.title)
+        observation = world.run(lambda: world.observer.observe(ref, epoch))
+        submit = next(n for n in observation.nodes if n.role.value == "button" and n.name == "Submit")
+        tick = world.quiet_baseline()
+        request = InvokeRequest(
+            expected_worker_generation=world.generation, dispatch_id=uuid.uuid4(), surface_ref=ref,
+            surface_epoch=epoch, observation_id=observation.observation_id, control_ref=submit.control_ref,
+            effect=InvokeEffect.NAME_TOGGLE, input_tick=tick,
+        )
+        answer = world.run(lambda: world.effects.invoke(request))
+        assert answer.outcome == "no_change"
+        # The click really happened (Invoke is not a no-op); nothing else did. `bm_click_msgs`,
+        # `mouse_msgs` and `activations` are the OS's own legacy-bridge mechanics for a plain Win32
+        # button (see the docstring above) and are allowed here; every OTHER counter -- edit, selection,
+        # key, window-move/close and password-read -- must still be exactly zero.
+        counters = untouched_except(app, ("button_clicks", "bm_click_msgs", "mouse_msgs", "activations"))
+        assert counters["button_clicks"] == 1

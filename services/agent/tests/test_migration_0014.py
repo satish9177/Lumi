@@ -15,6 +15,7 @@ def test_migration_0014_adds_exactly_the_dispatch_table_and_downgrades_cleanly(m
     url = migrated_database_url
     truncate_all(url)
     try:
+        downgrade(url, "0014")  # S4 (0015) sits on top; this test pins 0014's exact column set
         assert revision(url) == "0014" and exists(url, "desktop_dispatches")
         assert columns(url, "desktop_dispatches") == {
             "id", "action_id", "attempt_id", "worker_generation", "operation", "surface_ref", "surface_epoch",
@@ -26,7 +27,7 @@ def test_migration_0014_adds_exactly_the_dispatch_table_and_downgrades_cleanly(m
         downgrade(url, "0013")
         assert revision(url) == "0013" and not exists(url, "desktop_dispatches")
         assert exists(url, "desktop_disclosures") and exists(url, "desktop_observations")
-        migrate(url)
+        migrate(url, "0014")
         assert revision(url) == "0014" and exists(url, "desktop_dispatches")
     finally:
         migrate(url)

@@ -83,8 +83,9 @@ async def test_the_runtime_requires_its_bearer_credential(quiet_settings: Settin
 
 
 def test_the_runtime_exposes_exactly_the_reviewed_desktop_routes_and_no_verbs(quiet_settings: Settings) -> None:
-    """S1 exposed exactly two routes. S2 adds exactly the disclosure routes, ON PURPOSE, and this pins the
-    complete set: still no route that focuses, invokes, types, selects, scrolls, clicks or launches."""
+    """S1 exposed exactly two routes. Each later slice adds exactly its own routes, ON PURPOSE, and this
+    pins the complete set: still no route that types, drags, scrolls with a coordinate, clicks with a
+    coordinate, uses a key/hotkey, reads the clipboard or runs a shell command."""
     paths = create_app(quiet_settings).openapi()["paths"]
     desktop = {path: sorted(methods) for path, methods in paths.items() if "desktop" in path}
     assert desktop == {
@@ -99,17 +100,28 @@ def test_the_runtime_exposes_exactly_the_reviewed_desktop_routes_and_no_verbs(qu
         "/desktop/read-tasks/{task_id}/revoke": ["post"],
         "/desktop/read-tasks/{task_id}/disclosure": ["post"],
         "/desktop/read-tasks/{task_id}/result": ["post"],
-        # S3: exactly three effects, each behind an exact approval. Still no verb that invokes, types, selects,
-        # clicks or takes a handle, a path, an argument or a coordinate.
+        # S4: exact desktop action-planning disclosure. Disclosure authority only; nothing here runs.
+        "/desktop/action-plans": ["post"],
+        "/desktop/action-plans/latest": ["get"],
+        "/desktop/action-plans/{task_id}": ["get"],
+        "/desktop/action-plans/{task_id}/grant": ["post"],
+        "/desktop/action-plans/{task_id}/revoke": ["post"],
+        "/desktop/action-plans/{task_id}/claim": ["post"],
+        "/desktop/action-plans/{task_id}/result": ["post"],
+        # S3/S4: exactly six effects, each behind an exact approval. Still no verb that types, drags or
+        # takes a handle, a path, an argument or a coordinate; SetValue/Select/Invoke take only opaque
+        # refs and reach the ledger only through `from-plan`, never directly from a proposal body.
         "/desktop/actions/apps": ["get"],
         "/desktop/actions/focus": ["post"],
         "/desktop/actions/scroll": ["post"],
         "/desktop/actions/launch": ["post"],
         "/desktop/actions/scroll-targets": ["post"],
+        "/desktop/actions/from-plan": ["post"],
         "/desktop/actions/latest": ["get"],
         "/desktop/actions/{action_id}": ["get"],
         "/desktop/actions/{action_id}/approve": ["post"],
         "/desktop/actions/{action_id}/decline": ["post"],
+        "/desktop/actions/{action_id}/reconcile": ["post"],
     }
 
 

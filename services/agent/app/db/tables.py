@@ -444,7 +444,8 @@ task_grants = Table(
         name="status",
     ),
     CheckConstraint(
-        "kind IN ('public_research', 'authenticated_read', 'form_prepare', 'desktop_disclose')",
+        "kind IN ('public_research', 'authenticated_read', 'form_prepare', 'desktop_disclose', "
+        "'desktop_action_plan')",
         name="kind",
     ),
     CheckConstraint(
@@ -1184,10 +1185,14 @@ desktop_answers = Table(
 )
 
 
-#: Milestone 9 S3. One row per request to the desktop worker for ONE effect (focus, scroll, launch), written
-#: and committed before the worker is called. `attempt_id` is UNIQUE. Identifiers, opaque refs, digests and
-#: closed codes only: never a title, control text, path, handle, coordinate or typed value.
-DESKTOP_DISPATCH_OPERATIONS = ("focus_surface", "scroll_control", "launch_app")
+#: Milestone 9 S3/S4. One row per request to the desktop worker for ONE effect (focus, scroll, launch,
+#: and -- S4 -- set-value, select, invoke), written and committed before the worker is called.
+#: `attempt_id` is UNIQUE. Identifiers, opaque refs, digests and closed codes only: never a title,
+#: control text, path, handle, coordinate or typed value.
+DESKTOP_DISPATCH_OPERATIONS = (
+    "focus_surface", "scroll_control", "launch_app",
+    "set_control_value", "select_control", "invoke_control",
+)
 DESKTOP_DISPATCH_STATUSES = ("DISPATCHED", "OK", "FAILED_BEFORE_EFFECT", "OUTCOME_UNKNOWN")
 
 desktop_dispatches = Table(
@@ -1218,6 +1223,9 @@ desktop_dispatches = Table(
     Column("snapshot_digest", String(64), nullable=True),
     Column("control_ref", String(4), nullable=True),
     Column("app_id", String(32), nullable=True),
+    Column("value_ref", String(4), nullable=True),
+    Column("option_container_ref", String(4), nullable=True),
+    Column("invoke_effect", String(32), nullable=True),
     Column("input_tick", BigInteger(), nullable=False),
     Column("status", String(24), nullable=False),
     Column("error_code", String(64), nullable=True),
@@ -1234,14 +1242,34 @@ desktop_dispatches = Table(
     CheckConstraint("snapshot_digest IS NULL OR snapshot_digest ~ '^[0-9a-f]{64}$'", name="digest_format"),
     CheckConstraint("input_tick >= 0 AND input_tick <= 4294967295", name="input_tick_range"),
     CheckConstraint("result IS NULL OR jsonb_typeof(result) = 'object'", name="result_object"),
+    CheckConstraint("value_ref IS NULL OR value_ref ~ '^v([1-9]|10)$'", name="value_ref_shape"),
+    CheckConstraint(
+        "option_container_ref IS NULL OR option_container_ref ~ '^u([1-9][0-9]?|1[0-9][0-9]|200)$'",
+        name="option_container_ref_shape",
+    ),
+    CheckConstraint("invoke_effect IS NULL OR invoke_effect IN ('name_toggle')", name="invoke_effect_shape"),
     CheckConstraint(
         "(operation = 'focus_surface' AND surface_ref IS NOT NULL AND surface_epoch IS NOT NULL "
-        "AND control_ref IS NULL AND app_id IS NULL) "
+        "AND control_ref IS NULL AND app_id IS NULL AND value_ref IS NULL AND option_container_ref IS NULL "
+        "AND invoke_effect IS NULL) "
         "OR (operation = 'scroll_control' AND surface_ref IS NOT NULL AND surface_epoch IS NOT NULL "
         "AND observation_id IS NOT NULL AND snapshot_digest IS NOT NULL AND control_ref IS NOT NULL "
-        "AND app_id IS NULL) "
+        "AND app_id IS NULL AND value_ref IS NULL AND option_container_ref IS NULL AND invoke_effect IS NULL) "
         "OR (operation = 'launch_app' AND app_id IS NOT NULL AND surface_ref IS NULL "
-        "AND control_ref IS NULL AND observation_id IS NULL)",
+        "AND control_ref IS NULL AND observation_id IS NULL AND value_ref IS NULL "
+        "AND option_container_ref IS NULL AND invoke_effect IS NULL) "
+        "OR (operation = 'set_control_value' AND surface_ref IS NOT NULL AND surface_epoch IS NOT NULL "
+        "AND observation_id IS NOT NULL AND snapshot_digest IS NOT NULL AND control_ref IS NOT NULL "
+        "AND value_ref IS NOT NULL AND app_id IS NULL AND option_container_ref IS NULL "
+        "AND invoke_effect IS NULL) "
+        "OR (operation = 'select_control' AND surface_ref IS NOT NULL AND surface_epoch IS NOT NULL "
+        "AND observation_id IS NOT NULL AND snapshot_digest IS NOT NULL AND control_ref IS NOT NULL "
+        "AND option_container_ref IS NOT NULL AND app_id IS NULL AND value_ref IS NULL "
+        "AND invoke_effect IS NULL) "
+        "OR (operation = 'invoke_control' AND surface_ref IS NOT NULL AND surface_epoch IS NOT NULL "
+        "AND observation_id IS NOT NULL AND snapshot_digest IS NOT NULL AND control_ref IS NOT NULL "
+        "AND invoke_effect IS NOT NULL AND app_id IS NULL AND value_ref IS NULL "
+        "AND option_container_ref IS NULL)",
         name="operation_identity",
     ),
 )
@@ -1250,4 +1278,53 @@ Index(
     "ix_desktop_dispatches_in_flight",
     desktop_dispatches.c.status,
     postgresql_where=text("status = 'DISPATCHED'"),
+)
+
+
+#: Milestone 9 S4. One row per planning-disclosure attempt: an approved, redacted, bounded snapshot
+#: (plus the trusted local value descriptors -- never raw values) shown to ONE provider, and the ONE
+#: closed action it proposed back. `grant_id` and `task_id` are UNIQUE, exactly like
+#: `desktop_disclosures`: one planning approval funds one claim. This is disclosure authority, not
+#: execution authority: the proposed action still needs its own separate, exact approval on the
+#: ordinary action ledger (a `DESKTOP_SET_VALUE` / `DESKTOP_SELECT` / `DESKTOP_INVOKE` action) before
+#: any effect exists.
+DESKTOP_PLAN_STATUSES = ("STARTED", "SUCCEEDED", "FAILED", "OUTCOME_UNKNOWN")
+
+desktop_action_plans = Table(
+    "desktop_action_plans",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False),
+    Column("grant_id", Uuid(), ForeignKey("task_grants.id", ondelete="RESTRICT"), nullable=False),
+    Column("observation_id", Uuid(), nullable=False),
+    Column("snapshot_digest", String(64), nullable=False),
+    Column("recipient", String(16), nullable=False),
+    Column("model", String(64), nullable=False),
+    Column("projection_digest", String(64), nullable=False),
+    Column("node_count", Integer(), nullable=False),
+    Column("text_bytes", Integer(), nullable=False),
+    Column("redaction_count", Integer(), nullable=False),
+    Column("truncated", Boolean(), nullable=False),
+    Column("status", String(20), nullable=False),
+    Column("proposed_action", JSONB(), nullable=True),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("error_code", String(40), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("grant_id", name="uq_desktop_action_plans_grant_id"),
+    UniqueConstraint("task_id", name="uq_desktop_action_plans_task_id"),
+    CheckConstraint(
+        "status IN (" + ", ".join(f"'{status}'" for status in DESKTOP_PLAN_STATUSES) + ")", name="status"
+    ),
+    CheckConstraint("snapshot_digest ~ '^[0-9a-f]{64}$'", name="snapshot_digest_format"),
+    CheckConstraint("projection_digest ~ '^[0-9a-f]{64}$'", name="projection_digest_format"),
+    CheckConstraint("node_count >= 0 AND text_bytes >= 0 AND redaction_count >= 0", name="counts_non_negative"),
+    CheckConstraint("(status = 'STARTED') = (finished_at IS NULL)", name="finished_when_not_started"),
+    CheckConstraint(
+        "(status IN ('FAILED', 'OUTCOME_UNKNOWN')) = (error_code IS NOT NULL)", name="error_code_when_not_ok"
+    ),
+    CheckConstraint("(status = 'SUCCEEDED') = (proposed_action IS NOT NULL)", name="proposal_when_succeeded"),
+    CheckConstraint(
+        "proposed_action IS NULL OR jsonb_typeof(proposed_action) = 'object'", name="proposal_is_object"
+    ),
 )

@@ -65,12 +65,15 @@ async def running(harness: Harness) -> AsyncIterator[tuple[httpx.AsyncClient, An
             yield client, app.state.desktop
 
 
-async def test_health_reports_the_generation_and_exactly_two_operations() -> None:
+async def test_health_reports_the_generation_and_exactly_the_reviewed_operations() -> None:
     async with running(Harness()) as (client, state):
         response = await client.get("/health")
         identity = WorkerIdentity.model_validate(response.json())
         assert identity.worker_generation == state.generation
-        assert identity.operations == ["surfaces", "observe", "input_baseline", "focus", "scroll", "launch"]
+        assert identity.operations == [
+            "surfaces", "observe", "input_baseline", "focus", "scroll", "launch",
+            "set_value", "select", "invoke",
+        ]
 
 
 async def test_no_credential_and_a_wrong_credential_are_refused_on_every_route() -> None:
@@ -114,8 +117,8 @@ async def test_the_credential_is_compared_in_constant_time(monkeypatch: pytest.M
     ("method", "path"),
     [
         ("GET", "/"), ("GET", "/docs"), ("GET", "/openapi.json"), ("POST", "/v1/desktop/execute"),
-        ("POST", "/v1/desktop/action"), ("POST", "/v1/desktop/automation"), ("POST", "/v1/desktop/invoke"),
-        ("POST", "/v1/desktop/set-value"), ("POST", "/v1/desktop/select"), ("POST", "/v1/desktop/mouse"),
+        ("POST", "/v1/desktop/action"), ("POST", "/v1/desktop/automation"), ("POST", "/v1/desktop/toggle"),
+        ("POST", "/v1/desktop/drag"), ("POST", "/v1/desktop/send-input"), ("POST", "/v1/desktop/mouse"),
         ("POST", "/v1/desktop/keys"), ("POST", "/v1/desktop/run"), ("POST", "/v1/desktop/launch-path"),
         ("POST", "/v1/desktop/click"), ("POST", "/v1/desktop/type"), ("GET", "/v1/desktop/surfaces"),
         ("PUT", "/v1/desktop/observe"), ("POST", "/v1/dispatch"), ("POST", "/v1/sessions/open"),
@@ -128,7 +131,16 @@ async def test_unknown_routes_are_404_and_no_action_route_exists(method: str, pa
         assert response.status_code == 404 or path in ("/v1/desktop/surfaces", "/v1/desktop/observe")
 
 
-async def test_the_route_table_is_exactly_health_two_reads_and_three_reviewed_effects() -> None:
+@pytest.mark.parametrize("path", ["/v1/desktop/invoke", "/v1/desktop/set-value", "/v1/desktop/select"])
+async def test_s4_mutation_routes_exist_and_validate_their_body_but_nothing_else_desktop_shaped_does(path: str) -> None:
+    """S4 reviews and opens exactly these three routes (S3's `focus`/`scroll`/`launch` all already
+    exist too); an empty body is a validation error (422, the route is real and typed), never a 404."""
+    async with running(Harness()) as (client, _):
+        response = await client.post(path, json={})
+        assert response.status_code == 422
+
+
+async def test_the_route_table_is_exactly_health_two_reads_and_six_reviewed_effects() -> None:
     schema = Harness().app().openapi()["paths"]
     assert {(path, tuple(sorted(methods))) for path, methods in schema.items()} == {
         ("/health", ("get",)),
@@ -138,6 +150,9 @@ async def test_the_route_table_is_exactly_health_two_reads_and_three_reviewed_ef
         ("/v1/desktop/focus", ("post",)),
         ("/v1/desktop/scroll", ("post",)),
         ("/v1/desktop/launch", ("post",)),
+        ("/v1/desktop/set-value", ("post",)),
+        ("/v1/desktop/select", ("post",)),
+        ("/v1/desktop/invoke", ("post",)),
     }
 
 

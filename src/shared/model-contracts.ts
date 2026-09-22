@@ -36,7 +36,15 @@ export const MODEL_TASK_CLASSES = [
    * Milestone 9 S2: answer one typed question from ONE redacted, user-approved desktop snapshot.
    * Private, one recipient, no failover, no image, read-only output.
    */
-  'desktop_planning'
+  'desktop_planning',
+  /**
+   * Milestone 9 S4: propose exactly ONE bounded semantic desktop action (invoke/set-value/select) from
+   * ONE redacted, user-approved desktop snapshot plus the person's own candidate value descriptors.
+   * Private, one recipient, no failover, no image. Distinct from `desktop_planning` (S2, read-only
+   * answers): this class's output is validated and still needs its own separate, exact execution
+   * approval before anything runs -- disclosure authority, never execution authority.
+   */
+  'desktop_action_planning'
 ] as const
 export type ModelTaskClass = typeof MODEL_TASK_CLASSES[number]
 

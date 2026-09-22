@@ -7,6 +7,7 @@ import { scriptedAuthenticatedAnswer } from '../agent/authenticated-answer'
 import { scriptedAuthenticatedDecision } from '../agent/authenticated-planner'
 import { scriptedFormPlanDecision } from '../agent/form-planner'
 import { scriptedDesktopRead } from '../agent/desktop-reader'
+import { scriptedDesktopPlan } from '../agent/desktop-planner'
 import { scriptedResearchAnswer } from '../agent/research-answer'
 import { scriptedResearchDecision } from '../agent/research-planner'
 import { AUTHENTICATED_OPERATIONS, RESEARCH_OPERATIONS, type AgentAuthenticatedOperation, type AgentResearchOperation } from '../../shared/agent-contracts'
@@ -45,6 +46,7 @@ export class ScriptedTextProvider implements ModelProvider {
     if (request.taskClass === 'authenticated_answer') return this.authenticatedAnswer(request)
     if (request.taskClass === 'form_planning') return this.formPlanning(request)
     if (request.taskClass === 'desktop_planning') return this.desktopRead(request)
+    if (request.taskClass === 'desktop_action_planning') return this.desktopPlan(request)
     switch (this.behaviour) {
       case 'timeout':
         throw new ModelProviderError('timeout')
@@ -190,6 +192,27 @@ export class ScriptedTextProvider implements ModelProvider {
     return this.reply(JSON.stringify(result.kind === 'answer'
       ? { schemaVersion: 1, kind: 'answer', answer: result.answer, evidence: result.evidence.map((item) => ({ controlRef: item.control_ref, quote: item.quote })) }
       : { schemaVersion: 1, kind: 'cannot_answer', reason: result.reason }))
+  }
+
+  private desktopPlan(request: ModelRequest): ModelResponse {
+    const failure = this.behaviourFailure()
+    if (failure) return failure
+    if (this.behaviour === 'malformed') {
+      // Structurally JSON, semantically an attempt to smuggle a raw value into a closed action.
+      return this.reply(JSON.stringify({ schemaVersion: 1, action: 'set_value', controlRef: 'u1', value: 'attacker text' }))
+    }
+    if (this.behaviour === 'hostile') {
+      // Well-formed but referring to a control the snapshot never printed.
+      return this.reply(JSON.stringify({ schemaVersion: 1, action: 'invoke', controlRef: 'u199' }))
+    }
+    const result = scriptedDesktopPlan(extractUntrusted(request.input))
+    return this.reply(JSON.stringify(
+      result.action === 'invoke'
+        ? { schemaVersion: 1, action: 'invoke', controlRef: result.control_ref }
+        : result.action === 'set_value'
+          ? { schemaVersion: 1, action: 'set_value', controlRef: result.control_ref, valueRef: result.value_ref }
+          : { schemaVersion: 1, action: 'select', containerRef: result.container_ref, optionRef: result.option_ref }
+    ))
   }
 
   private formPlanning(request: ModelRequest): ModelResponse {

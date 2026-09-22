@@ -1,10 +1,14 @@
-"""Milestone 9 S3: trusted focus, semantic scroll and registered-application launch, through the action ledger.
+"""Milestone 9 S3/S4: trusted focus, semantic scroll, registered-application launch, and bounded
+semantic mutations (set value / select / invoke), through the action ledger.
 
 Nothing here is a parallel ledger. A desktop effect is an `actions` row with an exact `approvals` row, an
-`action_attempts` row and (new) a `desktop_dispatches` row, exactly as a browser effect is. The order is the
+`action_attempts` row and a `desktop_dispatches` row, exactly as a browser effect is. The order is the
 same one that makes a browser booking safe:
 
-    build the proposal from live, trusted facts        (the person picked a surface / control / app)
+    build the proposal from live, trusted facts        (S3: the person picked a surface/control/app.
+                                                          S4: a validated model proposal, re-verified
+                                                          against a fresh projection and re-resolved
+                                                          live facts -- see `propose_from_plan`)
     -> request an exact approval for that proposal     (the card shows exactly what will happen)
     -> the person clicks Approve
     -> take the human-input baseline                   (after the click, so the click is not "takeover")
@@ -15,11 +19,16 @@ same one that makes a browser booking safe:
 
 A worker answer that is lost, late or addressed to somebody else is `OUTCOME_UNKNOWN` and is never retried. A
 runtime that dies between the commit and the answer leaves an unfinished attempt that `RecoveryService` turns
-into `OUTCOME_UNKNOWN` and closes this dispatch. Focus and scroll are recoverable by a fresh observation and a
-NEW approval; nothing here ever repeats an effect on its own.
+into `OUTCOME_UNKNOWN` and closes this dispatch. Focus, scroll and launch are recoverable by a fresh
+observation and a NEW approval; nothing here ever repeats an effect on its own. The three S4 mutations are
+NOT recoverable this way: an unresolved (`OUTCOME_UNKNOWN`/`RECONCILING`) mutation blocks every new desktop
+action -- of any operation, in any task -- until it is reconciled (see `reconcile`).
 
-Desktop disclosure (S2) is not authority for any of this: there is no path from a `desktop_disclose` grant to
-these actions, and these actions take no grant.
+Desktop disclosure (S2) and desktop action planning (S4, `app.services.desktop_planning`) are not execution
+authority for any of this: there is no path from a `desktop_disclose` or `desktop_action_plan` grant straight
+to an effect. A plan's validated proposal only ever reaches `propose_from_plan`, which independently re-reads
+and re-verifies everything before it opens an ordinary WAITING_APPROVAL card -- a second, separate, exact
+approval the plan itself cannot grant.
 """
 
 import asyncio
@@ -27,12 +36,22 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.desktop.errors import DesktopReason, DesktopRefusal
-from app.desktop.protocol import FocusRequest, LaunchRequest, ScrollRequest, ScrollStep, clean_text
+from app.desktop.protocol import (
+    FocusRequest,
+    InvokeEffect,
+    InvokeRequest,
+    LaunchRequest,
+    ScrollRequest,
+    ScrollStep,
+    SelectRequest,
+    SetValueRequest,
+    clean_text,
+)
 from app.desktop.registry import AppRegistry
 from app.domain.action_status import ActionStatus, AttemptOutcome
 from app.domain.desktop_actions import (
@@ -44,22 +63,33 @@ from app.domain.desktop_actions import (
     DesktopOperation,
     DesktopProposal,
     FocusProposal,
+    InvokeProposal,
     LaunchProposal,
     ScrollProposal,
+    SelectProposal,
+    SetValueProposal,
     dump_proposal,
     outcome_for_refusal,
     parse_proposal,
 )
+from app.domain.desktop_disclosure import build_projection
+from app.domain.desktop_planning import InvokeAction, SelectAction, SetValueAction, parse_planned_action
 from app.repositories.actions import ActionRecord, AttemptRecord
 from app.repositories.desktop import DesktopRepository
 from app.repositories.desktop_actions import DesktopActionRepository
+from app.repositories.desktop_planning import DesktopPlanningRepository
 from app.services.actions import ActionService, ActionView
 from app.services.desktop import DesktopService
 from app.services.tasks import TaskService
 
 logger = logging.getLogger("lumi.desktop.actions")
 
-_VERIFIED_NO_CHANGE: Final = frozenset({"not_focused", "scroll_no_change"})
+_VERIFIED_NO_CHANGE: Final = frozenset({"not_focused", "scroll_no_change", "not_set", "not_selected", "no_change"})
+#: Proposal types whose target must be re-verified against a fresh observation at claim time: every S4
+#: mutation, exactly like S3's scroll.
+_FRESHNESS_CHECKED = (ScrollProposal, SetValueProposal, SelectProposal, InvokeProposal)
+#: Proposal types built from a plan (`propose_from_plan`): the only ones carrying `plan_id`.
+_PLAN_DERIVED = (SetValueProposal, SelectProposal, InvokeProposal)
 
 
 class DesktopActionError(Exception):
@@ -195,6 +225,115 @@ class DesktopActionService:
         )
         return await self._open(proposal)
 
+    # ---- S4: from a validated plan to an ordinary, separately-approvable execution proposal --------
+
+    async def propose_from_plan(self, plan_id: uuid.UUID) -> DesktopActionView:
+        """Turn one SUCCEEDED `desktop_action_plans` row into an ordinary `DESKTOP_SET_VALUE` /
+        `DESKTOP_SELECT` / `DESKTOP_INVOKE` action, awaiting its own separate exact approval.
+
+        Disclosure to a model is not execution authority: nothing here trusts the plan's own recorded
+        `proposed_action` blindly. Every fact that matters is re-read and re-verified from scratch --
+        the plan is STARTED->SUCCEEDED and unconsumed by an action already, the observation still
+        exists at exactly the digest the plan claimed, the projection rebuilt from it still contains
+        every ref the action names, and (for `set_value`) the value ref still resolves inside the
+        grant's own immutable scope. A live worker generation and a fresh identity are re-proved again,
+        a second time, by the worker itself immediately before the effect -- this method only decides
+        whether a card may be shown at all.
+        """
+        async with self._engine.connect() as connection:
+            plan_repository = DesktopPlanningRepository(connection)
+            plan = await plan_repository.get_plan(plan_id)
+            grant = await plan_repository.get_grant(plan.grant_id) if plan is not None else None
+        if plan is None or grant is None or plan.status != "SUCCEEDED" or plan.proposed_action is None:
+            raise DesktopActionError("desktop_plan_not_ready")
+        async with self._engine.connect() as connection:
+            existing = await DesktopActionRepository(connection).action_for_plan(plan_id)
+        if existing is not None:
+            # A plan proposes at most one execution card, ever: replaying `record_result`'s caller
+            # (a retried HTTP request, for instance) must not open a second one.
+            raise DesktopActionError("desktop_plan_already_opened", action_id=existing)
+        scope = grant.scope
+        if _age_seconds(scope.observed_at) > ACTION_OBSERVATION_MAX_AGE_SECONDS:
+            raise DesktopActionError("desktop_action_observation_stale")
+        async with self._engine.connect() as connection:
+            record = await DesktopRepository(connection).get_observation(scope.observation_id)
+        if record is None or record.snapshot_digest != scope.snapshot_digest:
+            raise DesktopActionError("desktop_action_observation_stale")
+        projection = build_projection(
+            record.snapshot, observed_at=scope.observed_at, max_nodes=scope.max_nodes,
+            max_text_bytes=scope.max_text_bytes, withhold=scope.withheld(),
+        )
+        action = parse_planned_action(plan.proposed_action)
+        label, title = scope.display.application_label, scope.display.window_title
+        proposal: DesktopProposal
+        if isinstance(action, InvokeAction):
+            node = projection.node(action.control_ref)
+            if node is None:
+                raise DesktopActionError("desktop_action_invalid")
+            proposal = InvokeProposal(
+                worker_generation=scope.worker_generation, plan_id=plan_id, surface_ref=scope.surface_ref,
+                surface_epoch=scope.surface_epoch, observation_id=scope.observation_id,
+                snapshot_digest=scope.snapshot_digest, control_ref=action.control_ref,
+                effect=InvokeEffect.NAME_TOGGLE, application_label=label, window_title=title,
+                control_role=str(node.get("role", "unknown"))[:32],
+                control_name=clean_text(str(node.get("name") or ""))[:120],
+            )
+        elif isinstance(action, SetValueAction):
+            raw = scope.resolve_value(action.value_ref)
+            node = projection.node(action.control_ref)
+            if raw is None or node is None:
+                raise DesktopActionError("desktop_action_invalid")
+            proposal = SetValueProposal(
+                worker_generation=scope.worker_generation, plan_id=plan_id, surface_ref=scope.surface_ref,
+                surface_epoch=scope.surface_epoch, observation_id=scope.observation_id,
+                snapshot_digest=scope.snapshot_digest, control_ref=action.control_ref,
+                value_ref=action.value_ref, value=raw, application_label=label, window_title=title,
+                control_role=str(node.get("role", "unknown"))[:32],
+                control_name=clean_text(str(node.get("name") or ""))[:120],
+            )
+        else:
+            container = projection.node(action.container_ref)
+            option = projection.node(action.option_ref)
+            if container is None or option is None:
+                raise DesktopActionError("desktop_action_invalid")
+            proposal = SelectProposal(
+                worker_generation=scope.worker_generation, plan_id=plan_id, surface_ref=scope.surface_ref,
+                surface_epoch=scope.surface_epoch, observation_id=scope.observation_id,
+                snapshot_digest=scope.snapshot_digest, container_ref=action.container_ref,
+                option_ref=action.option_ref, application_label=label, window_title=title,
+                container_role=str(container.get("role", "unknown"))[:32],
+                container_name=clean_text(str(container.get("name") or ""))[:120],
+                option_role=str(option.get("role", "unknown"))[:32],
+                option_name=clean_text(str(option.get("name") or ""))[:120],
+            )
+        return await self._open(proposal)
+
+    # ---- S4: getting unstuck after an unresolved mutation -------------------------------------------
+
+    async def reconcile(
+        self, action_id: uuid.UUID, *, expected_revision: int, outcome: Literal["succeeded", "failed", "still_unknown"]
+    ) -> DesktopActionView:
+        """The only way out of an unresolved (`OUTCOME_UNKNOWN`) S4 mutation. Never retries the effect
+        and never re-derives it automatically: the person looked at the actual application and says
+        what they saw. `still_unknown` leaves the action, and the block on every other desktop action,
+        exactly where it was -- a look that could not tell is not progress."""
+        current = await self.get(action_id)
+        if current.operation not in (DesktopOperation.SET_VALUE, DesktopOperation.SELECT, DesktopOperation.INVOKE):
+            raise DesktopActionError("desktop_action_not_reconcilable", action_id=action_id)
+        if current.status is not ActionStatus.OUTCOME_UNKNOWN:
+            raise DesktopActionError("desktop_action_not_reconcilable", action_id=action_id)
+        started = await self._actions.begin_reconciliation(action_id, expected_revision=expected_revision)
+        mapped = {
+            "succeeded": AttemptOutcome.SUCCEEDED,
+            "failed": AttemptOutcome.FAILED,
+            "still_unknown": AttemptOutcome.OUTCOME_UNKNOWN,
+        }[outcome]
+        finished = await self._actions.finish_reconciliation(
+            action_id, result=mapped, evidence={"source": "user_observed"},
+            expected_revision=started.action.revision,
+        )
+        return self._view(finished)
+
     async def _surface_facts(self, worker_generation: uuid.UUID, ref: str, epoch: int) -> tuple[str, str]:
         listing = await self._desktop.list_surfaces()
         if listing.worker_generation != worker_generation:
@@ -212,7 +351,26 @@ class DesktopActionService:
 
     async def _open_locked(self, proposal: DesktopProposal) -> DesktopActionView:
         async with self._engine.connect() as connection:
-            live = await DesktopActionRepository(connection).live_desktop_actions()
+            repository = DesktopActionRepository(connection)
+            live = await repository.live_desktop_actions()
+            unresolved = await repository.unresolved_mutation()
+            existing_for_plan = (
+                await repository.action_for_plan(proposal.plan_id) if isinstance(proposal, _PLAN_DERIVED) else None
+            )
+        if unresolved is not None:
+            # A set-value, select or invoke Lumi cannot account for blocks EVERY new desktop action --
+            # not just another mutation -- until it is reconciled. No new task, plan, observation or
+            # route can side-step it.
+            raise DesktopActionError("desktop_action_unresolved", action_id=unresolved)
+        if existing_for_plan is not None:
+            # Found by an independent integration review: `propose_from_plan`'s OWN `action_for_plan`
+            # check races the `_proposals` lock this method holds -- two concurrent calls for the SAME
+            # plan (a retried HTTP request, say) can both observe "no existing action" before either
+            # reaches here. Re-checked a second time, now serialized by the lock every `_open_locked`
+            # call already holds, so a plan can fund at most one execution card, ever, exactly as
+            # documented -- not merely "at most one that can ever be approved" (which the live-action
+            # supersession below already guaranteed on its own).
+            raise DesktopActionError("desktop_plan_already_opened", action_id=existing_for_plan)
         for other_id, _tool, status in live:
             if status in (ActionStatus.PROPOSED.value, ActionStatus.WAITING_APPROVAL.value):
                 # A card the person never answered is superseded by the new request, never left to be
@@ -320,7 +478,7 @@ class DesktopActionService:
             # Another approved or running desktop action is never raced by this one.
             if status in (ActionStatus.APPROVED.value, ActionStatus.EXECUTING.value):
                 raise DesktopActionError("desktop_action_open", action_id=other_id)
-        if isinstance(proposal, ScrollProposal):
+        if isinstance(proposal, _FRESHNESS_CHECKED):
             observation = await DesktopRepository(connection).get_observation(proposal.observation_id)
             if (
                 observation is None
@@ -375,26 +533,102 @@ class DesktopActionService:
                     return AttemptOutcome.FAILED, "scroll_no_change", result
                 result["follow_up_observation_id"] = await self._reobserve(proposal)
                 return AttemptOutcome.SUCCEEDED, None, result
-            launch = await self._desktop.launch(
-                LaunchRequest(
+            if isinstance(proposal, LaunchProposal):
+                launch = await self._desktop.launch(
+                    LaunchRequest(
+                        expected_worker_generation=proposal.worker_generation,
+                        dispatch_id=dispatch_id,
+                        app_id=proposal.app_id,
+                        input_tick=baseline,
+                    )
+                )
+                return (
+                    AttemptOutcome.SUCCEEDED,
+                    None,
+                    {
+                        "operation": proposal.operation.value,
+                        "outcome": launch.outcome,
+                        "surface_ref": launch.surface_ref,
+                        "surface_epoch": launch.surface_epoch,
+                        "focused": launch.focused,
+                        "human_input_during": launch.input_changed,
+                    },
+                )
+            if isinstance(proposal, SetValueProposal):
+                set_value = await self._desktop.set_value(
+                    SetValueRequest(
+                        expected_worker_generation=proposal.worker_generation,
+                        dispatch_id=dispatch_id,
+                        surface_ref=proposal.surface_ref,
+                        surface_epoch=proposal.surface_epoch,
+                        observation_id=proposal.observation_id,
+                        control_ref=proposal.control_ref,
+                        value=proposal.value,
+                        input_tick=baseline,
+                    )
+                )
+                result = {
+                    "operation": proposal.operation.value,
+                    "outcome": set_value.outcome,
+                    "human_input_during": set_value.input_changed,
+                    "observation_invalidated": True,
+                }
+                if set_value.outcome == "uncertain":
+                    # The write itself may have happened; the verifying re-read did not. This is
+                    # never treated as a known non-effect: it blocks every later desktop action until
+                    # a human reconciles it, exactly like a lost worker answer.
+                    return AttemptOutcome.OUTCOME_UNKNOWN, "set_value_uncertain", result
+                if set_value.outcome == "not_set":
+                    return AttemptOutcome.FAILED, "not_set", result
+                result["follow_up_observation_id"] = await self._reobserve(proposal)
+                return AttemptOutcome.SUCCEEDED, None, result
+            if isinstance(proposal, SelectProposal):
+                select = await self._desktop.select(
+                    SelectRequest(
+                        expected_worker_generation=proposal.worker_generation,
+                        dispatch_id=dispatch_id,
+                        surface_ref=proposal.surface_ref,
+                        surface_epoch=proposal.surface_epoch,
+                        observation_id=proposal.observation_id,
+                        container_ref=proposal.container_ref,
+                        option_ref=proposal.option_ref,
+                        input_tick=baseline,
+                    )
+                )
+                result = {
+                    "operation": proposal.operation.value,
+                    "outcome": select.outcome,
+                    "human_input_during": select.input_changed,
+                    "observation_invalidated": True,
+                }
+                if select.outcome == "uncertain":
+                    return AttemptOutcome.OUTCOME_UNKNOWN, "select_uncertain", result
+                if select.outcome == "not_selected":
+                    return AttemptOutcome.FAILED, "not_selected", result
+                result["follow_up_observation_id"] = await self._reobserve(proposal)
+                return AttemptOutcome.SUCCEEDED, None, result
+            invoke = await self._desktop.invoke(
+                InvokeRequest(
                     expected_worker_generation=proposal.worker_generation,
                     dispatch_id=dispatch_id,
-                    app_id=proposal.app_id,
+                    surface_ref=proposal.surface_ref,
+                    surface_epoch=proposal.surface_epoch,
+                    observation_id=proposal.observation_id,
+                    control_ref=proposal.control_ref,
+                    effect=proposal.effect,
                     input_tick=baseline,
                 )
             )
-            return (
-                AttemptOutcome.SUCCEEDED,
-                None,
-                {
-                    "operation": proposal.operation.value,
-                    "outcome": launch.outcome,
-                    "surface_ref": launch.surface_ref,
-                    "surface_epoch": launch.surface_epoch,
-                    "focused": launch.focused,
-                    "human_input_during": launch.input_changed,
-                },
-            )
+            result = {
+                "operation": proposal.operation.value,
+                "outcome": invoke.outcome,
+                "human_input_during": invoke.input_changed,
+                "observation_invalidated": True,
+            }
+            if invoke.outcome == "no_change":
+                return AttemptOutcome.FAILED, "no_change", result
+            result["follow_up_observation_id"] = await self._reobserve(proposal)
+            return AttemptOutcome.SUCCEEDED, None, result
         except DesktopRefusal as refusal:
             return outcome_for_refusal(refusal.code), refusal.code.value, {"operation": proposal.operation.value}
         except Exception:  # noqa: BLE001 - the answer was lost or garbled; the effect may have happened.
@@ -405,7 +639,9 @@ class DesktopActionService:
                 {"operation": proposal.operation.value},
             )
 
-    async def _reobserve(self, proposal: ScrollProposal) -> str | None:
+    async def _reobserve(
+        self, proposal: ScrollProposal | SetValueProposal | SelectProposal | InvokeProposal
+    ) -> str | None:
         """A fresh S1 observation of the same window. The old one is never extended or reused."""
         try:
             listing = await self._desktop.list_surfaces()
@@ -492,7 +728,34 @@ def _identity(proposal: DesktopProposal) -> dict[str, Any]:
             "snapshot_digest": proposal.snapshot_digest,
             "control_ref": proposal.control_ref,
         }
-    return {"app_id": proposal.app_id}
+    if isinstance(proposal, LaunchProposal):
+        return {"app_id": proposal.app_id}
+    if isinstance(proposal, SetValueProposal):
+        return {
+            "surface_ref": proposal.surface_ref,
+            "surface_epoch": proposal.surface_epoch,
+            "observation_id": proposal.observation_id,
+            "snapshot_digest": proposal.snapshot_digest,
+            "control_ref": proposal.control_ref,
+            "value_ref": proposal.value_ref,
+        }
+    if isinstance(proposal, SelectProposal):
+        return {
+            "surface_ref": proposal.surface_ref,
+            "surface_epoch": proposal.surface_epoch,
+            "observation_id": proposal.observation_id,
+            "snapshot_digest": proposal.snapshot_digest,
+            "control_ref": proposal.option_ref,
+            "option_container_ref": proposal.container_ref,
+        }
+    return {
+        "surface_ref": proposal.surface_ref,
+        "surface_epoch": proposal.surface_epoch,
+        "observation_id": proposal.observation_id,
+        "snapshot_digest": proposal.snapshot_digest,
+        "control_ref": proposal.control_ref,
+        "invoke_effect": proposal.effect.value,
+    }
 
 
 def _age_seconds(moment: datetime) -> float:

@@ -311,6 +311,17 @@ for (const file of [
 ]) {
   if (!existsSync(join(agentOut, ...file))) throw new Error(`${file.join('/')} is missing from the runtime bundle.`)
 }
+// Milestone 9 S4: bounded set-value/select/invoke, their widened dispatch table, and the parallel
+// planning-disclosure path (disclosure authority only -- never execution authority on its own).
+if (!readdirSync(join(agentOut, 'alembic', 'versions')).some((name) => name.startsWith('0015_'))) {
+  throw new Error('Migration 0015 is missing from the runtime bundle.')
+}
+for (const file of [
+  ['app', 'services', 'desktop_planning.py'], ['app', 'domain', 'desktop_planning.py'],
+  ['app', 'repositories', 'desktop_planning.py'], ['app', 'api', 'desktop_planning_schemas.py']
+]) {
+  if (!existsSync(join(agentOut, ...file))) throw new Error(`${file.join('/')} is missing from the runtime bundle.`)
+}
 
 // 5. Byte-compile once, so an installed copy never needs to write beside itself.
 step('byte-compiling')

@@ -24,6 +24,9 @@ class DesktopDispatchRecord:
     observation_id: uuid.UUID | None
     control_ref: str | None
     app_id: str | None
+    value_ref: str | None
+    option_container_ref: str | None
+    invoke_effect: str | None
     input_tick: int
     status: str
     error_code: str | None
@@ -42,6 +45,9 @@ def _record(row: Any) -> DesktopDispatchRecord:
         observation_id=row.observation_id,
         control_ref=row.control_ref,
         app_id=row.app_id,
+        value_ref=row.value_ref,
+        option_container_ref=row.option_container_ref,
+        invoke_effect=row.invoke_effect,
         input_tick=int(row.input_tick),
         status=row.status,
         error_code=row.error_code,
@@ -51,14 +57,20 @@ def _record(row: Any) -> DesktopDispatchRecord:
 
 #: A desktop action in any of these states is still live: waiting on the person, or running. An
 #: `OUTCOME_UNKNOWN` focus, scroll or launch does not block a new one (each is recoverable by a fresh
-#: observation and a NEW approval; a launch inspects for a running instance before it ever spawns). The
-#: S4 mutations will add their own blocking states when they exist.
+#: observation and a NEW approval; a launch inspects for a running instance before it ever spawns).
 _LIVE = (
     ActionStatus.PROPOSED.value,
     ActionStatus.WAITING_APPROVAL.value,
     ActionStatus.APPROVED.value,
     ActionStatus.EXECUTING.value,
 )
+
+#: S4 mutations (`set_control_value`, `select_control`, `invoke_control`) are different: their
+#: `OUTCOME_UNKNOWN` DOES block, until reconciled. A value write, a selection or an invoked control is
+#: a real mutation whose outcome Lumi does not know; letting a new task, a new plan or any other route
+#: propose past that would be exactly the silent-retry risk the ledger exists to prevent.
+_S4_MUTATION_TOOLS = ("DESKTOP_SET_VALUE", "DESKTOP_SELECT", "DESKTOP_INVOKE")
+_UNRESOLVED = (ActionStatus.OUTCOME_UNKNOWN.value, ActionStatus.RECONCILING.value)
 
 
 class DesktopActionRepository:
@@ -80,6 +92,9 @@ class DesktopActionRepository:
         snapshot_digest: str | None = None,
         control_ref: str | None = None,
         app_id: str | None = None,
+        value_ref: str | None = None,
+        option_container_ref: str | None = None,
+        invoke_effect: str | None = None,
     ) -> DesktopDispatchRecord:
         """The durable intent to ask the worker for ONE effect. `attempt_id` is UNIQUE."""
         row = (
@@ -97,6 +112,9 @@ class DesktopActionRepository:
                     snapshot_digest=snapshot_digest,
                     control_ref=control_ref,
                     app_id=app_id,
+                    value_ref=value_ref,
+                    option_container_ref=option_container_ref,
+                    invoke_effect=invoke_effect,
                     input_tick=input_tick,
                     status="DISPATCHED",
                 )
@@ -155,6 +173,35 @@ class DesktopActionRepository:
         if excluding is not None:
             query = query.where(actions.c.id != excluding)
         return int((await self._connection.execute(query)).scalar_one())
+
+    async def action_for_plan(self, plan_id: uuid.UUID) -> uuid.UUID | None:
+        """The execution action already opened from this plan, if any (`propose_from_plan` is
+        idempotent: a plan funds at most one execution card, ever)."""
+        row = (
+            await self._connection.execute(
+                select(actions.c.id).where(
+                    actions.c.tool_name.in_(_S4_MUTATION_TOOLS),
+                    actions.c.proposal["plan_id"].astext == str(plan_id),
+                )
+            )
+        ).first()
+        return row.id if row is not None else None
+
+    async def unresolved_mutation(self) -> uuid.UUID | None:
+        """An S4 mutation action still `OUTCOME_UNKNOWN` or `RECONCILING`, if one exists.
+
+        Not scoped to a task: an unresolved effect blocks every desktop action, not only a new one in
+        the same task, so a new task cannot side-step it either.
+        """
+        row = (
+            await self._connection.execute(
+                select(actions.c.id)
+                .where(actions.c.tool_name.in_(_S4_MUTATION_TOOLS), actions.c.status.in_(_UNRESOLVED))
+                .order_by(actions.c.created_at.desc())
+                .limit(1)
+            )
+        ).first()
+        return row.id if row is not None else None
 
     async def latest_desktop_action_id(self) -> uuid.UUID | None:
         row = (

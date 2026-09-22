@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from app.domain.action_status import ActionStatus, AttemptOutcome, task_status_for
 from app.domain.authenticated import PauseReason
 from app.domain.local_form_draft import FILL_OPERATION, HANDOVER_OPERATION
-from app.domain.task_status import TaskEventType, TaskStatus, accepts_actions
+from app.domain.task_status import TaskEventType, TaskStatus, accepts_actions, is_terminal
 from app.repositories.actions import ActionRepository
 from app.repositories.browser import BrowserRepository
 from app.repositories.desktop_actions import DesktopActionRepository
@@ -70,6 +70,78 @@ class RecoveryService:
                 len(recovered),
             )
         return recovered
+
+    async def recover_interrupted_reconciliations(self) -> list[uuid.UUID]:
+        """Startup: an action a dead process left in `RECONCILING`.
+
+        `begin_reconciliation` and `finish_reconciliation` are two separate committed transactions
+        (recording the reconciliation attempt durably before anything asks a person what they saw, and
+        never spanning that question with an open transaction). A crash between them leaves an action
+        at `RECONCILING` with no attempt, dispatch or worker call to recover -- reconciliation itself
+        never touches the desktop -- and, unlike `EXECUTING`, `RECONCILING` is not `runtime_generation`
+        scoped, because nothing about *which* runtime asked the question matters here. Every action
+        still `RECONCILING` at startup, from any previous process, goes back to `OUTCOME_UNKNOWN`: the
+        one status a reconciliation route will accept, so the person can be asked again instead of the
+        action being stuck forever.
+        """
+        async with self._engine.connect() as connection:
+            stuck = await ActionRepository(connection).list_actions_by_status(ActionStatus.RECONCILING)
+        recovered: list[uuid.UUID] = []
+        for action in stuck:
+            moved_id = await self._recover_one_reconciliation(action.id)
+            if moved_id is not None:
+                recovered.append(moved_id)
+        if recovered:
+            logger.warning(
+                "Recovered %d action(s) stuck in RECONCILING from a previous process as "
+                "OUTCOME_UNKNOWN; they need reconciliation again and were not retried.",
+                len(recovered),
+            )
+        return recovered
+
+    async def _recover_one_reconciliation(self, action_id: uuid.UUID) -> uuid.UUID | None:
+        async with self._engine.begin() as connection:
+            actions_repository = ActionRepository(connection)
+            tasks_repository = TaskRepository(connection)
+            action = await actions_repository.get_action(action_id)
+            if action is None:  # pragma: no cover - actions are never deleted.
+                return None
+            # Re-read under the lock: another process may have finished reconciling it already.
+            if action.status is not ActionStatus.RECONCILING:
+                return None
+            task = await tasks_repository.lock_task(action.task_id)
+            if task is None:  # pragma: no cover - tasks are never deleted.
+                return None
+            moved = await actions_repository.update_action_status(
+                action_id=action.id, expected_revision=action.revision, status=ActionStatus.OUTCOME_UNKNOWN
+            )
+            if moved is None:
+                return None
+            # Mirrors `_transition`: the task's own status moved when `begin_reconciliation` set the
+            # action to RECONCILING, so it must move back the same way here, unless the task itself
+            # became terminal in the meantime (cancelled, say) -- a terminal task's status never changes.
+            task_status = None if is_terminal(task.status) else task_status_for(ActionStatus.OUTCOME_UNKNOWN)
+            advanced = await tasks_repository.advance_task(
+                task_id=task.id, expected_revision=task.revision, status=task_status
+            )
+            if advanced is None:  # pragma: no cover - the task row lock is held.
+                return None
+            await tasks_repository.append_event(
+                task=advanced,
+                event_type=TaskEventType.ACTION_OUTCOME_UNKNOWN,
+                payload={
+                    "action_id": str(moved.id),
+                    "tool_name": moved.tool_name,
+                    "risk_tier": moved.risk_tier.value,
+                    "proposal_digest": moved.proposal_digest,
+                    "action_status": moved.status.value,
+                    "action_revision": moved.revision,
+                    "outcome": AttemptOutcome.OUTCOME_UNKNOWN.value,
+                    "error_code": "runtime_restart",
+                    "reason": "reconciliation_interrupted",
+                },
+            )
+            return moved.id
 
     async def _recover_one(
         self, attempt_id: uuid.UUID, action_id: uuid.UUID

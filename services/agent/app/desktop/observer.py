@@ -106,6 +106,16 @@ class ScrollState:
     vertical_percent: float | None
 
 
+@dataclass(frozen=True, slots=True)
+class ValueState:
+    """UIA ValuePattern state for one control. Worker-internal."""
+
+    read_only: bool
+    #: The pattern's own current value, read fresh (never the projected/cached one). Used only to
+    #: verify a `SetValue` call; never returned on the wire.
+    value: str | None
+
+
 class UiaElement(Protocol):
     def props(self, level: str) -> RawProps:
         """`level` is one of "scan", "structure", "full"."""
@@ -120,6 +130,18 @@ class UiaElement(Protocol):
 
     def focus(self) -> None:
         """ONE `IUIAutomationElement.SetFocus`, on a top-level window root. Nothing else may call it."""
+
+    def value_state(self) -> ValueState | None:
+        """The ValuePattern's current state, or None when the element exposes no ValuePattern."""
+
+    def set_value(self, value: str) -> None:
+        """ONE `ValuePattern.SetValue` call. No keyboard emulation, no paste."""
+
+    def select(self) -> None:
+        """ONE `SelectionItemPattern.Select` call. No index, coordinate or native item id."""
+
+    def invoke(self) -> None:
+        """ONE `InvokePattern.Invoke` call."""
 
 
 class UiaBackend(Protocol):
@@ -270,6 +292,43 @@ def _guarded_walk(
         raise DesktopRefusal(DesktopReason.BACKEND_FAILED) from None
 
 
+def _credential_scan(root: UiaElement, *, deadline: float) -> None:
+    """A lenient, credential-only re-scan of a live tree, for one purpose: does the surface contain a
+    credential input ANYWHERE, right now. Unlike `_walk`/`_guarded_walk`, a node that has become
+    unavailable mid-scan is simply skipped, not treated as proof the whole surface changed -- a node
+    that is gone cannot itself be a live credential input a person could type into, so its own
+    disappearance is never a reason to refuse a mutation aimed at a completely different, still-live
+    control. `_walk`'s stricter "stable or refused" rule exists to protect an OBSERVATION's fidelity as
+    a snapshot; this is not one -- it is a yes/no safety net run again immediately before a mutation,
+    and ordinary transient UI churn elsewhere in the tree must never be the reason it refuses. A
+    genuine backend failure (anything other than the element having disappeared) still fails closed.
+    """
+    stack: list[tuple[UiaElement, int]] = [(root, 0)]
+    visited = 0
+    while stack:
+        if visited >= MAX_SCAN_ELEMENTS or time.monotonic() > deadline:
+            return
+        element, depth = stack.pop()
+        visited += 1
+        try:
+            props = element.props("scan")
+        except ElementUnavailable:
+            continue
+        except Exception:  # noqa: BLE001 - a COM error carries private detail; none is kept.
+            raise DesktopRefusal(DesktopReason.BACKEND_FAILED) from None
+        if is_credential(props):
+            raise DesktopRefusal(DesktopReason.CREDENTIAL_SURFACE)
+        if depth >= MAX_SCAN_DEPTH:
+            continue
+        try:
+            children = element.children()
+        except ElementUnavailable:
+            continue
+        except Exception:  # noqa: BLE001 - a COM error carries private detail; none is kept.
+            raise DesktopRefusal(DesktopReason.BACKEND_FAILED) from None
+        stack.extend((child, depth + 1) for child in children[:MAX_SIBLINGS])
+
+
 def structure_records(walk: _Walk) -> tuple[str, ...]:
     """One digest per observed node: depth, role, name, patterns and enabled state, in tree order.
 
@@ -337,6 +396,9 @@ class ResolvedControl:
     name: str
     patterns: frozenset[DesktopPattern] = frozenset()
     element: UiaElement | None = None
+    #: The locator this control was re-derived from. S4 effects keep it to re-derive the SAME control
+    #: again, after their own mutation, without depending on a control table an effect may have cleared.
+    locator: "Locator | None" = None
 
 
 class DesktopObserver:
@@ -507,18 +569,72 @@ class DesktopObserver:
             raise DesktopRefusal(DesktopReason.STALE_CONTROL)
         return self._rederive(resolved, locator)
 
-    def _rederive(self, resolved: ResolvedSurface, locator: Locator) -> ResolvedControl:
-        current = self._backend_root(resolved)
+    def rederive(self, resolved: ResolvedSurface, locator: "Locator") -> ResolvedControl:
+        """Re-derive a control from a locator captured earlier in the same effect, not from a table.
+
+        An S4 mutation kills the observation's control table before it acts (the same rule scroll
+        follows): whatever it does, no `uN` of the observation it was proposed against resolves again.
+        Post-effect verification still needs to find the SAME control, so it keeps the locator from the
+        pre-effect re-resolution and re-derives directly, bypassing the (now-cleared) table.
+        """
+        return self._rederive(resolved, locator)
+
+    def rederive_after_mutation(self, resolved: ResolvedSurface, locator: "Locator") -> ResolvedControl:
+        """Like `rederive`, but the LAST step matches by identity (runtime id) rather than by name.
+
+        `NAME_TOGGLE` verification deliberately expects the control's own accessible name to have
+        changed; the ordinary locator step includes the name, so matching by the pre-effect step would
+        always miss the very control the effect was supposed to change. Every ancestor step still
+        matches structurally, exactly as `rederive` does, so this cannot be used to jump to an
+        unrelated element: only the final hop tolerates a name that moved.
+        """
+        return self._rederive(resolved, locator, match_last_by_identity=True)
+
+    def rederive_descendant(self, resolved: ResolvedSurface, container: "Locator", option: "Locator") -> ResolvedControl:
+        """Re-derive `option`, proving it is currently, LIVE, a descendant of the LIVE `container` --
+        not merely that each independently still matches its own previously-recorded path from the
+        surface root.
+
+        Comparing the two stored locator paths as string prefixes (the bounds check just below) proves
+        only that they *used to* nest this way. Two elements can each independently re-resolve against
+        their own old path while the live tree has actually been restructured -- a same-shaped
+        replacement container swapped in for the approved one, with the option reparented into it -- so
+        this re-derives `container` first, from the surface root as usual, and then re-derives `option`
+        a SECOND time from that live container element, walking only the path steps beyond it. `option`
+        only comes back resolved if it is actually found hanging off the live element `container`
+        resolved to, right now.
+        """
+        if len(option.path) <= len(container.path) or option.path[: len(container.path)] != container.path:
+            raise DesktopRefusal(DesktopReason.OPTION_WRONG_CONTAINER)
+        container_control = self._rederive(resolved, container)
+        if container_control.element is None:
+            raise DesktopRefusal(DesktopReason.ELEMENT_MISSING)
+        return self._rederive(resolved, option, from_element=container_control.element, from_index=len(container.path))
+
+    def _rederive(
+        self,
+        resolved: ResolvedSurface,
+        locator: Locator,
+        *,
+        match_last_by_identity: bool = False,
+        from_element: UiaElement | None = None,
+        from_index: int = 0,
+    ) -> ResolvedControl:
+        current = from_element if from_element is not None else self._backend_root(resolved)
         try:
             props = current.props("structure")
-            for step in locator.path:
+            for index in range(from_index, len(locator.path)):
+                step = locator.path[index]
                 candidates = [
                     (child, child.props("structure")) for child in current.children()[:MAX_SIBLINGS]
                 ]
                 if any(is_credential(found) for _, found in candidates):
                     # Same rule as observation: a credential input makes the area off limits.
                     raise DesktopRefusal(DesktopReason.CREDENTIAL_SURFACE)
-                matches = [(child, found) for child, found in candidates if _step(found) == step]
+                if match_last_by_identity and index == len(locator.path) - 1:
+                    matches = [(child, found) for child, found in candidates if found.runtime_id == locator.runtime_id]
+                else:
+                    matches = [(child, found) for child, found in candidates if _step(found) == step]
                 if not matches:
                     raise DesktopRefusal(DesktopReason.ELEMENT_MISSING)
                 if len(matches) > 1:
@@ -532,5 +648,6 @@ class DesktopObserver:
             # The same selector now names a different element instance: it was replaced.
             raise DesktopRefusal(DesktopReason.ELEMENT_CHANGED)
         return ResolvedControl(
-            role=role_for(props.control_type), name=props.name, patterns=props.patterns, element=current
+            role=role_for(props.control_type), name=props.name, patterns=props.patterns, element=current,
+            locator=locator,
         )

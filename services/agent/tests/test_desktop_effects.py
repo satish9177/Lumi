@@ -14,13 +14,18 @@ import pytest
 
 from app.desktop.effects import DesktopEffects
 from app.desktop.errors import DesktopReason, DesktopRefusal
-from app.desktop.observer import DesktopObserver
+from app.desktop.observer import ControlTable, DesktopObserver
 from app.desktop.protocol import (
+    DesktopObservation,
     DesktopPattern,
     FocusRequest,
+    InvokeEffect,
+    InvokeRequest,
     LaunchRequest,
     ScrollRequest,
     ScrollStep,
+    SelectRequest,
+    SetValueRequest,
 )
 from app.desktop.registry import AppRegistry, RegisteredApp, validate
 from app.desktop.surfaces import INTEGRITY_HIGH, ExclusionPolicy, SurfaceTable
@@ -57,12 +62,32 @@ class World:
         self.list_node = Node(
             control_type="List", name="Items", patterns=LIST_PATTERNS, scrollable=True, scroll_percent=0.0
         )
+        # -- S4 fixtures ------------------------------------------------------------------------
+        self.value_node = Node(control_type="Edit", name="Field", patterns=frozenset({DesktopPattern.VALUE}), value="")
+        self.readonly_node = Node(
+            control_type="Edit", name="Locked", patterns=frozenset({DesktopPattern.VALUE}), value="fixed", read_only=True
+        )
+        self.option_a = Node(
+            control_type="ListItem", name="Option A", patterns=frozenset({DesktopPattern.SELECTION_ITEM})
+        )
+        self.option_b = Node(
+            control_type="ListItem", name="Option B", patterns=frozenset({DesktopPattern.SELECTION_ITEM})
+        )
+        self.combo_node = Node(control_type="ComboBox", name="Combo", children=[self.option_a, self.option_b])
+        self.button_node = Node(
+            control_type="Button", name="Show details", patterns=frozenset({DesktopPattern.INVOKE}),
+            invoke_renames_to="Hide details",
+        )
+        self.dead_button = Node(control_type="Button", name="No-op", patterns=frozenset({DesktopPattern.INVOKE}))
 
     def window(self, hwnd: int = 10, pid: int = 4001, *, title: str = "Notes", **flags: bool) -> tuple[str, int]:
         if pid not in self.probe.processes:
             self.probe.add_process(pid, image="editor.exe", parent=1)
         self.probe.add_window(hwnd, pid, title=title, **flags)
-        self.backend.trees[hwnd] = window_tree(title, self.list_node)
+        self.backend.trees[hwnd] = window_tree(
+            title, self.list_node, self.value_node, self.readonly_node, self.combo_node, self.button_node,
+            self.dead_button,
+        )
         return self.ref_for(title)
 
     def ref_for(self, title: str) -> tuple[str, int]:
@@ -82,6 +107,56 @@ class World:
         observation = self.observer.observe(ref, epoch)
         node = next(n for n in observation.nodes if n.role.value == "list")
         return observation.observation_id, node.control_ref
+
+    def observe_full(self, ref: str, epoch: int) -> DesktopObservation:
+        return self.observer.observe(ref, epoch)
+
+    def ref_of(self, observation: DesktopObservation, name: str) -> str:
+        node = next(n for n in observation.nodes if n.name == name)
+        return node.control_ref
+
+    def set_value_request(
+        self, ref: str, epoch: int, observation_id: uuid.UUID, control: str, value: str = "hello", *, tick: int | None = None
+    ) -> SetValueRequest:
+        return SetValueRequest(
+            expected_worker_generation=self.generation,
+            dispatch_id=uuid.uuid4(),
+            surface_ref=ref,
+            surface_epoch=epoch,
+            observation_id=observation_id,
+            control_ref=control,
+            value=value,
+            input_tick=self.platform.input_tick if tick is None else tick,
+        )
+
+    def select_request(
+        self, ref: str, epoch: int, observation_id: uuid.UUID, container: str, option: str, *, tick: int | None = None
+    ) -> SelectRequest:
+        return SelectRequest(
+            expected_worker_generation=self.generation,
+            dispatch_id=uuid.uuid4(),
+            surface_ref=ref,
+            surface_epoch=epoch,
+            observation_id=observation_id,
+            container_ref=container,
+            option_ref=option,
+            input_tick=self.platform.input_tick if tick is None else tick,
+        )
+
+    def invoke_request(
+        self, ref: str, epoch: int, observation_id: uuid.UUID, control: str,
+        effect: InvokeEffect = InvokeEffect.NAME_TOGGLE, *, tick: int | None = None,
+    ) -> InvokeRequest:
+        return InvokeRequest(
+            expected_worker_generation=self.generation,
+            dispatch_id=uuid.uuid4(),
+            surface_ref=ref,
+            surface_epoch=epoch,
+            observation_id=observation_id,
+            control_ref=control,
+            effect=effect,
+            input_tick=self.platform.input_tick if tick is None else tick,
+        )
 
     def scroll_request(
         self, ref: str, epoch: int, observation_id: uuid.UUID, control: str, step: ScrollStep = ScrollStep.PAGE_DOWN,
@@ -664,3 +739,363 @@ def test_interpreters_lolbins_credential_ui_and_user_writable_directories_cannot
 
 def test_there_are_no_built_in_registered_applications() -> None:
     assert AppRegistry.from_config("").all() == ()
+
+
+# ---- S4: set_control_value -------------------------------------------------------------------------
+
+
+def test_set_value_writes_and_verifies_the_exact_text() -> None:
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    control = world.ref_of(observation, "Field")
+    response = world.effects.set_value(world.set_value_request(ref, epoch, observation.observation_id, control, "hello"))
+    assert response.outcome == "set"
+    assert world.value_node.set_value_calls == ["hello"]
+
+
+def test_set_value_that_the_application_ignores_is_a_known_failure_not_success() -> None:
+    world = World()
+    world.value_node.set_value_ignored = True
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    control = world.ref_of(observation, "Field")
+    response = world.effects.set_value(world.set_value_request(ref, epoch, observation.observation_id, control, "hello"))
+    assert response.outcome == "not_set"
+    assert world.value_node.set_value_calls == ["hello"]
+    assert world.value_node.value == ""
+
+
+def test_a_read_only_control_refuses_set_value_before_any_write() -> None:
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    control = world.ref_of(observation, "Locked")
+    request = world.set_value_request(ref, epoch, observation.observation_id, control, "hello")
+    assert code(lambda: world.effects.set_value(request)) is DesktopReason.READ_ONLY_CONTROL
+    assert world.readonly_node.set_value_calls == []
+
+
+def test_a_control_without_a_value_pattern_refuses_set_value() -> None:
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    control = world.ref_of(observation, "Items")
+    request = world.set_value_request(ref, epoch, observation.observation_id, control, "hello")
+    assert code(lambda: world.effects.set_value(request)) is DesktopReason.NOT_A_VALUE_CONTROL
+
+
+def test_a_credential_labelled_field_makes_the_whole_surface_refuse_before_any_ref_exists() -> None:
+    world = World()
+    world.value_node.name = "Password"
+    world.value_node.control_type = "Edit"
+    ref, epoch = world.window()
+    # The credential name makes the whole surface a credential surface: nothing projects at all, so
+    # there is never a ref to write to in the first place (S1's rule, unchanged by S4).
+    assert code(lambda: world.observe_full(ref, epoch)) is DesktopReason.CREDENTIAL_SURFACE
+
+
+def test_a_sensitive_target_process_refuses_set_value() -> None:
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    control = world.ref_of(observation, "Field")
+    world.probe.processes[4001].image = "cmd.exe"
+    request = world.set_value_request(ref, epoch, observation.observation_id, control, "hello")
+    assert code(lambda: world.effects.set_value(request)) is DesktopReason.SENSITIVE_TARGET_REFUSED
+    assert world.value_node.set_value_calls == []
+
+
+def test_a_file_dialog_titled_window_refuses_set_value() -> None:
+    world = World()
+    ref, epoch = world.window(title="Save As")
+    observation = world.observe_full(ref, epoch)
+    control = world.ref_of(observation, "Field")
+    request = world.set_value_request(ref, epoch, observation.observation_id, control, "hello")
+    assert code(lambda: world.effects.set_value(request)) is DesktopReason.SENSITIVE_TARGET_REFUSED
+    assert world.value_node.set_value_calls == []
+
+
+def test_a_credential_field_added_inside_an_unrelated_sibling_subtree_refuses_set_value() -> None:
+    """Found by an independent adversarial review of M9 S4: re-deriving the TARGET control only
+    re-checks credential exclusion along its own ancestor path (each ancestor and that ancestor's
+    direct siblings). A credential field added somewhere else entirely -- nested inside a DIFFERENT
+    top-level container, not merely beside one -- would never appear on that path. The whole-surface
+    re-scan `_mutation_target` now also runs must still catch it."""
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    control = world.ref_of(observation, "Field")
+    nested_password = Node(control_type="Edit", name="Password", is_password=True)
+    unrelated_panel = Node(control_type="Pane", name="Unrelated panel", children=[nested_password])
+    world.backend.trees[10].children.append(unrelated_panel)
+    request = world.set_value_request(ref, epoch, observation.observation_id, control, "hello")
+    assert code(lambda: world.effects.set_value(request)) is DesktopReason.CREDENTIAL_SURFACE
+    assert world.value_node.set_value_calls == []
+
+
+def test_an_unrelated_vanished_element_does_not_block_a_mutation_of_a_different_live_control() -> None:
+    """The credential re-scan is deliberately lenient about ordinary transient churn ELSEWHERE in the
+    tree: a node that disappears mid-scan is skipped, not treated as proof the whole surface changed,
+    because it cannot itself be a live credential input any more and it is not the control being
+    mutated. Otherwise an S4 effect would become newly, needlessly fragile to unrelated UI churn."""
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    control = world.ref_of(observation, "Field")
+    world.option_a.gone = True  # unrelated to "Field"; nested under a different top-level child
+    request = world.set_value_request(ref, epoch, observation.observation_id, control, "hello")
+    response = world.effects.set_value(request)
+    assert response.outcome == "set"
+
+
+def test_human_input_stops_set_value_before_any_write() -> None:
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    control = world.ref_of(observation, "Field")
+    request = world.set_value_request(ref, epoch, observation.observation_id, control, "hello", tick=world.platform.input_tick + 1)
+    assert code(lambda: world.effects.set_value(request)) is DesktopReason.HUMAN_INPUT_DETECTED
+    assert world.value_node.set_value_calls == []
+
+
+def test_set_value_kills_the_old_observations_refs_before_writing() -> None:
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    control = world.ref_of(observation, "Field")
+    world.effects.set_value(world.set_value_request(ref, epoch, observation.observation_id, control, "hello"))
+    stale = code(lambda: world.observer.resolve_control(ref, epoch, observation.observation_id, control))
+    assert stale is DesktopReason.STALE_CONTROL
+
+
+def test_set_value_replays_its_stored_answer_for_a_repeated_dispatch() -> None:
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    control = world.ref_of(observation, "Field")
+    request = world.set_value_request(ref, epoch, observation.observation_id, control, "hello")
+    first = world.effects.set_value(request)
+    replayed = world.effects.set_value(request)
+    assert replayed == first
+    assert world.value_node.set_value_calls == ["hello"]
+
+
+def test_a_stale_control_or_wrong_observation_refuses_set_value() -> None:
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    control = world.ref_of(observation, "Field")
+    world.observer.observe(ref, epoch)  # a newer observation replaces the control table
+    request = world.set_value_request(ref, epoch, observation.observation_id, control, "hello")
+    assert code(lambda: world.effects.set_value(request)) is DesktopReason.STALE_CONTROL
+
+
+# ---- S4: select_control ------------------------------------------------------------------------
+
+
+def test_select_chooses_the_exact_option_and_verifies_it() -> None:
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    container = world.ref_of(observation, "Combo")
+    option = world.ref_of(observation, "Option B")
+    response = world.effects.select(world.select_request(ref, epoch, observation.observation_id, container, option))
+    assert response.outcome == "selected"
+    assert world.option_b.select_calls == 1
+    assert world.option_a.select_calls == 0
+
+
+def test_select_the_application_ignores_is_a_known_failure_not_success() -> None:
+    world = World()
+    world.option_a.select_ignored = True
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    container = world.ref_of(observation, "Combo")
+    option = world.ref_of(observation, "Option A")
+    response = world.effects.select(world.select_request(ref, epoch, observation.observation_id, container, option))
+    assert response.outcome == "not_selected"
+    assert world.option_a.select_calls == 1
+
+
+def test_a_sensitive_target_process_refuses_select() -> None:
+    """Found by an independent integration review of M9 S4: `set_control_value` and `invoke_control`
+    both refuse a shell/terminal/script-host/security-app target, but `select_control` had no such
+    check -- even though selecting a file inside a real Open/Save common dialog's file list populates
+    the filename edit control, the same class of risk the other two effects already refuse."""
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    container = world.ref_of(observation, "Combo")
+    option = world.ref_of(observation, "Option A")
+    world.probe.processes[4001].image = "cmd.exe"
+    request = world.select_request(ref, epoch, observation.observation_id, container, option)
+    assert code(lambda: world.effects.select(request)) is DesktopReason.SENSITIVE_TARGET_REFUSED
+    assert world.option_a.select_calls == 0
+
+
+def test_an_option_from_a_different_container_is_refused() -> None:
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    # Pass the LIST as the container but an option that actually lives under the combo.
+    wrong_container = world.ref_of(observation, "Items")
+    option = world.ref_of(observation, "Option A")
+    request = world.select_request(ref, epoch, observation.observation_id, wrong_container, option)
+    assert code(lambda: world.effects.select(request)) is DesktopReason.OPTION_WRONG_CONTAINER
+    assert world.option_a.select_calls == 0
+
+
+def test_a_control_without_selection_item_pattern_cannot_be_selected() -> None:
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    container = world.ref_of(observation, "Combo")
+    not_selectable = world.ref_of(observation, "Combo")  # the combo itself has no SelectionItem pattern
+    request = world.select_request(ref, epoch, observation.observation_id, container, not_selectable)
+    assert code(lambda: world.effects.select(request)) is DesktopReason.OPTION_WRONG_CONTAINER
+
+
+def test_rederive_descendant_refuses_an_option_reparented_into_a_same_shaped_replacement_container() -> None:
+    """Found by an independent adversarial review of M9 S4: the OLD check compared the two STORED
+    locator paths as string prefixes, which only proves they *used to* nest this way, not that they
+    still do. A same-shaped replacement container (identical name/type/pattern, so it structurally
+    matches the approved container's own recorded path) swapped into the approved container's tree
+    position, with the SAME option (its own identity unchanged) reparented into it, would satisfy the
+    old check even though the option is no longer really under the container the approval named.
+    `rederive_descendant` closes this by re-deriving the option a second time starting FROM a live
+    re-resolution of the container, so it only succeeds if the option is actually still nested there,
+    right now."""
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    container_ref = world.ref_of(observation, "Combo")
+    option_ref = world.ref_of(observation, "Option A")
+    resolved = world.surfaces.resolve(ref, epoch)
+    table = resolved.slot.controls
+    assert isinstance(table, ControlTable)
+    container_locator = table.locators[container_ref]
+    option_locator = table.locators[option_ref]
+    replacement = Node(control_type="ComboBox", name="Combo", children=[world.option_a])
+    world.backend.trees[10].children = [
+        replacement if child is world.combo_node else child for child in world.backend.trees[10].children
+    ]
+    assert (
+        code(lambda: world.observer.rederive_descendant(resolved, container_locator, option_locator))
+        is DesktopReason.ELEMENT_CHANGED
+    )
+
+
+def test_human_input_stops_select_before_any_call() -> None:
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    container = world.ref_of(observation, "Combo")
+    option = world.ref_of(observation, "Option A")
+    request = world.select_request(ref, epoch, observation.observation_id, container, option, tick=world.platform.input_tick + 1)
+    assert code(lambda: world.effects.select(request)) is DesktopReason.HUMAN_INPUT_DETECTED
+    assert world.option_a.select_calls == 0
+
+
+def test_a_vanished_option_is_element_missing() -> None:
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    container = world.ref_of(observation, "Combo")
+    option = world.ref_of(observation, "Option A")
+    world.option_a.gone = True
+    request = world.select_request(ref, epoch, observation.observation_id, container, option)
+    assert code(lambda: world.effects.select(request)) is DesktopReason.ELEMENT_MISSING
+
+
+# ---- S4: invoke_control -------------------------------------------------------------------------
+
+
+def test_invoke_verified_by_a_name_change_reports_invoked() -> None:
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    control = world.ref_of(observation, "Show details")
+    response = world.effects.invoke(world.invoke_request(ref, epoch, observation.observation_id, control))
+    assert response.outcome == "invoked"
+    assert world.button_node.invoke_calls == 1
+    assert world.button_node.name == "Hide details"
+
+
+def test_invoke_with_no_observable_change_is_a_known_failure_not_success() -> None:
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    control = world.ref_of(observation, "No-op")
+    response = world.effects.invoke(world.invoke_request(ref, epoch, observation.observation_id, control))
+    assert response.outcome == "no_change"
+    assert world.dead_button.invoke_calls == 1
+
+
+def test_a_control_without_invoke_pattern_cannot_be_invoked() -> None:
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    control = world.ref_of(observation, "Field")
+    request = world.invoke_request(ref, epoch, observation.observation_id, control)
+    assert code(lambda: world.effects.invoke(request)) is DesktopReason.NOT_INVOKABLE
+    assert world.value_node.set_value_calls == []
+
+
+def test_a_dangerous_looking_label_is_not_refused_by_the_worker_itself() -> None:
+    """Label-based refusal is the CONTROLLER's job (`app.domain.desktop_planning`), on the model's
+    proposed action, before an execution proposal ever exists. The worker's own defence is structural
+    (identity, pattern, sensitive target, takeover) and verifies by observable state change, never by
+    a label, so a button named like a dangerous action still goes through the same NAME_TOGGLE check
+    as any other; it is invoked here to prove the worker applies no separate label heuristic."""
+    world = World()
+    world.button_node.name = "Submit"
+    world.button_node.invoke_renames_to = "Submitted"
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    control = world.ref_of(observation, "Submit")
+    response = world.effects.invoke(world.invoke_request(ref, epoch, observation.observation_id, control))
+    assert response.outcome == "invoked"
+
+
+def test_a_sensitive_target_process_refuses_invoke() -> None:
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    control = world.ref_of(observation, "Show details")
+    world.probe.processes[4001].image = "powershell.exe"
+    request = world.invoke_request(ref, epoch, observation.observation_id, control)
+    assert code(lambda: world.effects.invoke(request)) is DesktopReason.SENSITIVE_TARGET_REFUSED
+    assert world.button_node.invoke_calls == 0
+
+
+def test_human_input_stops_invoke_before_any_call() -> None:
+    world = World()
+    ref, epoch = world.window()
+    observation = world.observe_full(ref, epoch)
+    control = world.ref_of(observation, "Show details")
+    request = world.invoke_request(ref, epoch, observation.observation_id, control, tick=world.platform.input_tick + 1)
+    assert code(lambda: world.effects.invoke(request)) is DesktopReason.HUMAN_INPUT_DETECTED
+    assert world.button_node.invoke_calls == 0
+
+
+def test_lumis_own_window_refuses_every_s4_mutation_even_with_a_forged_ref() -> None:
+    world = World()
+    world.probe.add_process(5000, image="lumi.exe", parent=os.getpid())
+    world.probe.add_window(30, 5000, title="Lumi")
+    assert [s.window_title for s in world.observer.list_surfaces().surfaces] == []
+    request = world.set_value_request("s1", 1, uuid.uuid4(), "u1", "hello")
+    assert code(lambda: world.effects.set_value(request)) is DesktopReason.STALE_SURFACE
+    assert world.value_node.set_value_calls == []
+
+
+def test_an_elevated_surface_refuses_every_s4_mutation() -> None:
+    world = World()
+    ref, epoch = world.window()
+    world.probe.processes[4001].integrity = INTEGRITY_HIGH
+    request = SetValueRequest(
+        expected_worker_generation=world.generation, dispatch_id=uuid.uuid4(), surface_ref=ref,
+        surface_epoch=epoch, observation_id=uuid.uuid4(), control_ref="u1", value="x",
+        input_tick=world.platform.input_tick,
+    )
+    assert code(lambda: world.effects.set_value(request)) is DesktopReason.ELEVATED_WINDOW

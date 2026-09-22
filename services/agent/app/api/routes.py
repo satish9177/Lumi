@@ -115,9 +115,11 @@ from app.domain.desktop_actions import TOOL_PREFIX
 from app.services.desktop_actions import DesktopActionError, DesktopActionService
 from app.api.desktop_action_schemas import (
     DesktopActionDecisionBody,
+    DesktopActionReconcileBody,
     DesktopActionResponse,
     LatestDesktopActionResponse,
     ProposeFocusBody,
+    ProposeFromPlanBody,
     ProposeLaunchBody,
     ProposeScrollBody,
     RegisteredAppResponse,
@@ -135,6 +137,16 @@ from app.api.desktop_disclosure_schemas import (
     LatestDesktopReadResponse,
     ProviderContextResponse,
     RecordDesktopResultBody,
+)
+from app.services.desktop_planning import DesktopPlanningService
+from app.api.desktop_planning_schemas import (
+    CreateDesktopPlanBody,
+    DesktopPlanGrantBody,
+    DesktopPlanResponse,
+    DesktopPlanRevokeBody,
+    LatestDesktopPlanResponse,
+    PlanProviderContextResponse,
+    RecordDesktopPlanResultBody,
 )
 from app.services.login_takeover import LoginTakeoverService
 from app.services.page_inspection import PageInspectionService
@@ -1684,6 +1696,121 @@ async def record_desktop_result(
     )
 
 
+# --- Windows desktop action planning (Milestone 9, slice 4) ------------------------------
+#
+# Still no verb that touches a desktop. These routes observe ONE surface locally (S1's read), open a
+# trusted planning card (the redacted snapshot plus the person's own typed candidate values), take the
+# trusted click, release ONE redacted projection plus value descriptors after the claim has committed,
+# and record the one provider attempt's proposed action (or its failure). This is disclosure authority
+# only: recording a proposed action here runs nothing. Turning it into something that can actually run
+# is `POST /desktop/actions/from-plan`, on the ordinary action ledger, behind its own separate approval.
+
+
+def get_desktop_planning_service(request: Request) -> DesktopPlanningService:
+    service: DesktopPlanningService = request.app.state.desktop_planning_service
+    return service
+
+
+DesktopPlanningServiceDep = Annotated[DesktopPlanningService, Depends(get_desktop_planning_service)]
+
+
+@router.post(
+    "/desktop/action-plans",
+    status_code=status.HTTP_201_CREATED,
+    response_model=DesktopPlanResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="Observe one surface locally and open the planning card (nothing is sent)",
+)
+async def create_desktop_plan(
+    body: CreateDesktopPlanBody, service: DesktopPlanningServiceDep
+) -> DesktopPlanResponse:
+    return DesktopPlanResponse.from_view(
+        await service.create(
+            objective=body.objective,
+            recipient=body.recipient,
+            model=body.model,
+            worker_generation=body.worker_generation,
+            surface_ref=body.surface_ref,
+            surface_epoch=body.surface_epoch,
+            values=[(item.classification, item.value) for item in body.values],
+        )
+    )
+
+
+@router.get(
+    "/desktop/action-plans/latest",
+    response_model=LatestDesktopPlanResponse,
+    summary="The newest desktop action plan, if any (local, private)",
+)
+async def latest_desktop_plan(service: DesktopPlanningServiceDep) -> LatestDesktopPlanResponse:
+    view = await service.latest()
+    return LatestDesktopPlanResponse(plan=None if view is None else DesktopPlanResponse.from_view(view))
+
+
+@router.get(
+    "/desktop/action-plans/{task_id}",
+    response_model=DesktopPlanResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="One desktop action plan, as the trusted card shows it",
+)
+async def get_desktop_plan(task_id: uuid.UUID, service: DesktopPlanningServiceDep) -> DesktopPlanResponse:
+    return DesktopPlanResponse.from_view(await service.describe(task_id))
+
+
+@router.post(
+    "/desktop/action-plans/{task_id}/grant",
+    response_model=DesktopPlanResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="Confirm the exact planning disclosure shown on the trusted card (single use)",
+)
+async def grant_desktop_plan(
+    task_id: uuid.UUID, body: DesktopPlanGrantBody, service: DesktopPlanningServiceDep
+) -> DesktopPlanResponse:
+    return DesktopPlanResponse.from_view(
+        await service.confirm(task_id, grant_id=body.grant_id, expected_revision=body.expected_revision)
+    )
+
+
+@router.post(
+    "/desktop/action-plans/{task_id}/revoke",
+    response_model=DesktopPlanResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="Decline or withdraw the planning disclosure (cannot un-send after a claim)",
+)
+async def revoke_desktop_plan(
+    task_id: uuid.UUID, body: DesktopPlanRevokeBody, service: DesktopPlanningServiceDep
+) -> DesktopPlanResponse:
+    return DesktopPlanResponse.from_view(
+        await service.revoke(
+            task_id, grant_id=body.grant_id, expected_revision=body.expected_revision, reason=body.reason
+        )
+    )
+
+
+@router.post(
+    "/desktop/action-plans/{task_id}/claim",
+    response_model=PlanProviderContextResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="Claim the single-use approval and release the redacted projection for ONE call (internal)",
+)
+async def claim_desktop_plan(task_id: uuid.UUID, service: DesktopPlanningServiceDep) -> PlanProviderContextResponse:
+    return PlanProviderContextResponse.from_context(await service.claim(task_id))
+
+
+@router.post(
+    "/desktop/action-plans/{task_id}/result",
+    response_model=DesktopPlanResponse,
+    responses=_DESKTOP_DISCLOSURE_RESPONSES,
+    summary="Record the one provider attempt's proposed action or failure (internal)",
+)
+async def record_desktop_plan_result(
+    task_id: uuid.UUID, body: RecordDesktopPlanResultBody, service: DesktopPlanningServiceDep
+) -> DesktopPlanResponse:
+    return DesktopPlanResponse.from_view(
+        await service.record_result(task_id, plan_id=body.plan_id, result=body.result, failure=body.failure)
+    )
+
+
 # --- Windows desktop actions (Milestone 9, slice 3) --------------------------------------
 #
 # Exactly three effects, each behind an exact trusted approval on the ordinary action ledger: focus one
@@ -1809,3 +1936,36 @@ async def decline_desktop_action(
     action_id: uuid.UUID, body: DesktopActionDecisionBody, service: DesktopActionServiceDep
 ) -> DesktopActionResponse:
     return DesktopActionResponse.from_view(await service.decline(action_id, expected_revision=body.expected_revision))
+
+
+@router.post(
+    "/desktop/actions/from-plan",
+    status_code=status.HTTP_201_CREATED,
+    response_model=DesktopActionResponse,
+    responses=_DESKTOP_ACTION_RESPONSES,
+    summary="Open the exact execution approval card from one SUCCEEDED plan (nothing happens yet)",
+)
+async def propose_desktop_action_from_plan(
+    body: ProposeFromPlanBody, service: DesktopActionServiceDep
+) -> DesktopActionResponse:
+    """S4. The plan's disclosure approval is not execution authority: this independently re-verifies
+    everything (the plan is really SUCCEEDED and unconsumed, the observation and every ref it names
+    still exist) before opening a second, separate, exact approval card."""
+    return DesktopActionResponse.from_view(await service.propose_from_plan(body.plan_id))
+
+
+@router.post(
+    "/desktop/actions/{action_id}/reconcile",
+    response_model=DesktopActionResponse,
+    responses=_DESKTOP_ACTION_RESPONSES,
+    summary="The only way out of an unresolved S4 mutation: record what the person actually observed",
+)
+async def reconcile_desktop_action(
+    action_id: uuid.UUID, body: DesktopActionReconcileBody, service: DesktopActionServiceDep
+) -> DesktopActionResponse:
+    """Valid only from `OUTCOME_UNKNOWN` on a `set_control_value`/`select_control`/`invoke_control`
+    action. Never retries or re-derives the effect: the person looked at the live application and
+    reports what they saw. `still_unknown` leaves the block on every other desktop action in place."""
+    return DesktopActionResponse.from_view(
+        await service.reconcile(action_id, expected_revision=body.expected_revision, outcome=body.outcome)
+    )

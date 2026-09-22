@@ -107,6 +107,12 @@ export const DEFAULT_ROUTES: RoutingTable = {
   desktop_planning: {
     providers: [{ provider: 'gemini', model: 'gemini-2.5-flash' }, { provider: 'openai' }, { provider: 'deepseek' }],
     maxInputTokens: 8_000, maxOutputTokens: 700, timeoutMs: 30_000
+  },
+  // Milestone 9 S4. A candidate list, never a failover chain, like `desktop_planning`. The output
+  // schema is a closed action proposal, not prose, so the budget is small.
+  desktop_action_planning: {
+    providers: [{ provider: 'gemini', model: 'gemini-2.5-flash' }, { provider: 'openai' }, { provider: 'deepseek' }],
+    maxInputTokens: 8_000, maxOutputTokens: 400, timeoutMs: 30_000
   }
 }
 
@@ -120,7 +126,9 @@ export const DEFAULT_ROUTES: RoutingTable = {
  *   another model of the same one) with the same private page.
  * - **No image.** An authenticated screenshot never reaches any provider.
  */
-export const PRIVATE_TASK_CLASSES: readonly ModelTaskClass[] = ['authenticated_planning', 'authenticated_answer', 'form_planning', 'desktop_planning']
+export const PRIVATE_TASK_CLASSES: readonly ModelTaskClass[] = [
+  'authenticated_planning', 'authenticated_answer', 'form_planning', 'desktop_planning', 'desktop_action_planning'
+]
 
 /** A private request was made without the rule that names its one recipient. */
 export class PrivateRouteError extends Error {

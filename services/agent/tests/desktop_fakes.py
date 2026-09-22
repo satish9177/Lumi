@@ -11,7 +11,7 @@ import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-from app.desktop.observer import ElementUnavailable, RawProps, ScrollState, UiaElement
+from app.desktop.observer import ElementUnavailable, RawProps, ScrollState, UiaElement, ValueState
 from app.desktop.protocol import CheckedState, DesktopPattern, ScrollStep
 from app.desktop.registry import RegisteredApp
 from app.desktop.surfaces import (
@@ -165,6 +165,18 @@ class Node:
     scroll_percent: float | None = 0.0
     scroll_calls: list[ScrollStep] = field(default_factory=list)
     scroll_moves: bool = True
+    # -- S4: ValuePattern, SelectionItem, Invoke scripts ---------------------------------------
+    read_only: bool = False
+    set_value_calls: list[str] = field(default_factory=list)
+    #: When True, `set_value` silently fails to change `.value` (models an app that ignores the call).
+    set_value_ignored: bool = False
+    select_calls: int = 0
+    #: When True, `select` silently fails to change `.selected` (models an app that ignores the call).
+    select_ignored: bool = False
+    invoke_calls: int = 0
+    #: What `invoke()` changes `.name` to, if anything. `None` means invoking this control changes
+    #: nothing observable, which is the `no_change` / known-failure path for `NAME_TOGGLE`.
+    invoke_renames_to: str | None = None
 
 
 class FakeElement:
@@ -239,6 +251,36 @@ class FakeElement:
         delta = {ScrollStep.SMALL_DOWN: 10.0, ScrollStep.SMALL_UP: -10.0,
                  ScrollStep.PAGE_DOWN: 40.0, ScrollStep.PAGE_UP: -40.0}[step]
         self.node.scroll_percent = max(0.0, min(100.0, self.node.scroll_percent + delta))
+
+    # -- S4: ValuePattern, SelectionItem, Invoke ---------------------------------------------
+
+    def value_state(self) -> ValueState | None:
+        if self.node.gone:
+            raise ElementUnavailable
+        if DesktopPattern.VALUE not in self.node.patterns:
+            return None
+        return ValueState(read_only=self.node.read_only, value=self.node.value)
+
+    def set_value(self, value: str) -> None:
+        if self.node.gone:
+            raise ElementUnavailable
+        self.node.set_value_calls.append(value)
+        if not self.node.set_value_ignored:
+            self.node.value = value
+
+    def select(self) -> None:
+        if self.node.gone:
+            raise ElementUnavailable
+        self.node.select_calls += 1
+        if not self.node.select_ignored:
+            self.node.selected = True
+
+    def invoke(self) -> None:
+        if self.node.gone:
+            raise ElementUnavailable
+        self.node.invoke_calls += 1
+        if self.node.invoke_renames_to is not None:
+            self.node.name = self.node.invoke_renames_to
 
 
 class FakeBackend:
