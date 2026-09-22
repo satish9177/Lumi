@@ -2,7 +2,7 @@
 
 > **Lumi can read a Windows application the way a screen reader does (roles, names, values and states from UI Automation) before it is ever allowed to touch one.**
 
-Status: **S1 (observation only), S2 (exact desktop disclosure and read-only reasoning), S3 (trusted focus, semantic scroll, registered-app launch) and S4 (bounded set-value/select/invoke, behind a model-proposed-and-independently-reverified plan plus a second, separate execution approval) are implemented. S5 is NOT started. M10 is NOT started.**
+Status: **S1 (observation only), S2 (exact desktop disclosure and read-only reasoning), S3 (trusted focus, semantic scroll, registered-app launch), S4 (bounded set-value/select/invoke, behind a model-proposed-and-independently-reverified plan plus a second, separate execution approval) and S5 (scoped visual fallback, behind its own capture approval and a SEPARATE vision-disclosure approval) are implemented. M9's engineering implementation is complete, pending a final cross-slice audit. M10 is NOT started.**
 
 This plan refines the M9 entry in `docs/plans/general-computer-use-architecture.md`. That entry lists window inventory, focus, app launch, UIA observe/invoke/value/selection/scroll and a scoped visual fallback. M9 is delivered in slices, in the same order M8 used: **observation and target identity are reviewed before any write exists.** Each slice below is one reviewable change with its own tests and review report.
 
@@ -14,7 +14,9 @@ S2  done            exact one-observation disclosure to ONE provider + read-only
 S3  done            trusted focus + semantic UIA scroll + registered-app launch (three exact-approval effects)
 S4  done            bounded Invoke / Value / Selection actions on re-resolved targets, from a model-proposed
                      and independently-reverified plan, behind a second, separate exact execution approval
-S5  later           limited visual fallback, only where semantics are unavailable
+S5  done            scoped visual fallback: a screenshot only where UIA is deterministically insufficient,
+                     behind its own capture approval, plus a SEPARATE vision-disclosure approval before an
+                     image reaches a provider. No coordinate click; a vision result is evidence only.
 ```
 
 ## S2 in one paragraph
@@ -79,7 +81,7 @@ Everything in S1 exists to make that sentence checkable rather than promised.
 
 **S4, actions (done; see `docs/reviews/milestone-9-s4.md`).** Bounded `Invoke`, `ValuePattern` set and `SelectionItem` select, each on a control re-resolved from the current tree, each with an exact approval, effect classification, `OUTCOME_UNKNOWN` handling and the existing action ledger. No hotkeys, drag, terminal typing or coordinates. A model may *propose* which control and which of the three, from a redacted snapshot disclosed exactly like S2's, through a parallel private task class (`desktop_action_planning`); the runtime independently re-verifies the whole proposal before it opens a SECOND, separate, exact execution approval -- disclosure authority is never execution authority. An `OUTCOME_UNKNOWN` mutation blocks every new desktop action (in any task) until a human reconciles it; nothing auto-retries.
 
-**S5, visual fallback.** Scoped region capture only where UIA exposes nothing, with the existing capture consent and guards, DPI/multi-monitor transforms, and no blind coordinate click.
+**S5, visual fallback (done; see `docs/reviews/milestone-9-s5.md`).** Scoped client-area capture, only where a deterministic, local classification of a fresh UIA observation finds it insufficient (`uia_empty` / `uia_missing_required_semantics` / `uia_truncated_without_target`) -- never because a model preferred a screenshot. A capture needs its own trusted approval (local use only: on-device display and best-effort local OCR; no provider is ever contacted for it), and sending a FRESH image (never the capture's own bytes) to one named AI provider needs a SEPARATE trusted approval naming application/window, provider, model and purpose. Real DPI/multi-monitor transforms and a geometry fingerprint bind every frame to the exact window, monitor, DPI and process identity it was taken from; a material change (move, resize, monitor, DPI, or the process being replaced) invalidates it. The provider's reply is a closed, bounded evidence list (label, confidence, a region normalised to the crop) -- there is no field for a coordinate, a click or an action anywhere in the schema, and nothing in this codebase turns one into either.
 
 ## Test strategy
 

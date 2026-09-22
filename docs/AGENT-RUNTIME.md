@@ -921,3 +921,52 @@ Needs `LUMI_DESKTOP_OBSERVATION=1`, same as S1-S3. See `docs/plans/milestone-9.m
 * **Freshness**: `PLANNING_OBSERVATION_MAX_AGE_SECONDS = 20` for confirming a plan; S3's existing
   `ACTION_OBSERVATION_MAX_AGE_SECONDS = 60` for opening and claiming the execution proposal. Live target
   re-resolution immediately before the effect is mandatory regardless, by exact match only.
+
+## Desktop scoped visual fallback (M9 S5, migration `0016`)
+
+Needs `LUMI_DESKTOP_OBSERVATION=1`, same as S1-S4. See `docs/plans/milestone-9.md`, `docs/SECURITY.md` and
+`docs/reviews/milestone-9-s5.md`.
+
+* **The trigger is deterministic, local code.** `classify_fallback_eligibility` (`app.domain.desktop_vision`)
+  inspects an already-fresh S1 observation and returns one of `uia_empty` / `uia_missing_required_semantics`
+  / `uia_truncated_without_target`, or `None`. A capture card is offered only when it returns a reason; a
+  model is never asked and cannot request one by preference.
+* **Two separate grant kinds, one task.** `desktop_vision_capture`: local-only screenshot consent (no
+  provider named; `desktop_captures` records digests/dimensions/DPI/monitor id only, `STARTED ->
+  SUCCEEDED | FAILED | OUTCOME_UNKNOWN`, `grant_id`/`task_id` UNIQUE). `desktop_vision_disclose`: a
+  SEPARATE, later approval naming one provider, one model and the person's own typed purpose, created
+  only once the SAME task's capture has SUCCEEDED; its own `claim` step performs a BRAND NEW worker
+  capture (a new `capture_id`, a new native call) rather than reusing the first capture's bytes, and
+  records the provider's closed candidate list in `desktop_vision_disclosures`.
+* **Routes** (authenticated; Electron main only): `POST /desktop/captures` `{objective, worker_generation,
+  surface_ref, surface_epoch, target_hint?}`, `GET /desktop/captures/{taskId}`, `POST
+  /desktop/captures/{taskId}/grant|revoke|claim` (claim takes ONE screenshot for local use and runs best-
+  effort local OCR); `POST /desktop/captures/{taskId}/disclosure` `{recipient, model, purpose}` (recipient/
+  model chosen by Electron main, never a renderer field, exactly like S2/S4), `POST
+  /desktop/captures/{taskId}/disclosure/grant|revoke|claim|result`. Errors: `desktop_vision_refused` (422) /
+  `desktop_vision_state_changed` (409), mirroring S2/S4's own disclosure error shape.
+* **Worker** (`app.desktop.worker`): `POST /v1/desktop/capture`, same token/generation fence and
+  dispatch-replay-at-most-once-per-generation as every other effect, keyed on `capture_id`. Read-only: no
+  `OUTCOME_UNKNOWN` story the way a write has one, because nothing about the target ever changes.
+  `capture_win32.py` is the third reviewed native-surface file (after `win32.py`/`uia_backend.py`),
+  pinned by its own exact allowlist; `PrintWindow` is pinned to one call site, exact-shape, like
+  `SetValue`/`Select`/`Invoke`. The worker declares `PER_MONITOR_AWARE_V2` DPI awareness once, at
+  construction, so window/monitor geometry queries return true physical pixels.
+* **Frame identity.** `geometry_fingerprint` (`app.desktop.dpi`) digests window rect + client rect +
+  monitor + DPI + process creation identity; any material change (move, resize, monitor, DPI, or the
+  window being replaced) changes it. `capture_scope_certain` refuses BEFORE the native call
+  (`capture_scope_uncertain`) if the client-area crop cannot be proven exact, rather than guessing.
+* **Encoding and retention.** The worker encodes captured pixels to PNG itself
+  (`app.desktop.png_encode`, stdlib `zlib` only -- no Pillow, no screenshot library anywhere in this
+  codebase). Only digests/dimensions/DPI/monitor id are ever persisted; the base64 image exists in
+  memory for exactly one hop each (worker -> Python service -> Electron main for local use; the same
+  path again, plus -> the one approved provider, for disclosure) and is never written to Postgres, a
+  log line, a task event or the generic action-read route.
+* **The router's one exception.** `PRIVATE_VISION_TASK_CLASSES` (`src/main/models/model-router.ts`) names
+  exactly `desktop_vision`, the only task class in the whole router allowed to carry `request.image`
+  while private; every other private class still hard-refuses one, unchanged. `desktop_vision` still
+  gets the same one-recipient/zero-failover guarantee every private class gets for free.
+* **A vision result is evidence only.** `VisionResult`/`VisionCandidate` (`extra="forbid"`, Python) and
+  `parseDesktopVisionResult`/`AgentVisionCandidate` (exact-key parsing, TypeScript) have no field for a
+  click, a coordinate, an approval or an action; a region is normalised to the captured crop. Nothing
+  in this codebase turns a candidate into anything that can run.

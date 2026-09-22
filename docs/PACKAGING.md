@@ -365,6 +365,23 @@ migration `0015` (`desktop_dispatches`' widened operations/identity columns, the
 and no new fixture, secret or unexpected executable appears anywhere in the packaged tree. No signing
 change.
 
+### Desktop scoped visual fallback (Milestone 9 S5)
+
+No new native dependency and no new executable. Capture is `PrintWindow` and geometry/monitor/DPI
+queries through the same ctypes surface `win32.py`/`effects_win32.py` already use (a third reviewed
+native-surface file, `capture_win32.py`, pinned the same way); PNG encoding is a small stdlib-only
+(`zlib`) encoder (`app/desktop/png_encode.py`) added specifically to avoid a Pillow/imaging dependency.
+Local OCR reuses the existing, already-bundled `LocalOcrEngine` (`src/main/vision/ocr-engine.ts`,
+`tesseract.js`) and only ever runs if the person has already installed the optional "extras" pack
+(`isExtrasPackInstalled`) -- nothing is downloaded to get it, and the packaged build does not bundle a
+real OCR backend by default. `build-agent-runtime.mjs` additionally fails the build if migration `0016`
+(`task_grants.kind` widened, `desktop_captures`, `desktop_vision_disclosures`) or any of the seven new
+Python files (`app/desktop/capture_win32.py`, `dpi.py`, `png_encode.py`,
+`app/services/desktop_vision.py`, `app/domain/desktop_vision.py`, `app/repositories/desktop_vision.py`,
+`app/api/desktop_vision_schemas.py`) is missing from the runtime bundle. Packaged output was verified
+(`package:dir`): the bundled UIA backend import check still passes from the bundle alone, and no new
+fixture, secret or unexpected executable appears anywhere in the packaged tree. No signing change.
+
 ### Desktop focus, scroll and registered launch (Milestone 9 S3)
 
 No new native dependency and **no new executable**: starting a registered application is `subprocess.Popen` of a program the user registered, not a bundled helper. `build-agent-runtime.mjs` additionally fails the build if migration `0014` (`desktop_dispatches`), `app/desktop/effects.py`, `effects_win32.py`, `registry.py`, `app/services/desktop_actions.py` or `app/domain/desktop_actions.py` is missing from the runtime bundle. The user's registered-application list (`LUMI_DESKTOP_REGISTERED_APPS`) is configuration and is never bundled; no fixture or test file ships. No signing change.
