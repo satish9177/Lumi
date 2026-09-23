@@ -970,3 +970,7 @@ Needs `LUMI_DESKTOP_OBSERVATION=1`, same as S1-S4. See `docs/plans/milestone-9.m
   `parseDesktopVisionResult`/`AgentVisionCandidate` (exact-key parsing, TypeScript) have no field for a
   click, a coordinate, an approval or an action; a region is normalised to the captured crop. Nothing
   in this codebase turns a candidate into anything that can run.
+
+## Approved documents and the file broker (M10 S1, migration `0017`)
+
+The runtime owns M10 file roots (`file_roots`, explicit READ/CREATE/MODIFY with MODIFY fixed false), task-owned file refs (`file_refs`, bound to file identity and SHA-256), bounded extracted text (`documents`, 24 h) and one exact provider disclosure per document task (`document_disclose` grant kind, `document_disclosures` UNIQUE on grant and task, `document_answers`). Routes are `/file-roots*` and `/document-tasks*` (`app/api/document_routes.py`); none writes, copies, opens or deletes a file. Extraction runs in `python -m app.documents.helper`, a contained subprocess fed bytes on stdin. Startup marks a disclosure left `STARTED` as `OUTCOME_UNKNOWN` (never repeated) and purges expired text. See `docs/reviews/milestone-10-s1.md`.

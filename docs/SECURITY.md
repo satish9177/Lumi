@@ -826,6 +826,42 @@ S5 adds exactly one more capability, `capture`, and it is read-only: no OS mutat
 
 **Residual risks (honest, see `docs/reviews/milestone-9-s5.md` §19 for the full list).** Local OCR is wired as a pluggable interface with no real backend shipped this slice (a `LocalOcrEngine` instance is used only if the person already has the optional "extras" pack installed; nothing is downloaded to get it) -- the boundary is proven, not the OCR quality. The safe-Invoke-style heuristics this slice reuses (file-picker title matching, credential-name matching) are unchanged and still English-centric. No production-signed installed validation exists. **Found by the final cross-slice audit, deliberately not narrowed:** a screenshot is never redacted the way S2/S4's text disclosure is -- there is no OCR-plus-redaction-plus-re-render pipeline, and none is planned as part of this capability. This means a window that was the target of an earlier, separately-approved S4 `set_control_value` can, if it is later separately approved for capture and disclosure, show a provider exactly the text Lumi itself wrote, unredacted, alongside anything else visible in the window at capture time -- the same underlying concern S4's own deferred raw-value finding (`docs/reviews/milestone-9-s4.md` §13 finding 3) already named for TEXT disclosure, now also possible, with strictly less mitigation, through vision. It requires three separate human approvals in sequence (the original SetValue, a capture, and a disclosure), each showing what is about to happen, and is a structural consequence of screenshots carrying no redaction pass at all rather than a bypass of any approval; closing it fully needs either withholding capture eligibility near a recent write to the same surface or a real OCR-and-redact pipeline for images, both real design work tracked as follow-up rather than rushed into this audit. See `docs/reviews/milestone-9-final.md`.
 
+## Approved documents and the file broker (Milestone 10 S1)
+
+S1 adds **read-only** local document authority, with no mutation of any file. Details: `docs/reviews/milestone-10-s1.md`.
+
+**Roots.** An M10 file root is a runtime-owned record with explicit `can_read` / `can_create` / `can_modify` permissions (`can_modify` is fixed false by a CHECK). It is registered only after a native folder dialog **and** a native confirmation naming the permissions, both in Electron main. Approving a folder for search does not imply any M10 permission. Refused as roots:
+
+* system, program and application-data folders, including anything inside them (resolved through `SHGetKnownFolderPath`, failing closed);
+* a whole profile or `C:\Users`;
+* Lumi's own trees (the runtime directory and the browser-profile root);
+* reparse points and non-local paths.
+
+**Files.** A task holds opaque file refs:
+
+* a root file, chosen from a bounded listing, whose exclusions are re-applied on add;
+* or exactly one dropped file, which never grants its folder.
+
+Each ref is bound to volume, file index, size, mtime and SHA-256. Every read re-resolves the name with an `lstat` walk (no reparse point), then proves by **handle** that the final path, containment, single hard link, identity and hash still match. A replaced file under the same name is refused. Names are validated before any filesystem call: traversal, absolute/UNC/device paths, ADS, reserved names, trailing dot/space and non-NFC names are all refused.
+
+**Extraction** runs in a helper process that receives bytes, never a path. The helper:
+
+* runs with `-E -s -S`, an environment of `SystemRoot` only, and no shell;
+* runs in a Job Object: kill-on-close, 512 MB, one process only;
+* is killed after 20 s;
+* returns a closed JSON result.
+
+The extractors are stdlib-only, cover PDF, DOCX and text, and are bounded (size, pages, text, ZIP members and expansion, decoded bytes, nesting, operators, scan budget). Macros are refused. External relationships, field instructions and PDF actions or JavaScript are never evaluated or fetched. Encrypted PDFs are refused. XML parts must be UTF-8, with no DOCTYPE or ENTITY.
+
+**Privacy.** Extracted text is `document_private` and `untrusted_environment`. It reaches only its `documents` row (purged after 24 h, together with comparison quotes and dropped-file paths), the trusted panel, and — after an exact trusted approval — ONE provider call. That approval card names the documents, the exact redacted excerpts, the provider, the model and the purpose. The call carries only `d1`/`d2` excerpts: no file name or path. It uses the private class `document_compare`: one recipient, zero failover, no image, a grounded closed result, and never repeated after a lost result. Revoking the folder makes its documents unusable everywhere.
+
+**Residual risks (honest).**
+
+* Handle-verified access is not an operating-system sandbox: the runtime and the helper run with the user's rights.
+* The PDF subset refuses some real PDFs rather than guessing.
+* Redaction is identifier reduction, not anonymisation.
+* `registerDroppedFile` trusts main's own dropped-file registration.
+
 ## Known gaps
 
 - The broker constrains Chromium, not its host process. A compromised browser
