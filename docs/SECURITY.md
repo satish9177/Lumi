@@ -989,6 +989,18 @@ S4 composes S2 (download, placement), S1 (extraction, one provider disclosure) a
 * The M8 planner prompt still calls the offered values "saved details" (it sees only masked previews).
 * Nothing locks the placed file after import; later reads are identity- and hash-verified.
 
+## Cross-executor recovery and the effect registry (Milestone 10 S5)
+
+**One registry, one lock.** `app/domain/effects.py` names every effect-bearing tool (booking, download, placement, project start, desktop set-value/select/invoke), derives its keys from the persisted, controller-built proposal (a project start's key comes from the confirmed grant and is checked against its registered kind), and says per kind what may settle it and whether absence proves anything. No model, provider, page, renderer or generic caller can supply a key, a kind, a retry decision or an absence verdict. Every path into `EXECUTING` (`start_attempt`, `begin_exact_execution`, `start_scoped_attempt`) takes the same transaction-scoped advisory locks (global shared/exclusive, then the keys sorted) and refuses while any action holding a key -- or any booking, project start or unowned project run at all -- is in flight or unresolved. Keys and statuses live in the ledger; nothing is in memory.
+
+**Generic routes are inert.** The generic proposal route refuses every registered effect tool, every controller-owned tool name and every controller-owned task type; the generic attempt, finish and reconciliation routes refuse every effect tool. Booking keeps its reviewed card, execution and read-only reconciliation routes.
+
+**Booking reconciliation.** Read-only `lookup_booking`, bounded (two immediate looks, then backoff, at most 8 per rolling day, one in flight) and counted durably under the task lock. FOUND resolves the same action. NOT_FOUND is a known failure only where the reviewed site declaration makes absence authoritative AND the commit can no longer happen (the worker answered it, or that worker is gone); otherwise the action stays `OUTCOME_UNKNOWN`. A retry is always a new action with a new exact approval; an approval the lock refused is withdrawn.
+
+**Stop** never marks an in-flight or unknown effect failed, never compensates, never deletes a file and never erases a key or dispatch. Startup recovery is idempotent and keys any pre-registry unresolved effect (fail-closed where keys cannot be derived).
+
+**Residual risks (honest).** Only the fixture declares authoritative absence, and bookings have no manual settlement path; an unresolved global-tier effect blocks all keyed work (up to a day with an exhausted lookup budget, or until an unowned project process exits); placement keys use the root id (a re-registered folder or an 8.3 name gets another key, though the no-overwrite rename still refuses a second file); desktop focus/scroll/launch, provider disclosures and the frozen local form fill are not keyed. Details: `docs/reviews/milestone-10-s5.md`.
+
 ## Known gaps
 
 - The broker constrains Chromium, not its host process. A compromised browser

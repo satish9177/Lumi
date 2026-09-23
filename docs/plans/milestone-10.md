@@ -4,7 +4,7 @@
 > authorized steps. It never gains arbitrary filesystem, shell, browser, desktop or provider
 > authority because several systems take part.
 
-Status: **planned. M10 starts from `eda1620` (M9 merged to `main`).** It is delivered as five
+Status: **S1-S5 engineering complete** (reviews: `docs/reviews/milestone-10-s1.md` ... `-s5.md`; final audit: `docs/reviews/milestone-10-final.md`). M10 started from `eda1620` (M9 merged to `main`). It is delivered as five
 sequential security slices. Each slice gets its own implementation, adversarial review, validation,
 documentation and commits. If a hard requirement cannot be met, M10 stops at the last completed
 slice. No invariant is weakened to finish.
@@ -229,8 +229,10 @@ preparation (M8 S4-S6) → **stop before submit**. There is no new planner holdi
   4. After restart: one action, one dispatch, one effect, `OUTCOME_UNKNOWN`.
   5. Read-only reconcile: `FOUND` gives `SUCCEEDED`; authoritative absence gives `FAILED`;
      non-authoritative "not found" stays `OUTCOME_UNKNOWN`.
-  6. While unresolved, the same task, a new task, the browser route, the desktop route, a project
-     recipe, the file broker, another provider and another model are all refused.
+  6. While unresolved, the same task, a new task, the browser route, the desktop mutation route, a
+     project recipe, the file broker, another provider and another model are all refused. (As built,
+     S5: desktop focus/scroll/launch, read-only work and the frozen local form fill are not keyed; none
+     can repeat a keyed effect. See `docs/reviews/milestone-10-s5.md`.)
 * **Stop/cancel** revokes future dispatch, stops owned runs, and preserves evidence. It never marks
   an in-flight effect failed and never compensates.
 * **Final audit.** Two independent Claude passes over `eda1620..HEAD`.

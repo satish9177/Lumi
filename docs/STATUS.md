@@ -19,7 +19,7 @@ M10 S1 approved documents/broker   COMPLETE  (engineering)
     S2 downloads + placement       COMPLETE  (engineering)
     S3 project recipes             COMPLETE  (engineering)
     S4 cross-app preparation       COMPLETE  (engineering)
-    S5 cross-executor recovery     NOT STARTED
+    S5 cross-executor recovery     COMPLETE  (engineering; Acceptance F green)
 ```
 
 M10 S1 (plan: [plans/milestone-10.md](plans/milestone-10.md), review: [reviews/milestone-10-s1.md](reviews/milestone-10-s1.md)) adds read-only local document authority: M10 file roots with explicit permissions, handle-verified reads of a chosen file or the one dropped file, stdlib-only bounded extraction in a contained helper process, local comparison, and ONE exact, single-use provider disclosure of redacted excerpts. No file is written, moved or deleted.
@@ -27,6 +27,8 @@ M10 S1 (plan: [plans/milestone-10.md](plans/milestone-10.md), review: [reviews/m
 M10 S2 (review: [reviews/milestone-10-s2.md](reviews/milestone-10-s2.md)) adds ONE approved download into Lumi's own quarantine and, as a separate step, an atomic, no-overwrite, same-volume rename of it into ONE approved name in a folder approved for saving. It checks the type by signature, keeps Mark-of-the-Web, and settles an uncertain step from local evidence only, never with a second download. It also adds the cross-executor effect lock (`action_effect_keys`) that S5 builds on. Nothing is opened, executed, overwritten or deleted.
 
 M10 S3 (review: [reviews/milestone-10-s3.md](reviews/milestone-10-s3.md)) runs ONE script a registered project declares, from a recipe registered in trusted UI, once per native-confirmed approval. The fixed argv is `node.exe npm-cli.js run <script>`, with the pinned Program Files Node.js and an environment built from nothing. The process starts suspended in its own Job Object and is resumed only after its identity is committed. It counts as ready only when its job owns the port, and Stop ends only that job. Any change to the project or Node.js invalidates the recipe. There is no shell of Lumi's own, no install and no Git. Acceptance C keeps M9's refusal of the per-user VS Code install.
+
+M10 S5 (review: [reviews/milestone-10-s5.md](reviews/milestone-10-s5.md)) finishes the cross-executor boundary: one closed effect registry keys every booking, transfer, placement, project start and desktop mutation from its persisted proposal; every path into execution takes the same database lock; the generic ledger routes can no longer mint, start or settle an effect. Acceptance F hard-kills the runtime and worker after the fixture confirms a booking: after restart there is one action, one attempt, one dispatch and one booking, `OUTCOME_UNKNOWN`; every other route is refused; a read-only lookup settles it. No migration.
 
 M10 S4 (review: [reviews/milestone-10-s4.md](reviews/milestone-10-s4.md)) composes a download, the placed file's extraction, an optional ONE provider disclosure and M8's exact form preparation into one workflow that stops before submit. It is a deterministic controller that records lineage in the database; each step keeps its own approval. Details are adopted one at a time by an exact approval that keeps their provenance (`document_extracted` or `provider_derived`, never user-typed), and the form step can place only its own workflow's values. The combined acceptance fills the fixture form locally with zero submissions.
 

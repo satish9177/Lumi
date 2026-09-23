@@ -1027,3 +1027,13 @@ Migration `0020` adds `workflows` (ACTIVE/STOPPED, 24 h expiry), `workflow_steps
 
 Each child step is then driven by the routes that already own it (`/transfers`, `/document-tasks`, `/tasks/{id}/authenticated/*`, form preparation). A `form` step's form planning reads only its workflow's adopted values (`workflow_values`), selected by `workflow_steps`; the manifest carries `workflow_id` and per-field provenance. The adoption tool `adopt_workflow_value` is refused by every generic action route. New task events: `task.workflow_step_linked`, `task.workflow_candidates_found`, `task.workflow_value_adopted`, `task.workflow_stopped` (ids, kinds, provenance and counts only). Startup and every read purge the text of stopped or expired workflows. See `docs/reviews/milestone-10-s4.md`.
 
+## Cross-executor recovery (M10 S5, no migration)
+
+No schema change: `action_effect_keys` (0018) already allows the `external_mutation` and `desktop_mutation` kinds, and every derived key fits its CHECK.
+
+* **Registry:** `app/domain/effects.py` -- `EFFECT_TOOLS` (tool -> kinds, key derivation, owning controller), `resolve_effect_keys`, `RECONCILIATION_REGISTRY` (evidence, read-only operations, `AbsenceAuthority`, lookup bound), `lookup_allowance`.
+* **Lock:** `ActionService._claim_effect_keys` on every path into `EXECUTING`; `EffectLockRepository.lock(keys, global_tier=...)` (global advisory lock shared/exclusive, then keys sorted) and `.conflict` (same key unresolved; any global-tier action `EXECUTING`/`OUTCOME_UNKNOWN`/`RECONCILING`; any `project_runs` row `OUTCOME_UNKNOWN`). `settle_exact_approval` refuses effect tools.
+* **Generic routes:** `POST /tasks/{id}/actions` -> `effect_route_refused` for effect tools, controller-owned tools and controller task types; `/actions/{id}/attempts[/finish]` and `/reconciliation[/finish]` -> `effect_route_refused` for effect tools.
+* **Booking reconciliation:** `POST /actions/{id}/browser-reconciliation` -> `reconciliation_limited` (reasons `lookup_backoff`, `lookup_budget_exhausted`, `lookup_in_flight`) when bounded; the verdict fences authoritative absence on the commit being settled. `browser-execution` refused by the lock -> `effect_locked`, and the refused approval is REJECTED (reason `effect_locked`).
+* **Startup:** `RecoveryService.backfill_effect_keys` and `BrowserRepository.close_orphaned_lookups` join the existing recovery, before serving.
+* New error codes: `effect_route_refused`, `effect_keys_invalid`, `reconciliation_limited` (main maps `effect_locked` and `reconciliation_limited` to their own codes). See `docs/reviews/milestone-10-s5.md`.

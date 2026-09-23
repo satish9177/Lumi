@@ -353,6 +353,10 @@ real-account release remains **BLOCKED**.
 
 **M8a S3 packaging note.** Authenticated reading adds no new binary: it uses the bundled full Chromium and the S0 broker. Profiles live under the user data directory (`LUMI_BROWSER_PROFILE_ROOT`), not in the bundle. No new packaged-build run was performed for S3.
 
+### Cross-executor recovery (Milestone 10 S5)
+
+No new module, dependency or migration (head stays `0020`). `scripts/build-agent-runtime.mjs` additionally checks that the bundled `app/domain/effects.py` and `app/services/recovery.py` are the S5 versions (the effect registry and the startup key backfill).
+
 ### Desktop bounded semantic actions (Milestone 9 S4)
 
 No new native dependency and no new executable: `SetValue`/`Select`/`Invoke` are three more calls through
