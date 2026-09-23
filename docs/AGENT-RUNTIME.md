@@ -974,3 +974,18 @@ Needs `LUMI_DESKTOP_OBSERVATION=1`, same as S1-S4. See `docs/plans/milestone-9.m
 ## Approved documents and the file broker (M10 S1, migration `0017`)
 
 The runtime owns M10 file roots (`file_roots`, explicit READ/CREATE/MODIFY with MODIFY fixed false), task-owned file refs (`file_refs`, bound to file identity and SHA-256), bounded extracted text (`documents`, 24 h) and one exact provider disclosure per document task (`document_disclose` grant kind, `document_disclosures` UNIQUE on grant and task, `document_answers`). Routes are `/file-roots*` and `/document-tasks*` (`app/api/document_routes.py`); none writes, copies, opens or deletes a file. Extraction runs in `python -m app.documents.helper`, a contained subprocess fed bytes on stdin. Startup marks a disclosure left `STARTED` as `OUTCOME_UNKNOWN` (never repeated) and purges expired text. See `docs/reviews/milestone-10-s1.md`.
+
+## Controlled downloads and file placement (M10 S2, migration `0018`)
+
+Migration `0018` adds three things:
+
+* `file_transfers`: one per transfer task, UNIQUE on task and grant, with CHECKs for status, kind, `max_bytes`, and "verified before placement";
+* `action_effect_keys`: the cross-executor effect lock, with a closed kind set and a fixed key shape;
+* the `file_transfer` grant kind.
+
+Routes are `/transfers*` (`app/api/transfer_routes.py`): create, get, latest, grant, revoke, download, place and reconcile. None takes a path or an overwrite flag.
+
+The browser worker gains one operation, `download_to_quarantine` (target and effect `DOWNLOAD`, reconciled by `INSPECT_QUARANTINE`). Its quarantine base comes from `LUMI_BROWSER_QUARANTINE_ROOT`; the runtime's comes from `LUMI_DOWNLOAD_QUARANTINE_ROOT`. Both default to `%LOCALAPPDATA%\Lumi\quarantine`. Placement is `app/files/place.py`.
+
+Startup removes quarantines older than 24 h for PLACED, FAILED and CANCELLED transfers, and for QUARANTINED transfers under a closed grant. OUTCOME_UNKNOWN evidence and reconciliation tombstones are kept. See `docs/reviews/milestone-10-s2.md`.
+

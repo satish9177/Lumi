@@ -862,6 +862,58 @@ The extractors are stdlib-only, cover PDF, DOCX and text, and are bounded (size,
 * Redaction is identifier reduction, not anonymisation.
 * `registerDroppedFile` trusts main's own dropped-file registration.
 
+## Controlled downloads and file placement (Milestone 10 S2)
+
+S2 adds exactly two effects: fetching ONE approved public file into Lumi's own quarantine, and renaming it, as a separate step, into ONE approved name in a folder approved for saving. Details: `docs/reviews/milestone-10-s2.md`.
+
+**Authority.** A `file_transfer` grant binds:
+
+* the task and transfer id;
+* the canonical URL and its origin (checked against the public URL policy at creation and again at download);
+* one `can_create` root, by identity;
+* one validated name with a `.pdf`, `.docx` or `.txt` extension, and the expected kind;
+* `max_bytes` (at most 10 MB);
+* `overwrite = false` (a literal type: `true` cannot be expressed);
+* two single-use steps and an expiry.
+
+The renderer's card is re-confirmed by a native dialog in main, built from the runtime's record. No renderer or model input ever names a path.
+
+**Quarantine first.** The worker creates `<quarantine>\<transferId>\started.json` (an exclusive create, fsynced) **before** the request. It then captures the main-document body through the PublicNetworkGuard: GET only, status 200, bounded, redirects re-validated per hop, fresh cookie-less context, `accept_downloads=False`.
+
+**Type by signature.** The bytes are sniffed, never the name or the content type. Executables, scripts, shortcuts, OLE containers and macro documents are refused, as is anything that is not a PDF, DOCX or text file. A mismatch with the approved kind (`type_mismatch`) is never placed.
+
+Only then does it write `payload.bin`, with a `Zone.Identifier` (ZoneId=3, HostUrl = origin), followed last by `complete.json`. The runtime re-verifies the payload itself and ignores the worker's claim.
+
+**Placement is a rename, not a write.** It uses `NtSetInformationFile(FileRenameInformation)` with `ReplaceIfExists = FALSE`, relative to a held handle on the verified root:
+
+* the root handle has no `FILE_SHARE_DELETE` and uses `FILE_FLAG_OPEN_REPARSE_POINT`;
+* the payload handle has share-read only, and its bytes are hashed and sniffed through that same handle.
+
+As a result:
+
+* an existing file (or case or 8.3 variant) is never replaced;
+* a junction or folder swap is refused;
+* a cross-volume move is refused, not emulated;
+* Mark-of-the-Web travels with the file, and a payload without it is refused.
+
+Nothing is opened, executed, uploaded or deleted in an approved folder.
+
+**Uncertainty.** An uncertain download or placement becomes OUTCOME_UNKNOWN and is settled only from local evidence: the quarantine markers, or the file index at the destination versus in the quarantine. Nothing is ever fetched or renamed again. "No request was made" is declared only after reconciliation creates the transfer directory itself, a tombstone that makes the worker's exclusive `begin` fail for ever.
+
+**Cross-executor effect lock (`action_effect_keys`).** Keyed actions lock their keys in sorted order (`pg_advisory_xact_lock`) in the authorizing transaction. They are refused (`effect_locked`) while:
+
+* the same key is EXECUTING, OUTCOME_UNKNOWN or RECONCILING;
+* or any `external_mutation` or `project_run` action is unresolved.
+
+The generic action routes cannot start, settle or plant a transfer step.
+
+**Residual risks (honest).**
+
+* This is not a sandbox against a same-user process acting inside the quarantine between checks. Placement re-proves identity and bytes through its own handles.
+* The placed file keeps the quarantine's ACL.
+* Placement is same-volume only.
+* Script-triggered downloads are out of scope.
+
 ## Known gaps
 
 - The broker constrains Chromium, not its host process. A compromised browser
