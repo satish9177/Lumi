@@ -1,6 +1,6 @@
 # Milestone 10 handoff: S4 and S5 (for the next Claude session)
 
-S1–S3 are **committed and pushed** on `lumi-m10`. S4 and S5 are **not started**. Do not merge to `main`, and do not rewrite M9 history. Stop after M10; there is no M11.
+S1–S4 are **committed and pushed** on `lumi-m10` (S4: `docs/reviews/milestone-10-s4.md`, migration `0020`; S5 starts at `0021`). S5 is **not started**; §5 below is kept as the record of the S4 brief. Do not merge to `main`, and do not rewrite M9 history. Stop after M10; there is no M11.
 
 Read these first, in order:
 
@@ -23,9 +23,10 @@ eda1620  M9 final (= main)                                    <- M10 audit range
 
 * `0017`: documents and file broker;
 * `0018`: transfers and `action_effect_keys`;
-* `0019`: projects, recipes and runs.
+* `0019`: projects, recipes and runs;
+* `0020`: workflows, steps, candidates and workflow values (S4).
 
-Head is `0019`. The next is `0020`.
+Head is `0020`. The next is `0021`.
 
 ## 2. The process each slice followed (keep it)
 
@@ -64,7 +65,8 @@ Keep the model and subagent policy Claude-only. The lead owns security decisions
 * **Contract regeneration:**
   * After changing `TaskEventType` or error codes, regenerate the contract: `cd services/agent && uv run python -m app.api.contract --write`. That writes `src/shared/agent-runtime-contract.json`.
   * Also add the event to `TASK_EVENT_TYPES` in `src/shared/agent-contracts.ts` and to the timeline strings in `src/renderer/src/agent-task-view.ts`, or vitest's enum-contract test fails.
-* **New tables:** update `TRUNCATE_ALL` in `tests/conftest.py`. Add an `M10_S4_TABLES` tuple and add it to the `without=` lists in `test_migration_0013/0015/0017/0018/0019`. `test_schema.py` compares metadata with the migrated database, so tables and migration must match exactly.
+* **New tables:** update `TRUNCATE_ALL` in `tests/conftest.py`. Add an `M10_S5_TABLES` tuple (S4 added `M10_S4_TABLES`) and add it to the `without=` lists in `test_migration_0013/0015/0017/0018/0019/0020`.
+* **Changing an uncommitted migration:** the test database is already stamped at head, so truncate, downgrade one revision and migrate again before re-running tests. `test_schema.py` compares metadata with the migrated database, so tables and migration must match exactly.
 * **Packaging:** add each new migration and module to the presence checks in `scripts/build-agent-runtime.mjs`.
 * **Source scanners:**
   * `tests/desktop_source_scan.py`: the word "breakaway" anywhere outside two allowed files fails.

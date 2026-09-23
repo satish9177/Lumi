@@ -1014,3 +1014,16 @@ Startup recovers runs a dead runtime left:
 
 Shutdown stops every owned run. See `docs/reviews/milestone-10-s3.md`.
 
+## Cross-app preparation workflows (M10 S4, migration `0020`)
+
+Migration `0020` adds `workflows` (ACTIVE/STOPPED, 24 h expiry), `workflow_steps` (one task per role: `download`, `documents`, `form`), `workflow_candidates` and `workflow_values`, and `UNIQUE(id, task_id)` on `documents` and `document_disclosures` for the lineage foreign keys.
+
+**Routes** (`app/api/workflow_routes.py`):
+
+* `POST /workflows`, `GET /workflows/latest`, `GET /workflows/{id}`;
+* `POST /workflows/{id}/download|documents|form|stop`;
+* `POST /workflows/{id}/candidates/extract|derive`, `POST /workflows/{id}/candidates/{candidate}/adopt`;
+* `POST /workflows/adoptions/{action}/approve|reject`.
+
+Each child step is then driven by the routes that already own it (`/transfers`, `/document-tasks`, `/tasks/{id}/authenticated/*`, form preparation). A `form` step's form planning reads only its workflow's adopted values (`workflow_values`), selected by `workflow_steps`; the manifest carries `workflow_id` and per-field provenance. The adoption tool `adopt_workflow_value` is refused by every generic action route. New task events: `task.workflow_step_linked`, `task.workflow_candidates_found`, `task.workflow_value_adopted`, `task.workflow_stopped` (ids, kinds, provenance and counts only). Startup and every read purge the text of stopped or expired workflows. See `docs/reviews/milestone-10-s4.md`.
+

@@ -965,6 +965,30 @@ It is re-derived at every card, at every start, and again immediately before the
 * A run executes the project's code with the user's rights. The job bounds its lifetime and ownership, not its behaviour.
 * The dependency pre-check is a heuristic. A missing module fails the run; nothing is ever installed.
 
+## Cross-app preparation workflow (Milestone 10 S4)
+
+S4 composes S2 (download, placement), S1 (extraction, one provider disclosure) and M8 (account reading, exact form preparation) into one workflow that stops before submit. Details: `docs/reviews/milestone-10-s4.md`.
+
+**A controller, not a planner.** A workflow owns lineage only. It holds no tool, calls no model and never chooses a next step. Every step keeps its own approval, and none implies another:
+
+* the download card (and main's native dialog) on the `download` step;
+* the ONE provider disclosure card (provider, model, excerpt) on the `documents` step;
+* an exact, single-use adoption approval per detail, confirmed again by a native dialog built from the runtime's record (kind, exact value, source);
+* the account-reading card, the planning grant and the exact manifest on the `form` step.
+
+**Lineage, decided by the database.** A task belongs to at most one workflow, in one role, recorded in the transaction that creates it. Composite foreign keys bind a candidate's document and disclosure to the workflow's own `documents` step, and bind an adopted value's kind, digest and provenance to its candidate. The documents step holds exactly the file the workflow's transfer placed (same file identity, same SHA-256); the generic routes cannot add another. A `form` step reads only its own live workflow's values; every other task reads only the global saved details.
+
+**Provenance, never laundered.** A candidate is `document_extracted` (a labelled line of the document, closed vocabulary, canonicalised as an M8 kind) or `provider_derived` (a labelled document line that a quote grounded in the disclosed projection covers entirely). The value is always read from the document, never from a provider's quote; the provider's closed schema is unchanged and cannot name a field or a value. There is no user-typed provenance, adoption never writes M8's global `protected_values`, and the ledger holds only digests. The form manifest carries `workflow_id` and each value's provenance; pre-S4 digests are unchanged.
+
+**Nothing submits.** No S4 route, IPC channel or generic action route can submit, press a key, click, upload or navigate; the generic routes refuse to mint, approve, start or settle an adoption. M8's freeze, firewall and exact approvals are reused unchanged. The combined acceptance asserts the fixture's submission counter is 0.
+
+**Stop and retention.** A workflow expires after 24 h. Stop purges every candidate value, quote and adopted value, rejects pending adoptions, and revokes the open transfer, disclosure and account-reading grants. It never undoes an effect that already happened and leaves a frozen local draft to the person.
+
+**Residual risks (honest).**
+
+* The M8 planner prompt still calls the offered values "saved details" (it sees only masked previews).
+* Nothing locks the placed file after import; later reads are identity- and hash-verified.
+
 ## Known gaps
 
 - The broker constrains Chromium, not its host process. A compromised browser
