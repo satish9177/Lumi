@@ -17,6 +17,7 @@
 
 import type { AgentDocumentApi } from './document-contracts'
 import type { AgentTransferApi } from './transfer-contracts'
+import type { AgentProjectApi } from './project-contracts'
 import type { VoiceTaskCommand, VoiceTaskOutcome } from './voice-task-contracts'
 import type { AgentPreferenceView, ModelDiagnosticView, PreferenceKey } from './model-contracts'
 
@@ -118,6 +119,12 @@ export const TASK_EVENT_TYPES = [
   'task.transfer_requested',
   'task.transfer_granted',
   'task.transfer_revoked',
+  // Milestone 10 S3: registered project recipes.
+  'task.project_run_requested',
+  'task.project_run_granted',
+  'task.project_run_revoked',
+  'task.project_run_blocked',
+  'task.project_run_stopped',
   'action.proposed', 'action.approval_requested',
   'action.approved', 'action.authorized', 'action.rejected', 'action.execution_started', 'action.succeeded',
   'action.failed', 'action.outcome_unknown', 'action.reconciliation_started', 'action.reconciled'
@@ -1386,6 +1393,10 @@ export const AGENT_ERROR_CODES = [
   'transfer_refused',
   'transfer_state_changed',
   'effect_locked',
+  // Milestone 10 S3: a project request was refused (including BLOCKED: missing_dependency), or the
+  // recipe/approval moved on since it was reviewed.
+  'project_refused',
+  'project_state_changed',
   'request_failed'
 ] as const
 export type AgentErrorCode = typeof AGENT_ERROR_CODES[number]
@@ -1403,7 +1414,7 @@ export type AgentResult<T> = { ok: true; value: T } | { ok: false; error: AgentE
  * and the revision the user reviewed; nothing can carry a doctor, time, price,
  * proposal or digest. There is no generic request, URL or dispatch method.
  */
-export interface AgentApi extends AgentDocumentApi, AgentTransferApi {
+export interface AgentApi extends AgentDocumentApi, AgentTransferApi, AgentProjectApi {
   getRuntimeStatus: () => Promise<AgentRuntimeView>
   onRuntimeStatus: (listener: (status: AgentRuntimeView) => void) => () => void
   restartRuntime: () => Promise<AgentResult<AgentRuntimeView>>
@@ -1779,7 +1790,24 @@ export const AGENT_IPC_CHANNELS = {
   declineTransfer: 'lifelens:agent:decline-transfer',
   downloadTransfer: 'lifelens:agent:download-transfer',
   placeTransfer: 'lifelens:agent:place-transfer',
-  reconcileTransfer: 'lifelens:agent:reconcile-transfer'
+  reconcileTransfer: 'lifelens:agent:reconcile-transfer',
+  // Milestone 10 S3: registered projects, recipes and runs. Ids, revisions, labels and a closed recipe
+  // form; never a path, command, executable or argument. Folders come from a native dialog in main.
+  listProjects: 'lifelens:agent:list-projects',
+  addProject: 'lifelens:agent:add-project',
+  revokeProject: 'lifelens:agent:revoke-project',
+  listProjectScripts: 'lifelens:agent:list-project-scripts',
+  createProjectRecipe: 'lifelens:agent:create-project-recipe',
+  listProjectRecipes: 'lifelens:agent:list-project-recipes',
+  revokeProjectRecipe: 'lifelens:agent:revoke-project-recipe',
+  createProjectRun: 'lifelens:agent:create-project-run',
+  getProjectRun: 'lifelens:agent:get-project-run',
+  getLatestProjectRun: 'lifelens:agent:get-latest-project-run',
+  grantProjectRun: 'lifelens:agent:grant-project-run',
+  declineProjectRun: 'lifelens:agent:decline-project-run',
+  startProjectRun: 'lifelens:agent:start-project-run',
+  stopProjectRun: 'lifelens:agent:stop-project-run',
+  reconcileProjectRun: 'lifelens:agent:reconcile-project-run'
 } as const
 
 /** Actions whose side effect is unresolved or in flight. */

@@ -159,6 +159,8 @@ ERROR_CODES = (
     "effect_locked",
     "transfer_refused",
     "transfer_state_changed",
+    "project_refused",
+    "project_state_changed",
     "destination_not_allowed",
     "invalid_action_transition",
     "invalid_booking_criteria",

@@ -23,6 +23,7 @@ import type { DesktopPlanningController } from './desktop-planning-controller'
 import type { DesktopVisionController } from './desktop-vision-controller'
 import type { DocumentController } from './document-controller'
 import type { TransferController } from './transfer-controller'
+import type { ProjectController } from './project-controller'
 import type { VoiceTaskController } from './voice-task-controller'
 
 /**
@@ -93,6 +94,13 @@ export interface AgentIpcDependencies {
     | 'createTransfer' | 'getTransfer' | 'getLatestTransfer' | 'grantTransfer' | 'declineTransfer'
     | 'downloadTransfer' | 'placeTransfer' | 'reconcileTransfer'
   >
+  /** Milestone 10 S3. Absent in builds without the project capability. */
+  projects?: Pick<
+    ProjectController,
+    | 'listProjects' | 'addProject' | 'revokeProject' | 'listProjectScripts' | 'createProjectRecipe' | 'listProjectRecipes'
+    | 'revokeProjectRecipe' | 'createProjectRun' | 'getProjectRun' | 'getLatestProjectRun' | 'grantProjectRun'
+    | 'declineProjectRun' | 'startProjectRun' | 'stopProjectRun' | 'reconcileProjectRun'
+  >
 }
 
 const UNAVAILABLE = { code: 'request_failed', message: 'That is not available in this build.' } as const
@@ -112,7 +120,7 @@ function routeWithoutInterpreter(request: unknown): TypedRequestRoute {
 
 export function registerAgentIpc({
   ipcMain, assertTrustedSender, controller, voice, runtimeStatus, restartRuntime, text, memory, diagnostics,
-  browserProfiles, desktopRead, desktopActions, desktopPlanning, desktopVision, documents, transfers
+  browserProfiles, desktopRead, desktopActions, desktopPlanning, desktopVision, documents, transfers, projects
 }: AgentIpcDependencies): void {
   const handle = (channel: string, listener: (...args: unknown[]) => unknown): void => {
     ipcMain.handle(channel, (event, ...args) => {
@@ -350,4 +358,22 @@ export function registerAgentIpc({
   handle(AGENT_IPC_CHANNELS.downloadTransfer, (taskId) => transfers ? transfers.downloadTransfer(taskId) : noDocuments())
   handle(AGENT_IPC_CHANNELS.placeTransfer, (taskId) => transfers ? transfers.placeTransfer(taskId) : noDocuments())
   handle(AGENT_IPC_CHANNELS.reconcileTransfer, (taskId) => transfers ? transfers.reconcileTransfer(taskId) : noDocuments())
+  // Milestone 10 S3: fifteen fixed channels for registered projects. None takes a path, command or argument;
+  // a folder, a recipe and a run approval are each confirmed by a native dialog in main. Not reachable from voice.
+  const noProjects = (): Promise<{ ok: false; error: typeof UNAVAILABLE }> => Promise.resolve({ ok: false, error: UNAVAILABLE })
+  handle(AGENT_IPC_CHANNELS.listProjects, () => projects ? projects.listProjects() : Promise.resolve({ ok: true, value: [] }))
+  handle(AGENT_IPC_CHANNELS.addProject, (label) => projects ? projects.addProject(label) : noProjects())
+  handle(AGENT_IPC_CHANNELS.revokeProject, (projectId, revision) => projects ? projects.revokeProject(projectId, revision) : noProjects())
+  handle(AGENT_IPC_CHANNELS.listProjectScripts, (projectId) => projects ? projects.listProjectScripts(projectId) : noProjects())
+  handle(AGENT_IPC_CHANNELS.createProjectRecipe, (projectId, recipe) => projects ? projects.createProjectRecipe(projectId, recipe) : noProjects())
+  handle(AGENT_IPC_CHANNELS.listProjectRecipes, () => projects ? projects.listProjectRecipes() : Promise.resolve({ ok: true, value: [] }))
+  handle(AGENT_IPC_CHANNELS.revokeProjectRecipe, (recipeId, revision) => projects ? projects.revokeProjectRecipe(recipeId, revision) : noProjects())
+  handle(AGENT_IPC_CHANNELS.createProjectRun, (recipeId) => projects ? projects.createProjectRun(recipeId) : noProjects())
+  handle(AGENT_IPC_CHANNELS.getProjectRun, (taskId) => projects ? projects.getProjectRun(taskId) : noProjects())
+  handle(AGENT_IPC_CHANNELS.getLatestProjectRun, () => projects ? projects.getLatestProjectRun() : Promise.resolve({ ok: true, value: null }))
+  handle(AGENT_IPC_CHANNELS.grantProjectRun, (taskId, grantId, revision) => projects ? projects.grantProjectRun(taskId, grantId, revision) : noProjects())
+  handle(AGENT_IPC_CHANNELS.declineProjectRun, (taskId, grantId, revision) => projects ? projects.declineProjectRun(taskId, grantId, revision) : noProjects())
+  handle(AGENT_IPC_CHANNELS.startProjectRun, (taskId) => projects ? projects.startProjectRun(taskId) : noProjects())
+  handle(AGENT_IPC_CHANNELS.stopProjectRun, (taskId) => projects ? projects.stopProjectRun(taskId) : noProjects())
+  handle(AGENT_IPC_CHANNELS.reconcileProjectRun, (taskId) => projects ? projects.reconcileProjectRun(taskId) : noProjects())
 }

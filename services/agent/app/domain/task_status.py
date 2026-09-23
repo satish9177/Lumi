@@ -118,6 +118,12 @@ class TaskEventType(StrEnum):
     TASK_TRANSFER_REQUESTED = "task.transfer_requested"
     TASK_TRANSFER_GRANTED = "task.transfer_granted"
     TASK_TRANSFER_REVOKED = "task.transfer_revoked"
+    # Milestone 10 S3: registered project recipes. Ids and digests only; never a path, script text or log.
+    TASK_PROJECT_RUN_REQUESTED = "task.project_run_requested"
+    TASK_PROJECT_RUN_GRANTED = "task.project_run_granted"
+    TASK_PROJECT_RUN_REVOKED = "task.project_run_revoked"
+    TASK_PROJECT_RUN_BLOCKED = "task.project_run_blocked"
+    TASK_PROJECT_RUN_STOPPED = "task.project_run_stopped"
     ACTION_PROPOSED = "action.proposed"
     ACTION_APPROVAL_REQUESTED = "action.approval_requested"
     ACTION_APPROVED = "action.approved"

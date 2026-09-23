@@ -74,6 +74,7 @@ from app.services.clinic_info import (
 )
 from app.domain.errors import BrowserObservationError, DestinationNotAllowedError
 from app.domain.page_observation import PAGE_INSPECTION_TASK_TYPE
+from app.domain.projects import TOOL_PROJECT_START, ProjectRefusal
 from app.domain.transfers import TOOL_DOWNLOAD, TOOL_PLACE, TransferRefusal
 from app.domain.public_url import UrlPolicyError
 from app.domain.authenticated import (
@@ -338,6 +339,10 @@ async def _refuse_disclosure_tool(service: ActionService, action_id: uuid.UUID) 
         # lock, the quarantine and the evidence-based reconciliation are one unit. A generic attempt or a
         # generic "finish reconciliation" would start or settle a keyed effect around all of them.
         raise TransferRefusal("use_transfer_route")
+    if tool.lower() == TOOL_PROJECT_START:
+        # Milestone 10 S3: a project start exists only inside `ProjectService` (recipe re-derivation, the run
+        # row, the effect key, the suspended spawn into its own job).
+        raise ProjectRefusal("use_project_route")
 
 
 @router.post(
@@ -362,6 +367,9 @@ async def propose_action(
     if body.tool_name.lower().startswith("transfer_"):
         # Milestone 10 S2: only `TransferService` mints a download or placement action, with its effect keys.
         raise TransferRefusal("use_transfer_route")
+    if body.tool_name.lower().startswith("project_"):
+        # Milestone 10 S3: only `ProjectService` mints a project start, from a confirmed per-run approval.
+        raise ProjectRefusal("use_project_route")
     view, created = await service.propose_action(
         task_id,
         idempotency_key=body.idempotency_key,

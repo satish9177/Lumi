@@ -13,7 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from tests.conftest import M10_S1_TABLES, M10_S2_TABLES, head_revision, downgrade, migrate, truncate_all
+from tests.conftest import M10_S1_TABLES, M10_S2_TABLES, M10_S3_TABLES, head_revision, downgrade, migrate, truncate_all
 
 NEW_TABLES = ("desktop_disclosures", "desktop_answers")
 DIGEST = "a" * 64
@@ -190,7 +190,7 @@ def test_migration_0013_adds_exactly_the_disclosure_tables_and_downgrades_cleanl
             url,
             without=(
                 "desktop_dispatches", "desktop_action_plans", "desktop_vision_disclosures", "desktop_captures",
-                *M10_S1_TABLES, *M10_S2_TABLES,
+                *M10_S1_TABLES, *M10_S2_TABLES, *M10_S3_TABLES,
             ),
         )
         downgrade(url, "0012")

@@ -22,6 +22,8 @@ from app.domain.authenticated import AuthenticatedRefusal
 from app.domain.documents import STATE_CODES as DOCUMENT_STATE_CODES
 from app.domain.documents import DocumentRefusal
 from app.domain.effects import EffectLockedError
+from app.domain.projects import STATE_CODES as PROJECT_STATE_CODES
+from app.domain.projects import ProjectRefusal
 from app.domain.transfers import STATE_CODES as TRANSFER_STATE_CODES
 from app.domain.transfers import TransferRefusal
 from app.domain.desktop_disclosure import STATE_CODES as DESKTOP_DISCLOSURE_STATE_CODES
@@ -656,7 +658,20 @@ def register_error_handlers(app: FastAPI) -> None:
             ),
         )
 
+    async def project_refused(_: Request, exc: Exception) -> JSONResponse:
+        assert isinstance(exc, ProjectRefusal)
+        stale = exc.code in PROJECT_STATE_CODES
+        return _error(
+            status.HTTP_409_CONFLICT if stale else status.HTTP_422_UNPROCESSABLE_CONTENT,
+            ErrorDetail(
+                code="project_state_changed" if stale else "project_refused",
+                message="That project run can no longer go ahead as approved." if stale else "That project request was refused.",
+                reason=exc.code,
+            ),
+        )
+
     app.add_exception_handler(TransferRefusal, transfer_refused)
+    app.add_exception_handler(ProjectRefusal, project_refused)
     app.add_exception_handler(EffectLockedError, effect_locked)
     app.add_exception_handler(
         ProtectedValueRefusal,

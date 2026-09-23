@@ -10,6 +10,7 @@ import {
 import type { GuardedTool } from '../shared/intent'
 import { AGENT_IPC_CHANNELS, type AgentApi, type AgentBookingCriteria, type AgentProtectedDataKind, type AgentRuntimeView } from '../shared/agent-contracts'
 import type { VoiceTaskCommand } from '../shared/voice-task-contracts'
+import type { AgentProjectRecipeInput } from '../shared/project-contracts'
 import type { PreferenceKey } from '../shared/model-contracts'
 import { VOICE_RELAY_CHANNELS, type VoiceRelayApi, type VoiceRelayServerEvent } from '../shared/voice-relay-contracts'
 
@@ -215,7 +216,25 @@ const agentApi: AgentApi = {
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineTransfer, taskId, grantId, expectedRevision),
   downloadTransfer: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.downloadTransfer, taskId),
   placeTransfer: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.placeTransfer, taskId),
-  reconcileTransfer: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.reconcileTransfer, taskId)
+  reconcileTransfer: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.reconcileTransfer, taskId),
+  // Milestone 10 S3: registered projects. Ids, revisions, labels and a closed recipe form; never a path or command.
+  listProjects: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.listProjects),
+  addProject: (label: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.addProject, label),
+  revokeProject: (projectId: string, expectedRevision: number) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.revokeProject, projectId, expectedRevision),
+  listProjectScripts: (projectId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.listProjectScripts, projectId),
+  createProjectRecipe: (projectId: string, recipe: AgentProjectRecipeInput) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.createProjectRecipe, projectId, recipe),
+  listProjectRecipes: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.listProjectRecipes),
+  revokeProjectRecipe: (recipeId: string, expectedRevision: number) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.revokeProjectRecipe, recipeId, expectedRevision),
+  createProjectRun: (recipeId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.createProjectRun, recipeId),
+  getProjectRun: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getProjectRun, taskId),
+  getLatestProjectRun: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getLatestProjectRun),
+  grantProjectRun: (taskId: string, grantId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.grantProjectRun, taskId, grantId, expectedRevision),
+  declineProjectRun: (taskId: string, grantId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineProjectRun, taskId, grantId, expectedRevision),
+  startProjectRun: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.startProjectRun, taskId),
+  stopProjectRun: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.stopProjectRun, taskId),
+  reconcileProjectRun: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.reconcileProjectRun, taskId)
 }
 
 // The Gemini Live relay: fixed channels, closed message kinds, validated in

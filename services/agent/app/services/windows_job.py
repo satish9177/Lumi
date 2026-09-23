@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import threading
 from ctypes import wintypes
 from typing import Any
 
@@ -189,6 +190,8 @@ class ProcessJob:
             self._kernel32.CloseHandle(job)
             raise OSError(error, "could not configure a process job")
         self._handle: int | None = int(job)
+        # Terminate and close are serialised: a Stop can never act on a handle value another job reused.
+        self._lock = threading.Lock()
 
     @property
     def handle(self) -> int:
@@ -233,15 +236,17 @@ class ProcessJob:
 
     def terminate(self, exit_code: int = 1) -> bool:
         """End every process in this job, and only this job."""
-        if self._handle is None:
-            return False
-        return bool(self._kernel32.TerminateJobObject(self._handle, exit_code))
+        with self._lock:
+            if self._handle is None:
+                return False
+            return bool(self._kernel32.TerminateJobObject(self._handle, exit_code))
 
     def close(self) -> None:
         """Closing the last handle kills anything still in the job (kill-on-close)."""
-        if self._handle is not None:
-            self._kernel32.CloseHandle(self._handle)
-            self._handle = None
+        with self._lock:
+            if self._handle is not None:
+                self._kernel32.CloseHandle(self._handle)
+                self._handle = None
 
 
 def acquire_runtime_process_lock() -> None:

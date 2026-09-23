@@ -82,7 +82,7 @@ from app.files.broker import (
     resolve,
     verify_root,
 )
-from app.files.handles import FileIdentity, normcase
+from app.files.handles import FileIdentity, is_within, normcase
 from app.files.names import FileNameRefusal, display_relative, validate_file_name, validate_relative_path
 from app.repositories.documents import (
     DocumentAnswerRecord,
@@ -236,6 +236,17 @@ class DocumentService:
             repository = FileRepository(connection)
             if await repository.active_root_for_key(key) is not None:
                 raise DocumentRefusal("root_already_approved")
+            if can_create:
+                # Milestone 10 S3: a folder Lumi may SAVE downloads into can never overlap a project Lumi RUNS.
+                from app.repositories.projects import ProjectRepository
+
+                for project in await ProjectRepository(connection).active_projects():
+                    if (
+                        normcase(project.canonical_path) == key
+                        or is_within(project.canonical_path, facts.canonical_path)
+                        or is_within(facts.canonical_path, project.canonical_path)
+                    ):
+                        raise DocumentRefusal("overlaps_project")
             try:
                 async with connection.begin_nested():
                     root = await repository.insert_root(

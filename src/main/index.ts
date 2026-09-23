@@ -78,6 +78,8 @@ import { DesktopVisionReasoner } from './agent/desktop-vision'
 import { DesktopVisionController } from './services/desktop-vision-controller'
 import { DocumentController } from './services/document-controller'
 import { TransferController } from './services/transfer-controller'
+import { ProjectController } from './services/project-controller'
+import { RUN_WARNING } from '../shared/project-contracts'
 import { DocumentComparer } from './agent/document-comparer'
 import { LocalOcrEngine } from './vision/ocr-engine'
 import { extrasLanguageDirectory, isExtrasPackInstalled } from './vision/model-pack'
@@ -1294,6 +1296,73 @@ app.whenReady().then(async () => {
       return answer.response === 0
     }
   })
+  // Milestone 10 S3: registered projects. Each consequential step is confirmed by a NATIVE dialog built
+  // from what the runtime holds, carrying the execution warning; the renderer never supplies a path,
+  // a command or an argument.
+  const projects = new ProjectController({
+    runtime: {
+      request: (method, path, body, timeoutMs) => agentRuntime
+        ? agentRuntime.request(method, path, body, timeoutMs)
+        : Promise.reject(new RuntimeUnavailableError())
+    },
+    chooseProject: async (label) => {
+      if (!mainWindow) return undefined
+      const selection = await dialog.showOpenDialog(mainWindow, {
+        title: 'Choose a project folder for Lumi to run',
+        buttonLabel: 'Choose this project',
+        properties: ['openDirectory']
+      })
+      const folder = selection.canceled ? undefined : selection.filePaths[0]
+      if (!folder) return undefined
+      const answer = await dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        buttons: ['Register project', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        title: 'Lumi project',
+        message: `Register “${basename(folder) || folder}” as “${label}”?`,
+        detail: `${RUN_WARNING}\n\nLumi will only ever run scripts you register as recipes, one approved run at a time, `
+          + 'with a scrubbed environment. It never installs dependencies, runs Git, or opens a terminal.'
+      })
+      return answer.response === 0 ? folder : undefined
+    },
+    confirmRecipe: async (recipe) => {
+      if (!mainWindow) return false
+      const hooks = [recipe.preText ? `Runs first (pre${recipe.script}): ${recipe.preText}` : undefined,
+        recipe.postText ? `Runs after (post${recipe.script}): ${recipe.postText}` : undefined].filter(Boolean).join('\n')
+      const answer = await dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        buttons: ['Register recipe', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        title: 'Lumi project recipe',
+        message: `Register “npm run ${recipe.script}” for “${recipe.projectLabel}”?`,
+        detail: `${RUN_WARNING}\n\nScript: ${recipe.scriptText}\n${hooks ? `${hooks}\n` : ''}`
+          + `Variables: ${recipe.envNames.length ? recipe.envNames.join(', ') : 'none'}\n`
+          + `Ready when: ${recipe.readiness} (within ${recipe.timeoutSeconds} s)\n\n`
+          + 'Any later change to package.json, the lockfile or Node.js cancels this recipe.'
+      })
+      return answer.response === 0
+    },
+    confirmRun: async (card) => {
+      if (!mainWindow) return false
+      const answer = await dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        buttons: ['Run once', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        title: 'Lumi project run',
+        message: `Run “npm run ${card.script}” in “${card.projectLabel}” once?`,
+        detail: `${card.warning}\n\nScript: ${card.scriptText}\n`
+          + (card.preText ? `Runs first (pre${card.script}): ${card.preText}\n` : '')
+          + (card.postText ? `Runs after (post${card.script}): ${card.postText}\n` : '')
+          + `Variables: ${card.envNames.length ? card.envNames.join(', ') : 'none'}\n`
+          + `Ready when: ${card.readinessKind === 'http' ? `it answers on port ${card.readyPort ?? ''}${card.readyPath ?? ''}` : 'it exits successfully'}\n`
+          + `Stops: when you press Stop, or after ${card.timeoutSeconds} s if not ready. Only this run’s own processes are ever ended.`
+      })
+      return answer.response === 0
+    }
+  })
   // Milestone 8a S2: screen capture is refused from this process's first
   // instruction and stays refused until durable takeover state has been read.
   // A main-process restart during a live takeover therefore cannot produce a
@@ -1341,6 +1410,7 @@ app.whenReady().then(async () => {
     desktopVision,
     documents,
     transfers,
+    projects,
     diagnostics: () => diagnosticsVisible ? diagnostics.list() : [],
     runtimeStatus: () => agentRuntimeView(),
     restartRuntime: async () => {

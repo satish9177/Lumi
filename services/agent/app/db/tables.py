@@ -452,7 +452,7 @@ task_grants = Table(
     CheckConstraint(
         "kind IN ('public_research', 'authenticated_read', 'form_prepare', 'desktop_disclose', "
         "'desktop_action_plan', 'desktop_vision_capture', 'desktop_vision_disclose', 'document_disclose', "
-        "'file_transfer')",
+        "'file_transfer', 'project_run')",
         name="kind",
     ),
     CheckConstraint(
@@ -1654,6 +1654,97 @@ file_transfers = Table(
         "status NOT IN ('QUARANTINED', 'PLACING', 'PLACED') OR (sha256 IS NOT NULL AND length IS NOT NULL)",
         name="verified_before_placement",
     ),
+)
+
+#: Milestone 10 S3. A registered project root: separate from file roots, registered only through a native
+#: folder dialog plus the "executes code with your user-level permissions" confirmation in main.
+projects = Table(
+    "projects",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("label", String(64), nullable=False),
+    Column("canonical_path", Text(), nullable=False),
+    Column("path_key", Text(), nullable=False),
+    Column("volume_serial", BigInteger(), nullable=False),
+    Column("dir_index", String(20), nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("revision", BigInteger(), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("revoked_at", DateTime(timezone=True), nullable=True),
+    CheckConstraint("status IN ('ACTIVE', 'REVOKED')", name="status"),
+    CheckConstraint("(revoked_at IS NOT NULL) = (status = 'REVOKED')", name="revoked_at_set"),
+    CheckConstraint("dir_index ~ '^[0-9]{1,20}$'", name="dir_index_format"),
+    CheckConstraint("revision >= 1", name="revision_positive"),
+    CheckConstraint("length(label) BETWEEN 1 AND 64", name="label_present"),
+)
+
+Index("uq_projects_path_key_active", projects.c.path_key, unique=True, postgresql_where=text("status = 'ACTIVE'"))
+
+#: A recipe: everything that decides what runs, frozen in `spec` and identified by `digest`. Any change to
+#: the project's package.json, lockfile or the pinned Node.js invalidates it; it is never edited in place.
+project_recipes = Table(
+    "project_recipes",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("project_id", Uuid(), ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False),
+    Column("label", String(64), nullable=False),
+    Column("script_name", String(64), nullable=False),
+    Column("spec", JSONB(), nullable=False),
+    Column("digest", String(64), nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("invalid_reason", String(40), nullable=True),
+    Column("revision", BigInteger(), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint("status IN ('ACTIVE', 'INVALIDATED', 'REVOKED')", name="status"),
+    CheckConstraint("(status = 'INVALIDATED') = (invalid_reason IS NOT NULL)", name="invalid_reason_set"),
+    CheckConstraint("digest ~ '^[0-9a-f]{64}$'", name="digest_format"),
+    CheckConstraint("jsonb_typeof(spec) = 'object'", name="spec_is_object"),
+    CheckConstraint("spec ->> 'stop_policy' = 'terminate_job'", name="stop_policy_fixed"),
+    CheckConstraint("revision >= 1", name="revision_positive"),
+    CheckConstraint("length(label) BETWEEN 1 AND 64", name="label_present"),
+)
+
+#: One run per run task. The run row is committed (with the attempt) BEFORE the process is created, and
+#: at most one run per project can be live -- enforced by the database, so no duplicate launch is possible.
+project_runs = Table(
+    "project_runs",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False),
+    Column("grant_id", Uuid(), ForeignKey("task_grants.id", ondelete="RESTRICT"), nullable=False),
+    Column("recipe_id", Uuid(), ForeignKey("project_recipes.id", ondelete="RESTRICT"), nullable=False),
+    Column("project_id", Uuid(), ForeignKey("projects.id", ondelete="RESTRICT"), nullable=False),
+    Column("recipe_digest", String(64), nullable=False),
+    Column("status", String(24), nullable=False),
+    Column("error_code", String(40), nullable=True),
+    Column("pid", Integer(), nullable=True),
+    Column("creation_time", BigInteger(), nullable=True),
+    Column("exit_code", BigInteger(), nullable=True),
+    Column("action_id", Uuid(), ForeignKey("actions.id", ondelete="RESTRICT"), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("resumed_at", DateTime(timezone=True), nullable=True),
+    Column("ready_at", DateTime(timezone=True), nullable=True),
+    Column("ended_at", DateTime(timezone=True), nullable=True),
+    UniqueConstraint("task_id", name="uq_project_runs_task_id"),
+    UniqueConstraint("grant_id", name="uq_project_runs_grant_id"),
+    CheckConstraint(
+        "status IN ('STARTING', 'RUNNING', 'READY', 'SUCCEEDED', 'FAILED', 'STOPPED', 'ENDED_WITH_RUNTIME', "
+        "'OUTCOME_UNKNOWN')",
+        name="status",
+    ),
+    CheckConstraint("(pid IS NULL) = (creation_time IS NULL)", name="pid_with_creation_time"),
+    CheckConstraint("recipe_digest ~ '^[0-9a-f]{64}$'", name="recipe_digest_format"),
+    CheckConstraint("status NOT IN ('RUNNING', 'READY') OR (pid IS NOT NULL AND resumed_at IS NOT NULL)", name="running_has_process"),
+)
+
+Index(
+    "uq_project_runs_one_live_per_project",
+    project_runs.c.project_id,
+    unique=True,
+    postgresql_where=text("status IN ('STARTING', 'RUNNING', 'READY', 'OUTCOME_UNKNOWN')"),
 )
 
 #: The private, grounded comparison a disclosure produced. Stored evidence is the projection's own text.

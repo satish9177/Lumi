@@ -214,7 +214,18 @@ const ALLOWED_ROUTES: ReadonlyArray<{ method: RuntimeMethod; pattern: RegExp }> 
   { method: 'POST', pattern: /^\/transfers$/ },
   { method: 'GET', pattern: /^\/transfers\/latest$/ },
   { method: 'GET', pattern: new RegExp(`^/transfers/${UUID_PART}$`) },
-  { method: 'POST', pattern: new RegExp(`^/transfers/${UUID_PART}/(grant|revoke|download|place|reconcile)$`) }
+  { method: 'POST', pattern: new RegExp(`^/transfers/${UUID_PART}/(grant|revoke|download|place|reconcile)$`) },
+  // Milestone 10 S3: registered projects. No route takes a command, executable or argument.
+  { method: 'GET', pattern: /^\/projects$/ },
+  { method: 'POST', pattern: /^\/projects$/ },
+  { method: 'POST', pattern: new RegExp(`^/projects/${UUID_PART}/(revoke|recipes)$`) },
+  { method: 'GET', pattern: new RegExp(`^/projects/${UUID_PART}/scripts$`) },
+  { method: 'GET', pattern: /^\/project-recipes$/ },
+  { method: 'POST', pattern: new RegExp(`^/project-recipes/${UUID_PART}/revoke$`) },
+  { method: 'POST', pattern: /^\/project-runs$/ },
+  { method: 'GET', pattern: /^\/project-runs\/latest$/ },
+  { method: 'GET', pattern: new RegExp(`^/project-runs/${UUID_PART}$`) },
+  { method: 'POST', pattern: new RegExp(`^/project-runs/${UUID_PART}/(grant|revoke|start|stop|reconcile)$`) }
 ]
 
 export function isAllowedRuntimeRoute(method: RuntimeMethod, path: string): boolean {

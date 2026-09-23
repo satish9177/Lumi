@@ -10,6 +10,7 @@ from app.api.errors import register_error_handlers
 from app.api.routes import router
 from app.api.document_routes import router as document_router
 from app.api.transfer_routes import router as transfer_router
+from app.api.project_routes import router as project_router
 from app.api.security import RuntimeSecurityMiddleware
 from app.config import AGENT_ROOT, Settings
 from app.db.engine import create_database_engine, ping_database
@@ -34,6 +35,7 @@ from app.services.desktop_planning import DesktopPlanningService
 from app.services.desktop_vision import DesktopVisionService
 from app.services.documents import DocumentService
 from app.services.transfers import TransferService
+from app.services.projects import ProjectService, default_run_root
 from app.files.quarantine import default_quarantine_root
 from app.services.windows_job import runtime_job_is_active
 from app.services.browser_execution import (
@@ -349,6 +351,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     grant_ttl_seconds=resolved.transfer_grant_ttl_seconds,
                 )
                 await app.state.transfer_service.sweep_quarantine()
+                # Milestone 10 S3: registered project recipes. No run can survive a runtime restart (its job's
+                # only handle died with the old runtime); recovery proves that from (pid, creation time).
+                app.state.project_service = ProjectService(
+                    engine,
+                    actions=action_service,
+                    runtime_generation=generation.id,
+                    grant_ttl_seconds=resolved.project_run_ttl_seconds,
+                    forbidden_roots=tuple(
+                        path
+                        for path in (
+                            str(AGENT_ROOT),
+                            resolved.browser_profile_root,
+                            resolved.download_quarantine_root or default_quarantine_root(),
+                            resolved.project_run_root or default_run_root(),
+                        )
+                        if path
+                    ),
+                    run_root=resolved.project_run_root or default_run_root(),
+                )
+                await app.state.project_service.recover()
                 # A research session belongs to the process that created it.
                 # Sessions a dead runtime left open describe browser contexts
                 # that no longer exist, so every semantic ref they issued has
@@ -389,6 +411,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     warm_up = asyncio.create_task(worker.warm_up())
                 yield
         finally:
+            if getattr(app.state, "project_service", None) is not None:
+                await app.state.project_service.shutdown()
             if takeover_watchdog is not None:
                 takeover_watchdog.cancel()
                 await asyncio.gather(takeover_watchdog, return_exceptions=True)
@@ -413,4 +437,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(router)
     app.include_router(document_router)
     app.include_router(transfer_router)
+    app.include_router(project_router)
     return app
