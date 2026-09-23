@@ -262,6 +262,61 @@ async def binary(request: Request) -> Response:
     return Response(content=b"%PDF-1.7\n", media_type="application/pdf")
 
 
+# ---- Milestone 10 S2: synthetic files for the controlled-download tests ----------------------------------
+
+SYNTHETIC_PDF = (
+    b"%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n"
+    b"3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Contents 4 0 R>>endobj\n"
+    b"4 0 obj<</Length 44>>stream\nBT /F1 12 Tf 20 100 Td (Synthetic resume) Tj ET\nendstream endobj\n"
+    b"trailer<</Root 1 0 R>>\n%%EOF\n"
+)
+_FAKE_EXECUTABLE = b"MZ\x90\x00" + b"\x00" * 60 + b"This program cannot be run in DOS mode."
+
+
+@router.get("/files/resume.pdf")
+async def file_resume(request: Request) -> Response:
+    _log(request)
+    return Response(content=SYNTHETIC_PDF, media_type="application/pdf")
+
+
+@router.get("/files/tool.exe")
+async def file_executable(request: Request) -> Response:
+    _log(request)
+    return Response(content=_FAKE_EXECUTABLE, media_type="application/octet-stream",
+                    headers={"Content-Disposition": "attachment; filename=\"tool.exe\""})
+
+
+@router.get("/files/disguised.pdf")
+async def file_disguised(request: Request) -> Response:
+    """An executable served under a PDF name and a PDF content type: the bytes decide."""
+    _log(request)
+    return Response(content=_FAKE_EXECUTABLE, media_type="application/pdf")
+
+
+@router.get("/files/script.pdf")
+async def file_script(request: Request) -> Response:
+    _log(request)
+    return Response(content=b"@echo off\r\nrem synthetic\r\n", media_type="application/pdf")
+
+
+@router.get("/files/large.pdf")
+async def file_large(request: Request) -> Response:
+    _log(request)
+    return Response(content=SYNTHETIC_PDF + b"%" + b"0" * 200_000 + b"\n", media_type="application/pdf")
+
+
+@router.get("/files/redirect.pdf")
+async def file_redirect(request: Request) -> RedirectResponse:
+    _log(request)
+    return RedirectResponse("/files/resume.pdf", status_code=302)
+
+
+@router.get("/files/gone.pdf")
+async def file_gone(request: Request) -> HTMLResponse:
+    _log(request)
+    return HTMLResponse("<h1>Not found</h1>", status_code=404)
+
+
 @router.get("/missing")
 async def missing(request: Request) -> HTMLResponse:
     _log(request)

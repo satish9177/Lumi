@@ -74,6 +74,7 @@ from app.services.clinic_info import (
 )
 from app.domain.errors import BrowserObservationError, DestinationNotAllowedError
 from app.domain.page_observation import PAGE_INSPECTION_TASK_TYPE
+from app.domain.transfers import TOOL_DOWNLOAD, TOOL_PLACE, TransferRefusal
 from app.domain.public_url import UrlPolicyError
 from app.domain.authenticated import (
     AUTHENTICATED_READ_TASK_TYPE,
@@ -332,6 +333,11 @@ async def _refuse_disclosure_tool(service: ActionService, action_id: uuid.UUID) 
         # the guard, the durable dispatch and the worker call are one ordered unit. A generic approve, attempt or
         # finish would mint or settle an effect that skipped every one of them.
         raise DesktopActionError("use_desktop_route")
+    if tool in (TOOL_DOWNLOAD, TOOL_PLACE):
+        # Milestone 10 S2 (review finding 8). A transfer step exists only inside `TransferService`: the effect
+        # lock, the quarantine and the evidence-based reconciliation are one unit. A generic attempt or a
+        # generic "finish reconciliation" would start or settle a keyed effect around all of them.
+        raise TransferRefusal("use_transfer_route")
 
 
 @router.post(
@@ -353,6 +359,9 @@ async def propose_action(
         # Only the form-preparation service, from a controller-built manifest, may
         # create this action. A generic caller cannot mint an approval for one.
         raise FormPrepareRefusal("use_disclosure_route")
+    if body.tool_name.lower().startswith("transfer_"):
+        # Milestone 10 S2: only `TransferService` mints a download or placement action, with its effect keys.
+        raise TransferRefusal("use_transfer_route")
     view, created = await service.propose_action(
         task_id,
         idempotency_key=body.idempotency_key,

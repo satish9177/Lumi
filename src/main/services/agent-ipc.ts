@@ -22,6 +22,7 @@ import type { DesktopActionController } from './desktop-action-controller'
 import type { DesktopPlanningController } from './desktop-planning-controller'
 import type { DesktopVisionController } from './desktop-vision-controller'
 import type { DocumentController } from './document-controller'
+import type { TransferController } from './transfer-controller'
 import type { VoiceTaskController } from './voice-task-controller'
 
 /**
@@ -86,6 +87,12 @@ export interface AgentIpcDependencies {
     | 'addDocumentFromRoot' | 'addDroppedDocument' | 'extractDocument' | 'compareDocumentsLocally'
     | 'createDocumentDisclosure' | 'grantDocumentDisclosure' | 'declineDocumentDisclosure' | 'runDocumentDisclosure'
   >
+  /** Milestone 10 S2. Absent in builds without the download capability. */
+  transfers?: Pick<
+    TransferController,
+    | 'createTransfer' | 'getTransfer' | 'getLatestTransfer' | 'grantTransfer' | 'declineTransfer'
+    | 'downloadTransfer' | 'placeTransfer' | 'reconcileTransfer'
+  >
 }
 
 const UNAVAILABLE = { code: 'request_failed', message: 'That is not available in this build.' } as const
@@ -105,7 +112,7 @@ function routeWithoutInterpreter(request: unknown): TypedRequestRoute {
 
 export function registerAgentIpc({
   ipcMain, assertTrustedSender, controller, voice, runtimeStatus, restartRuntime, text, memory, diagnostics,
-  browserProfiles, desktopRead, desktopActions, desktopPlanning, desktopVision, documents
+  browserProfiles, desktopRead, desktopActions, desktopPlanning, desktopVision, documents, transfers
 }: AgentIpcDependencies): void {
   const handle = (channel: string, listener: (...args: unknown[]) => unknown): void => {
     ipcMain.handle(channel, (event, ...args) => {
@@ -330,4 +337,17 @@ export function registerAgentIpc({
   handle(AGENT_IPC_CHANNELS.declineDocumentDisclosure, (taskId, grantId, revision) =>
     documents ? documents.declineDocumentDisclosure(taskId, grantId, revision) : noDocuments())
   handle(AGENT_IPC_CHANNELS.runDocumentDisclosure, (taskId) => documents ? documents.runDocumentDisclosure(taskId) : noDocuments())
+  // Milestone 10 S2: eight fixed channels for one controlled download. None takes a path or an overwrite
+  // flag; the approval is re-confirmed by a native dialog in main. Not reachable from voice.
+  handle(AGENT_IPC_CHANNELS.createTransfer, (url, rootId, fileName, intent) =>
+    transfers ? transfers.createTransfer(url, rootId, fileName, intent) : noDocuments())
+  handle(AGENT_IPC_CHANNELS.getTransfer, (taskId) => transfers ? transfers.getTransfer(taskId) : noDocuments())
+  handle(AGENT_IPC_CHANNELS.getLatestTransfer, () => transfers ? transfers.getLatestTransfer() : Promise.resolve({ ok: true, value: null }))
+  handle(AGENT_IPC_CHANNELS.grantTransfer, (taskId, grantId, revision) =>
+    transfers ? transfers.grantTransfer(taskId, grantId, revision) : noDocuments())
+  handle(AGENT_IPC_CHANNELS.declineTransfer, (taskId, grantId, revision) =>
+    transfers ? transfers.declineTransfer(taskId, grantId, revision) : noDocuments())
+  handle(AGENT_IPC_CHANNELS.downloadTransfer, (taskId) => transfers ? transfers.downloadTransfer(taskId) : noDocuments())
+  handle(AGENT_IPC_CHANNELS.placeTransfer, (taskId) => transfers ? transfers.placeTransfer(taskId) : noDocuments())
+  handle(AGENT_IPC_CHANNELS.reconcileTransfer, (taskId) => transfers ? transfers.reconcileTransfer(taskId) : noDocuments())
 }

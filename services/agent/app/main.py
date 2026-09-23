@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from app.api.errors import register_error_handlers
 from app.api.routes import router
 from app.api.document_routes import router as document_router
+from app.api.transfer_routes import router as transfer_router
 from app.api.security import RuntimeSecurityMiddleware
 from app.config import AGENT_ROOT, Settings
 from app.db.engine import create_database_engine, ping_database
@@ -32,6 +33,8 @@ from app.services.desktop_disclosure import DesktopDisclosureService
 from app.services.desktop_planning import DesktopPlanningService
 from app.services.desktop_vision import DesktopVisionService
 from app.services.documents import DocumentService
+from app.services.transfers import TransferService
+from app.files.quarantine import default_quarantine_root
 from app.services.windows_job import runtime_job_is_active
 from app.services.browser_execution import (
     BrowserExecutionService,
@@ -74,6 +77,7 @@ def _worker_source(settings: Settings) -> WorkerSource | None:
         research_test_origins=settings.research_test_origins,
         research_max_tabs=settings.research_max_tabs,
         auth_test_origins=settings.auth_test_origins,
+        quarantine_root=settings.download_quarantine_root or default_quarantine_root(),
     )
 
 
@@ -321,11 +325,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     grant_ttl_seconds=resolved.document_disclosure_ttl_seconds,
                     # Lumi-owned trees can never be (or contain) an approved root (S1 review finding 1).
                     forbidden_roots=tuple(
-                        path for path in (str(AGENT_ROOT), resolved.browser_profile_root) if path
+                        path
+                        for path in (
+                            str(AGENT_ROOT),
+                            resolved.browser_profile_root,
+                            resolved.download_quarantine_root or default_quarantine_root(),
+                        )
+                        if path
                     ),
                 )
                 await app.state.document_service.recover_started()
                 await app.state.document_service.sweep_expired()
+                # Milestone 10 S2: controlled downloads into a Lumi-owned quarantine, then an atomic,
+                # no-overwrite placement. An attempt a dead runtime left is already OUTCOME_UNKNOWN
+                # (RecoveryService above); it is reconciled from local evidence, never refetched.
+                app.state.transfer_service = TransferService(
+                    engine,
+                    actions=action_service,
+                    browser=app.state.browser_execution_service,
+                    policy=resolved.public_policy,
+                    quarantine_root=resolved.download_quarantine_root or default_quarantine_root(),
+                    runtime_generation=generation.id,
+                    grant_ttl_seconds=resolved.transfer_grant_ttl_seconds,
+                )
+                await app.state.transfer_service.sweep_quarantine()
                 # A research session belongs to the process that created it.
                 # Sessions a dead runtime left open describe browser contexts
                 # that no longer exist, so every semantic ref they issued has
@@ -389,4 +412,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     register_error_handlers(app)
     app.include_router(router)
     app.include_router(document_router)
+    app.include_router(transfer_router)
     return app

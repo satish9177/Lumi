@@ -77,6 +77,7 @@ import { DesktopPlanningController } from './services/desktop-planning-controlle
 import { DesktopVisionReasoner } from './agent/desktop-vision'
 import { DesktopVisionController } from './services/desktop-vision-controller'
 import { DocumentController } from './services/document-controller'
+import { TransferController } from './services/transfer-controller'
 import { DocumentComparer } from './agent/document-comparer'
 import { LocalOcrEngine } from './vision/ocr-engine'
 import { extrasLanguageDirectory, isExtrasPackInstalled } from './vision/model-pack'
@@ -1269,6 +1270,30 @@ app.whenReady().then(async () => {
     },
     droppedFiles
   })
+  // Milestone 10 S2: one controlled download. The renderer's card is confirmed again by a NATIVE dialog
+  // built from what the runtime holds, so a compromised renderer cannot approve a download by itself.
+  const transfers = new TransferController({
+    runtime: {
+      request: (method, path, body, timeoutMs) => agentRuntime
+        ? agentRuntime.request(method, path, body, timeoutMs)
+        : Promise.reject(new RuntimeUnavailableError())
+    },
+    confirmTransfer: async (card) => {
+      if (!mainWindow) return false
+      const answer = await dialog.showMessageBox(mainWindow, {
+        type: 'question',
+        buttons: ['Allow this download', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        title: 'Lumi download',
+        message: `Download one ${card.expectedKind.toUpperCase()} file and save it as “${card.destName}” in “${card.destRootLabel}”?`,
+        detail: `From: ${card.sourceUrl}\nAt most ${Math.ceil(card.maxBytes / 1024)} KB.\n\n`
+          + 'Lumi checks the file’s contents first and refuses programs, scripts and macro documents. '
+          + 'It never replaces an existing file and never opens the file.'
+      })
+      return answer.response === 0
+    }
+  })
   // Milestone 8a S2: screen capture is refused from this process's first
   // instruction and stays refused until durable takeover state has been read.
   // A main-process restart during a live takeover therefore cannot produce a
@@ -1315,6 +1340,7 @@ app.whenReady().then(async () => {
     desktopPlanning,
     desktopVision,
     documents,
+    transfers,
     diagnostics: () => diagnosticsVisible ? diagnostics.list() : [],
     runtimeStatus: () => agentRuntimeView(),
     restartRuntime: async () => {

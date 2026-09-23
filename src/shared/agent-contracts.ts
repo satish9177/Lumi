@@ -16,6 +16,7 @@
  */
 
 import type { AgentDocumentApi } from './document-contracts'
+import type { AgentTransferApi } from './transfer-contracts'
 import type { VoiceTaskCommand, VoiceTaskOutcome } from './voice-task-contracts'
 import type { AgentPreferenceView, ModelDiagnosticView, PreferenceKey } from './model-contracts'
 
@@ -113,6 +114,10 @@ export const TASK_EVENT_TYPES = [
   'task.document_comparison_recorded',
   'task.document_disclosure_failed',
   'task.document_disclosure_outcome_unknown',
+  // Milestone 10 S2: controlled downloads and file placement.
+  'task.transfer_requested',
+  'task.transfer_granted',
+  'task.transfer_revoked',
   'action.proposed', 'action.approval_requested',
   'action.approved', 'action.authorized', 'action.rejected', 'action.execution_started', 'action.succeeded',
   'action.failed', 'action.outcome_unknown', 'action.reconciliation_started', 'action.reconciled'
@@ -1376,6 +1381,11 @@ export const AGENT_ERROR_CODES = [
   // Milestone 10 S1: a document request was refused, or the approved file/document/approval changed.
   'document_refused',
   'document_state_changed',
+  // Milestone 10 S2: a download/placement was refused or its approval moved on; or an earlier action
+  // with the same material effect is still unresolved (the cross-executor effect lock).
+  'transfer_refused',
+  'transfer_state_changed',
+  'effect_locked',
   'request_failed'
 ] as const
 export type AgentErrorCode = typeof AGENT_ERROR_CODES[number]
@@ -1393,7 +1403,7 @@ export type AgentResult<T> = { ok: true; value: T } | { ok: false; error: AgentE
  * and the revision the user reviewed; nothing can carry a doctor, time, price,
  * proposal or digest. There is no generic request, URL or dispatch method.
  */
-export interface AgentApi extends AgentDocumentApi {
+export interface AgentApi extends AgentDocumentApi, AgentTransferApi {
   getRuntimeStatus: () => Promise<AgentRuntimeView>
   onRuntimeStatus: (listener: (status: AgentRuntimeView) => void) => () => void
   restartRuntime: () => Promise<AgentResult<AgentRuntimeView>>
@@ -1759,7 +1769,17 @@ export const AGENT_IPC_CHANNELS = {
   createDocumentDisclosure: 'lifelens:agent:create-document-disclosure',
   grantDocumentDisclosure: 'lifelens:agent:grant-document-disclosure',
   declineDocumentDisclosure: 'lifelens:agent:decline-document-disclosure',
-  runDocumentDisclosure: 'lifelens:agent:run-document-disclosure'
+  runDocumentDisclosure: 'lifelens:agent:run-document-disclosure',
+  // Milestone 10 S2: one controlled download into one approved folder. A URL, a folder id, a file name
+  // and an intent; never a path or an overwrite flag.
+  createTransfer: 'lifelens:agent:create-transfer',
+  getTransfer: 'lifelens:agent:get-transfer',
+  getLatestTransfer: 'lifelens:agent:get-latest-transfer',
+  grantTransfer: 'lifelens:agent:grant-transfer',
+  declineTransfer: 'lifelens:agent:decline-transfer',
+  downloadTransfer: 'lifelens:agent:download-transfer',
+  placeTransfer: 'lifelens:agent:place-transfer',
+  reconcileTransfer: 'lifelens:agent:reconcile-transfer'
 } as const
 
 /** Actions whose side effect is unresolved or in flight. */

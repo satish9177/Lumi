@@ -938,7 +938,7 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
                     generation.id,
                 )
             origin = ""
-        elif operation.target is OperationTarget.PUBLIC_PAGE:
+        elif operation.target in (OperationTarget.PUBLIC_PAGE, OperationTarget.DOWNLOAD):
             # No origin to resolve: the approved URL is checked by the
             # operation against this worker's own policy, and by the guard on
             # every request. A public-page operation never runs without a
@@ -1029,6 +1029,7 @@ def create_worker_app(settings: WorkerSettings | None = None) -> FastAPI:
                 research_session=research_session,
                 authenticated_session=authenticated_session,
                 form_freeze=request.app.state.freeze,
+                quarantine_root=resolved.quarantine_directory,
             )
         except BaseException:
             ledger.release(body.dispatch_id)
@@ -1052,6 +1053,7 @@ async def _run(
     research_session: ResearchBrowserSession | None = None,
     authenticated_session: AuthenticatedReadSession | None = None,
     form_freeze: FormFreezeController | None = None,
+    quarantine_root: str | None = None,
 ) -> DispatchResponse:
     """Drive one operation in its own browser context, and classify the result.
 
@@ -1097,7 +1099,7 @@ async def _run(
             if active is not None and active in research_session.tabs
             else await context.new_page()
         )
-    elif operation.target is OperationTarget.PUBLIC_PAGE and public_policy is not None:
+    elif operation.target in (OperationTarget.PUBLIC_PAGE, OperationTarget.DOWNLOAD) and public_policy is not None:
         # A context that can only read: no service workers (which would sit
         # outside request routing), no downloads, no permissions, no stored
         # state. Every request is routed through the destination guard before
@@ -1123,6 +1125,7 @@ async def _run(
         research_session=research_session,
         authenticated_session=authenticated_session,
         form_freeze=form_freeze,
+        quarantine_root=quarantine_root if operation.target is OperationTarget.DOWNLOAD else None,
     )
 
     status_value = OperationStatus.OUTCOME_UNKNOWN

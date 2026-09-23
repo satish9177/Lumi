@@ -155,6 +155,10 @@ ERROR_CODES = (
     # Milestone 10 S1: approved documents. A refusal, or a state that moved on since it was approved.
     "document_refused",
     "document_state_changed",
+    # Milestone 10 S2: controlled downloads, and the cross-executor effect lock.
+    "effect_locked",
+    "transfer_refused",
+    "transfer_state_changed",
     "destination_not_allowed",
     "invalid_action_transition",
     "invalid_booking_criteria",

@@ -55,6 +55,9 @@ EXPECTED_OPERATIONS = {
     # Milestone 8b S6: the ONE LOCAL_DRAFT operation. Not a planner operation: only the
     # runtime, from a persisted, exactly-approved manifest, can dispatch it.
     "authenticated_prepare_form",
+    # Milestone 10 S2: the ONE DOWNLOAD operation. Writes only into the worker's own quarantine;
+    # placement into a user folder is a separate runtime step, never a browser operation.
+    "download_to_quarantine",
 }
 
 AUTHENTICATED_OPERATIONS = {
@@ -120,6 +123,16 @@ def test_exactly_one_operation_can_change_the_outside_world() -> None:
     assert consequential == ["commit_booking"]
 
 
+def test_the_download_operation_is_reconciled_from_its_quarantine_never_retried() -> None:
+    download = REGISTRY.get("download_to_quarantine")
+    assert download is not None
+    assert download.effect is Effect.DOWNLOAD and download.target is OperationTarget.DOWNLOAD
+    assert download.retry is RetryPolicy.RECONCILE_BEFORE_RETRY
+    assert download.reconciliation is Reconciliation.INSPECT_QUARANTINE
+    others = [name for name in REGISTRY.names() if (op := REGISTRY.get(name)) and (op.effect is Effect.DOWNLOAD or op.target is OperationTarget.DOWNLOAD)]
+    assert others == ["download_to_quarantine"]
+
+
 def test_the_consequential_operation_may_not_be_blindly_retried() -> None:
     commit = REGISTRY.get("commit_booking")
     assert commit is not None
@@ -168,6 +181,7 @@ def test_the_public_page_operation_is_read_only_and_never_retried_without_approv
         if name != "inspect_public_page"
         and name not in RESEARCH_OPERATIONS
         and name not in AUTHENTICATED_OPERATIONS
+        and name != "download_to_quarantine"
     ]
     assert all(op is not None and op.target is OperationTarget.REVIEWED_SITE for op in others)
 

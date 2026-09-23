@@ -18,6 +18,7 @@ from app.domain.action_status import (
     task_status_for,
 )
 from app.domain.digest import proposal_digest as compute_digest
+from app.domain.effects import EffectKey, EffectLockedError
 from app.domain.errors import (
     ActionAlreadyOpenError,
     ActionConcurrencyError,
@@ -37,6 +38,7 @@ from app.repositories.actions import (
     ApprovalRecord,
     AttemptRecord,
 )
+from app.repositories.effects import EffectLockRepository
 from app.repositories.tasks import TaskRecord, TaskRepository
 
 
@@ -409,6 +411,7 @@ class ActionService:
         risk_tier: RiskTier,
         proposal: dict[str, Any],
         authorizer: "ScopedAuthorizer",
+        effect_keys: tuple[EffectKey, ...] = (),
     ) -> tuple[ActionView, bool]:
         """PROPOSED -> AUTHORIZED -> EXECUTING, funded by a scoped grant.
 
@@ -460,6 +463,12 @@ class ActionService:
                 return await self._view(connection, existing), False
 
             await self._record_proposed(connection, task, created, scoped=True)
+            if effect_keys:
+                # Milestone 10: the cross-executor lock. Keys are written with the action and checked,
+                # under advisory locks, before any attempt exists. A refusal rolls everything back.
+                locks = EffectLockRepository(connection)
+                await locks.insert_keys(action_id=created.id, keys=effect_keys)
+                await self._require_effect_free(connection, created.id, [key.key for key in effect_keys])
             task = await self._reload_task(tasks_repository, task_id)
             authorized = await self._transition(
                 connection,
@@ -502,6 +511,20 @@ class ActionService:
                 },
             )
             return await self._view(connection, moved), True
+
+    @staticmethod
+    async def _require_effect_free(connection: AsyncConnection, action_id: uuid.UUID, keys: list[str]) -> None:
+        locks = EffectLockRepository(connection)
+        await locks.lock(keys)
+        conflict = await locks.conflict(action_id=action_id, keys=keys)
+        if conflict is not None:
+            raise EffectLockedError(str(conflict[0]), reason=conflict[1])
+
+    async def require_effect_free_for(self, connection: AsyncConnection, action_id: uuid.UUID) -> None:
+        """For an already-keyed action about to start another attempt (inside the caller's transaction)."""
+        keys = await EffectLockRepository(connection).keys_for(action_id)
+        if keys:
+            await self._require_effect_free(connection, action_id, keys)
 
     @staticmethod
     async def _reload_task(repository: TaskRepository, task_id: uuid.UUID) -> TaskRecord:

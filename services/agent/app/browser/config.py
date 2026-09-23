@@ -99,6 +99,10 @@ class WorkerSettings(BaseSettings):
     #: page and the guard to have no request in flight before it refuses with
     #: `page_never_settles`, and how long it waits for every broker relay to drain.
     #: Both are bounds, never a reason to freeze on top of an open request.
+    #: Milestone 10 S2: the download quarantine's *base directory*. The worker appends the
+    #: runtime-minted transfer UUID itself, so no request names a path. Empty means
+    #: `%LOCALAPPDATA%\Lumi\quarantine`; tests set a temporary directory.
+    quarantine_root: str = Field(default="", max_length=1024)
     freeze_settle_seconds: float = Field(default=5.0, ge=0.2, le=60.0)
     freeze_drain_seconds: float = Field(default=3.0, ge=0.2, le=30.0)
 
@@ -154,6 +158,12 @@ class WorkerSettings(BaseSettings):
         """
         environment = {PROFILE_ROOT_VARIABLE: self.profile_root} if self.profile_root else None
         return resolve_profile_paths(environment)
+
+    @property
+    def quarantine_directory(self) -> str:
+        from app.files.quarantine import default_quarantine_root
+
+        return self.quarantine_root or default_quarantine_root()
 
     @property
     def public_policy(self) -> PublicUrlPolicy:

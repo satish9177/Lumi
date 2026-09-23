@@ -55,7 +55,10 @@ import asyncio
 import logging
 import re
 from collections import Counter
+from dataclasses import dataclass
 from urllib.parse import urljoin
+
+from typing import Any
 
 from playwright.async_api import BrowserContext, Page, Request, Route, WebSocketRoute
 from playwright.async_api import Error as PlaywrightError
@@ -78,6 +81,23 @@ DOCUMENT_CONTENT_TYPES = frozenset({"text/html", "application/xhtml+xml", "text/
 MAX_RESPONSE_BYTES = 5_000_000
 REQUEST_TIMEOUT_SECONDS = 20.0
 REDIRECT_PLACEHOLDER = "<!doctype html><title></title>"
+
+
+@dataclass
+class DownloadCapture:
+    """Milestone 10 S2. Set on a guard by the download operation only.
+
+    The approved main-document response is fetched by the same checked `route.fetch` every other
+    request uses (destination policy, public resolution, GET only, no browser-followed redirect),
+    and its body is kept here -- bounded by `max_bytes` -- instead of being rendered. The page is
+    given an inert placeholder. Nothing else in the context is captured.
+    """
+
+    max_bytes: int
+    status: int | None = None
+    body: bytes | None = None
+    content_type: str = ""
+    disposition: str = ""
 
 
 class PublicNetworkGuard:
@@ -116,6 +136,8 @@ class PublicNetworkGuard:
         self.blocked: Counter[str] = Counter()
         #: Refused request methods, e.g. {"POST": 2}. Method names only, never URLs.
         self.blocked_methods: Counter[str] = Counter()
+        #: Milestone 10 S2: only the download operation sets this.
+        self.capture: DownloadCapture | None = None
 
     async def install(self, context: BrowserContext, page: Page | None = None) -> None:
         if page is not None:
@@ -239,6 +261,10 @@ class PublicNetworkGuard:
             await self._refuse(route, "redirect_not_followed", main_document=main_document)
             return
 
+        if main_document and self.capture is not None:
+            await self._capture(route, response)
+            return
+
         length = response.headers.get("content-length")
         if length is not None and (not length.isdigit() or int(length) > MAX_RESPONSE_BYTES):
             await response.dispose()
@@ -261,4 +287,39 @@ class PublicNetworkGuard:
             await route.fulfill(response=response)
         except PlaywrightError:
             # The page went away while the response was in flight.
+            pass
+
+    async def _capture(self, route: Route, response: Any) -> None:
+        """Keep the approved main document's body (bounded) and show the page an inert placeholder."""
+        capture = self.capture
+        assert capture is not None
+        length = response.headers.get("content-length")
+        if response.status != 200:
+            await response.dispose()
+            await self._refuse(route, "download_http_status", main_document=True)
+            return
+        if length is not None and (not length.isdigit() or int(length) > capture.max_bytes):
+            await response.dispose()
+            await self._refuse(route, "response_too_large", main_document=True)
+            return
+        try:
+            body = await response.body()
+        except PlaywrightError:
+            await self._refuse(route, "fetch_failed", main_document=True)
+            return
+        if len(body) > capture.max_bytes:
+            await self._refuse(route, "response_too_large", main_document=True)
+            return
+        capture.status = response.status
+        capture.body = body
+        capture.content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()[:100]
+        capture.disposition = response.headers.get("content-disposition", "")[:300]
+        try:
+            await route.fulfill(
+                status=200,
+                content_type="text/html",
+                body=REDIRECT_PLACEHOLDER,
+                headers={"content-security-policy": "default-src 'none'"},
+            )
+        except PlaywrightError:
             pass

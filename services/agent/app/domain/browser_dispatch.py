@@ -37,6 +37,11 @@ class BrowserEffect(StrEnum):
     #: Can change the outside world irreversibly. Requires a durable approval,
     #: a persisted execution attempt, and a reconciliation path.
     CONSEQUENTIAL = "CONSEQUENTIAL"
+    #: Milestone 10 S2. One GET of one approved URL whose body is written into a
+    #: Lumi-owned quarantine directory -- never into a user folder, never opened.
+    #: A download is a network effect (a site may count it) plus a local write, so
+    #: a lost answer is reconciled from the quarantine's own markers, never retried.
+    DOWNLOAD = "DOWNLOAD"
 
 
 class OperationStatus(StrEnum):

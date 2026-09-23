@@ -300,6 +300,9 @@ export function describeEvent(event: AgentEventView): string {
     case 'task.document_disclosure_started': return 'Sending the approved excerpts to the AI provider'
     case 'task.document_comparison_recorded': return 'The AI provider compared the documents'
     case 'task.document_disclosure_failed': return 'The AI provider could not compare the documents — nothing was retried'
+    case 'task.transfer_requested': return 'Asked to download one file into an approved folder'
+    case 'task.transfer_granted': return 'You allowed that one download'
+    case 'task.transfer_revoked': return 'Download cancelled — nothing more was downloaded or saved'
     case 'task.document_disclosure_outcome_unknown': return 'Lumi cannot tell whether the excerpts reached the AI provider — it was not repeated'
     case 'task.cancelled': return 'Task cancelled'
     case 'task.criteria_updated':

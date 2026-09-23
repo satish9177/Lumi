@@ -209,7 +209,12 @@ const ALLOWED_ROUTES: ReadonlyArray<{ method: RuntimeMethod; pattern: RegExp }> 
   { method: 'GET', pattern: /^\/document-tasks\/latest$/ },
   { method: 'GET', pattern: new RegExp(`^/document-tasks/${UUID_PART}$`) },
   { method: 'POST', pattern: new RegExp(`^/document-tasks/${UUID_PART}/(files|dropped-files|extract|compare|disclosure)$`) },
-  { method: 'POST', pattern: new RegExp(`^/document-tasks/${UUID_PART}/disclosure/(grant|revoke|claim|result)$`) }
+  { method: 'POST', pattern: new RegExp(`^/document-tasks/${UUID_PART}/disclosure/(grant|revoke|claim|result)$`) },
+  // Milestone 10 S2: controlled downloads. No route takes a path; placement never overwrites.
+  { method: 'POST', pattern: /^\/transfers$/ },
+  { method: 'GET', pattern: /^\/transfers\/latest$/ },
+  { method: 'GET', pattern: new RegExp(`^/transfers/${UUID_PART}$`) },
+  { method: 'POST', pattern: new RegExp(`^/transfers/${UUID_PART}/(grant|revoke|download|place|reconcile)$`) }
 ]
 
 export function isAllowedRuntimeRoute(method: RuntimeMethod, path: string): boolean {

@@ -203,7 +203,19 @@ const agentApi: AgentApi = {
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.grantDocumentDisclosure, taskId, grantId, expectedRevision),
   declineDocumentDisclosure: (taskId: string, grantId: string, expectedRevision: number) =>
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineDocumentDisclosure, taskId, grantId, expectedRevision),
-  runDocumentDisclosure: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.runDocumentDisclosure, taskId)
+  runDocumentDisclosure: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.runDocumentDisclosure, taskId),
+  // Milestone 10 S2: one controlled download. A URL, a folder id, a file name and an intent; never a path.
+  createTransfer: (url: string, rootId: string, fileName: string, intent: string) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.createTransfer, url, rootId, fileName, intent),
+  getTransfer: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getTransfer, taskId),
+  getLatestTransfer: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getLatestTransfer),
+  grantTransfer: (taskId: string, grantId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.grantTransfer, taskId, grantId, expectedRevision),
+  declineTransfer: (taskId: string, grantId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineTransfer, taskId, grantId, expectedRevision),
+  downloadTransfer: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.downloadTransfer, taskId),
+  placeTransfer: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.placeTransfer, taskId),
+  reconcileTransfer: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.reconcileTransfer, taskId)
 }
 
 // The Gemini Live relay: fixed channels, closed message kinds, validated in

@@ -78,11 +78,17 @@ class OperationTarget(StrEnum):
     #: `RESEARCH_SESSION`: a dispatch names exactly one kind of context, and the
     #: worker refuses an id of the other kind rather than falling back to it.
     AUTHENTICATED_SESSION = "AUTHENTICATED_SESSION"
+    #: Milestone 10 S2: one approved public URL, fetched in a fresh, cookie-less context
+    #: through the same destination guard as PUBLIC_PAGE, with its body captured into the
+    #: worker's quarantine. The URL comes from the approved grant scope, never a page.
+    DOWNLOAD = "DOWNLOAD"
 
 
 class Reconciliation(StrEnum):
     NOT_REQUIRED = "NOT_REQUIRED"
     LOOKUP_BOOKING = "lookup_booking"
+    #: Milestone 10 S2: the quarantine's own markers (started / complete) are the evidence.
+    INSPECT_QUARANTINE = "inspect_quarantine"
 
 
 @dataclass(slots=True)
@@ -117,6 +123,9 @@ class OperationContext:
     #: LOCAL_DRAFT operations only (Milestone 8b S6): the worker's freeze
     #: controller, which owns the two-layer network freeze and its owner.
     form_freeze: "FormFreezeController | None" = None
+    #: DOWNLOAD operations only (Milestone 10 S2): the worker's configured quarantine root.
+    #: The operation appends the runtime-minted transfer UUID itself; no request names a path.
+    quarantine_root: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +234,19 @@ class OperationRegistry:
                     f"authenticated operation {operation.name!r} must not declare a "
                     "reconciliation strategy"
                 )
+            if (operation.effect is Effect.DOWNLOAD) != (operation.target is OperationTarget.DOWNLOAD) or (
+                operation.effect is Effect.DOWNLOAD
+                and (
+                    operation.retry is not RetryPolicy.RECONCILE_BEFORE_RETRY
+                    or operation.reconciliation is not Reconciliation.INSPECT_QUARANTINE
+                )
+            ):
+                # A download may only run in its own capture context, is never repeated
+                # blindly, and is reconciled from the quarantine's markers.
+                raise ValueError(
+                    f"download operation {operation.name!r} must target a download context, "
+                    "reconcile before any retry, and reconcile from the quarantine"
+                )
             if operation.target is OperationTarget.RESEARCH_SESSION and (
                 operation.effect is not Effect.READ_ONLY
                 or operation.retry is not RetryPolicy.OBSERVE_THEN_REPLAN
@@ -258,7 +280,7 @@ def build_registry() -> OperationRegistry:
     adds five read-only research operations that run in a task-owned session.
     """
     from app.browser.adapters import appointment_fixture
-    from app.browser.operations import authenticated, form_draft, public_page, research
+    from app.browser.operations import authenticated, download, form_draft, public_page, research
 
     return OperationRegistry(
         appointment_fixture.OPERATIONS
@@ -266,4 +288,5 @@ def build_registry() -> OperationRegistry:
         + research.OPERATIONS
         + authenticated.OPERATIONS
         + form_draft.OPERATIONS
+        + download.OPERATIONS
     )

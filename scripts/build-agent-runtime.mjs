@@ -346,6 +346,18 @@ for (const file of [
 ]) {
   if (!existsSync(join(agentOut, ...file))) throw new Error(`${file.join('/')} is missing from the runtime bundle.`)
 }
+// Milestone 10 S2: controlled downloads, the quarantine and the no-overwrite placement, and the
+// cross-executor effect lock. No new dependency.
+if (!readdirSync(join(agentOut, 'alembic', 'versions')).some((name) => name.startsWith('0018_'))) {
+  throw new Error('Migration 0018 is missing from the runtime bundle.')
+}
+for (const file of [
+  ['app', 'files', 'quarantine.py'], ['app', 'files', 'place.py'], ['app', 'browser', 'operations', 'download.py'],
+  ['app', 'services', 'transfers.py'], ['app', 'domain', 'effects.py'], ['app', 'repositories', 'effects.py'],
+  ['app', 'api', 'transfer_routes.py']
+]) {
+  if (!existsSync(join(agentOut, ...file))) throw new Error(`${file.join('/')} is missing from the runtime bundle.`)
+}
 
 // 5. Byte-compile once, so an installed copy never needs to write beside itself.
 step('byte-compiling')
@@ -358,7 +370,7 @@ const bare = { SystemRoot: process.env.SystemRoot ?? 'C:\\Windows', PYTHONDONTWR
 // block an unsigned .pyd that a plain module import would only touch later.
 run(python, ['-c', [
   'import app.main, app.server, app.migrate, app.browser.main, evals.sites.appointments.server',
-  'import app.documents.helper, app.files.broker',
+  'import app.documents.helper, app.files.broker, app.files.place, app.services.transfers',
   'import greenlet._greenlet, asyncpg.protocol.protocol, pydantic_core._pydantic_core',
   'from sqlalchemy.util import greenlet_spawn',
   'print("ok")'

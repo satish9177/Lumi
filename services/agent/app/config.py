@@ -119,6 +119,10 @@ class Settings(DatabaseSettings):
     document_disclosure_ttl_seconds: int = Field(
         default=600, ge=30, le=1_800, validation_alias="LUMI_DOCUMENT_DISCLOSURE_TTL_SECONDS"
     )
+    #: Milestone 10 S2: the download quarantine's base directory (Lumi-owned). Empty means
+    #: `%LOCALAPPDATA%\Lumi\quarantine`. The browser worker receives the same value.
+    download_quarantine_root: str = Field(default="", max_length=1024, validation_alias="LUMI_DOWNLOAD_QUARANTINE_ROOT")
+    transfer_grant_ttl_seconds: int = Field(default=600, ge=30, le=1_800, validation_alias="LUMI_TRANSFER_TTL_SECONDS")
     #: Milestone 7a public page inspection. Hosts (`github.com,*.example.org`)
     #: an approved inspection may open, and exact loopback test origins. Both
     #: empty (the default) means there is no public inspection capability.

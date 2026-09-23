@@ -6,6 +6,7 @@ import type {
   AgentLocalComparisonView,
   AgentRootListingView
 } from '../../../shared/document-contracts'
+import { TransferPanel } from './TransferPanel'
 import './components.css'
 
 export interface DocumentPanelProps {
@@ -207,6 +208,8 @@ export function DocumentPanel({ agent, droppedFile, onClose }: DocumentPanelProp
         </>
       )}
       {message && <p role="alert" data-testid="document-message">{message}</p>}
+
+      <TransferPanel agent={agent} roots={roots} />
     </section>
   )
 }

@@ -114,6 +114,10 @@ class TaskEventType(StrEnum):
     TASK_DOCUMENT_COMPARISON_RECORDED = "task.document_comparison_recorded"
     TASK_DOCUMENT_DISCLOSURE_FAILED = "task.document_disclosure_failed"
     TASK_DOCUMENT_DISCLOSURE_OUTCOME_UNKNOWN = "task.document_disclosure_outcome_unknown"
+    # Milestone 10 S2: controlled downloads. Ids and digests only; never a URL, a path or a file name.
+    TASK_TRANSFER_REQUESTED = "task.transfer_requested"
+    TASK_TRANSFER_GRANTED = "task.transfer_granted"
+    TASK_TRANSFER_REVOKED = "task.transfer_revoked"
     ACTION_PROPOSED = "action.proposed"
     ACTION_APPROVAL_REQUESTED = "action.approval_requested"
     ACTION_APPROVED = "action.approved"

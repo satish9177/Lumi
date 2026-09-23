@@ -21,6 +21,9 @@ from app.domain.research import ResearchRefusal
 from app.domain.authenticated import AuthenticatedRefusal
 from app.domain.documents import STATE_CODES as DOCUMENT_STATE_CODES
 from app.domain.documents import DocumentRefusal
+from app.domain.effects import EffectLockedError
+from app.domain.transfers import STATE_CODES as TRANSFER_STATE_CODES
+from app.domain.transfers import TransferRefusal
 from app.domain.desktop_disclosure import STATE_CODES as DESKTOP_DISCLOSURE_STATE_CODES
 from app.domain.desktop_disclosure import DesktopDisclosureRefusal
 from app.domain.desktop_planning import STATE_CODES as DESKTOP_PLAN_STATE_CODES
@@ -628,6 +631,33 @@ def register_error_handlers(app: FastAPI) -> None:
         )
 
     app.add_exception_handler(DocumentRefusal, document_refused)
+
+    # --- Milestone 10 S2 controlled downloads and the cross-executor effect lock ------
+    async def transfer_refused(_: Request, exc: Exception) -> JSONResponse:
+        assert isinstance(exc, TransferRefusal)
+        stale = exc.code in TRANSFER_STATE_CODES
+        return _error(
+            status.HTTP_409_CONFLICT if stale else status.HTTP_422_UNPROCESSABLE_CONTENT,
+            ErrorDetail(
+                code="transfer_state_changed" if stale else "transfer_refused",
+                message="That download can no longer go ahead as approved." if stale else "That download request was refused.",
+                reason=exc.code,
+            ),
+        )
+
+    async def effect_locked(_: Request, exc: Exception) -> JSONResponse:
+        assert isinstance(exc, EffectLockedError)
+        return _error(
+            status.HTTP_409_CONFLICT,
+            ErrorDetail(
+                code="effect_locked",
+                message="An earlier action with the same effect is unresolved. Reconcile it first; nothing was done.",
+                reason=exc.reason,
+            ),
+        )
+
+    app.add_exception_handler(TransferRefusal, transfer_refused)
+    app.add_exception_handler(EffectLockedError, effect_locked)
     app.add_exception_handler(
         ProtectedValueRefusal,
         _reasoned(

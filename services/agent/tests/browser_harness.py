@@ -271,6 +271,7 @@ def browser_worker(
     research_max_tabs: int = 5,
     profile_root: str = "",
     auth_test_origins: str = "",
+    quarantine_root: str = "",
 ) -> Iterator[WorkerProcess]:
     from app.browser.protocol import WORKER_TOKEN_HEADER
 
@@ -298,6 +299,9 @@ def browser_worker(
         # Milestone 8a S2: exact loopback origins of the synthetic login/SSO
         # fixture, so the S0 broker's configured-origin exception admits them.
         "LUMI_BROWSER_AUTH_TEST_ORIGINS": auth_test_origins,
+        # Milestone 10 S2: tests always point the download quarantine at a temporary directory
+        # (never the developer's real %LOCALAPPDATA%\Lumi\quarantine).
+        "LUMI_BROWSER_QUARANTINE_ROOT": quarantine_root,
     }
     with log_path.open("wb") as log:
         process = _spawn(

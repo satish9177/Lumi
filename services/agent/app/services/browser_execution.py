@@ -70,6 +70,7 @@ from app.domain.errors import (
     StaleActionRevisionError,
 )
 from app.domain.page_observation import INSPECT_PUBLIC_PAGE, PUBLIC_WEB_SITE, PageObservation
+from app.domain.transfers import DOWNLOAD_TO_QUARANTINE
 from app.domain.public_url import PublicUrlPolicy, UrlPolicyError
 from app.domain.sites import site_trust
 from app.repositories.actions import ActionRepository, AttemptRecord
@@ -559,6 +560,69 @@ class BrowserExecutionService:
         return await self._actions.finish_attempt(
             action_id, outcome=AttemptOutcome.SUCCEEDED, result=result, record=store
         )
+
+    # ---- controlled downloads (Milestone 10 S2) ------------------------------
+
+    async def open_download_worker(self) -> tuple[BrowserWorkerClient, uuid.UUID]:
+        """Handshake and persist the worker generation BEFORE the transfer's step authorization is spent."""
+        client = await self._client()
+        try:
+            return client, await self._bind_worker(client)
+        except BaseException:
+            await client.aclose()
+            raise
+
+    async def run_download(
+        self,
+        client: BrowserWorkerClient,
+        worker_generation: uuid.UUID,
+        *,
+        action_id: uuid.UUID,
+        attempt_id: uuid.UUID,
+        url: str,
+        transfer_id: uuid.UUID,
+        max_bytes: int,
+    ) -> Outcome:
+        """Record the dispatch (committed), fetch into the quarantine, close the dispatch. No transaction is
+        open while the worker fetches. The classification is the shared, honest one: any doubt after the
+        request may have left is OUTCOME_UNKNOWN."""
+        dispatch_id = uuid.uuid4()
+        try:
+            async with self._engine.begin() as connection:
+                await BrowserRepository(connection).insert_dispatch(
+                    dispatch_id=dispatch_id,
+                    action_id=action_id,
+                    attempt_id=attempt_id,
+                    worker_generation=worker_generation,
+                    operation=DOWNLOAD_TO_QUARANTINE,
+                    site=PUBLIC_WEB_SITE,
+                    effect=BrowserEffect.DOWNLOAD,
+                )
+        except Exception:
+            logger.exception("could not record the download dispatch")
+            return Outcome(
+                outcome=AttemptOutcome.FAILED,
+                dispatch_status=DispatchStatus.FAILED_BEFORE_EFFECT,
+                submitted=False,
+                error_code="dispatch_not_recorded",
+                observation_id=None,
+                result={},
+            )
+        outcome = await self._dispatch(
+            client,
+            request=DispatchRequest(
+                dispatch_id=dispatch_id,
+                runtime_generation=self._runtime_generation,
+                expected_worker_generation=worker_generation,
+                action_id=action_id,
+                attempt_id=attempt_id,
+                operation=DOWNLOAD_TO_QUARANTINE,
+                site=PUBLIC_WEB_SITE,
+                input={"url": url, "transfer_id": str(transfer_id), "max_bytes": max_bytes},
+            ),
+        )
+        await self._close_dispatch(dispatch_id, outcome)
+        return outcome
 
     # ---- reconciliation -----------------------------------------------------
 

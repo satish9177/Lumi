@@ -63,6 +63,7 @@ def worker_environment(
     research_any_public_host: bool = False, research_hosts: str = "",
     research_test_origins: str = "", research_max_tabs: int = 5,
     profile_root: str = "", app_version: str = "", auth_test_origins: str = "",
+    quarantine_root: str = "",
     source: dict[str, str] | None = None,
 ) -> dict[str, str]:
     inherited = os.environ if source is None else source
@@ -86,6 +87,8 @@ def worker_environment(
         # it already inherits.
         LUMI_BROWSER_PROFILE_ROOT=profile_root,
         LUMI_BROWSER_AUTH_TEST_ORIGINS=auth_test_origins,
+        # Milestone 10 S2: a *base* directory; the worker appends the transfer UUID itself.
+        LUMI_BROWSER_QUARANTINE_ROOT=quarantine_root,
     )
     if app_version:
         environment["LUMI_BROWSER_APP_VERSION"] = app_version
@@ -114,6 +117,7 @@ class ManagedBrowserWorker:
         profile_root: str = "",
         app_version: str = "",
         auth_test_origins: str = "",
+        quarantine_root: str = "",
         startup_timeout_seconds: float = 60.0,
         maximum_starts: int = 4,
         spawn: Callable[[list[str], dict[str, str]], subprocess.Popen[bytes]] | None = None,
@@ -128,6 +132,7 @@ class ManagedBrowserWorker:
         self._profile_root = profile_root
         self._app_version = app_version
         self._auth_test_origins = auth_test_origins
+        self._quarantine_root = quarantine_root
         self._headless = headless
         self._timeout_seconds = timeout_seconds
         self._startup_timeout = startup_timeout_seconds
@@ -182,6 +187,7 @@ class ManagedBrowserWorker:
             profile_root=self._profile_root,
             app_version=self._app_version,
             auth_test_origins=self._auth_test_origins,
+            quarantine_root=self._quarantine_root,
         )
         try:
             process = self._spawn(arguments, environment)

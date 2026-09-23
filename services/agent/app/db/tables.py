@@ -451,7 +451,8 @@ task_grants = Table(
     ),
     CheckConstraint(
         "kind IN ('public_research', 'authenticated_read', 'form_prepare', 'desktop_disclose', "
-        "'desktop_action_plan', 'desktop_vision_capture', 'desktop_vision_disclose', 'document_disclose')",
+        "'desktop_action_plan', 'desktop_vision_capture', 'desktop_vision_disclose', 'document_disclose', "
+        "'file_transfer')",
         name="kind",
     ),
     CheckConstraint(
@@ -1585,6 +1586,73 @@ document_disclosures = Table(
     CheckConstraint("(status = 'STARTED') = (finished_at IS NULL)", name="finished_when_not_started"),
     CheckConstraint(
         "(status IN ('FAILED', 'OUTCOME_UNKNOWN')) = (error_code IS NOT NULL)", name="error_code_when_not_ok"
+    ),
+)
+
+#: Milestone 10 S2. The cross-executor effect lock's keys, written in the same transaction that creates an
+#: effect-bearing action. A key is an opaque, closed-code-derived string (hashes, never a path or URL).
+action_effect_keys = Table(
+    "action_effect_keys",
+    metadata,
+    Column("action_id", Uuid(), ForeignKey("actions.id", ondelete="RESTRICT"), primary_key=True),
+    Column("effect_key", String(160), primary_key=True),
+    Column("effect_kind", String(32), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint(
+        "effect_kind IN ('download', 'file_create', 'project_run', 'external_mutation', 'desktop_mutation')",
+        name="effect_kind",
+    ),
+    CheckConstraint("effect_key ~ '^[a-z_]+:[a-z_]+:[A-Za-z0-9:._-]{1,140}$'", name="effect_key_shape"),
+)
+
+Index("ix_action_effect_keys_effect_key", action_effect_keys.c.effect_key)
+
+#: Milestone 10 S2. One controlled download per task: the durable transfer manifest. Safe metadata only
+#: -- the source URL (which the person typed and the card showed), hashes, sizes, sniffed kind and file
+#: identities. The quarantine path is never stored: it is derived from the configured root and `id`.
+file_transfers = Table(
+    "file_transfers",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False),
+    Column("grant_id", Uuid(), ForeignKey("task_grants.id", ondelete="RESTRICT"), nullable=False),
+    Column("source_url", Text(), nullable=False),
+    Column("source_digest", String(64), nullable=False),
+    Column("source_host", String(255), nullable=False),
+    Column("dest_root_id", Uuid(), ForeignKey("file_roots.id", ondelete="RESTRICT"), nullable=False),
+    Column("dest_name", String(255), nullable=False),
+    Column("max_bytes", Integer(), nullable=False),
+    Column("status", String(20), nullable=False),
+    Column("error_code", String(40), nullable=True),
+    Column("length", BigInteger(), nullable=True),
+    Column("sha256", String(64), nullable=True),
+    Column("kind", String(8), nullable=True),
+    Column("content_type", String(100), nullable=True),
+    Column("quarantine_volume", BigInteger(), nullable=True),
+    Column("quarantine_index", String(20), nullable=True),
+    Column("placed_volume", BigInteger(), nullable=True),
+    Column("placed_index", String(20), nullable=True),
+    Column("download_action_id", Uuid(), ForeignKey("actions.id", ondelete="RESTRICT"), nullable=True),
+    Column("place_action_id", Uuid(), ForeignKey("actions.id", ondelete="RESTRICT"), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("quarantined_at", DateTime(timezone=True), nullable=True),
+    Column("placed_at", DateTime(timezone=True), nullable=True),
+    Column("cleaned_at", DateTime(timezone=True), nullable=True),
+    UniqueConstraint("task_id", name="uq_file_transfers_task_id"),
+    UniqueConstraint("grant_id", name="uq_file_transfers_grant_id"),
+    CheckConstraint(
+        "status IN ('PENDING', 'DOWNLOADING', 'QUARANTINED', 'PLACING', 'PLACED', 'FAILED', 'OUTCOME_UNKNOWN', 'CANCELLED')",
+        name="status",
+    ),
+    CheckConstraint("source_digest ~ '^[0-9a-f]{64}$'", name="source_digest_format"),
+    CheckConstraint("sha256 IS NULL OR sha256 ~ '^[0-9a-f]{64}$'", name="sha256_format"),
+    CheckConstraint("kind IS NULL OR kind IN ('pdf', 'docx', 'txt')", name="kind"),
+    CheckConstraint("max_bytes BETWEEN 1 AND 10485760", name="max_bytes_bounded"),
+    CheckConstraint("(status = 'PLACED') = (placed_at IS NOT NULL)", name="placed_at_set"),
+    CheckConstraint(
+        "status NOT IN ('QUARANTINED', 'PLACING', 'PLACED') OR (sha256 IS NOT NULL AND length IS NOT NULL)",
+        name="verified_before_placement",
     ),
 )
 
