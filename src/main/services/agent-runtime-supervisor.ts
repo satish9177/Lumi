@@ -225,7 +225,15 @@ const ALLOWED_ROUTES: ReadonlyArray<{ method: RuntimeMethod; pattern: RegExp }> 
   { method: 'POST', pattern: /^\/project-runs$/ },
   { method: 'GET', pattern: /^\/project-runs\/latest$/ },
   { method: 'GET', pattern: new RegExp(`^/project-runs/${UUID_PART}$`) },
-  { method: 'POST', pattern: new RegExp(`^/project-runs/${UUID_PART}/(grant|revoke|start|stop|reconcile)$`) }
+  { method: 'POST', pattern: new RegExp(`^/project-runs/${UUID_PART}/(grant|revoke|start|stop|reconcile)$`) },
+  // Milestone 10 S4: the cross-app preparation workflow controller. Lineage and candidate adoption only; no
+  // route here submits, uploads, clicks or names a value, a provenance, an origin or a provider.
+  { method: 'POST', pattern: /^\/workflows$/ },
+  { method: 'GET', pattern: /^\/workflows\/latest$/ },
+  { method: 'GET', pattern: new RegExp(`^/workflows/${UUID_PART}$`) },
+  { method: 'POST', pattern: new RegExp(`^/workflows/${UUID_PART}/(download|documents|form|stop|candidates/extract|candidates/derive)$`) },
+  { method: 'POST', pattern: new RegExp(`^/workflows/${UUID_PART}/candidates/${UUID_PART}/adopt$`) },
+  { method: 'POST', pattern: new RegExp(`^/workflows/adoptions/${UUID_PART}/(approve|reject)$`) }
 ]
 
 export function isAllowedRuntimeRoute(method: RuntimeMethod, path: string): boolean {

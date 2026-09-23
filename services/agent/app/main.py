@@ -10,6 +10,7 @@ from app.api.errors import register_error_handlers
 from app.api.routes import router
 from app.api.document_routes import router as document_router
 from app.api.transfer_routes import router as transfer_router
+from app.api.workflow_routes import router as workflow_router
 from app.api.project_routes import router as project_router
 from app.api.security import RuntimeSecurityMiddleware
 from app.config import AGENT_ROOT, Settings
@@ -35,6 +36,7 @@ from app.services.desktop_planning import DesktopPlanningService
 from app.services.desktop_vision import DesktopVisionService
 from app.services.documents import DocumentService
 from app.services.transfers import TransferService
+from app.services.workflows import WorkflowService
 from app.services.projects import ProjectService, default_run_root
 from app.files.quarantine import default_quarantine_root
 from app.services.windows_job import runtime_job_is_active
@@ -351,6 +353,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     grant_ttl_seconds=resolved.transfer_grant_ttl_seconds,
                 )
                 await app.state.transfer_service.sweep_quarantine()
+                # Milestone 10 S4: the cross-app preparation workflow controller. It holds no authority of its
+                # own: each child task keeps the grant and approvals of the service that owns it.
+                app.state.workflow_service = WorkflowService(
+                    engine,
+                    actions=action_service,
+                    documents=app.state.document_service,
+                    transfers=app.state.transfer_service,
+                    check_profile=app.state.authenticated_read_service.check_profile,
+                )
+                await app.state.workflow_service.sweep()
                 # Milestone 10 S3: registered project recipes. No run can survive a runtime restart (its job's
                 # only handle died with the old runtime); recovery proves that from (pid, creation time).
                 app.state.project_service = ProjectService(
@@ -437,5 +449,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(router)
     app.include_router(document_router)
     app.include_router(transfer_router)
+    app.include_router(workflow_router)
     app.include_router(project_router)
     return app

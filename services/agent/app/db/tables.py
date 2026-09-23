@@ -5,6 +5,7 @@ from sqlalchemy import (
     Column,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Identity,
     Index,
     Integer,
@@ -1546,6 +1547,8 @@ documents = Table(
     Column("expires_at", DateTime(timezone=True), nullable=False),
     Column("purged_at", DateTime(timezone=True), nullable=True),
     UniqueConstraint("file_ref_id", name="uq_documents_file_ref_id"),
+    #: Milestone 10 S4: lets a workflow candidate prove, by foreign key, that its document is its task's.
+    UniqueConstraint("id", "task_id", name="uq_documents_id_task_id"),
     CheckConstraint("classification = 'document_private'", name="classification"),
     CheckConstraint("format IN ('pdf', 'docx', 'txt')", name="format"),
     CheckConstraint("text_sha256 ~ '^[0-9a-f]{64}$'", name="text_sha256_format"),
@@ -1578,6 +1581,7 @@ document_disclosures = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     UniqueConstraint("grant_id", name="uq_document_disclosures_grant_id"),
     UniqueConstraint("task_id", name="uq_document_disclosures_task_id"),
+    UniqueConstraint("id", "task_id", name="uq_document_disclosures_id_task_id"),
     CheckConstraint("status IN ('STARTED', 'SUCCEEDED', 'FAILED', 'OUTCOME_UNKNOWN')", name="status"),
     CheckConstraint("projection_digest ~ '^[0-9a-f]{64}$'", name="projection_digest_format"),
     CheckConstraint(
@@ -1772,4 +1776,157 @@ document_answers = Table(
         "(kind = 'comparison') = (summary IS NOT NULL) AND (kind = 'cannot_compare') = (reason IS NOT NULL)",
         name="shape_matches_kind",
     ),
+)
+
+_WORKFLOW_KINDS_CK = "kind IN (" + ", ".join(f"'{kind}'" for kind in PROTECTED_KINDS) + ")"
+_VALUE_DIGEST_MATCHES = "value IS NULL OR value_digest = encode(sha256(convert_to(value, 'UTF8')), 'hex')"
+
+#: Milestone 10 S4. One cross-app preparation workflow: a deterministic controller over existing capabilities.
+#: It owns nothing but lineage; each authority stays on the child task that holds it.
+workflows = Table(
+    "workflows",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("kind", String(32), nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("objective", String(300), nullable=False),
+    Column("revision", BigInteger(), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("stopped_at", DateTime(timezone=True), nullable=True),
+    Column("stop_reason", String(40), nullable=True),
+    CheckConstraint("kind = 'cross_app_preparation'", name="kind"),
+    CheckConstraint("status IN ('ACTIVE', 'STOPPED')", name="status"),
+    CheckConstraint("(status = 'STOPPED') = (stopped_at IS NOT NULL)", name="stopped_at_set"),
+    CheckConstraint("(stopped_at IS NULL) = (stop_reason IS NULL)", name="stop_reason_set"),
+    CheckConstraint("expires_at > created_at", name="expires_after_creation"),
+    CheckConstraint("revision >= 1", name="revision_positive"),
+)
+
+#: A controller-created child task and its role. A task belongs to at most one workflow, in one role.
+workflow_steps = Table(
+    "workflow_steps",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("workflow_id", Uuid(), ForeignKey("workflows.id", ondelete="RESTRICT"), nullable=False),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False),
+    Column("role", String(16), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("task_id", name="uq_workflow_steps_task_id"),
+    UniqueConstraint("workflow_id", "role", name="uq_workflow_steps_workflow_id_role"),
+    UniqueConstraint("workflow_id", "task_id", "role", name="uq_workflow_steps_lineage"),
+    CheckConstraint("role IN ('download', 'documents', 'form')", name="role"),
+)
+
+#: A candidate field. Untrusted until adopted; never adopted automatically. Its document (and, for a
+#: provider-derived candidate, its disclosure) must belong to the workflow's `documents` step -- proven by
+#: composite foreign keys, not by application code alone.
+workflow_candidates = Table(
+    "workflow_candidates",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("workflow_id", Uuid(), ForeignKey("workflows.id", ondelete="RESTRICT"), nullable=False),
+    Column("source_task_id", Uuid(), nullable=False),
+    Column("source_role", String(16), nullable=False),
+    Column("document_id", Uuid(), nullable=False),
+    Column("document_text_sha256", String(64), nullable=False),
+    Column("kind", String(32), nullable=False),
+    Column("provenance", String(24), nullable=False),
+    Column("value", Text(), nullable=True),
+    Column("value_digest", String(64), nullable=False),
+    Column("preview", String(120), nullable=False),
+    Column("span_start", Integer(), nullable=False),
+    Column("span_end", Integer(), nullable=False),
+    Column("disclosure_id", Uuid(), nullable=True),
+    Column("projection_digest", String(64), nullable=True),
+    Column("doc_ref", String(2), nullable=True),
+    Column("quote", String(200), nullable=True),
+    Column("status", String(16), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("purged_at", DateTime(timezone=True), nullable=True),
+    ForeignKeyConstraint(
+        ["workflow_id", "source_task_id", "source_role"],
+        ["workflow_steps.workflow_id", "workflow_steps.task_id", "workflow_steps.role"],
+        name="fk_workflow_candidates_step",
+        ondelete="RESTRICT",
+    ),
+    ForeignKeyConstraint(
+        ["document_id", "source_task_id"],
+        ["documents.id", "documents.task_id"],
+        name="fk_workflow_candidates_document",
+        ondelete="RESTRICT",
+    ),
+    ForeignKeyConstraint(
+        ["disclosure_id", "source_task_id"],
+        ["document_disclosures.id", "document_disclosures.task_id"],
+        name="fk_workflow_candidates_disclosure",
+        ondelete="RESTRICT",
+    ),
+    UniqueConstraint("id", "workflow_id", "provenance", "kind", "value_digest", name="uq_workflow_candidates_lineage"),
+    UniqueConstraint(
+        "workflow_id", "document_id", "provenance", "kind", "value_digest", name="uq_workflow_candidates_dedupe"
+    ),
+    CheckConstraint("source_role = 'documents'", name="source_role"),
+    CheckConstraint(_WORKFLOW_KINDS_CK, name="kind"),
+    CheckConstraint("provenance IN ('document_extracted', 'provider_derived')", name="provenance"),
+    CheckConstraint("status IN ('PROPOSED', 'ADOPTED', 'DISMISSED')", name="status"),
+    CheckConstraint("value_digest ~ '^[0-9a-f]{64}$'", name="value_digest_format"),
+    CheckConstraint("document_text_sha256 ~ '^[0-9a-f]{64}$'", name="text_sha256_format"),
+    CheckConstraint(_VALUE_DIGEST_MATCHES, name="digest_matches_value"),
+    CheckConstraint("value IS NULL OR length(value) BETWEEN 1 AND 300", name="value_bounded"),
+    CheckConstraint("(purged_at IS NULL) = (value IS NOT NULL)", name="purged_means_no_value"),
+    CheckConstraint("span_start >= 0 AND span_end > span_start", name="span_ordered"),
+    CheckConstraint(
+        "(provenance = 'document_extracted' AND disclosure_id IS NULL AND projection_digest IS NULL "
+        "AND doc_ref IS NULL AND quote IS NULL) "
+        "OR (provenance = 'provider_derived' AND disclosure_id IS NOT NULL AND projection_digest IS NOT NULL "
+        "AND doc_ref IN ('d1', 'd2') AND (quote IS NOT NULL OR purged_at IS NOT NULL))",
+        name="provenance_shape",
+    ),
+    CheckConstraint(
+        "projection_digest IS NULL OR projection_digest ~ '^[0-9a-f]{64}$'", name="projection_digest_format"
+    ),
+)
+
+Index("ix_workflow_candidates_workflow_id", workflow_candidates.c.workflow_id)
+
+#: A workflow-scoped protected value: adopted by one exact approval, from one candidate, keeping its
+#: provenance. It is NOT a saved detail (M8's `protected_values` is untouched) and its provenance has no
+#: user-typed member. The composite foreign key makes kind, digest and provenance equal the candidate's.
+workflow_values = Table(
+    "workflow_values",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("workflow_id", Uuid(), ForeignKey("workflows.id", ondelete="RESTRICT"), nullable=False),
+    Column("candidate_id", Uuid(), nullable=False),
+    Column("adopt_action_id", Uuid(), ForeignKey("actions.id", ondelete="RESTRICT"), nullable=False),
+    Column("kind", String(32), nullable=False),
+    Column("provenance", String(24), nullable=False),
+    Column("value", Text(), nullable=True),
+    Column("value_digest", String(64), nullable=False),
+    Column("preview", String(120), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("purged_at", DateTime(timezone=True), nullable=True),
+    ForeignKeyConstraint(
+        ["candidate_id", "workflow_id", "provenance", "kind", "value_digest"],
+        [
+            "workflow_candidates.id",
+            "workflow_candidates.workflow_id",
+            "workflow_candidates.provenance",
+            "workflow_candidates.kind",
+            "workflow_candidates.value_digest",
+        ],
+        name="fk_workflow_values_candidate",
+        ondelete="RESTRICT",
+    ),
+    UniqueConstraint("candidate_id", name="uq_workflow_values_candidate_id"),
+    UniqueConstraint("adopt_action_id", name="uq_workflow_values_adopt_action_id"),
+    UniqueConstraint("workflow_id", "kind", name="uq_workflow_values_workflow_id_kind"),
+    CheckConstraint(_WORKFLOW_KINDS_CK, name="kind"),
+    CheckConstraint("provenance IN ('document_extracted', 'provider_derived')", name="provenance"),
+    CheckConstraint("value_digest ~ '^[0-9a-f]{64}$'", name="value_digest_format"),
+    CheckConstraint(_VALUE_DIGEST_MATCHES, name="digest_matches_value"),
+    CheckConstraint("value IS NULL OR length(value) BETWEEN 1 AND 300", name="value_bounded"),
+    CheckConstraint("(purged_at IS NULL) = (value IS NOT NULL)", name="purged_means_no_value"),
 )

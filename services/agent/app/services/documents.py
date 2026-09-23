@@ -19,7 +19,7 @@ import asyncio
 import logging
 import os
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -50,12 +50,13 @@ from app.domain.documents import (
     CompareResult,
     DisclosedDocument,
     DocumentDiscloseScope,
-    DocumentRefusal,
+    DocumentRefusal as DocumentRefusal,  # re-exported for the S4 workflow controller
     LocalComparison,
     NotGroundedError,
     Projection,
     build_projection,
     compare_locally,
+    normalise_quote,
     parse_compare_result,
     preview,
     text_sha256,
@@ -66,8 +67,10 @@ from app.domain.documents import (
     verify_grounding,
 )
 from app.domain.errors import TaskConcurrencyError, TaskKindMismatchError, TaskNotAcceptingActionsError, TaskNotFoundError
+from app.domain.protected_values import ProtectedValueRefusal, canonicalize, value_digest
 from app.domain.research import GrantStatus
 from app.domain.task_status import TaskEventType, TaskStatus, accepts_actions
+from app.domain.workflows import FoundField, find_fields, line_around, span_still_holds
 from app.files.broker import (
     FileBrokerRefusal,
     ProtectedFolders,
@@ -93,10 +96,13 @@ from app.repositories.documents import (
 )
 from app.repositories.files import FileRefRecord, FileRepository, FileRootRecord
 from app.repositories.tasks import TaskRecord, TaskRepository
+from app.repositories.workflows import WorkflowRepository
 
 logger = logging.getLogger("lumi.documents")
 
 Extractor = Callable[[bytes, str], Extracted]
+#: Milestone 10 S4: runs inside the transaction that creates a task, to record its workflow lineage.
+TaskLink = Callable[[AsyncConnection, uuid.UUID], Awaitable[None]]
 
 
 # ---- views -------------------------------------------------------------------------------------
@@ -183,6 +189,27 @@ class DocumentTaskView:
     card: DisclosureCardView | None
     disclosure: DocumentDisclosureRecord | None
     answer: DocumentAnswerRecord | None
+
+
+@dataclass(frozen=True, slots=True)
+class GroundedField:
+    """Milestone 10 S4: a labelled value inside one grounded quote of a SUCCEEDED disclosure."""
+
+    document_id: uuid.UUID
+    text_sha256: str
+    doc_ref: str
+    quote: str
+    found: FoundField
+
+
+@dataclass(frozen=True, slots=True)
+class TaskDocumentSummary:
+    """Milestone 10 S4: what the workflow view shows about a documents step. Labels and counts, no text."""
+
+    labels: dict[uuid.UUID, str]
+    document_count: int
+    disclosure_status: str | None
+    open_grant_id: uuid.UUID | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,7 +327,8 @@ class DocumentService:
 
     # ---- tasks and files -----------------------------------------------------------------------
 
-    async def create_task(self, *, objective: object = "") -> DocumentTaskView:
+    async def create_task(self, *, objective: object = "", link: TaskLink | None = None) -> DocumentTaskView:
+        """`link` (Milestone 10 S4) records workflow lineage in the SAME transaction that creates the task."""
         goal = validate_objective(objective)
         async with self._engine.begin() as connection:
             tasks = TaskRepository(connection)
@@ -308,6 +336,8 @@ class DocumentService:
                 task_id=uuid.uuid4(), status=TaskStatus.READY, request={"type": DOCUMENT_TASK_TYPE, "objective": goal}
             )
             await tasks.append_event(task=task, event_type=TaskEventType.TASK_CREATED, payload={"status": task.status.value})
+            if link is not None:
+                await link(connection, task.id)
             return await self._view(connection, task.id)
 
     async def add_root_file(self, task_id: uuid.UUID, *, root_id: uuid.UUID, relative_path: object) -> DocumentTaskView:
@@ -332,6 +362,7 @@ class DocumentService:
             raise _refused(refusal) from None
         async with self._engine.begin() as connection:
             task = await self._lock(connection, task_id)
+            await self._refuse_workflow_step(connection, task.id)
             # Re-checked under the task lock, with the root row share-locked: a revocation that committed
             # while the file was being read wins.
             current = await FileRepository(connection).get_root(root_id, lock=True)
@@ -346,6 +377,75 @@ class DocumentService:
                 relative_path=display_relative(components),
                 local_path=None,
                 display_name=name,
+                format=kind,
+                volume_serial=read.identity.volume,
+                file_index=read.identity.index,
+                size_bytes=read.identity.size,
+                mtime_ns=read.identity.mtime_ns,
+                sha256=read.sha256,
+            )
+            await self._event(connection, task.id, TaskEventType.TASK_DOCUMENT_FILE_ADDED, {"file_id": str(ref.id), "source": ref.source, "format": ref.format})
+            return await self._view(connection, task.id)
+
+    async def add_placed_file(
+        self,
+        task_id: uuid.UUID,
+        *,
+        root_id: uuid.UUID,
+        name: str,
+        expected_sha256: str,
+        expected_volume: int,
+        expected_index: int,
+        check: TaskLink | None = None,
+    ) -> DocumentTaskView:
+        """Milestone 10 S4: exactly the file a workflow's own transfer placed, proven by identity and bytes.
+
+        The file is read from its READ root like any root file, then must be the SAME file (volume and index
+        recorded by the placement) holding the SAME bytes (the SHA-256 the download's manifest verified). A
+        file replaced, edited or re-created under that name after placement is `placed_file_changed`.
+        """
+        try:
+            components = validate_relative_path(name)
+        except FileNameRefusal as refusal:
+            raise _refused(refusal) from None
+        if len(components) != 1 or document_format_for(components[0]) is None:
+            raise DocumentRefusal("unsupported_format")
+        await self._require_room(task_id)
+        root = await self._readable_root(root_id)
+        try:
+            read = await asyncio.to_thread(self._read_root_file, root, components, None, None)
+            await asyncio.to_thread(check_claim, read.data, os.path.splitext(components[0])[1])
+        except (FileBrokerRefusal, ExtractionRefusal) as refusal:
+            raise _refused(refusal) from None
+        if (
+            read.sha256 != expected_sha256
+            or read.identity.volume != expected_volume
+            or read.identity.index != expected_index
+        ):
+            raise DocumentRefusal("placed_file_changed")
+        kind = document_format_for(components[0])
+        assert kind is not None
+        async with self._engine.begin() as connection:
+            task = await self._lock(connection, task_id)
+            if check is not None:
+                await check(connection, task.id)  # e.g. the workflow is still live (task row locked first)
+            if any(
+                ref.root_id == root_id and ref.relative_path == display_relative(components) and ref.sha256 == read.sha256
+                for ref in await FileRepository(connection).refs_for_task(task_id)
+            ):
+                return await self._view(connection, task.id)  # a repeated or concurrent import adds nothing
+            current = await FileRepository(connection).get_root(root_id, lock=True)
+            if current is None or not current.active or not current.can_read:
+                raise DocumentRefusal("root_revoked")
+            await self._check_room(connection, task_id)
+            ref = await FileRepository(connection).insert_ref(
+                ref_id=uuid.uuid4(),
+                task_id=task.id,
+                source="ROOT_FILE",
+                root_id=root.id,
+                relative_path=display_relative(components),
+                local_path=None,
+                display_name=components[0],
                 format=kind,
                 volume_serial=read.identity.volume,
                 file_index=read.identity.index,
@@ -378,6 +478,7 @@ class DocumentService:
             raise _refused(refusal) from None
         async with self._engine.begin() as connection:
             task = await self._lock(connection, task_id)
+            await self._refuse_workflow_step(connection, task.id)
             await self._check_room(connection, task_id)
             ref = await FileRepository(connection).insert_ref(
                 ref_id=uuid.uuid4(),
@@ -503,6 +604,13 @@ class DocumentService:
             if not accepts_actions(task.status):
                 raise TaskNotAcceptingActionsError(task_id, task.status)
             await self._check_room(connection, task_id)
+
+    @staticmethod
+    async def _refuse_workflow_step(connection: AsyncConnection, task_id: uuid.UUID) -> None:
+        """Milestone 10 S4 (review finding 4): a workflow's documents step holds exactly the file its own download
+        placed. No other root file or dropped file can be added to it through the generic document routes."""
+        if await WorkflowRepository(connection).step_for_task(task_id) is not None:
+            raise DocumentRefusal("workflow_step_files_fixed")
 
     @staticmethod
     async def _check_room(connection: AsyncConnection, task_id: uuid.UUID) -> None:
@@ -660,6 +768,161 @@ class DocumentService:
                 )
                 await self._move_task(connection, task_id, TaskStatus.READY)
             return await self._view(connection, task_id)
+
+    # ---- Milestone 10 S4: narrow reads for the workflow controller (never the whole text) ----------------
+
+    async def candidate_fields(
+        self, connection: AsyncConnection, task_id: uuid.UUID, document_id: uuid.UUID
+    ) -> tuple[str, list[FoundField]]:
+        """The labelled fields of ONE document of `task_id`, and the text digest they were found in.
+
+        The deterministic extractor runs here, next to the text; only the found values leave this method.
+        """
+        text, sha = await self._task_document_text(connection, task_id, document_id)
+        return sha, find_fields(text)
+
+    async def grounded_fields(self, connection: AsyncConnection, task_id: uuid.UUID) -> tuple[uuid.UUID, str, list[GroundedField]]:
+        """Labelled fields of the disclosed DOCUMENTS whose whole line the ONE SUCCEEDED disclosure quoted.
+
+        Each quote is re-grounded in the projection recomputed now (which must equal the recorded one). The
+        value always comes from the document's own text, found by the same extractor as a local candidate and
+        covering its whole labelled line -- never from the provider's quote (S4 review finding 1: a quote that
+        starts mid-line, truncates a value or changes its case must not become the value). Returns
+        (disclosure, projection digest, fields)."""
+        repository = DocumentRepository(connection)
+        disclosure = await repository.disclosure_for_task(task_id)
+        if disclosure is None:
+            raise DocumentRefusal("disclosure_not_started")
+        if disclosure.status != "SUCCEEDED":
+            raise DocumentRefusal("disclosure_not_succeeded")
+        answer = await repository.answer_for_task(task_id)
+        if answer is None or answer.disclosure_id != disclosure.id:
+            raise DocumentRefusal("disclosure_not_succeeded")
+        scope, projection = await self.disclosed_projection(connection, disclosure)
+        listed = {item.doc_ref: item for item in scope.documents}
+        texts: dict[str, str] = {}
+        fields: list[GroundedField] = []
+        for finding in answer.findings:
+            for evidence in finding.get("evidence", []):
+                doc_ref, quote = evidence.get("doc_ref"), evidence.get("quote")
+                if not isinstance(doc_ref, str) or not isinstance(quote, str):
+                    continue
+                item = listed.get(doc_ref)  # type: ignore[call-overload]
+                excerpt = projection.excerpt(doc_ref)
+                quoted = normalise_quote(quote)
+                if item is None or excerpt is None or not quoted or quoted not in normalise_quote(excerpt):
+                    continue
+                if doc_ref not in texts:
+                    text, sha = await self._task_document_text(connection, task_id, item.document_id)
+                    if sha != item.text_sha256:
+                        raise DocumentRefusal("projection_changed")
+                    texts[doc_ref] = text
+                text = texts[doc_ref]
+                for found in find_fields(text):
+                    line = normalise_quote(text[found.line_start : found.line_end])
+                    if line and line in quoted:
+                        fields.append(
+                            GroundedField(document_id=item.document_id, text_sha256=item.text_sha256, doc_ref=doc_ref, quote=quote, found=found)
+                        )
+        return disclosure.id, disclosure.projection_digest, fields
+
+    async def rederive_field(
+        self,
+        connection: AsyncConnection,
+        task_id: uuid.UUID,
+        *,
+        document_id: uuid.UUID,
+        text_sha256_expected: str,
+        kind: str,
+        digest: str,
+        span_start: int,
+        span_end: int,
+        disclosure_id: uuid.UUID | None,
+        projection_digest: str | None,
+        doc_ref: str | None,
+        quote: str | None,
+    ) -> str:
+        """The canonical value as it stands NOW in its document, or a refusal if anything moved: the document's
+        text (same digest), and for a provider-derived value the same SUCCEEDED disclosure, the same projection,
+        a quote still grounded in it, and the value's whole document line inside that quote. The value is
+        always re-read from the DOCUMENT span. Returns only the value, never the text."""
+        source, sha = await self._task_document_text(connection, task_id, document_id)
+        if sha != text_sha256_expected:
+            raise DocumentRefusal("document_changed")
+        if disclosure_id is not None:
+            disclosure = await DocumentRepository(connection).get_disclosure(disclosure_id)
+            if disclosure is None or disclosure.task_id != task_id or disclosure.status != "SUCCEEDED":
+                raise DocumentRefusal("disclosure_not_succeeded")
+            if disclosure.projection_digest != projection_digest:
+                raise DocumentRefusal("projection_changed")
+            scope, projection = await self.disclosed_projection(connection, disclosure)
+            listed = next((item for item in scope.documents if item.doc_ref == doc_ref), None)
+            excerpt = projection.excerpt(doc_ref or "")
+            if listed is None or listed.document_id != document_id or excerpt is None or quote is None:
+                raise DocumentRefusal("projection_changed")
+            quoted = normalise_quote(quote)
+            if not quoted or quoted not in normalise_quote(excerpt):
+                raise DocumentRefusal("projection_changed")
+            if not 0 <= span_start < len(source) or normalise_quote(line_around(source, span_start)) not in quoted:
+                raise DocumentRefusal("candidate_changed")
+        if not span_still_holds(source, start=span_start, end=span_end, kind=kind, digest=digest):
+            raise DocumentRefusal("candidate_changed")
+        try:
+            canonical = canonicalize(kind, source[span_start:span_end])
+        except ProtectedValueRefusal:  # pragma: no cover - span_still_holds canonicalised it a moment ago.
+            raise DocumentRefusal("candidate_changed") from None
+        if value_digest(canonical) != digest:  # pragma: no cover - the same check as span_still_holds.
+            raise DocumentRefusal("candidate_changed")
+        return canonical
+
+    async def task_summary(self, connection: AsyncConnection, task_id: uuid.UUID) -> TaskDocumentSummary:
+        repository = DocumentRepository(connection)
+        records = await repository.documents_for_task(task_id)
+        refs = {ref.id: ref for ref in await FileRepository(connection).refs_for_task(task_id)}
+        disclosure = await repository.disclosure_for_task(task_id)
+        grant = await repository.open_grant_for_task(task_id)
+        return TaskDocumentSummary(
+            labels={record.id: refs[record.file_ref_id].display_name if record.file_ref_id in refs else "" for record in records},
+            document_count=len(records),
+            disclosure_status=disclosure.status if disclosure is not None else None,
+            open_grant_id=grant.id if grant is not None else None,
+        )
+
+    async def _task_document_text(
+        self, connection: AsyncConnection, task_id: uuid.UUID, document_id: uuid.UUID, *, text: bool = True
+    ) -> tuple[str, str]:
+        """(text, digest) of a document of exactly `task_id`, from a still-readable source; `text=False`
+        returns an empty text and only proves the document is live."""
+        record = await DocumentRepository(connection).get_document(document_id)
+        if record is None or record.task_id != task_id:
+            raise DocumentRefusal("document_not_found")
+        ref = await FileRepository(connection).get_ref(record.file_ref_id)
+        if ref is None or ref.task_id != task_id:  # pragma: no cover - a document always has its task's ref.
+            raise DocumentRefusal("document_not_found")
+        await self._require_live_source(connection, ref)
+        value = await DocumentRepository(connection).text_for(document_id, task_id=task_id)
+        if value is None:
+            raise DocumentRefusal("document_expired")
+        if text_sha256(value) != record.text_sha256:  # pragma: no cover - a row that disagrees with itself.
+            raise DocumentRefusal("document_changed")
+        return (value if text else ""), record.text_sha256
+
+    async def disclosed_projection(
+        self, connection: AsyncConnection, disclosure: DocumentDisclosureRecord
+    ) -> tuple[DocumentDiscloseScope, Projection]:
+        """Milestone 10 S4: the exact projection a SUCCEEDED disclosure showed its provider, recomputed from the
+        documents it names and proven equal to the recorded digest -- or `projection_changed`."""
+        repository = DocumentRepository(connection)
+        grant = await repository.get_grant(disclosure.grant_id)
+        if grant is None or grant.task_id != disclosure.task_id:
+            raise DocumentRefusal("projection_changed")
+        try:
+            projection = build_projection(grant.scope, await self._scope_texts(connection, grant))
+        except DocumentRefusal:
+            raise DocumentRefusal("projection_changed") from None
+        if projection.digest != disclosure.projection_digest:
+            raise DocumentRefusal("projection_changed")
+        return grant.scope, projection
 
     async def _scope_texts(self, connection: AsyncConnection, grant: DocumentGrantRecord) -> dict[str, str]:
         texts: dict[str, str] = {}

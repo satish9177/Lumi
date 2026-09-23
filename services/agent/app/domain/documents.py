@@ -437,8 +437,9 @@ class NotGroundedError(Exception):
 
 
 def verify_grounding(projection: Projection, result: CompareResult) -> list[list[dict[str, str]]]:
-    """Every quote must occur in the excerpt of the document it names; every number in a finding must
-    appear in that finding's quotes. Returns the evidence to store: always the projection's own text."""
+    """Every quote must occur (after `normalise_quote`) in the excerpt of the document it names; every number
+    in a finding must appear in that finding's quotes. Returns the evidence to store: the provider's quote as
+    given, verified to occur in the projection -- not a copy of the projection's own span."""
     if isinstance(result, CannotCompare):
         return []
     stored: list[list[dict[str, str]]] = []

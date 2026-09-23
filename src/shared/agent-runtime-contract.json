@@ -150,6 +150,10 @@
       "task.project_run_revoked",
       "task.project_run_blocked",
       "task.project_run_stopped",
+      "task.workflow_step_linked",
+      "task.workflow_candidates_found",
+      "task.workflow_value_adopted",
+      "task.workflow_stopped",
       "action.proposed",
       "action.approval_requested",
       "action.approved",
@@ -215,6 +219,8 @@
     "transfer_state_changed",
     "project_refused",
     "project_state_changed",
+    "workflow_refused",
+    "workflow_state_changed",
     "destination_not_allowed",
     "invalid_action_transition",
     "invalid_booking_criteria",
@@ -1073,7 +1079,8 @@
       ],
       "site": "jobs.example.test",
       "task_id": "00000000-0000-4000-8000-00000000000a",
-      "task_status": "READY"
+      "task_status": "READY",
+      "value_source": "saved_details"
     },
     "form_plan_draft_partial": {
       "candidate_element_count": 6,
@@ -1091,7 +1098,8 @@
             "field_label": "Email address",
             "kind": "saved_detail",
             "option_label": null,
-            "preview": "s***@g***.com"
+            "preview": "s***@g***.com",
+            "provenance": null
           },
           {
             "checked": null,
@@ -1100,7 +1108,8 @@
             "field_label": "Country",
             "kind": "option",
             "option_label": "India",
-            "preview": null
+            "preview": null,
+            "provenance": null
           },
           {
             "checked": true,
@@ -1109,14 +1118,16 @@
             "field_label": "I agree to the terms",
             "kind": "checkbox",
             "option_label": null,
-            "preview": null
+            "preview": null,
+            "provenance": null
           }
         ],
         "form_label": "Application",
         "result_code": "local_draft_partial",
         "reveals_country": false,
         "revision": 5,
-        "site": "jobs.example.test"
+        "site": "jobs.example.test",
+        "value_source": "saved_details"
       },
       "draft": {
         "draft_id": "00000000-0000-4000-8000-0000000000d1",
@@ -1171,7 +1182,8 @@
       ],
       "site": "jobs.example.test",
       "task_id": "00000000-0000-4000-8000-00000000000a",
-      "task_status": "PAUSED"
+      "task_status": "PAUSED",
+      "value_source": "saved_details"
     },
     "form_plan_draft_prepared": {
       "candidate_element_count": 6,
@@ -1189,7 +1201,8 @@
             "field_label": "Email address",
             "kind": "saved_detail",
             "option_label": null,
-            "preview": "s***@g***.com"
+            "preview": "s***@g***.com",
+            "provenance": null
           },
           {
             "checked": null,
@@ -1198,7 +1211,8 @@
             "field_label": "Country",
             "kind": "option",
             "option_label": "India",
-            "preview": null
+            "preview": null,
+            "provenance": null
           },
           {
             "checked": true,
@@ -1207,14 +1221,16 @@
             "field_label": "I agree to the terms",
             "kind": "checkbox",
             "option_label": null,
-            "preview": null
+            "preview": null,
+            "provenance": null
           }
         ],
         "form_label": "Application",
         "result_code": "local_draft_prepared",
         "reveals_country": false,
         "revision": 5,
-        "site": "jobs.example.test"
+        "site": "jobs.example.test",
+        "value_source": "saved_details"
       },
       "draft": {
         "draft_id": "00000000-0000-4000-8000-0000000000d1",
@@ -1269,7 +1285,8 @@
       ],
       "site": "jobs.example.test",
       "task_id": "00000000-0000-4000-8000-00000000000a",
-      "task_status": "PAUSED"
+      "task_status": "PAUSED",
+      "value_source": "saved_details"
     },
     "form_plan_handed_over": {
       "candidate_element_count": 6,
@@ -1287,7 +1304,8 @@
             "field_label": "Email address",
             "kind": "saved_detail",
             "option_label": null,
-            "preview": "s***@g***.com"
+            "preview": "s***@g***.com",
+            "provenance": null
           },
           {
             "checked": null,
@@ -1296,7 +1314,8 @@
             "field_label": "Country",
             "kind": "option",
             "option_label": "India",
-            "preview": null
+            "preview": null,
+            "provenance": null
           },
           {
             "checked": true,
@@ -1305,14 +1324,16 @@
             "field_label": "I agree to the terms",
             "kind": "checkbox",
             "option_label": null,
-            "preview": null
+            "preview": null,
+            "provenance": null
           }
         ],
         "form_label": "Application",
         "result_code": "local_draft_prepared",
         "reveals_country": false,
         "revision": 5,
-        "site": "jobs.example.test"
+        "site": "jobs.example.test",
+        "value_source": "saved_details"
       },
       "draft": {
         "draft_id": "00000000-0000-4000-8000-0000000000d1",
@@ -1378,7 +1399,8 @@
       ],
       "site": "jobs.example.test",
       "task_id": "00000000-0000-4000-8000-00000000000a",
-      "task_status": "PAUSED"
+      "task_status": "PAUSED",
+      "value_source": "saved_details"
     },
     "form_plan_handover_waiting": {
       "candidate_element_count": 6,
@@ -1396,7 +1418,8 @@
             "field_label": "Email address",
             "kind": "saved_detail",
             "option_label": null,
-            "preview": "s***@g***.com"
+            "preview": "s***@g***.com",
+            "provenance": null
           },
           {
             "checked": null,
@@ -1405,7 +1428,8 @@
             "field_label": "Country",
             "kind": "option",
             "option_label": "India",
-            "preview": null
+            "preview": null,
+            "provenance": null
           },
           {
             "checked": true,
@@ -1414,14 +1438,16 @@
             "field_label": "I agree to the terms",
             "kind": "checkbox",
             "option_label": null,
-            "preview": null
+            "preview": null,
+            "provenance": null
           }
         ],
         "form_label": "Application",
         "result_code": "local_draft_prepared",
         "reveals_country": false,
         "revision": 5,
-        "site": "jobs.example.test"
+        "site": "jobs.example.test",
+        "value_source": "saved_details"
       },
       "draft": {
         "draft_id": "00000000-0000-4000-8000-0000000000d1",
@@ -1487,7 +1513,8 @@
       ],
       "site": "jobs.example.test",
       "task_id": "00000000-0000-4000-8000-00000000000a",
-      "task_status": "PAUSED"
+      "task_status": "PAUSED",
+      "value_source": "saved_details"
     },
     "form_plan_none": {
       "candidate_element_count": 6,
@@ -1521,7 +1548,8 @@
       ],
       "site": "jobs.example.test",
       "task_id": "00000000-0000-4000-8000-00000000000a",
-      "task_status": "READY"
+      "task_status": "READY",
+      "value_source": "saved_details"
     },
     "form_plan_pending": {
       "candidate_element_count": 6,
@@ -1572,7 +1600,8 @@
       ],
       "site": "jobs.example.test",
       "task_id": "00000000-0000-4000-8000-00000000000a",
-      "task_status": "READY"
+      "task_status": "READY",
+      "value_source": "saved_details"
     },
     "form_plan_prepared_nothing": {
       "candidate_element_count": 6,
@@ -1590,7 +1619,8 @@
             "field_label": "Email address",
             "kind": "saved_detail",
             "option_label": null,
-            "preview": "s***@g***.com"
+            "preview": "s***@g***.com",
+            "provenance": null
           },
           {
             "checked": null,
@@ -1599,7 +1629,8 @@
             "field_label": "Country",
             "kind": "option",
             "option_label": "India",
-            "preview": null
+            "preview": null,
+            "provenance": null
           },
           {
             "checked": true,
@@ -1608,14 +1639,16 @@
             "field_label": "I agree to the terms",
             "kind": "checkbox",
             "option_label": null,
-            "preview": null
+            "preview": null,
+            "provenance": null
           }
         ],
         "form_label": "Application",
         "result_code": "prepared_nothing",
         "reveals_country": false,
         "revision": 5,
-        "site": "jobs.example.test"
+        "site": "jobs.example.test",
+        "value_source": "saved_details"
       },
       "draft": null,
       "form_count": 1,
@@ -1663,7 +1696,8 @@
       ],
       "site": "jobs.example.test",
       "task_id": "00000000-0000-4000-8000-00000000000a",
-      "task_status": "READY"
+      "task_status": "READY",
+      "value_source": "saved_details"
     },
     "form_plan_preparing": {
       "candidate_element_count": 6,
@@ -1714,7 +1748,8 @@
       ],
       "site": "jobs.example.test",
       "task_id": "00000000-0000-4000-8000-00000000000a",
-      "task_status": "READY"
+      "task_status": "READY",
+      "value_source": "saved_details"
     },
     "form_plan_waiting_approval": {
       "candidate_element_count": 6,
@@ -1732,7 +1767,8 @@
             "field_label": "Email address",
             "kind": "saved_detail",
             "option_label": null,
-            "preview": "s***@g***.com"
+            "preview": "s***@g***.com",
+            "provenance": null
           },
           {
             "checked": null,
@@ -1741,7 +1777,8 @@
             "field_label": "Country",
             "kind": "option",
             "option_label": "India",
-            "preview": null
+            "preview": null,
+            "provenance": null
           },
           {
             "checked": true,
@@ -1750,14 +1787,16 @@
             "field_label": "I agree to the terms",
             "kind": "checkbox",
             "option_label": null,
-            "preview": null
+            "preview": null,
+            "provenance": null
           }
         ],
         "form_label": "Application",
         "result_code": null,
         "reveals_country": false,
         "revision": 2,
-        "site": "jobs.example.test"
+        "site": "jobs.example.test",
+        "value_source": "saved_details"
       },
       "draft": null,
       "form_count": 1,
@@ -1805,7 +1844,8 @@
       ],
       "site": "jobs.example.test",
       "task_id": "00000000-0000-4000-8000-00000000000a",
-      "task_status": "READY"
+      "task_status": "READY",
+      "value_source": "saved_details"
     },
     "health": {
       "database": "ok",
@@ -4974,6 +5014,15 @@
             "site": {
               "title": "Site",
               "type": "string"
+            },
+            "value_source": {
+              "default": "saved_details",
+              "enum": [
+                "saved_details",
+                "workflow"
+              ],
+              "title": "Value Source",
+              "type": "string"
             }
           },
           "required": [
@@ -5069,6 +5118,22 @@
               ],
               "default": null,
               "title": "Preview"
+            },
+            "provenance": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "document_extracted",
+                    "provider_derived"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "title": "Provenance"
             }
           },
           "required": [
@@ -5465,6 +5530,15 @@
         },
         "task_status": {
           "title": "Task Status",
+          "type": "string"
+        },
+        "value_source": {
+          "default": "saved_details",
+          "enum": [
+            "saved_details",
+            "workflow"
+          ],
+          "title": "Value Source",
           "type": "string"
         }
       },

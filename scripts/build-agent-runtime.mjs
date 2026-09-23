@@ -369,6 +369,16 @@ for (const file of [
 ]) {
   if (!existsSync(join(agentOut, ...file))) throw new Error(`${file.join('/')} is missing from the runtime bundle.`)
 }
+// Milestone 10 S4: the cross-app preparation workflow controller. No new dependency.
+if (!readdirSync(join(agentOut, 'alembic', 'versions')).some((name) => name.startsWith('0020_'))) {
+  throw new Error('Migration 0020 is missing from the runtime bundle.')
+}
+for (const file of [
+  ['app', 'domain', 'workflows.py'], ['app', 'repositories', 'workflows.py'], ['app', 'services', 'workflows.py'],
+  ['app', 'api', 'workflow_routes.py']
+]) {
+  if (!existsSync(join(agentOut, ...file))) throw new Error(`${file.join('/')} is missing from the runtime bundle.`)
+}
 
 // 5. Byte-compile once, so an installed copy never needs to write beside itself.
 step('byte-compiling')

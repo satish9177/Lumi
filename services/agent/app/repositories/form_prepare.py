@@ -188,7 +188,7 @@ class FormPrepareRepository:
                 status=GrantStatus.PENDING.value,
                 revision=1,
                 policy_version=scope.policy_version,
-                scope=scope.model_dump(mode="json"),
+                scope=scope.stored(),
                 scope_digest=scope.digest,
                 profile_id=scope.profile_id,
                 profile_revoke_epoch=scope.profile_revoke_epoch,

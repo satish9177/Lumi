@@ -8,6 +8,7 @@ import type {
 } from '../../../shared/document-contracts'
 import { TransferPanel } from './TransferPanel'
 import { ProjectPanel } from './ProjectPanel'
+import { WorkflowPanel } from './WorkflowPanel'
 import './components.css'
 
 export interface DocumentPanelProps {
@@ -211,6 +212,8 @@ export function DocumentPanel({ agent, droppedFile, onClose }: DocumentPanelProp
       {message && <p role="alert" data-testid="document-message">{message}</p>}
 
       <TransferPanel agent={agent} roots={roots} />
+
+      <WorkflowPanel agent={agent} roots={roots} />
 
       <ProjectPanel agent={agent} />
     </section>

@@ -104,6 +104,7 @@ from app.repositories.actions import ActionRecord, ActionRepository, AttemptReco
 from app.repositories.browser import BrowserRepository
 from app.repositories.form_drafts import DraftRecord, FormDraftRepository
 from app.repositories.form_prepare import FormPrepareRepository, ProtectedValueRepository
+from app.repositories.workflows import WorkflowRepository
 from app.repositories.profiles import BrowserProfileRepository
 from app.repositories.tasks import TaskRepository
 from app.services.actions import ActionService, ActionView
@@ -412,7 +413,13 @@ class FormDraftService:
             await self._form._guard(connection, record, manifest)
             # The exact bytes the user approved, verified against the approved digest under
             # a share lock, in the approving transaction, and held in memory only.
-            raw = await ProtectedValueRepository(connection).values_for_execution(manifest.data_refs)
+            if manifest.workflow_id is None:
+                raw = await ProtectedValueRepository(connection).values_for_execution(manifest.data_refs)
+            else:
+                # Milestone 10 S4: the workflow's adopted values -- live workflow only, same digest check.
+                raw = await WorkflowRepository(connection).values_for_execution(
+                    manifest.workflow_id, manifest.data_refs
+                )
             for field in manifest.fields:
                 if field.data_ref is None:
                     continue

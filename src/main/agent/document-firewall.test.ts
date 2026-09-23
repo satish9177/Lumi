@@ -58,7 +58,8 @@ describe('M10 S1 document firewall', () => {
     const end = preload.indexOf('runDocumentDisclosure:')
     const bridge = preload.slice(start, preload.indexOf('\n', end))
     expect(bridge).not.toMatch(/\bpath\s*:|absolutePath|filePath|getPathForFile|folderPath/)
-    expect(Object.keys(AGENT_IPC_CHANNELS).filter((key) => /Document|FileRoot/.test(key)).sort()).toEqual([
+    // M10 S4's `startWorkflowDocuments` takes only a workflow id; it is pinned in workflow-controller.test.ts.
+    expect(Object.keys(AGENT_IPC_CHANNELS).filter((key) => /Document|FileRoot/.test(key) && !/Workflow/.test(key)).sort()).toEqual([
       'addDocumentFromRoot', 'addDroppedDocument', 'addFileRoot', 'compareDocumentsLocally', 'createDocumentDisclosure',
       'createDocumentTask', 'declineDocumentDisclosure', 'extractDocument', 'getDocumentTask', 'grantDocumentDisclosure',
       'listFileRootFiles', 'listFileRoots', 'revokeFileRoot', 'runDocumentDisclosure'

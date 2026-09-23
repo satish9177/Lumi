@@ -124,6 +124,11 @@ class TaskEventType(StrEnum):
     TASK_PROJECT_RUN_REVOKED = "task.project_run_revoked"
     TASK_PROJECT_RUN_BLOCKED = "task.project_run_blocked"
     TASK_PROJECT_RUN_STOPPED = "task.project_run_stopped"
+    # Milestone 10 S4: cross-app preparation workflow lineage and adoption (never a value or text).
+    TASK_WORKFLOW_STEP_LINKED = "task.workflow_step_linked"
+    TASK_WORKFLOW_CANDIDATES_FOUND = "task.workflow_candidates_found"
+    TASK_WORKFLOW_VALUE_ADOPTED = "task.workflow_value_adopted"
+    TASK_WORKFLOW_STOPPED = "task.workflow_stopped"
     ACTION_PROPOSED = "action.proposed"
     ACTION_APPROVAL_REQUESTED = "action.approval_requested"
     ACTION_APPROVED = "action.approved"

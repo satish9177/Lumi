@@ -24,6 +24,7 @@ import hashlib
 import logging
 import os
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
@@ -149,7 +150,17 @@ class TransferService:
 
     # ---- the card --------------------------------------------------------------------------------
 
-    async def create(self, *, url: object, root_id: uuid.UUID, file_name: object, intent: object, max_bytes: int = DEFAULT_MAX_BYTES) -> TransferView:
+    async def create(
+        self,
+        *,
+        url: object,
+        root_id: uuid.UUID,
+        file_name: object,
+        intent: object,
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        link: Callable[[AsyncConnection, uuid.UUID], Awaitable[None]] | None = None,
+    ) -> TransferView:
+        """Open the card. `link` (Milestone 10 S4) records workflow lineage in the SAME transaction."""
         if not self._policy.configured:
             raise TransferRefusal("downloads_not_configured")
         if not isinstance(url, str):
@@ -195,6 +206,8 @@ class TransferService:
                 TaskEventType.TASK_TRANSFER_REQUESTED,
                 {"transfer_id": str(scope.transfer_id), "grant_id": str(grant.id), "scope_digest": grant.scope_digest},
             )
+            if link is not None:
+                await link(connection, task.id)
             return await self._view(connection, task.id)
 
     async def _creatable_root(self, root_id: uuid.UUID) -> FileRootRecord:

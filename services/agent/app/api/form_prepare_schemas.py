@@ -152,6 +152,8 @@ class DisclosureFieldResponse(BaseModel):
     preview: str | None = None
     option_label: str | None = None
     checked: bool | None = None
+    #: Milestone 10 S4: where a workflow value came from. Absent for a global saved detail.
+    provenance: Literal["document_extracted", "provider_derived"] | None = None
 
     @classmethod
     def from_field(cls, field: ManifestField) -> "DisclosureFieldResponse":
@@ -162,6 +164,7 @@ class DisclosureFieldResponse(BaseModel):
                 kind="saved_detail",
                 data_ref=field.data_ref,
                 preview=field.preview,
+                provenance=field.provenance,
             )
         if field.option_ref is not None:
             return cls(
@@ -197,6 +200,8 @@ class DisclosureCardResponse(BaseModel):
     #: True for a `form-prepare-v2` manifest, whose approval fills the form locally with the
     #: network frozen. False for a historical S5 manifest, which is never executable.
     executable: bool
+    #: Milestone 10 S4: `workflow` when the values placed are a workflow's adopted values.
+    value_source: Literal["saved_details", "workflow"] = "saved_details"
 
     @classmethod
     def from_view(cls, view: DisclosureView) -> "DisclosureCardResponse":
@@ -213,6 +218,7 @@ class DisclosureCardResponse(BaseModel):
             reveals_country="country" in manifest.data_refs,
             result_code=view.result_code,
             executable=view.executable,
+            value_source="saved_details" if manifest.workflow_id is None else "workflow",
         )
 
 
@@ -294,10 +300,13 @@ class FormPlanResponse(BaseModel):
     preparing: bool = False
     draft: DraftCardResponse | None = None
     handover: HandoverCardResponse | None = None
+    #: Milestone 10 S4: `workflow` for a workflow's `form` step; `saved_details` are then its adopted values.
+    value_source: Literal["saved_details", "workflow"] = "saved_details"
 
     @classmethod
     def from_view(cls, view: FormPlanView, handover: HandoverView | None = None) -> "FormPlanResponse":
         return cls(
+            value_source="workflow" if view.value_source == "workflow" else "saved_details",
             preparing=view.preparing,
             draft=DraftCardResponse.from_record(view.draft, site=view.site or "") if view.draft else None,
             handover=HandoverCardResponse.from_view(handover) if handover else None,

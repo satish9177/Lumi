@@ -9,7 +9,7 @@ import uuid
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from tests.conftest import M10_S2_TABLES, M10_S3_TABLES, head_revision, downgrade, migrate, truncate_all
+from tests.conftest import M10_S2_TABLES, M10_S3_TABLES, M10_S4_TABLES, head_revision, downgrade, migrate, truncate_all
 from tests.test_migration_0013 import exists, insert_grant, insert_task, revision, run
 
 S1_TABLES = ("file_roots", "file_refs", "documents", "document_disclosures", "document_answers")
@@ -53,7 +53,7 @@ def test_migration_0017_adds_the_document_tables_and_downgrades_only_without_aud
             downgrade(url, "0016")
         assert revision(url) == "0017"
 
-        truncate_all(url, without=(*M10_S2_TABLES, *M10_S3_TABLES))
+        truncate_all(url, without=(*M10_S2_TABLES, *M10_S3_TABLES, *M10_S4_TABLES))
         downgrade(url, "0016")
         assert revision(url) == "0016"
         for table in S1_TABLES:

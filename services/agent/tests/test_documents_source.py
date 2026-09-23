@@ -128,6 +128,10 @@ def test_no_other_runtime_module_imports_the_document_modules() -> None:
         # extract or read document text.
         if uses == {"app.documents.sniff"} and relative in {"services/transfers.py", "browser/operations/download.py"}:
             continue
+        # S4: the workflow controller and its routes reach documents ONLY through `DocumentService`, whose
+        # narrow workflow methods return found fields, labels and digests -- never the extracted text.
+        if uses == {"app.services.documents"} and relative == "services/workflows.py":
+            continue
         if uses:
             assert relative in allowed, f"{relative} imports {sorted(uses)}"
 

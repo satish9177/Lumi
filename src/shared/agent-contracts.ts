@@ -18,6 +18,7 @@
 import type { AgentDocumentApi } from './document-contracts'
 import type { AgentTransferApi } from './transfer-contracts'
 import type { AgentProjectApi } from './project-contracts'
+import type { AgentWorkflowApi } from './workflow-contracts'
 import type { VoiceTaskCommand, VoiceTaskOutcome } from './voice-task-contracts'
 import type { AgentPreferenceView, ModelDiagnosticView, PreferenceKey } from './model-contracts'
 
@@ -125,6 +126,10 @@ export const TASK_EVENT_TYPES = [
   'task.project_run_revoked',
   'task.project_run_blocked',
   'task.project_run_stopped',
+  'task.workflow_step_linked',
+  'task.workflow_candidates_found',
+  'task.workflow_value_adopted',
+  'task.workflow_stopped',
   'action.proposed', 'action.approval_requested',
   'action.approved', 'action.authorized', 'action.rejected', 'action.execution_started', 'action.succeeded',
   'action.failed', 'action.outcome_unknown', 'action.reconciliation_started', 'action.reconciled'
@@ -824,8 +829,12 @@ export interface AgentFormGrantView {
   maxFields: number
 }
 
+/** Milestone 10 S4: where a workflow-scoped value came from. Never user-typed. */
+export const WORKFLOW_PROVENANCES = ['document_extracted', 'provider_derived'] as const
+export type AgentWorkflowProvenance = typeof WORKFLOW_PROVENANCES[number]
+
 export type AgentDisclosureFieldView =
-  | { kind: 'saved_detail'; fieldLabel: string; controlType: string; dataRef: AgentProtectedDataKind; preview: string }
+  | { kind: 'saved_detail'; fieldLabel: string; controlType: string; dataRef: AgentProtectedDataKind; preview: string; provenance?: AgentWorkflowProvenance }
   | { kind: 'option'; fieldLabel: string; controlType: string; optionLabel: string }
   | { kind: 'checkbox'; fieldLabel: string; controlType: string; checked: boolean }
 
@@ -848,6 +857,8 @@ export interface AgentDisclosureCardView {
    * frozen. False for a historical S5 manifest, which is never executable.
    */
   executable: boolean
+  /** Milestone 10 S4: present when the placed values are a workflow's adopted values, not saved details. */
+  valueSource?: 'workflow'
 }
 
 export const DRAFT_STATUSES = ['PREPARED', 'STALE', 'DISCARDED', 'HANDED_OVER'] as const
@@ -893,6 +904,8 @@ export interface AgentFormPlanView {
   preparing: boolean
   draft?: AgentDraftCardView
   handover?: AgentHandoverCardView
+  /** Milestone 10 S4: present for a workflow's form step; `savedDetails` are then its adopted values. */
+  valueSource?: 'workflow'
 }
 
 /**
@@ -1397,6 +1410,9 @@ export const AGENT_ERROR_CODES = [
   // recipe/approval moved on since it was reviewed.
   'project_refused',
   'project_state_changed',
+  // Milestone 10 S4: a workflow request was refused, or its lineage/candidate moved on since it was reviewed.
+  'workflow_refused',
+  'workflow_state_changed',
   'request_failed'
 ] as const
 export type AgentErrorCode = typeof AGENT_ERROR_CODES[number]
@@ -1414,7 +1430,7 @@ export type AgentResult<T> = { ok: true; value: T } | { ok: false; error: AgentE
  * and the revision the user reviewed; nothing can carry a doctor, time, price,
  * proposal or digest. There is no generic request, URL or dispatch method.
  */
-export interface AgentApi extends AgentDocumentApi, AgentTransferApi, AgentProjectApi {
+export interface AgentApi extends AgentDocumentApi, AgentTransferApi, AgentProjectApi, AgentWorkflowApi {
   getRuntimeStatus: () => Promise<AgentRuntimeView>
   onRuntimeStatus: (listener: (status: AgentRuntimeView) => void) => () => void
   restartRuntime: () => Promise<AgentResult<AgentRuntimeView>>
@@ -1807,7 +1823,21 @@ export const AGENT_IPC_CHANNELS = {
   declineProjectRun: 'lifelens:agent:decline-project-run',
   startProjectRun: 'lifelens:agent:start-project-run',
   stopProjectRun: 'lifelens:agent:stop-project-run',
-  reconcileProjectRun: 'lifelens:agent:reconcile-project-run'
+  reconcileProjectRun: 'lifelens:agent:reconcile-project-run',
+  // Milestone 10 S4: one cross-app preparation workflow. Ids, revisions, a typed objective and the S2 download
+  // card's own fields; never a value, a provenance, an origin, a provider, or anything that submits.
+  createWorkflow: 'lifelens:agent:create-workflow',
+  getWorkflow: 'lifelens:agent:get-workflow',
+  getLatestWorkflow: 'lifelens:agent:get-latest-workflow',
+  startWorkflowDownload: 'lifelens:agent:start-workflow-download',
+  startWorkflowDocuments: 'lifelens:agent:start-workflow-documents',
+  extractWorkflowCandidates: 'lifelens:agent:extract-workflow-candidates',
+  deriveWorkflowCandidates: 'lifelens:agent:derive-workflow-candidates',
+  proposeWorkflowAdoption: 'lifelens:agent:propose-workflow-adoption',
+  approveWorkflowAdoption: 'lifelens:agent:approve-workflow-adoption',
+  rejectWorkflowAdoption: 'lifelens:agent:reject-workflow-adoption',
+  startWorkflowForm: 'lifelens:agent:start-workflow-form',
+  stopWorkflow: 'lifelens:agent:stop-workflow'
 } as const
 
 /** Actions whose side effect is unresolved or in flight. */

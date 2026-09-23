@@ -1409,6 +1409,38 @@ export class AgentTaskController {
   }
 
   /**
+   * Milestone 10 S4. Make a cross-app workflow's `form` step the active task, exactly as
+   * `createAuthenticatedTask` would have: the same offered recipients, the same account-reading card
+   * (opened here, PENDING, confirmed only by the person), the same M8 planning and manifest approvals.
+   * `taskId` comes from the runtime's own reply to the workflow controller, never from the renderer.
+   */
+  async activateWorkflowFormTask(taskIdValue: unknown, recipientIdValue: unknown): Promise<AgentResult<AgentTaskSnapshot>> {
+    let taskId: string
+    let recipient: AgentDisclosureRecipient
+    try {
+      const support = this.requireAuthenticated()
+      const offered = this.authenticatedRecipients(support)
+      if (typeof taskIdValue !== 'string' || !UUID.test(taskIdValue)) fail('invalid_request', 'That workflow step is invalid.')
+      taskId = taskIdValue
+      if (typeof recipientIdValue !== 'string' || !(offered as readonly string[]).includes(recipientIdValue)) {
+        fail('invalid_request', 'Choose one of the AI providers Lumi offered.')
+      }
+      recipient = recipientIdValue as AgentDisclosureRecipient
+    } catch (error) {
+      return { ok: false, error: toAgentError(error) }
+    }
+    return this.exclusive('task', async () => {
+      await this.assertNoUnresolvedAction()
+      const task = parseTask((await this.call('GET', `/tasks/${taskId}`, undefined, TIMEOUTS.read)).body)
+      if (task.taskId !== taskId || task.kind !== 'authenticated_read') throw new WireError('workflow.form.task')
+      const prepared = await this.call('POST', `/tasks/${taskId}/authenticated/prepare`, { recipient }, TIMEOUTS.write)
+      if (parseAuthenticated(prepared.body).view.taskId !== taskId) throw new WireError('authenticated.prepare')
+      await this.store.write(taskId)
+      return await this.snapshot(taskId, 0)
+    })
+  }
+
+  /**
    * The trusted click. Confirms exactly the scope that was on screen, by id and
    * revision. There is no other route to an active scope.
    */

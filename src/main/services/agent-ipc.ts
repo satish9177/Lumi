@@ -24,6 +24,7 @@ import type { DesktopVisionController } from './desktop-vision-controller'
 import type { DocumentController } from './document-controller'
 import type { TransferController } from './transfer-controller'
 import type { ProjectController } from './project-controller'
+import type { WorkflowController } from './workflow-controller'
 import type { VoiceTaskController } from './voice-task-controller'
 
 /**
@@ -101,6 +102,13 @@ export interface AgentIpcDependencies {
     | 'revokeProjectRecipe' | 'createProjectRun' | 'getProjectRun' | 'getLatestProjectRun' | 'grantProjectRun'
     | 'declineProjectRun' | 'startProjectRun' | 'stopProjectRun' | 'reconcileProjectRun'
   >
+  /** Milestone 10 S4. Absent in builds without the workflow capability. */
+  workflows?: Pick<
+    WorkflowController,
+    | 'createWorkflow' | 'getWorkflow' | 'getLatestWorkflow' | 'startWorkflowDownload' | 'startWorkflowDocuments'
+    | 'extractWorkflowCandidates' | 'deriveWorkflowCandidates' | 'proposeWorkflowAdoption' | 'approveWorkflowAdoption'
+    | 'rejectWorkflowAdoption' | 'startWorkflowForm' | 'stopWorkflow'
+  >
 }
 
 const UNAVAILABLE = { code: 'request_failed', message: 'That is not available in this build.' } as const
@@ -120,7 +128,7 @@ function routeWithoutInterpreter(request: unknown): TypedRequestRoute {
 
 export function registerAgentIpc({
   ipcMain, assertTrustedSender, controller, voice, runtimeStatus, restartRuntime, text, memory, diagnostics,
-  browserProfiles, desktopRead, desktopActions, desktopPlanning, desktopVision, documents, transfers, projects
+  browserProfiles, desktopRead, desktopActions, desktopPlanning, desktopVision, documents, transfers, projects, workflows
 }: AgentIpcDependencies): void {
   const handle = (channel: string, listener: (...args: unknown[]) => unknown): void => {
     ipcMain.handle(channel, (event, ...args) => {
@@ -376,4 +384,25 @@ export function registerAgentIpc({
   handle(AGENT_IPC_CHANNELS.startProjectRun, (taskId) => projects ? projects.startProjectRun(taskId) : noProjects())
   handle(AGENT_IPC_CHANNELS.stopProjectRun, (taskId) => projects ? projects.stopProjectRun(taskId) : noProjects())
   handle(AGENT_IPC_CHANNELS.reconcileProjectRun, (taskId) => projects ? projects.reconcileProjectRun(taskId) : noProjects())
+  // Milestone 10 S4: twelve fixed channels for one preparation workflow. None submits, uploads, clicks or
+  // names a value; an adoption is confirmed by a native dialog in main. Not reachable from voice.
+  const noWorkflows = (): Promise<{ ok: false; error: typeof UNAVAILABLE }> => Promise.resolve({ ok: false, error: UNAVAILABLE })
+  handle(AGENT_IPC_CHANNELS.createWorkflow, (objective) => workflows ? workflows.createWorkflow(objective) : noWorkflows())
+  handle(AGENT_IPC_CHANNELS.getWorkflow, (workflowId) => workflows ? workflows.getWorkflow(workflowId) : noWorkflows())
+  handle(AGENT_IPC_CHANNELS.getLatestWorkflow, () => workflows ? workflows.getLatestWorkflow() : Promise.resolve({ ok: true, value: null }))
+  handle(AGENT_IPC_CHANNELS.startWorkflowDownload, (workflowId, url, rootId, fileName, intent) =>
+    workflows ? workflows.startWorkflowDownload(workflowId, url, rootId, fileName, intent) : noWorkflows())
+  handle(AGENT_IPC_CHANNELS.startWorkflowDocuments, (workflowId) => workflows ? workflows.startWorkflowDocuments(workflowId) : noWorkflows())
+  handle(AGENT_IPC_CHANNELS.extractWorkflowCandidates, (workflowId, documentId) =>
+    workflows ? workflows.extractWorkflowCandidates(workflowId, documentId) : noWorkflows())
+  handle(AGENT_IPC_CHANNELS.deriveWorkflowCandidates, (workflowId) => workflows ? workflows.deriveWorkflowCandidates(workflowId) : noWorkflows())
+  handle(AGENT_IPC_CHANNELS.proposeWorkflowAdoption, (workflowId, candidateId) =>
+    workflows ? workflows.proposeWorkflowAdoption(workflowId, candidateId) : noWorkflows())
+  handle(AGENT_IPC_CHANNELS.approveWorkflowAdoption, (workflowId, actionId, revision) =>
+    workflows ? workflows.approveWorkflowAdoption(workflowId, actionId, revision) : noWorkflows())
+  handle(AGENT_IPC_CHANNELS.rejectWorkflowAdoption, (workflowId, actionId, revision) =>
+    workflows ? workflows.rejectWorkflowAdoption(workflowId, actionId, revision) : noWorkflows())
+  handle(AGENT_IPC_CHANNELS.startWorkflowForm, (workflowId, profileId, objective, recipientId) =>
+    workflows ? workflows.startWorkflowForm(workflowId, profileId, objective, recipientId) : noWorkflows())
+  handle(AGENT_IPC_CHANNELS.stopWorkflow, (workflowId) => workflows ? workflows.stopWorkflow(workflowId) : noWorkflows())
 }

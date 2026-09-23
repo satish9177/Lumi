@@ -78,6 +78,7 @@ import { DesktopVisionReasoner } from './agent/desktop-vision'
 import { DesktopVisionController } from './services/desktop-vision-controller'
 import { DocumentController } from './services/document-controller'
 import { TransferController } from './services/transfer-controller'
+import { WorkflowController } from './services/workflow-controller'
 import { ProjectController } from './services/project-controller'
 import { RUN_WARNING } from '../shared/project-contracts'
 import { DocumentComparer } from './agent/document-comparer'
@@ -1296,6 +1297,35 @@ app.whenReady().then(async () => {
       return answer.response === 0
     }
   })
+  // Milestone 10 S4: one cross-app preparation workflow. Adopting a detail is confirmed by a NATIVE dialog
+  // built from what the runtime holds (the detail, its exact value and where it came from).
+  const PROVENANCE_TEXT = {
+    document_extracted: 'found by Lumi in the document itself',
+    provider_derived: 'suggested by the AI provider from the approved excerpt'
+  } as const
+  const workflows = new WorkflowController({
+    runtime: {
+      request: (method, path, body, timeoutMs) => agentRuntime
+        ? agentRuntime.request(method, path, body, timeoutMs)
+        : Promise.reject(new RuntimeUnavailableError())
+    },
+    confirmAdoption: async (card) => {
+      if (!mainWindow) return false
+      const answer = await dialog.showMessageBox(mainWindow, {
+        type: 'question',
+        buttons: ['Adopt for this workflow', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        title: 'Lumi preparation detail',
+        message: `Use this ${card.kind.replace(/_/g, ' ')} for “${card.workflowObjective}”?`,
+        detail: `Value: ${card.value}\nSource: ${PROVENANCE_TEXT[card.provenance]} (“${card.documentLabel}”).\n\n`
+          + 'It is used only in this workflow and is never saved as one of your own details. '
+          + 'Each form it goes into still needs its own approval, and Lumi never submits the form.'
+      })
+      return answer.response === 0
+    },
+    activateFormTask: (taskId, recipientId) => agentTasks.activateWorkflowFormTask(taskId, recipientId)
+  })
   // Milestone 10 S3: registered projects. Each consequential step is confirmed by a NATIVE dialog built
   // from what the runtime holds, carrying the execution warning; the renderer never supplies a path,
   // a command or an argument.
@@ -1411,6 +1441,7 @@ app.whenReady().then(async () => {
     documents,
     transfers,
     projects,
+    workflows,
     diagnostics: () => diagnosticsVisible ? diagnostics.list() : [],
     runtimeStatus: () => agentRuntimeView(),
     restartRuntime: async () => {

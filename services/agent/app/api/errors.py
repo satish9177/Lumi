@@ -24,6 +24,8 @@ from app.domain.documents import DocumentRefusal
 from app.domain.effects import EffectLockedError
 from app.domain.projects import STATE_CODES as PROJECT_STATE_CODES
 from app.domain.projects import ProjectRefusal
+from app.domain.workflows import STATE_CODES as WORKFLOW_STATE_CODES
+from app.domain.workflows import WorkflowRefusal
 from app.domain.transfers import STATE_CODES as TRANSFER_STATE_CODES
 from app.domain.transfers import TransferRefusal
 from app.domain.desktop_disclosure import STATE_CODES as DESKTOP_DISCLOSURE_STATE_CODES
@@ -670,6 +672,20 @@ def register_error_handlers(app: FastAPI) -> None:
             ),
         )
 
+    # --- Milestone 10 S4 cross-app preparation workflows --------------------------------
+    async def workflow_refused(_: Request, exc: Exception) -> JSONResponse:
+        assert isinstance(exc, WorkflowRefusal)
+        stale = exc.code in WORKFLOW_STATE_CODES
+        return _error(
+            status.HTTP_409_CONFLICT if stale else status.HTTP_422_UNPROCESSABLE_CONTENT,
+            ErrorDetail(
+                code="workflow_state_changed" if stale else "workflow_refused",
+                message="That workflow step can no longer go ahead as approved." if stale else "That workflow request was refused.",
+                reason=exc.code,
+            ),
+        )
+
+    app.add_exception_handler(WorkflowRefusal, workflow_refused)
     app.add_exception_handler(TransferRefusal, transfer_refused)
     app.add_exception_handler(ProjectRefusal, project_refused)
     app.add_exception_handler(EffectLockedError, effect_locked)

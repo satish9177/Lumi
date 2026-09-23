@@ -305,6 +305,10 @@ export function describeEvent(event: AgentEventView): string {
     case 'task.project_run_revoked': return 'Project run cancelled — nothing was started'
     case 'task.project_run_blocked': return 'Blocked: a dependency is missing — Lumi never installs anything'
     case 'task.project_run_stopped': return 'You stopped the run — only its own processes were ended'
+    case 'task.workflow_step_linked': return 'This step belongs to a preparation workflow'
+    case 'task.workflow_candidates_found': return 'Possible form details were found — none is used until you adopt it'
+    case 'task.workflow_value_adopted': return 'You adopted one detail for this workflow only'
+    case 'task.workflow_stopped': return 'The workflow was stopped — nothing further will be prepared'
     case 'task.transfer_requested': return 'Asked to download one file into an approved folder'
     case 'task.transfer_granted': return 'You allowed that one download'
     case 'task.transfer_revoked': return 'Download cancelled — nothing more was downloaded or saved'
@@ -1321,7 +1325,16 @@ export function describeDisclosureCard(card: AgentDisclosureCardView): {
     rows: card.fields.map((field): DisclosureLine => {
       switch (field.kind) {
         case 'saved_detail':
-          return { savedLabel: `Saved ${DATA_KIND_LABELS[field.dataRef]}`, detail: field.preview, fieldLabel: field.fieldLabel }
+          // Milestone 10 S4: a workflow value says where it came from; it is never called a saved detail.
+          return {
+            savedLabel: field.provenance === 'provider_derived'
+              ? `${DATA_KIND_LABELS[field.dataRef]} (AI suggestion from your document)`
+              : field.provenance === 'document_extracted'
+                ? `${DATA_KIND_LABELS[field.dataRef]} (from your document)`
+                : `Saved ${DATA_KIND_LABELS[field.dataRef]}`,
+            detail: field.preview,
+            fieldLabel: field.fieldLabel
+          }
         case 'option':
           return { savedLabel: 'Option', detail: field.optionLabel, fieldLabel: field.fieldLabel }
         case 'checkbox':

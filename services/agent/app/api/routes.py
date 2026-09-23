@@ -76,6 +76,7 @@ from app.domain.errors import BrowserObservationError, DestinationNotAllowedErro
 from app.domain.page_observation import PAGE_INSPECTION_TASK_TYPE
 from app.domain.projects import TOOL_PROJECT_START, ProjectRefusal
 from app.domain.transfers import TOOL_DOWNLOAD, TOOL_PLACE, TransferRefusal
+from app.domain.workflows import ADOPT_TOOL, WorkflowRefusal
 from app.domain.public_url import UrlPolicyError
 from app.domain.authenticated import (
     AUTHENTICATED_READ_TASK_TYPE,
@@ -343,6 +344,10 @@ async def _refuse_disclosure_tool(service: ActionService, action_id: uuid.UUID) 
         # Milestone 10 S3: a project start exists only inside `ProjectService` (recipe re-derivation, the run
         # row, the effect key, the suspended spawn into its own job).
         raise ProjectRefusal("use_project_route")
+    if tool.lower() == ADOPT_TOOL:
+        # Milestone 10 S4: an adoption is spent only by `WorkflowService.approve_adoption`, which re-derives the
+        # candidate from its source inside the approving transaction and writes the value there.
+        raise WorkflowRefusal("use_workflow_route")
 
 
 @router.post(
@@ -370,6 +375,9 @@ async def propose_action(
     if body.tool_name.lower().startswith("project_"):
         # Milestone 10 S3: only `ProjectService` mints a project start, from a confirmed per-run approval.
         raise ProjectRefusal("use_project_route")
+    if body.tool_name.lower().startswith(("adopt_", "workflow_")):
+        # Milestone 10 S4: only `WorkflowService` mints an adoption, from a controller-built, digest-only proposal.
+        raise WorkflowRefusal("use_workflow_route")
     view, created = await service.propose_action(
         task_id,
         idempotency_key=body.idempotency_key,

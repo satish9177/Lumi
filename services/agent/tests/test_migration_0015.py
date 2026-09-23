@@ -10,7 +10,7 @@ this file is about the migration's own shape and its downgrade/upgrade cleanline
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from tests.conftest import M10_S1_TABLES, M10_S2_TABLES, M10_S3_TABLES, head_revision, downgrade, migrate, truncate_all
+from tests.conftest import M10_S1_TABLES, M10_S2_TABLES, M10_S3_TABLES, M10_S4_TABLES, head_revision, downgrade, migrate, truncate_all
 from tests.test_migration_0013 import columns, exists, insert_grant, insert_task, revision, run
 
 NEW_DISPATCH_COLUMNS = ("value_ref", "option_container_ref", "invoke_effect")
@@ -63,7 +63,7 @@ def test_migration_0015_widens_dispatches_and_adds_desktop_action_plans(migrated
         # ---- with no plan grant left, downgrade removes exactly what 0015 added ----
         # Standing at 0015 (S5's tables do not exist here), so they must be excluded from the shared
         # TRUNCATE_ALL list, exactly like S3/S4's own tables are excluded in `test_migration_0013.py`.
-        truncate_all(url, without=("desktop_vision_disclosures", "desktop_captures", *M10_S1_TABLES, *M10_S2_TABLES, *M10_S3_TABLES))
+        truncate_all(url, without=("desktop_vision_disclosures", "desktop_captures", *M10_S1_TABLES, *M10_S2_TABLES, *M10_S3_TABLES, *M10_S4_TABLES))
         downgrade(url, "0014")
         assert revision(url) == "0014"
         assert not exists(url, "desktop_action_plans")

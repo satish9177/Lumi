@@ -234,7 +234,26 @@ const agentApi: AgentApi = {
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineProjectRun, taskId, grantId, expectedRevision),
   startProjectRun: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.startProjectRun, taskId),
   stopProjectRun: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.stopProjectRun, taskId),
-  reconcileProjectRun: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.reconcileProjectRun, taskId)
+  reconcileProjectRun: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.reconcileProjectRun, taskId),
+  // Milestone 10 S4: one preparation workflow. Ids, revisions and typed text; never a value or anything that submits.
+  createWorkflow: (objective: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.createWorkflow, objective),
+  getWorkflow: (workflowId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getWorkflow, workflowId),
+  getLatestWorkflow: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getLatestWorkflow),
+  startWorkflowDownload: (workflowId: string, url: string, rootId: string, fileName: string, intent: string) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.startWorkflowDownload, workflowId, url, rootId, fileName, intent),
+  startWorkflowDocuments: (workflowId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.startWorkflowDocuments, workflowId),
+  extractWorkflowCandidates: (workflowId: string, documentId: string) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.extractWorkflowCandidates, workflowId, documentId),
+  deriveWorkflowCandidates: (workflowId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.deriveWorkflowCandidates, workflowId),
+  proposeWorkflowAdoption: (workflowId: string, candidateId: string) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.proposeWorkflowAdoption, workflowId, candidateId),
+  approveWorkflowAdoption: (workflowId: string, actionId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.approveWorkflowAdoption, workflowId, actionId, expectedRevision),
+  rejectWorkflowAdoption: (workflowId: string, actionId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.rejectWorkflowAdoption, workflowId, actionId, expectedRevision),
+  startWorkflowForm: (workflowId: string, profileId: string, objective: string, recipientId: string) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.startWorkflowForm, workflowId, profileId, objective, recipientId),
+  stopWorkflow: (workflowId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.stopWorkflow, workflowId)
 }
 
 // The Gemini Live relay: fixed channels, closed message kinds, validated in

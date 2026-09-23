@@ -122,6 +122,17 @@ def _digest_of(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_json(dict(payload)).encode("utf-8")).hexdigest()
 
 
+def _without_unset_workflow(body: dict[str, Any]) -> dict[str, Any]:
+    """Milestone 10 S4. `workflow_id` and a field's `provenance` are left out of a dump when unset, so every
+    scope and manifest built before S4 keeps exactly the digest it was approved with."""
+    if body.get("workflow_id") is None:
+        body.pop("workflow_id", None)
+    for field in body.get("fields", ()) or ():
+        if isinstance(field, dict) and field.get("provenance") is None:
+            field.pop("provenance", None)
+    return body
+
+
 def account_binding(account_fingerprint: str) -> str:
     """A one-way binding to the account, so the fingerprint itself is never stored twice."""
     return hashlib.sha256(f"form-prepare-account-v1:{account_fingerprint}".encode()).hexdigest()
@@ -159,6 +170,10 @@ class FormPrepareScope(_Frozen):
     allowed_data_refs: list[ProtectedKind] = Field(min_length=1, max_length=len(PROTECTED_KINDS))
     max_fields: int = Field(default=MAX_FORM_FIELDS, ge=1, le=MAX_FORM_FIELDS)
     classification: Literal["account_private"] = ACCOUNT_PRIVATE
+    #: Milestone 10 S4. Set only for the `form` step of a cross-app workflow: the values this grant may
+    #: preview (and a later manifest may place) are that workflow's adopted values, never the global saved
+    #: details. Derived by the controller from `workflow_steps`, never from a caller.
+    workflow_id: uuid.UUID | None = None
 
     @field_validator("allowed_data_refs")
     @classmethod
@@ -174,9 +189,13 @@ class FormPrepareScope(_Frozen):
             raise ValueError("a recipient origin is a scheme and a host, nothing else")
         return value
 
+    def stored(self) -> dict[str, Any]:
+        """The persisted scope. A pre-S4 scope (no workflow) is stored exactly as before."""
+        return _without_unset_workflow(self.model_dump(mode="json"))
+
     @property
     def digest(self) -> str:
-        return _digest_of(self.model_dump(mode="json"))
+        return _digest_of(self.stored())
 
 
 # ---- the proposal --------------------------------------------------------------
@@ -268,6 +287,9 @@ class ManifestField(_Frozen):
     option_label: str | None = Field(default=None, max_length=120)
     option_identity_hash: str | None = Field(default=None, pattern=_DIGEST)
     checked: bool | None = None
+    #: Milestone 10 S4. Where a workflow-scoped value came from, shown on the card. Set on exactly the
+    #: saved-value fields of a workflow manifest; never on a global saved detail.
+    provenance: Literal["document_extracted", "provider_derived"] | None = None
 
     @model_validator(mode="after")
     def _one_variant(self) -> Self:
@@ -281,6 +303,8 @@ class ManifestField(_Frozen):
             valid = valid and self.checked is None
         else:
             valid = self.checked is not None and all(item is None for item in (*text, *choice))
+        if self.provenance is not None and self.data_ref is None:
+            valid = False
         if not valid:
             raise ValueError("a manifest field carries exactly the variant its control needs")
         return self
@@ -320,6 +344,9 @@ class DisclosureManifest(_Frozen):
     form_ref: str = Field(pattern=FORM_REF)
     form_label: str | None = Field(default=None, max_length=120)
     fields: list[ManifestField] = Field(min_length=1, max_length=MAX_FORM_FIELDS)
+    #: Milestone 10 S4. The workflow whose adopted values this manifest places. Absent for M8's global
+    #: saved details. Every saved-value field of a workflow manifest names its provenance.
+    workflow_id: uuid.UUID | None = None
     manifest_digest: str = Field(pattern=_DIGEST)
 
     @model_validator(mode="after")
@@ -327,12 +354,15 @@ class DisclosureManifest(_Frozen):
         keys = [field.sort_key for field in self.fields]
         if keys != sorted(keys) or len(set(keys)) != len(keys):
             raise ValueError("manifest fields are unique and in canonical order")
+        for field in self.fields:
+            if field.data_ref is not None and (field.provenance is None) != (self.workflow_id is None):
+                raise ValueError("a workflow manifest names every value's provenance, and only it does")
         if self.manifest_digest != self.compute_digest():
             raise ValueError("manifest_digest does not match the manifest")
         return self
 
     def _body(self) -> dict[str, Any]:
-        body = self.model_dump(mode="json")
+        body = _without_unset_workflow(self.model_dump(mode="json"))
         body.pop("manifest_digest")
         return body
 
@@ -344,13 +374,13 @@ class DisclosureManifest(_Frozen):
         """Order the fields canonically, then bind them with the digest."""
         fields = sorted(facts.pop("fields"), key=lambda item: item.sort_key)
         unsigned = cls.model_construct(**facts, fields=fields, manifest_digest="0" * 64)
-        body = unsigned.model_dump(mode="json")
+        body = _without_unset_workflow(unsigned.model_dump(mode="json"))
         body.pop("manifest_digest")
         return cls(**facts, fields=fields, manifest_digest=_digest_of(body))
 
     def proposal(self) -> dict[str, Any]:
         """The persisted action proposal: the manifest itself, and nothing else."""
-        return self.model_dump(mode="json")
+        return _without_unset_workflow(self.model_dump(mode="json"))
 
     @property
     def data_refs(self) -> list[str]:

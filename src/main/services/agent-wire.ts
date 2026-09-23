@@ -26,6 +26,7 @@ import {
   RISK_TIERS,
   TASK_EVENT_TYPES,
   TASK_STATUSES,
+  WORKFLOW_PROVENANCES,
   type AgentActionView,
   type AgentApprovalView,
   type AgentAttemptOutcome,
@@ -1593,8 +1594,18 @@ function parseDisclosureField(value: unknown): AgentDisclosureFieldView {
     controlType: text(field.control_type, 'form_plan.field.control_type', CODE, 32)
   }
   switch (field.kind) {
-    case 'saved_detail':
-      return { kind: 'saved_detail', ...base, dataRef: DATA_KIND(field.data_ref, 'form_plan.field.data_ref'), preview: text(field.preview, 'form_plan.field.preview', undefined, 120) }
+    case 'saved_detail': {
+      const provenance = field.provenance === null || field.provenance === undefined
+        ? undefined
+        : member(WORKFLOW_PROVENANCES, field.provenance, 'form_plan.field.provenance')
+      return {
+        kind: 'saved_detail',
+        ...base,
+        dataRef: DATA_KIND(field.data_ref, 'form_plan.field.data_ref'),
+        preview: text(field.preview, 'form_plan.field.preview', undefined, 120),
+        ...(provenance ? { provenance } : {})
+      }
+    }
     case 'option':
       return { kind: 'option', ...base, optionLabel: text(field.option_label, 'form_plan.field.option_label', undefined, PLAN_TEXT) }
     case 'checkbox':
@@ -1603,6 +1614,13 @@ function parseDisclosureField(value: unknown): AgentDisclosureFieldView {
     default:
       throw new WireError('form_plan.field.kind')
   }
+}
+
+/** Absent means the M8 global saved details; anything else must be exactly 'workflow'. */
+function valueSource(value: unknown, what: string): 'saved_details' | 'workflow' {
+  if (value === null || value === undefined || value === 'saved_details') return 'saved_details'
+  if (value === 'workflow') return 'workflow'
+  throw new WireError(what)
 }
 
 function parseDisclosureCard(value: unknown): AgentDisclosureCardView | undefined {
@@ -1632,6 +1650,7 @@ function parseDisclosureCard(value: unknown): AgentDisclosureCardView | undefine
     fields: card.fields.map(parseDisclosureField),
     revealsCountry: card.reveals_country,
     executable: card.executable,
+    ...(valueSource(card.value_source, 'form_plan.disclosure.value_source') === 'workflow' ? { valueSource: 'workflow' as const } : {}),
     ...(resultCode ? { resultCode } : {})
   }
 }
@@ -1652,6 +1671,7 @@ export function parseFormPlan(value: unknown): AgentFormPlanView {
     formCount: integer(body.form_count, 'form_plan.form_count', 0, 5),
     candidateElementCount: integer(body.candidate_element_count, 'form_plan.candidate_element_count', 0, 40),
     preparing: body.preparing === true,
+    ...(valueSource(body.value_source, 'form_plan.value_source') === 'workflow' ? { valueSource: 'workflow' as const } : {}),
     ...(parseDraftCard(body.draft) ? { draft: parseDraftCard(body.draft)! } : {}),
     ...(parseHandoverCard(body.handover) ? { handover: parseHandoverCard(body.handover)! } : {})
   }

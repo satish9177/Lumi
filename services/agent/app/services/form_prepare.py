@@ -56,6 +56,7 @@ from app.domain.errors import (
 )
 from app.domain.form_prepare import (
     FORM_PREPARE_TOOL,
+    ProtectedSnapshot,
     MANIFEST_POLICY_VERSION,
     MAX_FORM_FIELDS,
     PREPARED_NOTHING,
@@ -94,6 +95,7 @@ from app.repositories.form_prepare import (
 )
 from app.repositories.profiles import BrowserProfileRepository
 from app.repositories.tasks import TaskRecord, TaskRepository
+from app.repositories.workflows import WorkflowRepository
 from app.services.actions import ActionService, ActionView
 from app.services.form_state import FormStateRegistry
 
@@ -135,6 +137,9 @@ class FormPlanView:
     #: currently in preparation mode (a headed window, nothing written).
     draft: DraftRecord | None = None
     preparing: bool = False
+    #: Milestone 10 S4. `workflow` for the `form` step of a cross-app workflow: `saved_details` are then
+    #: that workflow's adopted values (kind and masked preview only), never the global saved details.
+    value_source: str = "saved_details"
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +202,34 @@ def _is_current(
         if reason in reasons:
             return reason
     return None
+
+
+async def workflow_for_task(connection: AsyncConnection, task_id: uuid.UUID) -> uuid.UUID | None:
+    """Milestone 10 S4. The workflow whose `form` step this task is, or None for an ordinary task.
+
+    Decided by `workflow_steps`, which only the workflow controller writes, in the same transaction that
+    creates the task. A workflow child task in any other role can never plan a form.
+    """
+    step = await WorkflowRepository(connection).step_for_task(task_id)
+    if step is None:
+        return None
+    if step.role != "form":
+        raise FormPrepareRefusal("not_a_form_step")
+    return step.workflow_id
+
+
+async def value_snapshots(
+    connection: AsyncConnection, workflow_id: uuid.UUID | None, kinds: Any, *, lock: bool = False
+) -> dict[str, ProtectedSnapshot]:
+    """Digests and previews from exactly one source: the global saved details, or ONE live workflow's values."""
+    if workflow_id is None:
+        return await ProtectedValueRepository(connection).snapshots(kinds, lock=lock)
+    return await WorkflowRepository(connection).snapshots(workflow_id, kinds, lock=lock)
+
+
+async def require_workflow_live(connection: AsyncConnection, workflow_id: uuid.UUID | None) -> None:
+    if workflow_id is not None and not await WorkflowRepository(connection).is_live(workflow_id):
+        raise FormPrepareRefusal("workflow_not_active")
 
 
 class FormPrepareService:
@@ -262,7 +295,16 @@ class FormPrepareService:
         grant = await repository.open_grant_for_task(task_id) or await repository.latest_grant_for_task(
             task_id
         )
-        details = tuple(await ProtectedValueRepository(connection).list_details())
+        workflow_id = await workflow_for_task(connection, task_id)
+        if workflow_id is None:
+            details = tuple(await ProtectedValueRepository(connection).list_details())
+        else:
+            live = await WorkflowRepository(connection).is_live(workflow_id)
+            details = tuple(
+                SavedDetail(kind=value.kind, preview=value.preview, updated_at=value.created_at)
+                for value in await WorkflowRepository(connection).values(workflow_id)
+                if live and not value.purged
+            )
         records = await AuthenticatedRepository(connection).list_observations(task_id)
         pages = [record for record in records if record.observation.kind == "page"]
         newest = pages[-1].observation if pages else None
@@ -280,6 +322,7 @@ class FormPrepareService:
             disclosure=await self._latest_disclosure(connection, task_id),
             form_count=newest.inventory.form_count if newest else 0,
             candidate_element_count=newest.inventory.element_count if newest else 0,
+            value_source="saved_details" if workflow_id is None else "workflow",
         )
 
     @staticmethod
@@ -374,7 +417,9 @@ class FormPrepareService:
             ]
             if not pages:
                 raise FormPrepareRefusal("no_form_observed")
-            saved = await ProtectedValueRepository(connection).snapshots(allowed_data_refs)
+            workflow_id = await workflow_for_task(connection, task_id)
+            await require_workflow_live(connection, workflow_id)
+            saved = await value_snapshots(connection, workflow_id, allowed_data_refs)
             if set(allowed_data_refs) - set(saved):
                 raise FormPrepareRefusal("data_ref_unavailable")
             scope = FormPrepareScope(
@@ -386,6 +431,7 @@ class FormPrepareService:
                 planning_recipient=source.scope.disclosure.recipient,
                 recipient_origin=_origin_for(profile, pages[-1].observation.host),
                 allowed_data_refs=allowed_data_refs,
+                workflow_id=workflow_id,
             )
             grant = await repository.insert_grant(grant_id=uuid.uuid4(), task_id=task_id, scope=scope)
             await self._event(
@@ -521,6 +567,11 @@ class FormPrepareService:
     ) -> None:
         """Raise the precise reason a grant cannot be used, decided by the database."""
         repository = FormPrepareRepository(connection)
+        # Milestone 10 S4: a workflow grant is usable only while its workflow is, and only by its own
+        # `form` step (the scope's workflow must still be the task's).
+        if await workflow_for_task(connection, grant.task_id) != grant.scope.workflow_id:
+            raise FormPrepareRefusal("not_a_form_step")
+        await require_workflow_live(connection, grant.scope.workflow_id)
         if await repository.usable_now(grant.id):
             return
         profile = await BrowserProfileRepository(connection).get(grant.profile_id)
@@ -578,7 +629,7 @@ class FormPrepareService:
                 self._forms.assert_clean(profile.id)
             if _origin_for(profile, observation.host) != grant.scope.recipient_origin:
                 raise FormPrepareRefusal("origin_changed")
-            saved = await ProtectedValueRepository(connection).snapshots(grant.scope.allowed_data_refs)
+            saved = await value_snapshots(connection, grant.scope.workflow_id, grant.scope.allowed_data_refs)
             forms = tuple(
                 {
                     "form_ref": form.ref,
@@ -637,7 +688,16 @@ class FormPrepareService:
             records = await AuthenticatedRepository(connection).list_observations(task_id)
             profile = await self._profile(connection, task)
             assert profile is not None
-            saved = await ProtectedValueRepository(connection).snapshots(grant.scope.allowed_data_refs)
+            saved = await value_snapshots(connection, grant.scope.workflow_id, grant.scope.allowed_data_refs)
+            provenance = (
+                {}
+                if grant.scope.workflow_id is None
+                else {
+                    value.kind: value.provenance
+                    for value in await WorkflowRepository(connection).values(grant.scope.workflow_id)
+                    if not value.purged
+                }
+            )
         record = next(
             (item for item in records if item.observation.ref == proposal.observation), None
         )
@@ -680,6 +740,14 @@ class FormPrepareService:
         fields = resolve_fields(
             proposal=proposal, observed=observed, scope=grant.scope, saved=saved
         )
+        if grant.scope.workflow_id is not None:
+            # Every placed value says where it came from; a value whose provenance is unknown is not placed.
+            if any(field.data_ref is not None and field.data_ref not in provenance for field in fields):
+                raise FormPrepareRefusal("data_ref_unavailable")
+            fields = [
+                field.model_copy(update={"provenance": provenance[field.data_ref]}) if field.data_ref else field
+                for field in fields
+            ]
         if len(fields) > MAX_FORM_FIELDS:  # pragma: no cover - resolve_fields bounds it.
             raise FormPrepareRefusal("too_many_entries")
         manifest = DisclosureManifest.build(
@@ -699,6 +767,7 @@ class FormPrepareService:
             form_ref=form.ref,
             form_label=form.label,
             fields=fields,
+            workflow_id=grant.scope.workflow_id,
         )
         await self._open_approval(task_id, manifest)
         return await self.describe(task_id)
@@ -778,17 +847,26 @@ class FormPrepareService:
             or grant.scope.planning_recipient != manifest.planning_recipient
         ):
             raise FormPrepareRefusal("origin_changed")
+        if grant.scope.workflow_id != manifest.workflow_id:
+            raise FormPrepareRefusal("manifest_invalid")
         profile = await BrowserProfileRepository(connection).get(grant.profile_id)
         assert profile is not None
         if _origin_for(profile, urlsplit(manifest.recipient_origin).hostname) != manifest.recipient_origin:
             raise FormPrepareRefusal("origin_changed")
         # Saved values: share-locked so an update waits for this decision.
-        saved = await ProtectedValueRepository(connection).snapshots(
-            manifest.data_refs, lock=True
-        )
+        saved = await value_snapshots(connection, manifest.workflow_id, manifest.data_refs, lock=True)
         verify_protected_values_current(
             manifest, {kind: snapshot.value_digest for kind, snapshot in saved.items()}
         )
+        if manifest.workflow_id is not None:
+            provenance = {
+                value.kind: value.provenance
+                for value in await WorkflowRepository(connection).values(manifest.workflow_id)
+                if not value.purged
+            }
+            for field in manifest.fields:
+                if field.data_ref is not None and provenance.get(field.data_ref) != field.provenance:
+                    raise FormPrepareRefusal("protected_value_changed")
         records = await AuthenticatedRepository(connection).list_observations(action.task_id)
         record = next(
             (item for item in records if item.observation.observation_id == manifest.observation_id),
