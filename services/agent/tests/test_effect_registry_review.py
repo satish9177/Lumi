@@ -181,3 +181,9 @@ async def test_review_7_an_underivable_unresolved_action_is_keyed_conservatively
         )
     assert await RecoveryService(engine).backfill_effect_keys() == [view.action.id]
     assert await key_rows(engine, view.action.id) == [("unparsed:file_create:transfer_place", "file_create")]
+
+
+async def test_final_audit_a3_generic_task_creation_cannot_mint_a_controller_task(client: httpx.AsyncClient) -> None:
+    for kind in ("document_task", "file_transfer_task", "project_run_task", "desktop_action_planning", "desktop_vision"):
+        response = await client.post("/tasks", json={"request": {"type": kind, "text": "x"}})
+        assert response.status_code == 422, kind

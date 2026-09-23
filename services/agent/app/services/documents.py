@@ -96,7 +96,7 @@ from app.repositories.documents import (
 )
 from app.repositories.files import FileRefRecord, FileRepository, FileRootRecord
 from app.repositories.tasks import TaskRecord, TaskRepository
-from app.repositories.workflows import WorkflowRepository
+from app.repositories.workflows import WorkflowRepository, require_step_live
 
 logger = logging.getLogger("lumi.documents")
 
@@ -1138,6 +1138,10 @@ class DocumentService:
             raise TaskKindMismatchError(task_id, DOCUMENT_TASK_TYPE)
         if require_accepting and not accepts_actions(task.status):
             raise TaskNotAcceptingActionsError(task_id, task.status)
+        if require_accepting:
+            # M10 final audit (Pass A, F1): no new file, extraction, disclosure card, confirmation or claim on a
+            # stopped or expired workflow's documents step. Revoke and recording a result stay possible.
+            await require_step_live(connection, task_id)
         return task
 
     @staticmethod

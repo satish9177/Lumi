@@ -1247,6 +1247,26 @@ app.whenReady().then(async () => {
         : Promise.reject(new RuntimeUnavailableError())
     },
     comparer: modelRouter ? new DocumentComparer(modelRouter) : undefined,
+    // Milestone 10 final audit (Pass A, F2): the private-document disclosure is confirmed again by a NATIVE
+    // dialog built from the runtime's card, like every other M10 approval.
+    confirmDisclosure: async (card) => {
+      if (!mainWindow) return false
+      const labels = card.documents.map((document) => `“${document.label}”`).join(' and ')
+      const answer = await dialog.showMessageBox(mainWindow, {
+        type: 'question',
+        buttons: ['Send once', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        title: 'Lumi document comparison',
+        message: `Send redacted excerpts of ${labels} to ${card.provider} (${card.model}) once?`,
+        detail: `Purpose: ${card.purpose}
+At most ${card.maxExcerptBytes} bytes per document, with identifiers redacted.
+
+`
+          + 'Only these excerpts are sent, to this one provider, one time. Nothing else from your files leaves this computer.'
+      })
+      return answer.response === 0
+    },
     chooseFolder: async ({ label, canRead, canCreate }) => {
       if (!mainWindow) return undefined
       const selection = await dialog.showOpenDialog(mainWindow, {

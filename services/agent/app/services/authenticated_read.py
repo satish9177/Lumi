@@ -114,6 +114,7 @@ from app.repositories.browser import BrowserRepository
 from app.repositories.login_attempts import LoginAttemptRepository
 from app.repositories.profiles import BrowserProfileRepository
 from app.repositories.tasks import TaskRecord, TaskRepository
+from app.repositories.workflows import require_step_live
 from app.services.actions import ActionService, ActionView
 from app.services.browser_execution import (
     Outcome,
@@ -450,6 +451,8 @@ class AuthenticatedReadService:
                 raise TaskKindMismatchError(task_id, AUTHENTICATED_READ_TASK_TYPE)
             if not accepts_actions(task.status):
                 raise TaskNotAcceptingActionsError(task_id, task.status)
+            # M10 final audit (Pass A, F1): a stopped workflow's form step never gets account reading back.
+            await require_step_live(connection, task_id)
             repository = AuthenticatedRepository(connection)
             existing = await repository.open_grant_for_task(task_id)
             if existing is not None:
@@ -497,6 +500,7 @@ class AuthenticatedReadService:
                 raise TaskNotFoundError(task_id)
             if not accepts_actions(task.status):
                 raise TaskNotAcceptingActionsError(task_id, task.status)
+            await require_step_live(connection, task_id)  # M10 final audit (Pass A, F1)
             repository = AuthenticatedRepository(connection)
             grant = await repository.get_grant(grant_id)
             if grant is None or grant.task_id != task_id:

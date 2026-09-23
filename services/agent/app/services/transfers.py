@@ -60,6 +60,7 @@ from app.files.place import PlacementRefusal, place
 from app.repositories.actions import ActionRecord, ActionRepository
 from app.repositories.files import FileRepository, FileRootRecord
 from app.repositories.tasks import TaskRecord, TaskRepository
+from app.repositories.workflows import require_step_live
 from app.repositories.transfers import TransferGrantRecord, TransferRecord, TransferRepository
 from app.services.actions import ActionService, ActionView
 from app.services.browser_execution import BrowserExecutionService
@@ -299,6 +300,7 @@ class TransferService:
     async def download(self, task_id: uuid.UUID) -> TransferView:
         async with self._engine.connect() as connection:
             await self._require_task(connection, task_id)
+            await require_step_live(connection, task_id)  # M10 final audit (Pass A, F1)
             repository = TransferRepository(connection)
             transfer = await repository.for_task(task_id)
             if transfer is None:
@@ -442,6 +444,7 @@ class TransferService:
     async def place(self, task_id: uuid.UUID) -> TransferView:
         async with self._engine.connect() as connection:
             await self._require_task(connection, task_id)
+            await require_step_live(connection, task_id)  # M10 final audit (Pass A, F1)
             repository = TransferRepository(connection)
             transfer = await repository.for_task(task_id)
             if transfer is None:
@@ -763,6 +766,8 @@ class TransferService:
             raise TaskKindMismatchError(task_id, TRANSFER_TASK_TYPE)
         if require_accepting and not accepts_actions(task.status):
             raise TaskNotAcceptingActionsError(task_id, task.status)
+        if require_accepting:
+            await require_step_live(connection, task_id)  # M10 final audit (Pass A, F1)
         return task
 
     @staticmethod

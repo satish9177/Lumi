@@ -601,3 +601,34 @@ async def test_two_windows_spellings_of_one_file_are_one_destination_across_task
     other = await _approved(service, root_id, url=f"{ORIGIN}/files/elsewhere.pdf", name="resume.PDF")
     assert await _code(service.download(other)) == "effect_locked"
     assert browser.dispatches == 1
+
+
+# ---- Milestone 10 final audit (Pass B, finding 4) -----------------------------------------------------------
+
+
+async def test_final_audit_b4_the_sweep_keeps_the_quarantine_of_an_unresolved_step(
+    service: TransferService, documents: DocumentService, browser: FakeBrowser, folders: dict[str, Path],
+    action_service: ActionService, engine: AsyncEngine,
+) -> None:
+    from datetime import timedelta
+
+    from app.domain.action_status import RiskTier
+    from app.repositories.transfers import TransferRepository
+
+    task = await _approved(service, await _root(documents, folders["dest"]))
+    assert (await service.download(task)).phase == "quarantined"
+    grant = (await service.describe(task)).grant
+    assert grant is not None
+    await service.revoke(task, grant_id=grant.id, expected_revision=None)  # it can no longer be placed
+    async with engine.begin() as connection:  # ...and a day passed
+        await connection.execute(text("UPDATE file_transfers SET updated_at = now() - interval '2 days'"))
+    async with engine.connect() as connection:
+        assert len(await TransferRepository(connection).cleanable(older_than=timedelta(hours=24))) == 1
+    # A placement attempt that committed before the row moved on, left unknown by a crash.
+    step = await action_service.propose_exclusive_action(task, tool_name="transfer_place", risk_tier=RiskTier.R2, proposal={"x": 1})
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE actions SET status = 'OUTCOME_UNKNOWN', revision = revision + 1 WHERE id = :a"), {"a": step.action.id}
+        )
+    async with engine.connect() as connection:
+        assert await TransferRepository(connection).cleanable(older_than=timedelta(hours=24)) == []

@@ -311,7 +311,8 @@ def lookup_allowance(rule: ReconciliationRule, *, previous_ages_seconds: list[fl
     """
     if rule.max_lookups is None:
         return True, "", 0
-    recent = sorted(age for age in previous_ages_seconds if age < LOOKUP_WINDOW_SECONDS)
+    # A negative age (clock skew, or a look that committed after this transaction began) counts as "just now".
+    recent = sorted(max(0.0, age) for age in previous_ages_seconds if age < LOOKUP_WINDOW_SECONDS)
     if len(recent) >= rule.max_lookups:
         return False, "lookup_budget_exhausted", int(LOOKUP_WINDOW_SECONDS - recent[-1]) + 1
     if recent and rule.lookup_backoff_seconds:

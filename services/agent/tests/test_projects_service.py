@@ -563,3 +563,63 @@ async def test_a_run_alive_but_unowned_after_a_restart_blocks_everything_and_nev
     assert ended.run is not None and ended.run.status in ("STOPPED", "ENDED_WITH_RUNTIME")
     assert process_is_alive(first.run.pid, first.run.creation_time or 0) is False
     assert (await action_service.start_attempt(booking)).action.status.value == "EXECUTING"
+
+
+# ---- Milestone 10 final audit (Pass B) ---------------------------------------------------------------------
+
+
+async def test_final_audit_b1_a_start_orphaned_before_the_run_was_linked_is_settled_on_restart(
+    service: ProjectService, tmp_path: Path, engine: AsyncEngine, action_service: ActionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.domain.action_status import ActionStatus
+    from app.repositories.projects import ProjectRepository
+
+    project = await _project(service, tmp_path / "p")
+    task = await _approved_run(service, await _recipe(service, project, "check"))
+    original = ProjectRepository.update_run
+
+    async def crash_on_link(self: Any, run_id: uuid.UUID, **values: Any) -> Any:
+        if "action_id" in values:
+            raise KeyboardInterrupt  # the runtime dies after the attempt committed, before the run knows it
+        return await original(self, run_id, **values)
+
+    monkeypatch.setattr(ProjectRepository, "update_run", crash_on_link)
+    with pytest.raises(KeyboardInterrupt):
+        await service.start(task)
+    monkeypatch.setattr(ProjectRepository, "update_run", original)
+    await RecoveryService(engine).recover_unfinished_attempts(uuid.uuid4())
+    assert (await service.describe(task)).start_status == "OUTCOME_UNKNOWN"
+    fresh = ProjectService(engine, actions=action_service, runtime_generation=uuid.uuid4(), grant_ttl_seconds=600,
+                           protected_folders=((), ()), run_root=str(tmp_path / "runs"))
+    await fresh.recover()
+    view = await fresh.describe(task)
+    assert view.start_status == ActionStatus.FAILED.value  # never resumed: no project code ran
+    assert view.run is not None and view.run.pid is None
+    booking = await _approved_booking(action_service, engine)
+    assert (await action_service.start_attempt(booking)).action.status.value == "EXECUTING"  # the lock is free
+
+
+async def test_final_audit_b1_a_start_left_unresolved_after_its_run_ended_is_settled(
+    service: ProjectService, tmp_path: Path, engine: AsyncEngine, action_service: ActionService
+) -> None:
+    project = await _project(service, tmp_path / "p")
+    task = await _approved_run(service, await _recipe(service, project, "check"))
+    await service.start(task)
+    await _until(service, task, {"succeeded", "failed"})
+    # A crash between `_end_run` and settling the action, simulated: the run is final, the action is not.
+    async with engine.begin() as connection:
+        await connection.execute(
+            text("UPDATE actions SET status = 'OUTCOME_UNKNOWN', revision = revision + 1 WHERE task_id = :t AND tool_name = 'project_start'"),
+            {"t": task},
+        )
+    assert (await service.reconcile(task)).start_status == "SUCCEEDED"  # it ran (a pid was recorded) and is over
+
+
+async def test_final_audit_b2_reconcile_is_refused_while_this_runtime_is_starting_the_run(service: ProjectService, tmp_path: Path) -> None:
+    project = await _project(service, tmp_path / "p")
+    task = await _approved_run(service, await _recipe(service, project, "check"))
+    service._starting.add(task)  # noqa: SLF001 - the window between the attempt commit and the launch
+    try:
+        assert await _code(service.reconcile(task)) == "wrong_phase"
+    finally:
+        service._starting.discard(task)  # noqa: SLF001

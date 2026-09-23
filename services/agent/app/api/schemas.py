@@ -62,7 +62,11 @@ class TaskRequestPayload(BaseModel):
     @classmethod
     def _not_reserved(cls, value: str) -> str:
         # Milestone 9 S2: a desktop read is created only by its own route, after a local observation.
-        if value in ("desktop_read", "desktop_action"):
+        # Milestone 10 final audit (Pass A, F3): nor any M9/M10 controller-owned task type.
+        if value in (
+            "desktop_read", "desktop_action", "desktop_action_planning", "desktop_vision",
+            "document_task", "file_transfer_task", "project_run_task",
+        ):
             raise ValueError("this task type is created only by its own route")
         return value
 

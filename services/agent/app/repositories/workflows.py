@@ -424,3 +424,14 @@ __all__ = [
     "WorkflowRepository",
     "workflow_is_live",
 ]
+
+
+async def require_step_live(connection: AsyncConnection, task_id: uuid.UUID) -> None:
+    """M10 final audit (Pass A, F1): a workflow child task takes no new authority once its workflow is stopped
+    or expired. A task that is not a workflow step is untouched. Callers hold the task row lock."""
+    from app.domain.workflows import WorkflowRefusal
+
+    repository = WorkflowRepository(connection)
+    step = await repository.step_for_task(task_id)
+    if step is not None and not await repository.is_live(step.workflow_id):
+        raise WorkflowRefusal("workflow_not_active")

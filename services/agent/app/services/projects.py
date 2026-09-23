@@ -26,7 +26,7 @@ import logging
 import os
 import time
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -69,6 +69,7 @@ logger = logging.getLogger("lumi.projects")
 
 STEP_TTL = timedelta(minutes=5)
 _START_KEY = "project-start"
+_LIVE_RUN_STATUSES = ("STARTING", "OUTCOME_UNKNOWN", "RUNNING", "READY")
 MAX_LABEL_CHARS = 64
 
 
@@ -571,7 +572,9 @@ class ProjectService:
         async def record(connection: AsyncConnection, _: Any) -> None:
             repository = ProjectRepository(connection)
             if outcome is AttemptOutcome.SUCCEEDED:
-                await repository.update_run(scope.run_id, status="RUNNING", resumed_at=datetime.now().astimezone())
+                # M10 final audit (Pass B, finding 3): only a run still STARTING becomes RUNNING -- a script that
+                # already exited (and was ended by its monitor) is never shown as running again.
+                await repository.update_run(scope.run_id, only_if=("STARTING",), status="RUNNING", resumed_at=datetime.now().astimezone())
                 await repository.close_grant(grant_id=grant.id, status=GrantStatus.COMPLETED)
             elif outcome is AttemptOutcome.FAILED:
                 await repository.update_run(scope.run_id, status="FAILED", error_code=error_code, ended_at=datetime.now().astimezone())
@@ -584,7 +587,7 @@ class ProjectService:
 
     async def _record_pid(self, run_id: uuid.UUID, pid: int, creation_time: int) -> None:
         async with self._engine.begin() as connection:
-            await ProjectRepository(connection).update_run(run_id, pid=pid, creation_time=creation_time)
+            await ProjectRepository(connection).update_run(run_id, only_if=("STARTING",), pid=pid, creation_time=creation_time)
 
     async def _end_run(self, run_id: uuid.UUID, status: str, *, error_code: str | None = None, exit_code: int | None = None) -> None:
         async with self._engine.begin() as connection:
@@ -698,13 +701,62 @@ class ProjectService:
                 continue
             await self._settle(run)
             resolved += 1
+        # M10 final audit (Pass B, finding 1): a start action left OUTCOME_UNKNOWN whose run row is already final
+        # -- a crash between the attempt commit and linking the run, or between ending the run and settling the
+        # action. Nothing else could ever settle it, and it would hold the global tier for good.
+        async with self._engine.connect() as connection:
+            stranded = [
+                action
+                for status in (ActionStatus.OUTCOME_UNKNOWN, ActionStatus.RECONCILING)
+                for action in await ActionRepository(connection).list_actions_by_status(status)
+                if action.tool_name == TOOL_PROJECT_START and action.idempotency_key == _START_KEY
+            ]
+            pairs = [(action, await ProjectRepository(connection).run_for_task(action.task_id)) for action in stranded]
+        for action, ended in pairs:
+            if ended is None or ended.id in self._processes or ended.status in _LIVE_RUN_STATUSES:
+                continue
+            await self._settle_start_from_ended_run(ended, action.id)
+            resolved += 1
         return resolved
 
+    async def _settle_start_from_ended_run(self, run: RunRecord, action_id: uuid.UUID) -> None:
+        """Settle a start action from a run row whose evidence is already final. No (pid, creation time) ever
+        recorded -> the process was never resumed, no project code ran (FAILED). Recorded -> it ran and is over
+        (SUCCEEDED). Never starts anything."""
+        if run.action_id is None:
+            async with self._engine.begin() as connection:
+                await ProjectRepository(connection).update_run(run.id, action_id=action_id)
+        view = await self._actions.get_action(action_id)
+        if view.action.status is ActionStatus.OUTCOME_UNKNOWN:
+            view = await self._actions.begin_reconciliation(action_id, expected_revision=view.action.revision)
+        if view.action.status is not ActionStatus.RECONCILING:
+            return
+        ran = run.pid is not None
+        await self._actions.finish_reconciliation(
+            action_id,
+            result=AttemptOutcome.SUCCEEDED if ran else AttemptOutcome.FAILED,
+            evidence={"source": "project_runs", "pid_recorded": ran, "run_status": run.status},
+            expected_revision=view.action.revision,
+        )
+
     async def reconcile(self, task_id: uuid.UUID) -> RunView:
+        if task_id in self._starting:
+            # M10 final audit (Pass B, finding 2): this runtime is still starting it; `_start` settles it.
+            raise ProjectRefusal("wrong_phase")
         async with self._engine.connect() as connection:
             await self._require_task(connection, task_id)
             run = await ProjectRepository(connection).run_for_task(task_id)
-        if run is None or run.id in self._processes or run.status not in ("STARTING", "OUTCOME_UNKNOWN", "RUNNING", "READY"):
+            action = await self._start_action(connection, task_id)
+        if (
+            run is not None and run.id not in self._processes and action is not None
+            and run.status not in _LIVE_RUN_STATUSES
+            and action.status in (ActionStatus.OUTCOME_UNKNOWN, ActionStatus.RECONCILING)
+        ):
+            # The run's evidence is final but its start action was left unresolved (Pass B, finding 1).
+            await self._settle_start_from_ended_run(run, action.id)
+            async with self._engine.connect() as connection:
+                return await self._view(connection, task_id)
+        if run is None or run.id in self._processes or run.status not in _LIVE_RUN_STATUSES:
             raise ProjectRefusal("wrong_phase")
         if run.action_id is not None and (await self._actions.get_action(run.action_id)).action.status is ActionStatus.EXECUTING:
             # M10 S5 review finding 8: the start is still in progress in THIS runtime (between the attempt and the
@@ -728,7 +780,15 @@ class ProjectService:
         else:
             await self._end_run(run.id, status, error_code="never_resumed" if status == "FAILED" else None)
         if run.action_id is None:
-            return
+            # Pass B finding 1: the attempt may have committed without the run ever recording its id.
+            async with self._engine.connect() as connection:
+                orphan = await self._start_action(connection, run.task_id)
+            if orphan is None:
+                return
+            async with self._engine.begin() as connection:
+                await ProjectRepository(connection).update_run(run.id, action_id=orphan.id)
+            run = replace(run, action_id=orphan.id)
+        assert run.action_id is not None
         view = await self._actions.get_action(run.action_id)
         if view.action.status not in (ActionStatus.OUTCOME_UNKNOWN, ActionStatus.RECONCILING) or status == "OUTCOME_UNKNOWN":
             return
@@ -756,9 +816,7 @@ class ProjectService:
         repository = ProjectRepository(connection)
         grant = await repository.grant_for_task(task_id)
         run = await repository.run_for_task(task_id)
-        action = await ActionRepository(connection).get_action_by_idempotency_key(task_id=task_id, idempotency_key=_START_KEY)
-        if action is not None and action.tool_name != TOOL_PROJECT_START:  # M10 S5 review finding 4
-            action = None
+        action = await self._start_action(connection, task_id)
         process = self._processes.get(run.id) if run is not None else None
         return RunView(
             task_id=task.id, task_status=task.status.value, task_revision=task.revision, phase=_phase(grant, run, action),
@@ -767,6 +825,12 @@ class ProjectService:
             ready=run is not None and run.status == "READY",
             log_tail=tuple(process.log.tail(50)) if process is not None else self._final_logs.get(run.id, ()) if run is not None else (),
         )
+
+    @staticmethod
+    async def _start_action(connection: AsyncConnection, task_id: uuid.UUID) -> ActionRecord | None:
+        """This task's start action, by (task, idempotency key) AND tool (M10 S5 review finding 4)."""
+        action = await ActionRepository(connection).get_action_by_idempotency_key(task_id=task_id, idempotency_key=_START_KEY)
+        return action if action is not None and action.tool_name == TOOL_PROJECT_START else None
 
     @staticmethod
     async def _require_task(connection: AsyncConnection, task_id: uuid.UUID) -> TaskRecord:

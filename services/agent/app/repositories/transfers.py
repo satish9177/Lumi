@@ -14,7 +14,7 @@ from typing import Any
 from sqlalchemy import Row, and_, func, insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncConnection
 
-from app.db.tables import file_transfers, step_authorizations, task_grants
+from app.db.tables import actions, file_transfers, step_authorizations, task_grants
 from app.domain.research import GrantStatus
 from app.domain.transfers import FILE_TRANSFER_KIND, TransferScope
 
@@ -342,9 +342,18 @@ class TransferRepository:
         expired_grant = select(task_grants.c.id).where(
             task_grants.c.id == file_transfers.c.grant_id, task_grants.c.expires_at < func.now()
         ).exists()
+        # M10 final audit (Pass B, finding 4): a step action still in flight or unresolved keeps its evidence,
+        # whatever the transfer row says (a crash between the attempt commit and the row update leaves the row
+        # QUARANTINED while its placement may have begun).
+        unresolved_step = select(actions.c.id).where(
+            actions.c.task_id == file_transfers.c.task_id,
+            actions.c.tool_name.in_(("transfer_download", "transfer_place")),
+            actions.c.status.in_(("EXECUTING", "OUTCOME_UNKNOWN", "RECONCILING")),
+        ).exists()
         rows = await self._connection.execute(
             select(file_transfers).where(
                 file_transfers.c.cleaned_at.is_(None),
+                ~unresolved_step,
                 or_(
                     file_transfers.c.status.in_(("PLACED", "FAILED", "CANCELLED")),
                     and_(file_transfers.c.status == "QUARANTINED", or_(closed_grant, expired_grant)),

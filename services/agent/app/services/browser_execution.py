@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import SecretStr, ValidationError
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from app.browser.client import BrowserWorkerClient
@@ -685,7 +686,7 @@ class BrowserExecutionService:
                 # the task row lock, so concurrent reconcile calls cannot all pass the count before any inserts.
                 await TaskRepository(connection).lock_task(action.task_id)
                 records = await BrowserRepository(connection).list_dispatches(action_id)
-                self._check_lookup_allowance(records)
+                self._check_lookup_allowance(records, await connection.scalar(select(func.now())))
                 # M10 S5 review finding 1: absence can only be authoritative once the commit can no longer happen.
                 absence_fenced = _commit_is_settled(records, current_worker=worker_generation)
                 await BrowserRepository(connection).insert_dispatch(
@@ -748,13 +749,16 @@ class BrowserExecutionService:
     async def _require_lookup_allowed(self, action_id: uuid.UUID) -> None:
         async with self._engine.connect() as connection:
             records = await BrowserRepository(connection).list_dispatches(action_id)
-        self._check_lookup_allowance(records)
+            now = await connection.scalar(select(func.now()))
+        self._check_lookup_allowance(records, now)
 
     @staticmethod
-    def _check_lookup_allowance(records: list[Any]) -> None:
+    def _check_lookup_allowance(records: list[Any], database_now: datetime | None) -> None:
+        # Ages on the database's own clock: `started_at` is its `now()`, and a runtime clock even slightly
+        # behind it would make a lookup look like it happened in the future.
         rule = RECONCILIATION_REGISTRY[EffectKind.EXTERNAL_MUTATION]
         action_id = records[0].action_id if records else "?"
-        now = datetime.now(UTC)
+        now = database_now or datetime.now(UTC)
         # A lookup still open is in flight -- unless it is older than any worker call can last (a runtime that
         # died mid-lookup leaves its row open forever; that must not block reconciliation for good).
         if any(

@@ -74,12 +74,14 @@ function controller(runtime: DesktopRuntimeRequester, options: {
   comparer?: FakeComparer
   folder?: string
   dropped?: DroppedFileLookup
+  confirm?: () => Promise<boolean>
 } = {}): DocumentController {
   return new DocumentController({
     runtime,
     comparer: (options.comparer ?? new FakeComparer()) as unknown as DocumentComparer,
     chooseFolder: async () => options.folder,
-    droppedFiles: options.dropped
+    droppedFiles: options.dropped,
+    confirmDisclosure: options.confirm ?? (async () => true)
   })
 }
 
@@ -200,6 +202,19 @@ describe('M10 S1 exact document disclosure', () => {
     const result = await controller(runtime, { comparer }).runDocumentDisclosure(TASK)
     expect(result.ok).toBe(false)
     expect(comparer.calls).toBe(0)
+  })
+
+  it('allows a disclosure only after main\'s native confirmation (M10 final audit, Pass A F2)', async () => {
+    const pending = taskBody('awaiting_approval', { card: { ...(approvedTask().card as object), grant_status: 'PENDING' } })
+    const seen: unknown[] = []
+    const refused = requester(() => ok(pending))
+    const cancelled = await controller(refused.runtime, { confirm: async () => false }).grantDocumentDisclosure(TASK, GRANT, 2)
+    expect(cancelled.ok).toBe(true)
+    expect(refused.calls.every((call) => !call.path.endsWith('/disclosure/grant'))).toBe(true)
+    const allowed = requester(() => ok(pending))
+    await controller(allowed.runtime, { confirm: async () => { seen.push('asked'); return true } }).grantDocumentDisclosure(TASK, GRANT, 2)
+    expect(seen).toEqual(['asked'])
+    expect(allowed.calls.at(-1)?.path).toBe(`/document-tasks/${TASK}/disclosure/grant`)
   })
 
   it('does not claim before the person allowed the card', async () => {

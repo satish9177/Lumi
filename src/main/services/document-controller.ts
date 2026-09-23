@@ -4,8 +4,7 @@ import type {
   AgentDocumentTaskView,
   AgentFileRootView,
   AgentLocalComparisonView,
-  AgentRootListingView
-} from '../../shared/document-contracts'
+  AgentRootListingView, AgentDocumentCardView } from '../../shared/document-contracts'
 import type { DocumentComparer } from '../agent/document-comparer'
 import { WireError } from './agent-wire'
 import { AgentRequestError } from './agent-tasks'
@@ -99,6 +98,12 @@ export interface DocumentControllerDependencies {
    */
   chooseFolder: (grant: { label: string; canRead: boolean; canCreate: boolean }) => Promise<string | undefined>
   droppedFiles: DroppedFileLookup | undefined
+  /**
+   * Milestone 10 final audit (Pass A, F2): a NATIVE confirmation owned by main, built from the runtime's card
+   * (provider, model, documents, purpose, excerpt size). Resolves true only if the person chose Allow. A
+   * compromised renderer can no longer approve a private-document disclosure by itself.
+   */
+  confirmDisclosure: (card: AgentDocumentCardView) => Promise<boolean>
 }
 
 export class DocumentController implements AgentDocumentApi {
@@ -305,6 +310,7 @@ export class DocumentController implements AgentDocumentApi {
           code: 'document_state_changed', message: 'The approval changed since you reviewed it. Review the current card.', currentRevision: current.card.grantRevision
         })
       }
+      if (kind === 'grant' && !(await this.dependencies.confirmDisclosure(current.card))) return current
       const reply = await this.call('POST', `/document-tasks/${taskId}/disclosure/${kind}`, { grant_id: grantId, expected_revision: expected }, TIMEOUTS.write)
       return parseDocumentTask(reply.body)
     })

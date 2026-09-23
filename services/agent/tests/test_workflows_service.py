@@ -542,3 +542,42 @@ async def test_an_unknown_booking_elsewhere_blocks_the_workflows_download_and_pl
         assert refused.value.code == "effect_locked"
     assert flow.browser.dispatches == 1
     assert not (flow.folder / "details.pdf").exists() and not (flow.folder / "other.pdf").exists()
+
+
+# ---- Milestone 10 final audit (Pass A, F1): a stopped workflow's steps take no new authority -----------------
+
+
+async def test_final_audit_a_stopped_workflow_documents_step_cannot_open_or_claim_a_disclosure(flow: Flow) -> None:
+    workflow_id = await flow.placed()
+    docs_task, document_id = await flow.extracted(workflow_id)
+    await flow.workflows.stop(workflow_id)
+    for attempt in (
+        flow.documents.create_disclosure(docs_task, document_ids=[document_id], purpose="Compare", recipient="gemini", model="m"),
+        flow.documents.claim(docs_task),
+    ):
+        with pytest.raises(WorkflowRefusal) as refused:
+            await attempt
+        assert refused.value.code == "workflow_not_active"
+
+
+async def test_final_audit_a_stopped_workflow_form_step_never_gets_account_reading_back(flow: Flow) -> None:
+    workflow_id, _, _ = await flow.ready()
+    form_task = await flow.form_task(workflow_id)
+    await flow.workflows.stop(workflow_id)
+    with pytest.raises(WorkflowRefusal) as refused:
+        await flow.rig.service.prepare(form_task, recipient="gemini")
+    assert refused.value.code == "workflow_not_active"
+
+
+async def test_final_audit_a_stopped_workflow_download_step_cannot_download_or_place(flow: Flow) -> None:
+    view = await flow.workflows.create(objective="Prepare my application")
+    view = await flow.workflows.start_download(view.workflow.id, url=URL, root_id=await flow.root(), file_name="details.pdf", intent="Details")
+    task_id = next(step.task_id for step in view.steps if step.role == "download")
+    transfer = await flow.transfers.describe(task_id)
+    assert transfer.grant is not None
+    await flow.transfers.confirm(task_id, grant_id=transfer.grant.id, expected_revision=transfer.grant.revision)
+    await flow.workflows.stop(view.workflow.id)
+    for step in (flow.transfers.download(task_id), flow.transfers.place(task_id)):
+        with pytest.raises(WorkflowRefusal):
+            await step
+    assert flow.browser.dispatches == 0
