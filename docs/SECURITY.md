@@ -914,6 +914,57 @@ The generic action routes cannot start, settle or plant a transfer step.
 * Placement is same-volume only.
 * Script-triggered downloads are out of scope.
 
+## Registered project recipes (Milestone 10 S3)
+
+S3 lets Lumi run ONE script that a registered project's `package.json` declares, from a recipe registered in trusted UI, once per approval. Details: `docs/reviews/milestone-10-s3.md`.
+
+**Three separate native confirmations in main**, each built from the runtime's record:
+
+* the project folder, with the warning "This recipe executes code from this project with your user-level permissions.";
+* the recipe, showing the exact script text and any `pre`/`post` hook;
+* each run (R3), showing the fixed argv, the script, the env names, readiness and timeout.
+
+A model can at most name a `recipe_id`.
+
+**Fixed argv, no shell of Lumi's own.** The only project spawn in Lumi is `[node.exe, npm-cli.js, "run", <script>]`:
+
+* the executables are the pinned files under the Program Files known folder, each by identity and SHA-256, never looked up on PATH;
+* it runs with `shell=False` and `cwd` = the verified project root;
+* a source scan pins the call site.
+
+npm runs the script text through `cmd.exe`. That text is the recipe's own, hashed and shown. Lumi never types into a terminal, installs dependencies or runs Git.
+
+**Any change invalidates a recipe.** The recipe freezes:
+
+* the project identity;
+* `package.json`, the lockfile, the script and hook texts;
+* `node.exe` and `npm-cli.js`;
+* the env allowlist, readiness, timeout and stop policy.
+
+It is re-derived at every card, at every start, and again immediately before the spawn. A project with any npm context above it (a parent `package.json` or workspace root, a `node_modules` or a `.npmrc`) is refused, because npm walks up from the working directory. A `pre`/`post` hook the approval cannot display also refuses the recipe. A project with its own `.npmrc` is refused, because npm reads it from the working directory, and an empty environment override was shown not to neutralise its `node-options`.
+
+**Environment built from nothing.** The run gets only system basics, per-run scratch folders, empty npm configs, offline npm, and the recipe's allowlisted pairs. Secret-looking and code-changing names and values are refused. A test plants fake provider, Lumi, database, Git, cloud and npm secrets, plus `NODE_OPTIONS`, and proves the child sees none of them.
+
+**Ownership.** Before any process exists, two things are committed: the run row (one live run per project, enforced by a partial unique index) and the attempt (with the global-tier `project_run` effect key). The launch then goes in this order:
+
+1. the process is created suspended;
+2. it is put in its own kill-on-close Job Object, with no breakaway, whose only handle is the runtime's;
+3. its (pid, creation time) is committed;
+4. only then is it resumed.
+
+**Readiness and Stop.**
+
+* Readiness requires every listener on the port to be a member of that job.
+* Stop is `TerminateJobObject` on that job only.
+* After a restart, recovery uses (pid, creation time): never resumed means no code ran; gone means ended with the runtime; still alive means OUTCOME_UNKNOWN, and the project stays locked.
+
+**Download folders.** A folder approved for saving downloads can never overlap a project, in either direction.
+
+**Residual risks (honest).**
+
+* A run executes the project's code with the user's rights. The job bounds its lifetime and ownership, not its behaviour.
+* The dependency pre-check is a heuristic. A missing module fails the run; nothing is ever installed.
+
 ## Known gaps
 
 - The broker constrains Chromium, not its host process. A compromised browser

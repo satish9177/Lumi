@@ -989,3 +989,28 @@ The browser worker gains one operation, `download_to_quarantine` (target and eff
 
 Startup removes quarantines older than 24 h for PLACED, FAILED and CANCELLED transfers, and for QUARANTINED transfers under a closed grant. OUTCOME_UNKNOWN evidence and reconciliation tombstones are kept. See `docs/reviews/milestone-10-s2.md`.
 
+## Registered project recipes (M10 S3, migration `0019`)
+
+Migration `0019` adds four things:
+
+* `projects`: separate from file roots, one live row per folder;
+* `project_recipes`: a frozen `spec` plus its `digest`; the stop policy is pinned to `terminate_job` by a CHECK;
+* `project_runs`: one per run task, committed before spawn, with at most one live run per project (partial unique index);
+* the `project_run` grant kind.
+
+**Routes:**
+
+* `/projects` (register, list, revoke, list scripts, create recipe);
+* `/project-recipes` (list, revoke);
+* `/project-runs` (create, latest, get, grant, revoke, start, stop, reconcile).
+
+No route takes a command, executable or argument. The runtime spawns `node.exe npm-cli.js run <script>` from Program Files (`app/projects/process.py`), suspended, into a per-run Job Object. Per-run scratch folders live under `LUMI_PROJECT_RUN_ROOT` (default `%LOCALAPPDATA%\Lumi\project-runs`).
+
+Startup recovers runs a dead runtime left:
+
+* never resumed → FAILED;
+* gone → `ENDED_WITH_RUNTIME`;
+* still alive → `OUTCOME_UNKNOWN`.
+
+Shutdown stops every owned run. See `docs/reviews/milestone-10-s3.md`.
+
