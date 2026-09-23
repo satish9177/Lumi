@@ -8,6 +8,7 @@ import { scriptedAuthenticatedDecision } from '../agent/authenticated-planner'
 import { scriptedFormPlanDecision } from '../agent/form-planner'
 import { scriptedDesktopRead } from '../agent/desktop-reader'
 import { scriptedDesktopPlan } from '../agent/desktop-planner'
+import { scriptedDocumentCompare } from '../agent/document-comparer'
 import { scriptedResearchAnswer } from '../agent/research-answer'
 import { scriptedResearchDecision } from '../agent/research-planner'
 import { AUTHENTICATED_OPERATIONS, RESEARCH_OPERATIONS, type AgentAuthenticatedOperation, type AgentResearchOperation } from '../../shared/agent-contracts'
@@ -47,6 +48,7 @@ export class ScriptedTextProvider implements ModelProvider {
     if (request.taskClass === 'form_planning') return this.formPlanning(request)
     if (request.taskClass === 'desktop_planning') return this.desktopRead(request)
     if (request.taskClass === 'desktop_action_planning') return this.desktopPlan(request)
+    if (request.taskClass === 'document_compare') return this.documentCompare(request)
     switch (this.behaviour) {
       case 'timeout':
         throw new ModelProviderError('timeout')
@@ -192,6 +194,31 @@ export class ScriptedTextProvider implements ModelProvider {
     return this.reply(JSON.stringify(result.kind === 'answer'
       ? { schemaVersion: 1, kind: 'answer', answer: result.answer, evidence: result.evidence.map((item) => ({ controlRef: item.control_ref, quote: item.quote })) }
       : { schemaVersion: 1, kind: 'cannot_answer', reason: result.reason }))
+  }
+
+  private documentCompare(request: ModelRequest): ModelResponse {
+    const failure = this.behaviourFailure()
+    if (failure) return failure
+    if (this.behaviour === 'malformed') {
+      // Structurally JSON, semantically an attempt to smuggle an effect into a read-only comparison.
+      return this.reply(JSON.stringify({ schemaVersion: 1, kind: 'comparison', summary: 'Done.', findings: [], action: 'upload' }))
+    }
+    if (this.behaviour === 'hostile') {
+      // Well-formed but ungrounded: a quote nobody was shown and a number from nowhere.
+      return this.reply(JSON.stringify({
+        schemaVersion: 1, kind: 'comparison', summary: 'You scored 999.',
+        findings: [{ kind: 'match', text: 'You scored 999.', evidence: [{ docRef: 'd1', quote: 'this text was never in the excerpt' }] }]
+      }))
+    }
+    const result = scriptedDocumentCompare(extractUntrusted(request.input))
+    return this.reply(JSON.stringify(result.kind === 'comparison'
+      ? {
+          schemaVersion: 1, kind: 'comparison', summary: result.summary,
+          findings: result.findings.map((finding) => ({
+            kind: finding.kind, text: finding.text, evidence: finding.evidence.map((item) => ({ docRef: item.doc_ref, quote: item.quote }))
+          }))
+        }
+      : { schemaVersion: 1, kind: 'cannot_compare', reason: result.reason }))
   }
 
   private desktopPlan(request: ModelRequest): ModelResponse {

@@ -289,6 +289,18 @@ export function describeEvent(event: AgentEventView): string {
     case 'task.desktop_vision_candidates_recorded': return 'The AI provider returned visual evidence — nothing was clicked'
     case 'task.desktop_vision_disclosure_failed': return 'The AI provider could not analyse the screenshot — nothing was retried'
     case 'task.desktop_vision_disclosure_outcome_unknown': return 'Lumi cannot tell whether the screenshot reached the AI provider — it was not repeated'
+    // Milestone 10 S1. A document task has its own trusted panel; the words exist so the switch stays
+    // exhaustive. They carry no document text, file name or path: the events do not either.
+    case 'task.document_file_added': return 'A file was added to the document task'
+    case 'task.document_extracted': return 'Lumi read a document’s text on this device'
+    case 'task.document_extraction_refused': return 'Lumi refused to read a document'
+    case 'task.document_disclosure_requested': return 'Asked to send document excerpts to one AI provider'
+    case 'task.document_disclosure_granted': return 'You allowed one AI provider to see the excerpts once'
+    case 'task.document_disclosure_revoked': return 'Document disclosure cancelled — nothing was sent'
+    case 'task.document_disclosure_started': return 'Sending the approved excerpts to the AI provider'
+    case 'task.document_comparison_recorded': return 'The AI provider compared the documents'
+    case 'task.document_disclosure_failed': return 'The AI provider could not compare the documents — nothing was retried'
+    case 'task.document_disclosure_outcome_unknown': return 'Lumi cannot tell whether the excerpts reached the AI provider — it was not repeated'
     case 'task.cancelled': return 'Task cancelled'
     case 'task.criteria_updated':
       return event.invalidatedActionIds?.length

@@ -33,6 +33,7 @@ import {
   DesktopActionPanel,
   DesktopPlanningPanel,
   DesktopVisionPanel,
+  DocumentPanel,
   BrandMark,
   ConfirmDialog,
   DragGrip,
@@ -135,6 +136,7 @@ export default function LifeLensApp() {
   const [desktopActionOpen, setDesktopActionOpen] = useState(false)
   const [desktopPlanningOpen, setDesktopPlanningOpen] = useState(false)
   const [desktopVisionOpen, setDesktopVisionOpen] = useState(false)
+  const [documentsOpen, setDocumentsOpen] = useState(false)
   /** A voice outcome asking the trusted task UI to draw attention somewhere. */
   const [agentFocus, setAgentFocus] = useState<{ target: VoiceTaskFocus; serial: number }>()
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest>()
@@ -1838,6 +1840,9 @@ export default function LifeLensApp() {
             <button className="chip" type="button" onClick={() => setDesktopVisionOpen(true)} data-testid="open-desktop-vision">
               Look at a window Lumi cannot read
             </button>
+            <button className="chip" type="button" onClick={() => setDocumentsOpen(true)} data-testid="open-documents">
+              Documents
+            </button>
           </div>
 
           <form className="composer" onSubmit={(event) => { event.preventDefault(); void askQuestion() }}>
@@ -1923,6 +1928,13 @@ export default function LifeLensApp() {
           {desktopVisionOpen && (
             <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Look at a window Lumi cannot read normally">
               <DesktopVisionPanel agent={window.lifeLens.agent} onClose={() => setDesktopVisionOpen(false)} />
+            </div>
+          )}
+
+          {documentsOpen && (
+            <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Documents">
+              <DocumentPanel agent={window.lifeLens.agent} onClose={() => setDocumentsOpen(false)}
+                {...(droppedFile && droppedFile.mediaKind === 'document' ? { droppedFile: { droppedId: droppedFile.droppedId, fileName: droppedFile.fileName } } : {})} />
             </div>
           )}
 

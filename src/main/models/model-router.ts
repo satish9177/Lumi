@@ -121,6 +121,12 @@ export const DEFAULT_ROUTES: RoutingTable = {
   desktop_vision: {
     providers: [{ provider: 'gemini', model: 'gemini-2.5-flash' }, { provider: 'openai' }],
     maxInputTokens: 4_000, maxOutputTokens: 500, timeoutMs: 30_000, vision: true
+  },
+  // Milestone 10 S1. A candidate list, never a failover chain: the request carries the approval's
+  // one-recipient `permits` rule and the first provider attempted is the last. Text only.
+  document_compare: {
+    providers: [{ provider: 'gemini', model: 'gemini-2.5-flash' }, { provider: 'openai' }, { provider: 'deepseek' }],
+    maxInputTokens: 8_000, maxOutputTokens: 900, timeoutMs: 45_000
   }
 }
 
@@ -138,7 +144,7 @@ export const DEFAULT_ROUTES: RoutingTable = {
  */
 export const PRIVATE_TASK_CLASSES: readonly ModelTaskClass[] = [
   'authenticated_planning', 'authenticated_answer', 'form_planning', 'desktop_planning',
-  'desktop_action_planning', 'desktop_vision'
+  'desktop_action_planning', 'desktop_vision', 'document_compare'
 ]
 
 /**

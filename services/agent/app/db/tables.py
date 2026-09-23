@@ -451,7 +451,7 @@ task_grants = Table(
     ),
     CheckConstraint(
         "kind IN ('public_research', 'authenticated_read', 'form_prepare', 'desktop_disclose', "
-        "'desktop_action_plan', 'desktop_vision_capture', 'desktop_vision_disclose')",
+        "'desktop_action_plan', 'desktop_vision_capture', 'desktop_vision_disclose', 'document_disclose')",
         name="kind",
     ),
     CheckConstraint(
@@ -1445,5 +1445,172 @@ desktop_vision_disclosures = Table(
     CheckConstraint("(status = 'SUCCEEDED') = (candidates IS NOT NULL)", name="candidates_when_succeeded"),
     CheckConstraint(
         "approval_input_tick >= 0 AND approval_input_tick <= 4294967295", name="approval_input_tick_range"
+    ),
+)
+
+
+# --- Milestone 10 S1: approved documents and the file broker -------------------------------------
+
+#: An M10 file root: a folder the person chose in a native dialog, with EXPLICIT permissions. Search
+#: approval (Electron main's legacy approved folders) does not imply any of these. `canonical_path` is
+#: controller-local: no route, event or log ever returns it. `(volume_serial, dir_index)` is the
+#: directory's identity; a replaced or re-pointed folder is not the approved root. `can_modify` exists
+#: so the capability is represented, and is fixed false in M10 (no operation consumes it).
+file_roots = Table(
+    "file_roots",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("label", String(64), nullable=False),
+    Column("canonical_path", Text(), nullable=False),
+    #: Case-folded canonical path, for "one live root per folder".
+    Column("path_key", Text(), nullable=False),
+    Column("volume_serial", BigInteger(), nullable=False),
+    Column("dir_index", String(20), nullable=False),
+    Column("can_read", Boolean(), nullable=False),
+    Column("can_create", Boolean(), nullable=False),
+    Column("can_modify", Boolean(), nullable=False, server_default=false()),
+    Column("status", String(16), nullable=False),
+    Column("revision", BigInteger(), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("revoked_at", DateTime(timezone=True), nullable=True),
+    CheckConstraint("status IN ('ACTIVE', 'REVOKED')", name="status"),
+    CheckConstraint("(revoked_at IS NOT NULL) = (status = 'REVOKED')", name="revoked_at_set"),
+    CheckConstraint("can_modify = false", name="no_modify_in_m10"),
+    CheckConstraint("can_read OR can_create", name="some_permission"),
+    CheckConstraint("dir_index ~ '^[0-9]{1,20}$'", name="dir_index_format"),
+    CheckConstraint("revision >= 1", name="revision_positive"),
+    CheckConstraint("length(label) BETWEEN 1 AND 64", name="label_present"),
+)
+
+Index(
+    "uq_file_roots_path_key_active",
+    file_roots.c.path_key,
+    unique=True,
+    postgresql_where=text("status = 'ACTIVE'"),
+)
+
+#: One task-owned file authority. A ROOT_FILE is a root plus a validated relative name; a DROPPED_FILE is
+#: exactly the one file main handed over (never its folder). Both bind the file's identity and content
+#: hash at the moment it was added, so a different file under the same name is not this ref. Paths are
+#: controller-local; the API exposes only the id, the display name and the root-relative name.
+file_refs = Table(
+    "file_refs",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False),
+    Column("source", String(16), nullable=False),
+    Column("root_id", Uuid(), ForeignKey("file_roots.id", ondelete="RESTRICT"), nullable=True),
+    Column("relative_path", Text(), nullable=True),
+    Column("local_path", Text(), nullable=True),
+    Column("display_name", String(255), nullable=False),
+    Column("format", String(8), nullable=False),
+    Column("volume_serial", BigInteger(), nullable=False),
+    Column("file_index", String(20), nullable=False),
+    Column("size_bytes", BigInteger(), nullable=False),
+    Column("mtime_ns", BigInteger(), nullable=False),
+    Column("sha256", String(64), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    CheckConstraint("source IN ('ROOT_FILE', 'DROPPED_FILE')", name="source"),
+    CheckConstraint(
+        "(source = 'ROOT_FILE' AND root_id IS NOT NULL AND relative_path IS NOT NULL AND local_path IS NULL) "
+        "OR (source = 'DROPPED_FILE' AND root_id IS NULL AND relative_path IS NULL AND local_path IS NOT NULL)",
+        name="source_shape",
+    ),
+    CheckConstraint("format IN ('pdf', 'docx', 'txt')", name="format"),
+    CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="sha256_format"),
+    CheckConstraint("file_index ~ '^[0-9]{1,20}$'", name="file_index_format"),
+    CheckConstraint("size_bytes >= 0", name="size_non_negative"),
+)
+
+Index("ix_file_refs_task_id", file_refs.c.task_id)
+
+#: Extracted text: private (`document_private`) and untrusted, task-owned, kept at most a day. After
+#: `expires_at` the text is purged (NULL) and only its digest and counts remain.
+documents = Table(
+    "documents",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False),
+    Column("file_ref_id", Uuid(), ForeignKey("file_refs.id", ondelete="RESTRICT"), nullable=False),
+    Column("format", String(8), nullable=False),
+    Column("page_count", Integer(), nullable=True),
+    Column("text", Text(), nullable=True),
+    Column("text_sha256", String(64), nullable=False),
+    Column("text_chars", Integer(), nullable=False),
+    Column("truncated", Boolean(), nullable=False),
+    Column("flags", JSONB(), nullable=False),
+    Column("classification", String(24), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("purged_at", DateTime(timezone=True), nullable=True),
+    UniqueConstraint("file_ref_id", name="uq_documents_file_ref_id"),
+    CheckConstraint("classification = 'document_private'", name="classification"),
+    CheckConstraint("format IN ('pdf', 'docx', 'txt')", name="format"),
+    CheckConstraint("text_sha256 ~ '^[0-9a-f]{64}$'", name="text_sha256_format"),
+    CheckConstraint("(purged_at IS NULL) = (text IS NOT NULL)", name="purged_means_no_text"),
+    CheckConstraint("text IS NULL OR length(text) <= 120000", name="text_bounded"),
+    CheckConstraint("jsonb_typeof(flags) = 'object'", name="flags_is_object"),
+    CheckConstraint("expires_at > created_at", name="expires_after_creation"),
+)
+
+Index("ix_documents_task_id", documents.c.task_id)
+
+#: One row per claimed `document_disclose` grant: ONE provider call. UNIQUE on the grant and the task.
+document_disclosures = Table(
+    "document_disclosures",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False),
+    Column("grant_id", Uuid(), ForeignKey("task_grants.id", ondelete="RESTRICT"), nullable=False),
+    Column("recipient", String(16), nullable=False),
+    Column("model", String(64), nullable=False),
+    Column("projection_digest", String(64), nullable=False),
+    Column("document_count", Integer(), nullable=False),
+    Column("text_bytes", Integer(), nullable=False),
+    Column("redaction_count", Integer(), nullable=False),
+    Column("truncated", Boolean(), nullable=False),
+    Column("status", String(20), nullable=False),
+    Column("started_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("finished_at", DateTime(timezone=True), nullable=True),
+    Column("error_code", String(40), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("grant_id", name="uq_document_disclosures_grant_id"),
+    UniqueConstraint("task_id", name="uq_document_disclosures_task_id"),
+    CheckConstraint("status IN ('STARTED', 'SUCCEEDED', 'FAILED', 'OUTCOME_UNKNOWN')", name="status"),
+    CheckConstraint("projection_digest ~ '^[0-9a-f]{64}$'", name="projection_digest_format"),
+    CheckConstraint(
+        "document_count BETWEEN 1 AND 2 AND text_bytes >= 0 AND redaction_count >= 0", name="counts_bounded"
+    ),
+    CheckConstraint("(status = 'STARTED') = (finished_at IS NULL)", name="finished_when_not_started"),
+    CheckConstraint(
+        "(status IN ('FAILED', 'OUTCOME_UNKNOWN')) = (error_code IS NOT NULL)", name="error_code_when_not_ok"
+    ),
+)
+
+#: The private, grounded comparison a disclosure produced. Stored evidence is the projection's own text.
+document_answers = Table(
+    "document_answers",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=False),
+    Column(
+        "disclosure_id", Uuid(), ForeignKey("document_disclosures.id", ondelete="RESTRICT"), nullable=False
+    ),
+    Column("classification", String(24), nullable=False),
+    Column("recipient", String(16), nullable=False),
+    Column("model", String(64), nullable=False),
+    Column("kind", String(16), nullable=False),
+    Column("summary", String(800), nullable=True),
+    Column("reason", String(24), nullable=True),
+    Column("findings", JSONB(), nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("disclosure_id", name="uq_document_answers_disclosure_id"),
+    CheckConstraint("classification = 'document_private'", name="classification"),
+    CheckConstraint("kind IN ('comparison', 'cannot_compare')", name="kind"),
+    CheckConstraint("jsonb_typeof(findings) = 'array'", name="findings_is_array"),
+    CheckConstraint(
+        "(kind = 'comparison') = (summary IS NOT NULL) AND (kind = 'cannot_compare') = (reason IS NOT NULL)",
+        name="shape_matches_kind",
     ),
 )

@@ -8,8 +8,9 @@ from fastapi import FastAPI
 
 from app.api.errors import register_error_handlers
 from app.api.routes import router
+from app.api.document_routes import router as document_router
 from app.api.security import RuntimeSecurityMiddleware
-from app.config import Settings
+from app.config import AGENT_ROOT, Settings
 from app.db.engine import create_database_engine, ping_database
 from app.db.migrations import verify_schema_is_current
 from app.browser.managed import ManagedBrowserWorker
@@ -30,6 +31,7 @@ from app.services.desktop_actions import DesktopActionService
 from app.services.desktop_disclosure import DesktopDisclosureService
 from app.services.desktop_planning import DesktopPlanningService
 from app.services.desktop_vision import DesktopVisionService
+from app.services.documents import DocumentService
 from app.services.windows_job import runtime_job_is_active
 from app.services.browser_execution import (
     BrowserExecutionService,
@@ -312,6 +314,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     desktop=app.state.desktop_service,
                     registry=AppRegistry.from_config(resolved.desktop_registered_apps),
                 )
+                # Milestone 10 S1: approved documents. Reads only; a disclosure a dead runtime left
+                # STARTED is OUTCOME_UNKNOWN and is never repeated; expired extracted text is purged.
+                app.state.document_service = DocumentService(
+                    engine,
+                    grant_ttl_seconds=resolved.document_disclosure_ttl_seconds,
+                    # Lumi-owned trees can never be (or contain) an approved root (S1 review finding 1).
+                    forbidden_roots=tuple(
+                        path for path in (str(AGENT_ROOT), resolved.browser_profile_root) if path
+                    ),
+                )
+                await app.state.document_service.recover_started()
+                await app.state.document_service.sweep_expired()
                 # A research session belongs to the process that created it.
                 # Sessions a dead runtime left open describe browser contexts
                 # that no longer exist, so every semantic ref they issued has
@@ -374,4 +388,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.add_middleware(RuntimeSecurityMiddleware, token=resolved.runtime_token)
     register_error_handlers(app)
     app.include_router(router)
+    app.include_router(document_router)
     return app

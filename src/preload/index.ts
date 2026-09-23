@@ -181,7 +181,29 @@ const agentApi: AgentApi = {
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.grantDesktopVisionDisclosure, taskId, grantId, expectedRevision),
   declineDesktopVisionDisclosure: (taskId: string, grantId: string, expectedRevision: number) =>
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineDesktopVisionDisclosure, taskId, grantId, expectedRevision),
-  runDesktopVisionDisclosure: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.runDesktopVisionDisclosure, taskId)
+  runDesktopVisionDisclosure: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.runDesktopVisionDisclosure, taskId),
+  // Milestone 10 S1: M10 file roots and approved documents. Ids, revisions, labels, booleans and a
+  // typed purpose; never a path. `addFileRoot` makes main open a native folder dialog.
+  listFileRoots: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.listFileRoots),
+  addFileRoot: (label: string, canRead: boolean, canCreate: boolean) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.addFileRoot, label, canRead, canCreate),
+  revokeFileRoot: (rootId: string, expectedRevision: number) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.revokeFileRoot, rootId, expectedRevision),
+  listFileRootFiles: (rootId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.listFileRootFiles, rootId),
+  createDocumentTask: (objective: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.createDocumentTask, objective),
+  getDocumentTask: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getDocumentTask, taskId),
+  addDocumentFromRoot: (taskId: string, rootId: string, relativePath: string) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.addDocumentFromRoot, taskId, rootId, relativePath),
+  addDroppedDocument: (taskId: string, droppedId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.addDroppedDocument, taskId, droppedId),
+  extractDocument: (taskId: string, fileId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.extractDocument, taskId, fileId),
+  compareDocumentsLocally: (taskId: string, firstDocumentId: string, secondDocumentId: string) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.compareDocumentsLocally, taskId, firstDocumentId, secondDocumentId),
+  createDocumentDisclosure: (taskId: string, documentIds: string[], purpose: string) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.createDocumentDisclosure, taskId, documentIds, purpose),
+  grantDocumentDisclosure: (taskId: string, grantId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.grantDocumentDisclosure, taskId, grantId, expectedRevision),
+  declineDocumentDisclosure: (taskId: string, grantId: string, expectedRevision: number) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.declineDocumentDisclosure, taskId, grantId, expectedRevision),
+  runDocumentDisclosure: (taskId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.runDocumentDisclosure, taskId)
 }
 
 // The Gemini Live relay: fixed channels, closed message kinds, validated in

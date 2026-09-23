@@ -52,7 +52,12 @@ export const MODEL_TASK_CLASSES = [
    * failover, and the ONE class in the whole router allowed to carry an image: text disclosure
    * authority (S2/S4) never extends to this, and a fresh image needs a fresh, separate approval.
    */
-  'desktop_vision'
+  'desktop_vision',
+  /**
+   * Milestone 10 S1: compare up to two approved local documents from the exact, redacted excerpts a
+   * trusted card named. Private, one recipient, no failover, no image, closed grounded output.
+   */
+  'document_compare'
 ] as const
 export type ModelTaskClass = typeof MODEL_TASK_CLASSES[number]
 

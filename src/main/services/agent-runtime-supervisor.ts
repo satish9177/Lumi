@@ -197,7 +197,19 @@ const ALLOWED_ROUTES: ReadonlyArray<{ method: RuntimeMethod; pattern: RegExp }> 
   { method: 'POST', pattern: /^\/desktop\/captures$/ },
   { method: 'GET', pattern: new RegExp(`^/desktop/captures/${UUID_PART}$`) },
   { method: 'POST', pattern: new RegExp(`^/desktop/captures/${UUID_PART}/(grant|revoke|claim|disclosure)$`) },
-  { method: 'POST', pattern: new RegExp(`^/desktop/captures/${UUID_PART}/disclosure/(grant|revoke|claim|result)$`) }
+  { method: 'POST', pattern: new RegExp(`^/desktop/captures/${UUID_PART}/disclosure/(grant|revoke|claim|result)$`) },
+  // Milestone 10 S1: M10 file roots and approved documents. Read-only file authority: no route here
+  // writes, copies, moves, renames or deletes a file. `POST /file-roots` carries the folder a NATIVE
+  // dialog in main returned; `dropped-files` carries the path main's own dropped-file store resolved.
+  { method: 'GET', pattern: /^\/file-roots$/ },
+  { method: 'POST', pattern: /^\/file-roots$/ },
+  { method: 'POST', pattern: new RegExp(`^/file-roots/${UUID_PART}/revoke$`) },
+  { method: 'GET', pattern: new RegExp(`^/file-roots/${UUID_PART}/files$`) },
+  { method: 'POST', pattern: /^\/document-tasks$/ },
+  { method: 'GET', pattern: /^\/document-tasks\/latest$/ },
+  { method: 'GET', pattern: new RegExp(`^/document-tasks/${UUID_PART}$`) },
+  { method: 'POST', pattern: new RegExp(`^/document-tasks/${UUID_PART}/(files|dropped-files|extract|compare|disclosure)$`) },
+  { method: 'POST', pattern: new RegExp(`^/document-tasks/${UUID_PART}/disclosure/(grant|revoke|claim|result)$`) }
 ]
 
 export function isAllowedRuntimeRoute(method: RuntimeMethod, path: string): boolean {

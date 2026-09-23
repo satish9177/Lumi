@@ -60,7 +60,7 @@ export interface ContextInput {
    * its own delimiters, clipped line by line to the remaining budget. Page
    * text cannot forge either delimiter.
    */
-  untrusted?: { label: string; lines: readonly string[]; source?: 'web page' | 'desktop application' }
+  untrusted?: { label: string; lines: readonly string[]; source?: 'web page' | 'desktop application' | 'local document' }
 }
 
 export interface ContextSectionReport {

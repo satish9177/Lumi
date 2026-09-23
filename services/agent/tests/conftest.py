@@ -31,7 +31,7 @@ class _TestEnvironment(BaseSettings):
 
 
 TRUNCATE_ALL = (
-    "TRUNCATE desktop_dispatches, desktop_answers, desktop_disclosures, desktop_action_plans, "
+    "TRUNCATE document_answers, document_disclosures, documents, file_refs, file_roots, desktop_dispatches, desktop_answers, desktop_disclosures, desktop_action_plans, "
     "desktop_vision_disclosures, desktop_captures, desktop_observations, desktop_worker_generations, form_drafts, protected_values, authenticated_answers, authenticated_observations, research_answers, "
     "research_observations, page_observations, browser_dispatches, "
     "research_sessions, step_authorizations, task_grants, login_attempts, browser_profiles, "
@@ -39,6 +39,8 @@ TRUNCATE_ALL = (
     "actions, runtime_generations, task_events, tasks RESTART IDENTITY"
 )
 TEST_RUNTIME_TOKEN = SecretStr("test-runtime-token-with-at-least-32-bytes")
+#: Milestone 10 S1 tables: absent at any revision before `0017`, for migration tests standing there.
+M10_S1_TABLES = ("document_answers", "document_disclosures", "documents", "file_refs", "file_roots")
 
 
 def truncate_all(database_url: str, *, without: tuple[str, ...] = ()) -> None:
@@ -67,6 +69,15 @@ def migrate(database_url: str, revision: str = "head") -> None:
 
 def downgrade(database_url: str, revision: str) -> None:
     command.downgrade(alembic_config(database_url, configure_logging=False), revision)
+
+
+def head_revision() -> str:
+    """The newest migration, so a test standing on an older one need not name today's head."""
+    from alembic.script import ScriptDirectory
+
+    head = ScriptDirectory.from_config(alembic_config("postgresql://unused/unused_test", configure_logging=False)).get_current_head()
+    assert head is not None
+    return head
 
 
 @pytest.fixture(scope="session")

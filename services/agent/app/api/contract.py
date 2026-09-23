@@ -152,6 +152,9 @@ ERROR_CODES = (
     # Milestone 9 S5: scoped visual fallback. A refusal, or a state that moved on since the card.
     "desktop_vision_refused",
     "desktop_vision_state_changed",
+    # Milestone 10 S1: approved documents. A refusal, or a state that moved on since it was approved.
+    "document_refused",
+    "document_state_changed",
     "destination_not_allowed",
     "invalid_action_transition",
     "invalid_booking_criteria",

@@ -115,6 +115,10 @@ class Settings(DatabaseSettings):
     desktop_disclosure_ttl_seconds: int = Field(
         default=600, ge=30, le=1_800, validation_alias="LUMI_DESKTOP_DISCLOSURE_TTL_SECONDS"
     )
+    #: Milestone 10 S1: how long one document-disclosure approval stays usable. Single-use either way.
+    document_disclosure_ttl_seconds: int = Field(
+        default=600, ge=30, le=1_800, validation_alias="LUMI_DOCUMENT_DISCLOSURE_TTL_SECONDS"
+    )
     #: Milestone 7a public page inspection. Hosts (`github.com,*.example.org`)
     #: an approved inspection may open, and exact loopback test origins. Both
     #: empty (the default) means there is no public inspection capability.

@@ -15,6 +15,7 @@
  * PendingActionStore can reach the ledger.
  */
 
+import type { AgentDocumentApi } from './document-contracts'
 import type { VoiceTaskCommand, VoiceTaskOutcome } from './voice-task-contracts'
 import type { AgentPreferenceView, ModelDiagnosticView, PreferenceKey } from './model-contracts'
 
@@ -101,6 +102,17 @@ export const TASK_EVENT_TYPES = [
   'task.desktop_vision_candidates_recorded',
   'task.desktop_vision_disclosure_failed',
   'task.desktop_vision_disclosure_outcome_unknown',
+  // Milestone 10 S1: approved documents.
+  'task.document_file_added',
+  'task.document_extracted',
+  'task.document_extraction_refused',
+  'task.document_disclosure_requested',
+  'task.document_disclosure_granted',
+  'task.document_disclosure_revoked',
+  'task.document_disclosure_started',
+  'task.document_comparison_recorded',
+  'task.document_disclosure_failed',
+  'task.document_disclosure_outcome_unknown',
   'action.proposed', 'action.approval_requested',
   'action.approved', 'action.authorized', 'action.rejected', 'action.execution_started', 'action.succeeded',
   'action.failed', 'action.outcome_unknown', 'action.reconciliation_started', 'action.reconciled'
@@ -1361,6 +1373,9 @@ export const AGENT_ERROR_CODES = [
   // changed) or its approval moved on since the card. The message names the specific reason.
   'desktop_refused',
   'desktop_read_stale',
+  // Milestone 10 S1: a document request was refused, or the approved file/document/approval changed.
+  'document_refused',
+  'document_state_changed',
   'request_failed'
 ] as const
 export type AgentErrorCode = typeof AGENT_ERROR_CODES[number]
@@ -1378,7 +1393,7 @@ export type AgentResult<T> = { ok: true; value: T } | { ok: false; error: AgentE
  * and the revision the user reviewed; nothing can carry a doctor, time, price,
  * proposal or digest. There is no generic request, URL or dispatch method.
  */
-export interface AgentApi {
+export interface AgentApi extends AgentDocumentApi {
   getRuntimeStatus: () => Promise<AgentRuntimeView>
   onRuntimeStatus: (listener: (status: AgentRuntimeView) => void) => () => void
   restartRuntime: () => Promise<AgentResult<AgentRuntimeView>>
@@ -1728,7 +1743,23 @@ export const AGENT_IPC_CHANNELS = {
   createDesktopVisionDisclosure: 'lifelens:agent:create-desktop-vision-disclosure',
   grantDesktopVisionDisclosure: 'lifelens:agent:grant-desktop-vision-disclosure',
   declineDesktopVisionDisclosure: 'lifelens:agent:decline-desktop-vision-disclosure',
-  runDesktopVisionDisclosure: 'lifelens:agent:run-desktop-vision-disclosure'
+  runDesktopVisionDisclosure: 'lifelens:agent:run-desktop-vision-disclosure',
+  // Milestone 10 S1: M10 file roots and approved documents. Ids, revisions, labels, booleans and a
+  // typed purpose only; the one channel that involves a folder opens a NATIVE dialog in main.
+  listFileRoots: 'lifelens:agent:list-file-roots',
+  addFileRoot: 'lifelens:agent:add-file-root',
+  revokeFileRoot: 'lifelens:agent:revoke-file-root',
+  listFileRootFiles: 'lifelens:agent:list-file-root-files',
+  createDocumentTask: 'lifelens:agent:create-document-task',
+  getDocumentTask: 'lifelens:agent:get-document-task',
+  addDocumentFromRoot: 'lifelens:agent:add-document-from-root',
+  addDroppedDocument: 'lifelens:agent:add-dropped-document',
+  extractDocument: 'lifelens:agent:extract-document',
+  compareDocumentsLocally: 'lifelens:agent:compare-documents-locally',
+  createDocumentDisclosure: 'lifelens:agent:create-document-disclosure',
+  grantDocumentDisclosure: 'lifelens:agent:grant-document-disclosure',
+  declineDocumentDisclosure: 'lifelens:agent:decline-document-disclosure',
+  runDocumentDisclosure: 'lifelens:agent:run-document-disclosure'
 } as const
 
 /** Actions whose side effect is unresolved or in flight. */

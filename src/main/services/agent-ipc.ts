@@ -21,6 +21,7 @@ import type { DesktopReadController } from './desktop-read-controller'
 import type { DesktopActionController } from './desktop-action-controller'
 import type { DesktopPlanningController } from './desktop-planning-controller'
 import type { DesktopVisionController } from './desktop-vision-controller'
+import type { DocumentController } from './document-controller'
 import type { VoiceTaskController } from './voice-task-controller'
 
 /**
@@ -78,6 +79,13 @@ export interface AgentIpcDependencies {
     | 'createDesktopCapture' | 'getDesktopCapture' | 'grantDesktopCapture' | 'declineDesktopCapture' | 'runDesktopCapture'
     | 'createDesktopVisionDisclosure' | 'grantDesktopVisionDisclosure' | 'declineDesktopVisionDisclosure' | 'runDesktopVisionDisclosure'
   >
+  /** Milestone 10 S1. Absent in builds without the document capability. */
+  documents?: Pick<
+    DocumentController,
+    | 'listFileRoots' | 'addFileRoot' | 'revokeFileRoot' | 'listFileRootFiles' | 'createDocumentTask' | 'getDocumentTask'
+    | 'addDocumentFromRoot' | 'addDroppedDocument' | 'extractDocument' | 'compareDocumentsLocally'
+    | 'createDocumentDisclosure' | 'grantDocumentDisclosure' | 'declineDocumentDisclosure' | 'runDocumentDisclosure'
+  >
 }
 
 const UNAVAILABLE = { code: 'request_failed', message: 'That is not available in this build.' } as const
@@ -97,7 +105,7 @@ function routeWithoutInterpreter(request: unknown): TypedRequestRoute {
 
 export function registerAgentIpc({
   ipcMain, assertTrustedSender, controller, voice, runtimeStatus, restartRuntime, text, memory, diagnostics,
-  browserProfiles, desktopRead, desktopActions, desktopPlanning, desktopVision
+  browserProfiles, desktopRead, desktopActions, desktopPlanning, desktopVision, documents
 }: AgentIpcDependencies): void {
   const handle = (channel: string, listener: (...args: unknown[]) => unknown): void => {
     ipcMain.handle(channel, (event, ...args) => {
@@ -298,4 +306,28 @@ export function registerAgentIpc({
     desktopVision ? desktopVision.declineDesktopVisionDisclosure(taskId, grantId, revision) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
   handle(AGENT_IPC_CHANNELS.runDesktopVisionDisclosure, (taskId) =>
     desktopVision ? desktopVision.runDesktopVisionDisclosure(taskId) : Promise.resolve({ ok: false, error: UNAVAILABLE }))
+  // Milestone 10 S1: M10 file roots and approved documents. Fourteen fixed channels, each checking the
+  // sender first. None takes a path: a folder comes from a native dialog in main, a dropped file by its
+  // opaque id, a root file by a root id plus the root-relative name the listing showed. Not reachable
+  // from voice (`DocumentController` is not a member of the voice backend).
+  const noDocuments = (): Promise<{ ok: false; error: typeof UNAVAILABLE }> => Promise.resolve({ ok: false, error: UNAVAILABLE })
+  handle(AGENT_IPC_CHANNELS.listFileRoots, () => documents ? documents.listFileRoots() : Promise.resolve({ ok: true, value: [] }))
+  handle(AGENT_IPC_CHANNELS.addFileRoot, (label, canRead, canCreate) => documents ? documents.addFileRoot(label, canRead, canCreate) : noDocuments())
+  handle(AGENT_IPC_CHANNELS.revokeFileRoot, (rootId, revision) => documents ? documents.revokeFileRoot(rootId, revision) : noDocuments())
+  handle(AGENT_IPC_CHANNELS.listFileRootFiles, (rootId) => documents ? documents.listFileRootFiles(rootId) : noDocuments())
+  handle(AGENT_IPC_CHANNELS.createDocumentTask, (objective) => documents ? documents.createDocumentTask(objective) : noDocuments())
+  handle(AGENT_IPC_CHANNELS.getDocumentTask, (taskId) => documents ? documents.getDocumentTask(taskId) : noDocuments())
+  handle(AGENT_IPC_CHANNELS.addDocumentFromRoot, (taskId, rootId, relativePath) =>
+    documents ? documents.addDocumentFromRoot(taskId, rootId, relativePath) : noDocuments())
+  handle(AGENT_IPC_CHANNELS.addDroppedDocument, (taskId, droppedId) => documents ? documents.addDroppedDocument(taskId, droppedId) : noDocuments())
+  handle(AGENT_IPC_CHANNELS.extractDocument, (taskId, fileId) => documents ? documents.extractDocument(taskId, fileId) : noDocuments())
+  handle(AGENT_IPC_CHANNELS.compareDocumentsLocally, (taskId, first, second) =>
+    documents ? documents.compareDocumentsLocally(taskId, first, second) : noDocuments())
+  handle(AGENT_IPC_CHANNELS.createDocumentDisclosure, (taskId, documentIds, purpose) =>
+    documents ? documents.createDocumentDisclosure(taskId, documentIds, purpose) : noDocuments())
+  handle(AGENT_IPC_CHANNELS.grantDocumentDisclosure, (taskId, grantId, revision) =>
+    documents ? documents.grantDocumentDisclosure(taskId, grantId, revision) : noDocuments())
+  handle(AGENT_IPC_CHANNELS.declineDocumentDisclosure, (taskId, grantId, revision) =>
+    documents ? documents.declineDocumentDisclosure(taskId, grantId, revision) : noDocuments())
+  handle(AGENT_IPC_CHANNELS.runDocumentDisclosure, (taskId) => documents ? documents.runDocumentDisclosure(taskId) : noDocuments())
 }

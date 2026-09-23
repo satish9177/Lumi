@@ -76,6 +76,8 @@ import { DesktopPlanner } from './agent/desktop-planner'
 import { DesktopPlanningController } from './services/desktop-planning-controller'
 import { DesktopVisionReasoner } from './agent/desktop-vision'
 import { DesktopVisionController } from './services/desktop-vision-controller'
+import { DocumentController } from './services/document-controller'
+import { DocumentComparer } from './agent/document-comparer'
 import { LocalOcrEngine } from './vision/ocr-engine'
 import { extrasLanguageDirectory, isExtrasPackInstalled } from './vision/model-pack'
 import { DesktopActionController } from './services/desktop-action-controller'
@@ -1232,6 +1234,41 @@ app.whenReady().then(async () => {
       ? agentRuntime.request(method, path, body, timeoutMs)
       : Promise.reject(new RuntimeUnavailableError())
   }, modelRouter ? new DesktopVisionReasoner(modelRouter) : undefined, () => desktopOcrEngine)
+  // Milestone 10 S1: M10 file roots and approved documents. The folder dialog is opened HERE, in main;
+  // the renderer never supplies or sees a path. A dropped file is resolved from main's own store.
+  const documents = new DocumentController({
+    runtime: {
+      request: (method, path, body, timeoutMs) => agentRuntime
+        ? agentRuntime.request(method, path, body, timeoutMs)
+        : Promise.reject(new RuntimeUnavailableError())
+    },
+    comparer: modelRouter ? new DocumentComparer(modelRouter) : undefined,
+    chooseFolder: async ({ label, canRead, canCreate }) => {
+      if (!mainWindow) return undefined
+      const selection = await dialog.showOpenDialog(mainWindow, {
+        title: 'Choose a folder for Lumi’s file access',
+        buttonLabel: 'Choose this folder',
+        properties: ['openDirectory']
+      })
+      const folder = selection.canceled ? undefined : selection.filePaths[0]
+      if (!folder) return undefined
+      // A main-owned confirmation naming exactly what is being granted; the renderer's checkboxes alone
+      // are never the authority.
+      const allowed = [canRead ? '• read documents you choose from it' : undefined, canCreate ? '• save new downloads you approve into it' : undefined]
+        .filter(Boolean).join('\n')
+      const answer = await dialog.showMessageBox(mainWindow, {
+        type: 'question',
+        buttons: ['Allow', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        title: 'Lumi file access',
+        message: `Give Lumi access to “${basename(folder) || folder}” as “${label}”?`,
+        detail: `Lumi may:\n${allowed}\n\nLumi can never change, rename or delete files there. You can remove this access at any time.`
+      })
+      return answer.response === 0 ? folder : undefined
+    },
+    droppedFiles
+  })
   // Milestone 8a S2: screen capture is refused from this process's first
   // instruction and stays refused until durable takeover state has been read.
   // A main-process restart during a live takeover therefore cannot produce a
@@ -1277,6 +1314,7 @@ app.whenReady().then(async () => {
     desktopActions,
     desktopPlanning,
     desktopVision,
+    documents,
     diagnostics: () => diagnosticsVisible ? diagnostics.list() : [],
     runtimeStatus: () => agentRuntimeView(),
     restartRuntime: async () => {

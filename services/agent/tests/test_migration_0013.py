@@ -13,7 +13,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from tests.conftest import downgrade, migrate, truncate_all
+from tests.conftest import M10_S1_TABLES, head_revision, downgrade, migrate, truncate_all
 
 NEW_TABLES = ("desktop_disclosures", "desktop_answers")
 DIGEST = "a" * 64
@@ -127,7 +127,7 @@ def test_migration_0013_adds_exactly_the_disclosure_tables_and_downgrades_cleanl
     truncate_all(url)
     try:
         # ---- clean at head ----
-        assert revision(url) == "0016"  # S3/S4/S5 sit on top; this test pins 0013 by stepping down to it
+        assert revision(url) == head_revision()  # later slices sit on top; this test pins 0013 by stepping down to it
         downgrade(url, "0013")
         assert revision(url) == "0013"
         assert all(exists(url, table) for table in NEW_TABLES)
@@ -188,7 +188,10 @@ def test_migration_0013_adds_exactly_the_disclosure_tables_and_downgrades_cleanl
         # ---- with no desktop grant left, downgrade removes exactly the two tables and restores the kinds ----
         truncate_all(
             url,
-            without=("desktop_dispatches", "desktop_action_plans", "desktop_vision_disclosures", "desktop_captures"),
+            without=(
+                "desktop_dispatches", "desktop_action_plans", "desktop_vision_disclosures", "desktop_captures",
+                *M10_S1_TABLES,
+            ),
         )
         downgrade(url, "0012")
         assert revision(url) == "0012" and not any(exists(url, table) for table in NEW_TABLES)
@@ -204,4 +207,4 @@ def test_migration_0013_adds_exactly_the_disclosure_tables_and_downgrades_cleanl
     finally:
         migrate(url)
         truncate_all(url)
-    assert revision(url) == "0016"
+    assert revision(url) == head_revision()

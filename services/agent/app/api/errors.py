@@ -19,6 +19,8 @@ from app.domain.browser_profile import ProfileRefusal
 from app.domain.login_takeover import TakeoverRefusal
 from app.domain.research import ResearchRefusal
 from app.domain.authenticated import AuthenticatedRefusal
+from app.domain.documents import STATE_CODES as DOCUMENT_STATE_CODES
+from app.domain.documents import DocumentRefusal
 from app.domain.desktop_disclosure import STATE_CODES as DESKTOP_DISCLOSURE_STATE_CODES
 from app.domain.desktop_disclosure import DesktopDisclosureRefusal
 from app.domain.desktop_planning import STATE_CODES as DESKTOP_PLAN_STATE_CODES
@@ -610,6 +612,22 @@ def register_error_handlers(app: FastAPI) -> None:
         )
 
     app.add_exception_handler(DesktopVisionRefusal, desktop_vision_refused)
+
+    # --- Milestone 10 S1 approved documents ------------------------------------------
+    # Codes only -- never a path, a file name, a label, document text, a purpose or a quote.
+    async def document_refused(_: Request, exc: Exception) -> JSONResponse:
+        assert isinstance(exc, DocumentRefusal)
+        stale = exc.code in DOCUMENT_STATE_CODES
+        return _error(
+            status.HTTP_409_CONFLICT if stale else status.HTTP_422_UNPROCESSABLE_CONTENT,
+            ErrorDetail(
+                code="document_state_changed" if stale else "document_refused",
+                message="That document is no longer available as approved." if stale else "That document request was refused.",
+                reason=exc.code,
+            ),
+        )
+
+    app.add_exception_handler(DocumentRefusal, document_refused)
     app.add_exception_handler(
         ProtectedValueRefusal,
         _reasoned(
