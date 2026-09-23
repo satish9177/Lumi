@@ -297,7 +297,9 @@ def test_a_recovered_browser_action_cannot_be_executed_again(
                 current = ok(api.get(f"{base_url}/actions/{action_id}", timeout=30))
 
         assert retry_browser.status_code == 409
-        assert retry_attempt.status_code == 409
+        # Milestone 10 S5: the generic attempt route refuses a registered effect tool outright.
+        assert retry_attempt.status_code == 422
+        assert retry_attempt.json()["error"]["code"] == "effect_route_refused"
         assert reapprove.status_code == 409
         assert current["status"] == "OUTCOME_UNKNOWN"
         assert len(current["attempts"]) == 1

@@ -37,7 +37,7 @@ from app.desktop.protocol import (
     SetValueResponse,
 )
 from app.desktop.registry import AppRegistry, RegisteredApp
-from app.domain.action_status import ActionStatus
+from app.domain.action_status import ActionStatus, AttemptOutcome, RiskTier
 from app.repositories.desktop import DesktopRepository
 from app.services.actions import ActionService
 from app.services.desktop import DesktopService
@@ -204,11 +204,13 @@ async def build_plan(
     *,
     result: dict[str, Any],
     values: list[tuple[str, str]] | None = None,
+    recipient: Any = "openai",
+    model: str = "gpt-test",
 ) -> uuid.UUID:
     """Drive `DesktopPlanningService` through create -> confirm -> claim -> record_result, exactly as
     Electron main would after ONE (here, hand-supplied) provider attempt. Returns the plan id."""
     created = await planning.create(
-        objective="Fill in the field", recipient="openai", model="gpt-test",
+        objective="Fill in the field", recipient=recipient, model=model,
         worker_generation=desktop.worker_generation, surface_ref="s1", surface_epoch=1,
         values=values or [],
     )
@@ -1123,3 +1125,68 @@ async def build_ungrounded_plan(
     recorded = await planning.record_result(created.task_id, plan_id=context.plan_id, result=result, failure=None)
     assert recorded.phase == "failed"
     return None
+
+
+# ---- Milestone 10 S5: desktop mutations join the shared effect lock ----------------------------------------
+
+
+async def _unknown_booking(action_service: ActionService, task_service: TaskService) -> uuid.UUID:
+    task = await task_service.create_task({"type": "appointment_booking"})
+    view = await action_service.propose_exclusive_action(
+        task.id, tool_name="commit_booking", risk_tier=RiskTier.R2,
+        proposal={"site": "appointment_fixture", "slot_id": "slot-a-1830", "doctor": "Dr A",
+                  "time": "2026-09-19T18:30:00+05:30", "price": 800, "currency": "INR"},
+    )
+    view = await action_service.request_approval(view.action.id)
+    view = await action_service.approve_action(view.action.id)
+    await action_service.start_attempt(view.action.id)
+    await action_service.finish_attempt(view.action.id, outcome=AttemptOutcome.OUTCOME_UNKNOWN, error_code="lost_response")
+    return view.action.id
+
+
+@pytest.mark.parametrize(("recipient", "model"), [("openai", "gpt-test"), ("gemini", "gemini-other-model")])
+async def test_an_unknown_booking_blocks_a_plan_derived_mutation_whatever_provider_planned_it(
+    service: DesktopActionService, planning: DesktopPlanningService, desktop: FakeEffectDesktop, engine: AsyncEngine,
+    action_service: ActionService, task_service: TaskService, recipient: str, model: str,
+) -> None:
+    from app.domain.effects import EffectLockedError
+
+    booking = await _unknown_booking(action_service, task_service)
+    plan_id = await build_plan(
+        planning, desktop,
+        result={"schema_version": 1, "action": "set_value", "control_ref": "u4", "value_ref": "v1"},
+        values=[("greeting", "hi")], recipient=recipient, model=model,
+    )
+    view = await service.propose_from_plan(plan_id)
+    with pytest.raises(EffectLockedError) as locked:
+        await service.approve(view.action_id, expected_revision=view.revision)
+    assert locked.value.blocking_action_id == str(booking)
+    assert desktop.calls == [], "the worker must never be asked"
+    assert (await service.get(view.action_id)).status is ActionStatus.WAITING_APPROVAL
+    assert await scalar(engine, "SELECT count(*) FROM desktop_dispatches") == 0
+
+
+async def test_a_mutation_is_keyed_on_the_ledger_and_an_unknown_one_blocks_the_next_across_tasks(
+    service: DesktopActionService, planning: DesktopPlanningService, desktop: FakeEffectDesktop, engine: AsyncEngine,
+    action_service: ActionService, task_service: TaskService,
+) -> None:
+    from app.domain.effects import EffectLockedError
+
+    plan_id = await build_plan(planning, desktop, result={"schema_version": 1, "action": "invoke", "control_ref": "u7"})
+    view = await service.propose_from_plan(plan_id)
+    await service.approve(view.action_id, expected_revision=view.revision)
+    keys = await rows(engine, "SELECT effect_key, effect_kind FROM action_effect_keys WHERE action_id = :a", a=view.action_id)
+    assert [(row.effect_key, row.effect_kind) for row in keys] == [("desktop:mutation:all", "desktop_mutation")]
+    # Force it back to an unknown outcome and bypass M9's own desktop-only check: the ledger lock alone
+    # still refuses a second mutation, from a brand-new task.
+    async with engine.begin() as connection:
+        await connection.execute(text("UPDATE actions SET status = 'OUTCOME_UNKNOWN', revision = revision + 1 WHERE id = :a"), {"a": view.action_id})
+    card = await task_service.create_task({"type": "desktop_action", "operation": "set_control_value"})
+    other = await action_service.propose_exclusive_action(card.id, tool_name="DESKTOP_SELECT", risk_tier=RiskTier.R2, proposal={"x": 1})
+    other = await action_service.request_approval(other.action.id)
+
+    async def no_guard(_connection: Any, _action: Any) -> None:
+        return None
+
+    with pytest.raises(EffectLockedError):
+        await action_service.begin_exact_execution(other.action.id, expected_revision=other.action.revision, guard=no_guard)

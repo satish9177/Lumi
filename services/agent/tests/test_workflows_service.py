@@ -497,3 +497,48 @@ async def test_review_6_stop_revokes_the_form_steps_account_reading(flow: Flow) 
     assert await flow.sql(
         "SELECT status FROM task_grants WHERE task_id = :t AND kind = 'authenticated_read'", t=task_id
     ) == "REVOKED"
+
+
+# ---- Milestone 10 S5: the workflow is not a way around the shared effect lock --------------------------------
+
+
+async def test_an_unknown_booking_elsewhere_blocks_the_workflows_download_and_placement(flow: Flow) -> None:
+    from app.domain.action_status import AttemptOutcome, RiskTier
+    from app.domain.transfers import TransferRefusal
+    from app.services.tasks import TaskService
+
+    actions = flow.rig.actions
+    # A download that already reached the quarantine, in one workflow...
+    view = await flow.workflows.create(objective="Prepare my application")
+    view = await flow.workflows.start_download(view.workflow.id, url=URL, root_id=await flow.root(), file_name="details.pdf", intent="Details")
+    quarantined = next(step.task_id for step in view.steps if step.role == "download")
+    transfer = await flow.transfers.describe(quarantined)
+    assert transfer.grant is not None
+    await flow.transfers.confirm(quarantined, grant_id=transfer.grant.id, expected_revision=transfer.grant.revision)
+    await flow.transfers.download(quarantined)
+    # ...and a fresh one in another workflow.
+    other = await flow.workflows.create(objective="Another application")
+    other = await flow.workflows.start_download(other.workflow.id, url=f"{ORIGIN}/files/other.pdf", root_id=await flow.root(), file_name="other.pdf", intent="Other")
+    fresh = next(step.task_id for step in other.steps if step.role == "download")
+    fresh_grant = (await flow.transfers.describe(fresh)).grant
+    assert fresh_grant is not None
+    await flow.transfers.confirm(fresh, grant_id=fresh_grant.id, expected_revision=fresh_grant.revision)
+
+    # An unrelated booking task's outcome becomes unknown.
+    task = await TaskService(flow.engine).create_task({"type": "appointment_booking"})
+    booking = await actions.propose_exclusive_action(
+        task.id, tool_name="commit_booking", risk_tier=RiskTier.R2,
+        proposal={"site": "appointment_fixture", "slot_id": "slot-a-1830", "doctor": "Dr A",
+                  "time": "2026-09-19T18:30:00+05:30", "price": 800, "currency": "INR"},
+    )
+    booking = await actions.request_approval(booking.action.id)
+    booking = await actions.approve_action(booking.action.id)
+    await actions.start_attempt(booking.action.id)
+    await actions.finish_attempt(booking.action.id, outcome=AttemptOutcome.OUTCOME_UNKNOWN, error_code="lost_response")
+
+    for step in (flow.transfers.download(fresh), flow.transfers.place(quarantined)):
+        with pytest.raises(TransferRefusal) as refused:
+            await step
+        assert refused.value.code == "effect_locked"
+    assert flow.browser.dispatches == 1
+    assert not (flow.folder / "details.pdf").exists() and not (flow.folder / "other.pdf").exists()

@@ -379,6 +379,16 @@ for (const file of [
 ]) {
   if (!existsSync(join(agentOut, ...file))) throw new Error(`${file.join('/')} is missing from the runtime bundle.`)
 }
+// Milestone 10 S5: the closed effect registry and the startup key backfill. No migration and no new module;
+// prove the bundle carries the S5 versions of the two files rather than older copies.
+for (const [file, marker] of [
+  [['app', 'domain', 'effects.py'], 'EFFECT_TOOLS'],
+  [['app', 'services', 'recovery.py'], 'backfill_effect_keys']
+]) {
+  if (!readFileSync(join(agentOut, ...file), 'utf8').includes(marker)) {
+    throw new Error(`${file.join('/')} in the runtime bundle predates the M10 S5 effect registry.`)
+  }
+}
 
 // 5. Byte-compile once, so an installed copy never needs to write beside itself.
 step('byte-compiling')

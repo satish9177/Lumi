@@ -454,34 +454,40 @@ def booking_proposal(slot_id: str, doctor: str, time_iso: str, price: int) -> di
 def drive_to_approved(
     http: RuntimeHttp, proposal: dict[str, Any], *, idempotency_key: str = "booking-001"
 ) -> dict[str, Any]:
-    """Task -> proposal -> approval request -> approval. Stops short of executing."""
+    """Task -> the reviewed booking preparation -> approval. Stops short of executing.
+
+    Milestone 10 S5: the generic `POST /tasks/{id}/actions` route can no longer mint a booking, so this goes
+    through `/booking/prepare` exactly as the desktop does (the worker observes the slot, the runtime builds
+    the proposal and opens the approval request). `proposal` names the slot and the values the fixture is
+    expected to quote for it; `idempotency_key` is kept for callers but no longer used.
+    """
+    del idempotency_key
     base_url = http.base_url
     task = ok(
         http.post(
             f"{base_url}/tasks",
-            json={"request": {"type": "appointment_booking", "text": "Book Saturday evening"}},
-            timeout=30,
-        )
-    )
-    action = ok(
-        http.post(
-            f"{base_url}/tasks/{task['id']}/actions",
             json={
-                "idempotency_key": idempotency_key,
-                "tool_name": "commit_booking",
-                "risk_tier": "R2",
-                "proposal": proposal,
+                "request": {
+                    "type": "appointment_booking",
+                    "text": "Book Saturday evening",
+                    "specialty": "Dermatology",
+                    "day": "Saturday",
+                }
             },
             timeout=30,
         )
     )
     action = ok(
         http.post(
-            f"{base_url}/actions/{action['id']}/approval-request",
-            json={"expected_revision": action["revision"]},
-            timeout=30,
+            f"{base_url}/tasks/{task['id']}/booking/prepare",
+            json={"slot_id": proposal["slot_id"]},
+            timeout=120,
         )
     )
+    assert action["status"] == "WAITING_APPROVAL"
+    assert action["tool_name"] == "commit_booking"
+    for field in ("site", "slot_id", "doctor", "price", "currency"):
+        assert action["proposal"][field] == proposal[field], field
     action = ok(
         http.post(
             f"{base_url}/actions/{action['id']}/approve",

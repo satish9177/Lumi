@@ -157,6 +157,10 @@ ERROR_CODES = (
     "document_state_changed",
     # Milestone 10 S2: controlled downloads, and the cross-executor effect lock.
     "effect_locked",
+    # Milestone 10 S5: the closed effect registry and bounded reconciliation.
+    "effect_route_refused",
+    "effect_keys_invalid",
+    "reconciliation_limited",
     "transfer_refused",
     "transfer_state_changed",
     "project_refused",

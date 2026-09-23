@@ -77,6 +77,9 @@ from app.domain.page_observation import PAGE_INSPECTION_TASK_TYPE
 from app.domain.projects import TOOL_PROJECT_START, ProjectRefusal
 from app.domain.transfers import TOOL_DOWNLOAD, TOOL_PLACE, TransferRefusal
 from app.domain.workflows import ADOPT_TOOL, WorkflowRefusal
+from app.domain.effects import EffectRouteRefusal, effect_tool, is_effect_tool_name
+from app.domain.authenticated import AUTHENTICATED_TOOL_NAMES
+from app.domain.research import TOOL_NAMES as RESEARCH_TOOL_NAME_MAP
 from app.domain.public_url import UrlPolicyError
 from app.domain.authenticated import (
     AUTHENTICATED_READ_TASK_TYPE,
@@ -320,6 +323,37 @@ def get_action_service(request: Request) -> ActionService:
 ActionServiceDep = Annotated[ActionService, Depends(get_action_service)]
 
 
+#: Milestone 10 S5 (review finding 4). Tasks a reviewed controller creates and drives by (task, idempotency
+#: key). The generic route adds nothing to them, so it can never squat a step's key.
+_CONTROLLER_TASK_TYPES = frozenset(
+    {
+        "desktop_action", "desktop_read", "desktop_action_planning", "desktop_vision",
+        "document_task", "file_transfer_task", "project_run_task",
+    }
+)
+
+#: Milestone 10 S5. Tool names a reviewed controller owns that are NOT effect tools (read-only work). The
+#: generic proposal route refuses these too, so every action it can create is inert: every executor selects
+#: by exact persisted tool name, and no executor recognises a name that is not on one of these lists.
+_CONTROLLED_READ_TOOLS = frozenset(
+    {"lookup_booking", "inspect_public_page", *AUTHENTICATED_TOOL_NAMES, *RESEARCH_TOOL_NAME_MAP.values()}
+)
+
+
+async def _refuse_effect_tool(service: ActionService, action_id: uuid.UUID) -> None:
+    """Milestone 10 S5: the generic attempt, finish and reconciliation routes never move an effect tool.
+
+    Each effect exists only inside its controller: a booking's attempt is claimed by `browser-execution`
+    (worker bound, dispatch recorded, outcome classified honestly) and it is settled only by the read-only
+    `browser-reconciliation` lookup. A generic attempt would start an effect around all of that, and a
+    generic "reconciliation finished: FAILED" would turn an unknown booking into a claimed failure -- the
+    exact way a non-authoritative absence must never become a safe retry.
+    """
+    tool = (await service.get_action(action_id)).action.tool_name
+    if effect_tool(tool) is not None or is_effect_tool_name(tool):
+        raise EffectRouteRefusal(tool)
+
+
 async def _refuse_disclosure_tool(service: ActionService, action_id: uuid.UUID) -> None:
     """The generic action routes can never move a form-disclosure approval.
 
@@ -360,6 +394,7 @@ async def propose_action(
     task_id: uuid.UUID,
     body: ProposeActionBody,
     service: ActionServiceDep,
+    tasks: TaskServiceDep,
     response: Response,
 ) -> ActionResponse:
     """Record a proposal. Replaying the same idempotency key returns `200`."""
@@ -378,6 +413,15 @@ async def propose_action(
     if body.tool_name.lower().startswith(("adopt_", "workflow_")):
         # Milestone 10 S4: only `WorkflowService` mints an adoption, from a controller-built, digest-only proposal.
         raise WorkflowRefusal("use_workflow_route")
+    if is_effect_tool_name(body.tool_name):
+        # Milestone 10 S5: no registered effect tool -- a booking above all -- is ever minted here. This was a
+        # same-task bypass of booking exclusivity (a second commit_booking proposed next to an unknown one).
+        raise EffectRouteRefusal(body.tool_name)
+    if body.tool_name.casefold() in _CONTROLLED_READ_TOOLS:
+        # Milestone 10 S5: nor any tool a reviewed controller owns; this route only holds inert actions.
+        raise EffectRouteRefusal(body.tool_name)
+    if (await tasks.get_task(task_id)).request.get("type") in _CONTROLLER_TASK_TYPES:
+        raise EffectRouteRefusal("")
     view, created = await service.propose_action(
         task_id,
         idempotency_key=body.idempotency_key,
@@ -473,6 +517,7 @@ async def start_action_attempt(
     body: Annotated[ExpectedRevisionBody | None, Body()] = None,
 ) -> ActionResponse:
     await _refuse_disclosure_tool(service, action_id)
+    await _refuse_effect_tool(service, action_id)
     view = await service.start_attempt(action_id, expected_revision=_expected_revision(body))
     return ActionResponse.from_view(view)
 
@@ -487,6 +532,7 @@ async def finish_action_attempt(
     action_id: uuid.UUID, body: FinishAttemptBody, service: ActionServiceDep
 ) -> ActionResponse:
     await _refuse_disclosure_tool(service, action_id)
+    await _refuse_effect_tool(service, action_id)
     view = await service.finish_attempt(
         action_id,
         outcome=body.outcome,
@@ -510,6 +556,7 @@ async def begin_action_reconciliation(
 ) -> ActionResponse:
     """Valid only from `OUTCOME_UNKNOWN`. Never starts a second attempt."""
     await _refuse_disclosure_tool(service, action_id)
+    await _refuse_effect_tool(service, action_id)
     view = await service.begin_reconciliation(
         action_id, expected_revision=_expected_revision(body)
     )
@@ -526,6 +573,7 @@ async def finish_action_reconciliation(
     action_id: uuid.UUID, body: FinishReconciliationBody, service: ActionServiceDep
 ) -> ActionResponse:
     await _refuse_disclosure_tool(service, action_id)
+    await _refuse_effect_tool(service, action_id)
     view = await service.finish_reconciliation(
         action_id,
         result=body.result,

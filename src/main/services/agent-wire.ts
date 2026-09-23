@@ -1503,6 +1503,11 @@ const ERROR_MAP: Record<string, { code: AgentError['code']; message: string }> =
   form_prepare_refused: { code: 'form_plan_refused', message: 'Lumi refused that form plan. Nothing was changed.' },
   form_prepare_state_changed: { code: 'form_plan_stale', message: 'Something changed since that plan was made. Nothing was changed; plan the form again.' },
   protected_value_refused: { code: 'invalid_request', message: 'Lumi refused that saved detail.' },
+  // Milestone 10 S5: the shared effect lock and the bounded read-only reconciliation.
+  effect_locked: { code: 'effect_locked', message: 'An earlier action may already have happened and is not checked yet. Check it first; nothing was done.' },
+  reconciliation_limited: { code: 'reconciliation_limited', message: 'Checking again is paused for a while. Nothing changed; try again later.' },
+  effect_route_refused: { code: 'invalid_request', message: 'Lumi refused that request. Nothing was done.' },
+  effect_keys_invalid: { code: 'invalid_request', message: 'Lumi refused that request. Nothing was done.' },
   invalid_request: { code: 'invalid_request', message: 'Lumi refused an invalid request.' }
 }
 

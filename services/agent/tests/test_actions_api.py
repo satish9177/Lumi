@@ -16,7 +16,9 @@ PROPOSAL = {
 }
 PROPOSE = {
     "idempotency_key": "booking-001",
-    "tool_name": "commit_booking",
+    # Milestone 10 S5: the generic routes only ever hold inert actions. A registered effect tool (a booking)
+    # is refused here -- see test_the_generic_routes_refuse_every_registered_effect_tool.
+    "tool_name": "record_note",
     "risk_tier": "R2",
     "proposal": PROPOSAL,
 }

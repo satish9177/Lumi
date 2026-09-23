@@ -1406,6 +1406,8 @@ export const AGENT_ERROR_CODES = [
   'transfer_refused',
   'transfer_state_changed',
   'effect_locked',
+  // Milestone 10 S5: a read-only reconciliation check was paused by its bound (nothing changed).
+  'reconciliation_limited',
   // Milestone 10 S3: a project request was refused (including BLOCKED: missing_dependency), or the
   // recipe/approval moved on since it was reviewed.
   'project_refused',

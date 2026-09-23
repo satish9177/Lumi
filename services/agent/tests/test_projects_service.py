@@ -472,3 +472,94 @@ async def test_a_line_without_newlines_cannot_exhaust_memory(service: ProjectSer
     await service.start(task)
     view = await _until(service, task, {"succeeded", "failed"})
     assert all(len(line) <= 400 for line in view.log_tail)
+
+
+# ---- Milestone 10 S5: project runs in the shared cross-executor lock -----------------------------------------
+
+
+async def _approved_booking(action_service: ActionService, engine: AsyncEngine) -> uuid.UUID:
+    from app.domain.action_status import RiskTier
+    from app.services.tasks import TaskService
+
+    task = await TaskService(engine).create_task({"type": "appointment_booking"})
+    view = await action_service.propose_exclusive_action(
+        task.id, tool_name="commit_booking", risk_tier=RiskTier.R2,
+        proposal={"site": "appointment_fixture", "slot_id": "slot-a-1830", "doctor": "Dr A",
+                  "time": "2026-09-19T18:30:00+05:30", "price": 800, "currency": "INR"},
+    )
+    view = await action_service.request_approval(view.action.id)
+    return (await action_service.approve_action(view.action.id)).action.id
+
+
+async def test_an_unknown_booking_blocks_a_project_start_and_nothing_is_spawned(
+    service: ProjectService, tmp_path: Path, engine: AsyncEngine, action_service: ActionService
+) -> None:
+    from app.domain.action_status import AttemptOutcome
+
+    project = await _project(service, tmp_path / "p")
+    task = await _approved_run(service, await _recipe(service, project, "check"))
+    booking = await _approved_booking(action_service, engine)
+    await action_service.start_attempt(booking)
+    await action_service.finish_attempt(booking, outcome=AttemptOutcome.OUTCOME_UNKNOWN, error_code="lost_response")
+    assert await _code(service.start(task)) == "effect_locked"
+    view = await service.describe(task)
+    assert view.run is not None and view.run.pid is None and view.run.error_code == "effect_locked"
+
+
+async def test_an_uncertain_project_start_blocks_a_booking_until_it_is_reconciled(
+    service: ProjectService, tmp_path: Path, engine: AsyncEngine, action_service: ActionService, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import app.services.projects as projects_module
+    from app.domain.effects import EffectLockedError
+
+    project = await _project(service, tmp_path / "p")
+    task = await _approved_run(service, await _recipe(service, project, "check"))
+
+    def crash(*_: Any, **__: Any) -> Any:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(projects_module, "launch", crash)
+    with pytest.raises(KeyboardInterrupt):
+        await service.start(task)
+    await RecoveryService(engine).recover_unfinished_attempts(uuid.uuid4())
+    booking = await _approved_booking(action_service, engine)
+    with pytest.raises(EffectLockedError):
+        await action_service.start_attempt(booking)
+    # Reconciliation reads evidence only: never resumed -> no project code ran; nothing is started again.
+    assert await service.recover() == 1
+    assert (await service.describe(task)).start_status == "FAILED"
+    assert (await action_service.start_attempt(booking)).action.status.value == "EXECUTING"
+
+
+async def test_a_run_alive_but_unowned_after_a_restart_blocks_everything_and_never_starts_twice(
+    service: ProjectService, tmp_path: Path, engine: AsyncEngine, action_service: ActionService, runtime_generation: RuntimeGeneration,
+) -> None:
+    from app.domain.effects import EffectLockedError
+
+    project = await _project(service, tmp_path / "p")
+    recipe = await _recipe(service, project, "hang", timeout=60)
+    task = await _approved_run(service, recipe)
+    first = await service.start(task)
+    assert first.run is not None and first.run.pid is not None
+    # A "restarted" runtime that cannot own the old job, while its process is (somehow) still alive.
+    fresh = ProjectService(engine, actions=action_service, runtime_generation=runtime_generation.id, grant_ttl_seconds=600,
+                           protected_folders=((), ()), run_root=str(tmp_path / "runs"))
+    try:
+        assert await fresh.recover() == 1
+        view = await fresh.describe(task)
+        assert view.run is not None and view.run.status == "OUTCOME_UNKNOWN"
+        # Global: an unrelated booking is refused...
+        booking = await _approved_booking(action_service, engine)
+        with pytest.raises(EffectLockedError):
+            await action_service.start_attempt(booking)
+        # ...and no second server of this project can start, whatever the UI shows.
+        again = await _approved_run(fresh, recipe)
+        assert await _code(fresh.start(again)) in ("effect_locked", "run_already_active")
+        assert (await fresh.reconcile(task)).run.status == "OUTCOME_UNKNOWN"  # type: ignore[union-attr]
+    finally:
+        await service.shutdown()  # the owning "old runtime" goes away; its job takes the tree with it
+    # (In-process, the owner itself records the end; after a real restart `reconcile` proves it from the pid.)
+    ended = await fresh.describe(task)
+    assert ended.run is not None and ended.run.status in ("STOPPED", "ENDED_WITH_RUNTIME")
+    assert process_is_alive(first.run.pid, first.run.creation_time or 0) is False
+    assert (await action_service.start_attempt(booking)).action.status.value == "EXECUTING"

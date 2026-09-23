@@ -18,7 +18,7 @@ from app.domain.action_status import (
     task_status_for,
 )
 from app.domain.digest import proposal_digest as compute_digest
-from app.domain.effects import EffectKey, EffectLockedError
+from app.domain.effects import GLOBAL_TIER, EffectKey, EffectKeysError, EffectLockedError, resolve_effect_keys
 from app.domain.errors import (
     ActionAlreadyOpenError,
     ActionConcurrencyError,
@@ -437,6 +437,9 @@ class ActionService:
         becomes a no-op instead of a second execution.
         """
         digest = compute_digest(proposal)
+        # Milestone 10 S5: the registry decides the keys (derived from this proposal, or -- for a project
+        # start -- the controller's, checked against the tool's registered kind). Refused before any write.
+        keys = resolve_effect_keys(tool_name, proposal, effect_keys)
         async with self._engine.begin() as connection:
             repository = ActionRepository(connection)
             tasks_repository = TaskRepository(connection)
@@ -463,12 +466,9 @@ class ActionService:
                 return await self._view(connection, existing), False
 
             await self._record_proposed(connection, task, created, scoped=True)
-            if effect_keys:
-                # Milestone 10: the cross-executor lock. Keys are written with the action and checked,
-                # under advisory locks, before any attempt exists. A refusal rolls everything back.
-                locks = EffectLockRepository(connection)
-                await locks.insert_keys(action_id=created.id, keys=effect_keys)
-                await self._require_effect_free(connection, created.id, [key.key for key in effect_keys])
+            # Milestone 10: the cross-executor lock. Keys are written with the action and checked, under
+            # advisory locks, before any attempt exists. A refusal rolls everything back.
+            await self._claim_effect_keys(connection, created, supplied=keys)
             task = await self._reload_task(tasks_repository, task_id)
             authorized = await self._transition(
                 connection,
@@ -513,18 +513,32 @@ class ActionService:
             return await self._view(connection, moved), True
 
     @staticmethod
-    async def _require_effect_free(connection: AsyncConnection, action_id: uuid.UUID, keys: list[str]) -> None:
+    async def _claim_effect_keys(
+        connection: AsyncConnection, action: ActionRecord, *, supplied: tuple[EffectKey, ...] = ()
+    ) -> None:
+        """The cross-executor lock, for EVERY path into `EXECUTING` (Milestone 10 S5).
+
+        Runs inside the caller's transaction, under the owning task's row lock, before any attempt row is
+        written. A registered effect tool always ends up keyed: its keys are resolved by the closed registry
+        from the persisted proposal, written if this action does not hold them yet (an action proposed before
+        S5, or by a controller that proposes before it claims), and must equal any keys it already holds.
+        Then the global lock and the keys (sorted) are taken and any conflicting action refuses the claim.
+        A tool that is not registered holds no keys and is not locked.
+        """
+        keys = resolve_effect_keys(action.tool_name, action.proposal, supplied)
+        if not keys:
+            return
         locks = EffectLockRepository(connection)
-        await locks.lock(keys)
-        conflict = await locks.conflict(action_id=action_id, keys=keys)
+        stored = await locks.stored(action.id)
+        if not stored:
+            await locks.insert_keys(action_id=action.id, keys=keys)
+        elif set(stored) != set(keys):
+            raise EffectKeysError(action.tool_name, "the action holds keys the registry does not derive")
+        names = [key.key for key in keys]
+        await locks.lock(names, global_tier=any(key.kind in GLOBAL_TIER for key in keys))
+        conflict = await locks.conflict(action_id=action.id, keys=names)
         if conflict is not None:
             raise EffectLockedError(str(conflict[0]), reason=conflict[1])
-
-    async def require_effect_free_for(self, connection: AsyncConnection, action_id: uuid.UUID) -> None:
-        """For an already-keyed action about to start another attempt (inside the caller's transaction)."""
-        keys = await EffectLockRepository(connection).keys_for(action_id)
-        if keys:
-            await self._require_effect_free(connection, action_id, keys)
 
     @staticmethod
     async def _reload_task(repository: TaskRepository, task_id: uuid.UUID) -> TaskRecord:
@@ -721,6 +735,9 @@ class ActionService:
                     else "the approval no longer matches this action"
                 )
                 raise ApprovalNotUsableError(action_id, reason)
+            # Milestone 10 S5: a keyed effect (a booking) is refused here, in the claiming transaction, while
+            # any conflicting effect is in flight or unresolved -- the claim above rolls back with it.
+            await self._claim_effect_keys(connection, action)
 
             attempt_number = await repository.next_attempt_number(action_id)
             attempt = await repository.insert_attempt(
@@ -836,6 +853,10 @@ class ActionService:
                 raise ApprovalNotUsableError(action_id, "the approval is for a different proposal")
             if await repository.is_expired(approval.id):
                 raise ApprovalNotUsableError(action_id, "the approval request has expired")
+            if resolve_effect_keys(action.tool_name, action.proposal):
+                # Milestone 10 S5: settling records SUCCEEDED without executing anything. An effect tool's
+                # approval can never be spent that way.
+                raise EffectKeysError(action.tool_name, "an effect tool cannot be settled without executing")
             await guard(connection, action)
 
             approved = await self._transition(
@@ -935,6 +956,9 @@ class ActionService:
             if await repository.is_expired(approval.id):
                 raise ApprovalNotUsableError(action_id, "the approval request has expired")
             await guard(connection, action)
+            # Milestone 10 S5: a keyed effect (a desktop mutation) is refused here, before the approval is
+            # granted or claimed; if it raises, nothing at all is written and the card stays answerable.
+            await self._claim_effect_keys(connection, action)
 
             approved = await self._transition(
                 connection,

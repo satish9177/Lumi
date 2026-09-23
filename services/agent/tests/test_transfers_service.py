@@ -552,3 +552,52 @@ async def test_the_generic_action_routes_can_never_touch_a_transfer_step(
     async with engine.connect() as connection:
         count = (await connection.execute(text("SELECT count(*) FROM actions WHERE task_id = :t"), {"t": task})).scalar_one()
     assert count == 1
+
+
+# ---- Milestone 10 S5: the shared effect lock across executors --------------------------------------------
+
+
+async def _unknown_booking(action_service: ActionService, engine: AsyncEngine) -> uuid.UUID:
+    from app.domain.action_status import RiskTier
+    from app.services.tasks import TaskService
+
+    task = await TaskService(engine).create_task({"type": "appointment_booking"})
+    view = await action_service.propose_exclusive_action(
+        task.id, tool_name="commit_booking", risk_tier=RiskTier.R2,
+        proposal={"site": "appointment_fixture", "slot_id": "slot-a-1830", "doctor": "Dr A",
+                  "time": "2026-09-19T18:30:00+05:30", "price": 800, "currency": "INR"},
+    )
+    view = await action_service.request_approval(view.action.id)
+    view = await action_service.approve_action(view.action.id)
+    await action_service.start_attempt(view.action.id)
+    await action_service.finish_attempt(view.action.id, outcome=AttemptOutcome.OUTCOME_UNKNOWN, error_code="lost_response")
+    return view.action.id
+
+
+async def test_an_unknown_booking_in_another_task_blocks_download_and_placement(
+    service: TransferService, documents: DocumentService, browser: FakeBrowser, folders: dict[str, Path],
+    action_service: ActionService, engine: AsyncEngine,
+) -> None:
+    root_id = await _root(documents, folders["dest"])
+    quarantined = await _approved(service, root_id)
+    assert (await service.download(quarantined)).phase == "quarantined"
+    fresh = await _approved(service, root_id, url=f"{ORIGIN}/files/other.pdf", name="other.pdf")
+    await _unknown_booking(action_service, engine)
+    # The refusal comes from the shared lock (not from anything about the transfer), before any request.
+    assert await _code(service.download(fresh)) == "effect_locked"
+    assert await _code(service.place(quarantined)) == "effect_locked"
+    assert browser.dispatches == 1
+    assert not (folders["dest"] / "resume.pdf").exists() and not (folders["dest"] / "other.pdf").exists()
+
+
+async def test_two_windows_spellings_of_one_file_are_one_destination_across_tasks(
+    service: TransferService, documents: DocumentService, browser: FakeBrowser, folders: dict[str, Path]
+) -> None:
+    root_id = await _root(documents, folders["dest"])
+    browser.mode = "partial"
+    first = await _approved(service, root_id, name="Resume.pdf")
+    await service.download(first)
+    assert (await service.reconcile(first)).phase == "download_unknown"
+    other = await _approved(service, root_id, url=f"{ORIGIN}/files/elsewhere.pdf", name="resume.PDF")
+    assert await _code(service.download(other)) == "effect_locked"
+    assert browser.dispatches == 1

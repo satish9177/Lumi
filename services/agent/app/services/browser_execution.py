@@ -29,7 +29,7 @@ becomes a failure.
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 from pydantic import SecretStr, ValidationError
@@ -55,6 +55,14 @@ from app.browser.protocol import (
 )
 from app.domain.action_status import ActionStatus, AttemptOutcome
 from app.domain.booking import booking_reference, parse_booking_proposal
+from app.domain.effects import (
+    RECONCILIATION_REGISTRY,
+    AbsenceAuthority,
+    EffectKind,
+    EffectLockedError,
+    ReconciliationLimitedError,
+    lookup_allowance,
+)
 from app.domain.browser_profile import BrowserVersions
 from app.domain.browser_dispatch import (
     BrowserEffect,
@@ -76,6 +84,7 @@ from app.domain.sites import site_trust
 from app.repositories.actions import ActionRepository, AttemptRecord
 from app.repositories.browser import BrowserRepository
 from app.repositories.observations import ObservationRepository
+from app.repositories.tasks import TaskRepository
 from app.services.actions import ActionService, ActionView
 
 logger = logging.getLogger("lumi.browser.execution")
@@ -357,9 +366,16 @@ class BrowserExecutionService:
             worker_generation = await self._bind_worker(client)
 
             # --- the last database work before the outside world -------------
-            view = await self._actions.start_attempt(
-                action_id, expected_revision=expected_revision
-            )
+            try:
+                view = await self._actions.start_attempt(
+                    action_id, expected_revision=expected_revision
+                )
+            except EffectLockedError:
+                # M10 S5 review finding 2: an approval given while another consequential effect was in flight or
+                # unknown must not stay spendable after that one is settled. It is withdrawn here; a booking
+                # needs a fresh card and a fresh approval once the earlier outcome is known.
+                await self._withdraw_locked_approval(action_id)
+                raise
             attempt = next(a for a in view.attempts if a.finished_at is None)
             dispatch_id = uuid.uuid4()
             try:
@@ -648,6 +664,9 @@ class BrowserExecutionService:
             raise InvalidActionTransitionError(action_id, action.status, ActionStatus.RECONCILING)
         if expected_revision is not None and action.revision != expected_revision:
             raise StaleActionRevisionError(action_id, expected_revision, action.revision)
+        # Milestone 10 S5: bounded. Counted from the durable lookup dispatches, so a restart does not reset
+        # it. Refused before anything is written: the action stays exactly as uncertain as it was.
+        await self._require_lookup_allowed(action_id)
 
         if action.status is ActionStatus.OUTCOME_UNKNOWN:
             view = await self._actions.begin_reconciliation(
@@ -662,6 +681,13 @@ class BrowserExecutionService:
             worker_generation = await self._bind_worker(client)
             dispatch_id = uuid.uuid4()
             async with self._engine.begin() as connection:
+                # M10 S5 review finding 3: the bound is counted and the lookup recorded in ONE transaction under
+                # the task row lock, so concurrent reconcile calls cannot all pass the count before any inserts.
+                await TaskRepository(connection).lock_task(action.task_id)
+                records = await BrowserRepository(connection).list_dispatches(action_id)
+                self._check_lookup_allowance(records)
+                # M10 S5 review finding 1: absence can only be authoritative once the commit can no longer happen.
+                absence_fenced = _commit_is_settled(records, current_worker=worker_generation)
                 await BrowserRepository(connection).insert_dispatch(
                     dispatch_id=dispatch_id,
                     action_id=action_id,
@@ -692,7 +718,7 @@ class BrowserExecutionService:
 
         await self._close_dispatch(dispatch_id, answer)
         result, evidence = _reconciliation_verdict(
-            site=proposal.site, reference=reference, answer=answer
+            site=proposal.site, reference=reference, answer=answer, absence_fenced=absence_fenced
         )
         logger.info(
             "browser reconciliation finished",
@@ -711,6 +737,36 @@ class BrowserExecutionService:
         return await self._actions.finish_reconciliation(
             action_id, result=result, evidence=evidence, expected_revision=reconciling_revision
         )
+
+    async def _withdraw_locked_approval(self, action_id: uuid.UUID) -> None:
+        try:
+            current = await self._actions.get_action(action_id)
+            await self._actions.reject_action(action_id, expected_revision=current.action.revision, reason="effect_locked")
+        except Exception:  # noqa: BLE001 - the refusal stands either way; nothing was dispatched.
+            logger.warning("a booking approval refused by the effect lock could not be withdrawn")
+
+    async def _require_lookup_allowed(self, action_id: uuid.UUID) -> None:
+        async with self._engine.connect() as connection:
+            records = await BrowserRepository(connection).list_dispatches(action_id)
+        self._check_lookup_allowance(records)
+
+    @staticmethod
+    def _check_lookup_allowance(records: list[Any]) -> None:
+        rule = RECONCILIATION_REGISTRY[EffectKind.EXTERNAL_MUTATION]
+        action_id = records[0].action_id if records else "?"
+        now = datetime.now(UTC)
+        # A lookup still open is in flight -- unless it is older than any worker call can last (a runtime that
+        # died mid-lookup leaves its row open forever; that must not block reconciliation for good).
+        if any(
+            record.operation == LOOKUP_BOOKING and record.finished_at is None
+            and (now - record.started_at).total_seconds() < _LOOKUP_IN_FLIGHT_SECONDS
+            for record in records
+        ):
+            raise ReconciliationLimitedError(str(action_id), reason="lookup_in_flight", retry_after_seconds=30)
+        ages = [(now - record.started_at).total_seconds() for record in records if record.operation == LOOKUP_BOOKING]
+        allowed, reason, retry_after = lookup_allowance(rule, previous_ages_seconds=ages)
+        if not allowed:
+            raise ReconciliationLimitedError(str(action_id), reason=reason, retry_after_seconds=retry_after)
 
     # ---- dispatching --------------------------------------------------------
 
@@ -922,8 +978,36 @@ def _summarise(response: DispatchResponse) -> dict[str, Any]:
     return summary
 
 
+#: Longer than any worker call is allowed to take (the worker's own operation timeout is capped at 3600 s).
+_LOOKUP_IN_FLIGHT_SECONDS = 3600
+
+#: Codes the RUNTIME assigns when it lost a commit's answer. The worker itself may still be running that
+#: commit; only a worker's own answer (or its death) says the operation is over.
+_RUNTIME_SIDE_LOSS_CODES = frozenset(
+    {"browser_worker_lost_response", "stale_worker_result", "dispatch_error", "runtime_restart"}
+)
+
+
+def _commit_is_settled(records: list[Any], *, current_worker: uuid.UUID) -> bool:
+    """Can the booking's commit still take effect? (M10 S5 review finding 1.)
+
+    Settled when every consequential dispatch either has the worker's own final answer (the operation ended
+    inside the worker), or was addressed to a worker generation that is not the one answering now (that
+    worker process is gone, and its browser with it). A dispatch still open, or one whose answer the runtime
+    lost while that same worker is still alive, may still be submitting: absence proves nothing yet.
+    """
+    for record in records:
+        if record.operation != COMMIT_BOOKING:
+            continue
+        if record.finished_at is None or record.status is DispatchStatus.DISPATCHED:
+            return False
+        if record.worker_generation == current_worker and record.error_code in _RUNTIME_SIDE_LOSS_CODES:
+            return False
+    return True
+
+
 def _reconciliation_verdict(
-    *, site: str, reference: str, answer: Outcome
+    *, site: str, reference: str, answer: Outcome, absence_fenced: bool = True
 ) -> tuple[AttemptOutcome, dict[str, Any]]:
     """Turn a lookup into a verdict, and record why it was reached.
 
@@ -933,6 +1017,10 @@ def _reconciliation_verdict(
     real website. `UNKNOWN`, and any failure to look at all, never resolve
     anything.
     """
+    # The registry says WHO may call absence authoritative for an external mutation: the reviewed site
+    # declaration, and nobody else (never the lookup, the worker, the page or a model).
+    if RECONCILIATION_REGISTRY[EffectKind.EXTERNAL_MUTATION].absence is not AbsenceAuthority.SITE_DECLARED:
+        raise RuntimeError("the effect registry no longer delegates booking absence to the site declaration")
     trust = site_trust(site)
     evidence: dict[str, Any] = {
         "source": "browser_lookup",
@@ -958,6 +1046,12 @@ def _reconciliation_verdict(
             booking=answer.result.get("booking"),
         )
         return AttemptOutcome.SUCCEEDED, evidence
+    if lookup == LookupStatus.NOT_FOUND.value and trust.lookup_absence_is_authoritative and not absence_fenced:
+        evidence.update(
+            absence_is_authoritative=False,
+            reason="the original submission may still be in flight in a live browser worker",
+        )
+        return AttemptOutcome.OUTCOME_UNKNOWN, evidence
     if lookup == LookupStatus.NOT_FOUND.value and trust.lookup_absence_is_authoritative:
         evidence.update(
             absence_is_authoritative=True,

@@ -69,11 +69,12 @@ async def test_disclosure_routes_refuse_unknown_actions_and_stay_narrow(client: 
     assert (await client.post(f"/actions/{missing}/field-disclosure/approve", json={})).status_code == 422
 
 
-async def test_a_booking_action_cannot_be_approved_through_the_disclosure_route(client: httpx.AsyncClient) -> None:
+async def test_another_action_cannot_be_approved_through_the_disclosure_route(client: httpx.AsyncClient) -> None:
     task = (await client.post("/tasks", json={"request": {"type": "appointment_booking", "text": "x"}})).json()
+    # (Since M10 S5 the generic route cannot mint a booking at all; any other action stands in for it.)
     action = (await client.post(
         f"/tasks/{task['id']}/actions",
-        json={"idempotency_key": "k-2", "tool_name": "commit_booking", "risk_tier": "R2", "proposal": {"a": 1}},
+        json={"idempotency_key": "k-2", "tool_name": "record_note", "risk_tier": "R2", "proposal": {"a": 1}},
     )).json()
     response = await client.post(f"/actions/{action['id']}/field-disclosure/approve", json={"expected_revision": action["revision"]})
     assert response.status_code == 422 and response.json()["error"]["reason"] == "not_a_disclosure_approval"

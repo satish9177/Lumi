@@ -21,7 +21,7 @@ from app.domain.research import ResearchRefusal
 from app.domain.authenticated import AuthenticatedRefusal
 from app.domain.documents import STATE_CODES as DOCUMENT_STATE_CODES
 from app.domain.documents import DocumentRefusal
-from app.domain.effects import EffectLockedError
+from app.domain.effects import EffectKeysError, EffectLockedError, EffectRouteRefusal, ReconciliationLimitedError
 from app.domain.projects import STATE_CODES as PROJECT_STATE_CODES
 from app.domain.projects import ProjectRefusal
 from app.domain.workflows import STATE_CODES as WORKFLOW_STATE_CODES
@@ -660,6 +660,36 @@ def register_error_handlers(app: FastAPI) -> None:
             ),
         )
 
+    # --- Milestone 10 S5: the closed effect registry --------------------------------------
+    async def effect_route_refused(_: Request, exc: Exception) -> JSONResponse:
+        assert isinstance(exc, EffectRouteRefusal)
+        return _error(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            ErrorDetail(
+                code="effect_route_refused",
+                message="That action has consequences and can only be handled by its own reviewed route.",
+                reason=exc.code,
+            ),
+        )
+
+    async def effect_keys_invalid(_: Request, exc: Exception) -> JSONResponse:
+        assert isinstance(exc, EffectKeysError)
+        return _error(
+            status.HTTP_409_CONFLICT,
+            ErrorDetail(code="effect_keys_invalid", message="That action cannot run; nothing was done."),
+        )
+
+    async def reconciliation_limited(_: Request, exc: Exception) -> JSONResponse:
+        assert isinstance(exc, ReconciliationLimitedError)
+        return _error(
+            status.HTTP_409_CONFLICT,
+            ErrorDetail(
+                code="reconciliation_limited",
+                message=f"Checking again is paused; try again in about {exc.retry_after_seconds} seconds. Nothing changed.",
+                reason=exc.reason,
+            ),
+        )
+
     async def project_refused(_: Request, exc: Exception) -> JSONResponse:
         assert isinstance(exc, ProjectRefusal)
         stale = exc.code in PROJECT_STATE_CODES
@@ -689,6 +719,9 @@ def register_error_handlers(app: FastAPI) -> None:
     app.add_exception_handler(TransferRefusal, transfer_refused)
     app.add_exception_handler(ProjectRefusal, project_refused)
     app.add_exception_handler(EffectLockedError, effect_locked)
+    app.add_exception_handler(EffectRouteRefusal, effect_route_refused)
+    app.add_exception_handler(EffectKeysError, effect_keys_invalid)
+    app.add_exception_handler(ReconciliationLimitedError, reconciliation_limited)
     app.add_exception_handler(
         ProtectedValueRefusal,
         _reasoned(

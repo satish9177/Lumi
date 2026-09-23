@@ -287,7 +287,12 @@ class TransferService:
         actions = ActionRepository(connection)
         download = await actions.get_action_by_idempotency_key(task_id=transfer.task_id, idempotency_key=_DOWNLOAD_KEY)
         placement = await actions.get_action_by_idempotency_key(task_id=transfer.task_id, idempotency_key=_PLACE_KEY)
-        return download, placement
+        # M10 S5 review finding 4: the key alone is not identity. An action under that key with another tool
+        # is not this transfer's step, and its evidence can never settle (or fail) the transfer.
+        return (
+            download if download is not None and download.tool_name == TOOL_DOWNLOAD else None,
+            placement if placement is not None and placement.tool_name == TOOL_PLACE else None,
+        )
 
     # ---- step 1: the download -----------------------------------------------------------------------
 

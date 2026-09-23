@@ -706,6 +706,10 @@ class ProjectService:
             run = await ProjectRepository(connection).run_for_task(task_id)
         if run is None or run.id in self._processes or run.status not in ("STARTING", "OUTCOME_UNKNOWN", "RUNNING", "READY"):
             raise ProjectRefusal("wrong_phase")
+        if run.action_id is not None and (await self._actions.get_action(run.action_id)).action.status is ActionStatus.EXECUTING:
+            # M10 S5 review finding 8: the start is still in progress in THIS runtime (between the attempt and the
+            # launch); its evidence is not complete, and `_start` itself settles it.
+            raise ProjectRefusal("wrong_phase")
         await self._settle(run)
         async with self._engine.connect() as connection:
             return await self._view(connection, task_id)
@@ -753,6 +757,8 @@ class ProjectService:
         grant = await repository.grant_for_task(task_id)
         run = await repository.run_for_task(task_id)
         action = await ActionRepository(connection).get_action_by_idempotency_key(task_id=task_id, idempotency_key=_START_KEY)
+        if action is not None and action.tool_name != TOOL_PROJECT_START:  # M10 S5 review finding 4
+            action = None
         process = self._processes.get(run.id) if run is not None else None
         return RunView(
             task_id=task.id, task_status=task.status.value, task_revision=task.revision, phase=_phase(grant, run, action),

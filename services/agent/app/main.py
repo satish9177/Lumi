@@ -145,6 +145,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 # RECONCILING forever. Not generation-scoped: reconciliation never touches the
                 # desktop, so it does not matter which process asked the question.
                 await recovery_service.recover_interrupted_reconciliations()
+                # Milestone 10 S5: pre-registry unresolved effects (a booking, a desktop mutation) get their
+                # effect keys before anything is served, so they block what the registry says they block.
+                await recovery_service.backfill_effect_keys()
                 # Milestone 8b S6: a local form draft is browser state and the browser died
                 # with the last runtime. Its row is closed, never restored or re-filled.
                 await FormDraftRecovery(engine).discard_lost_drafts()

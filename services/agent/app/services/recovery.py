@@ -2,15 +2,19 @@ import logging
 import uuid
 from dataclasses import dataclass
 
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.domain.action_status import ActionStatus, AttemptOutcome, task_status_for
+from app.db.tables import action_effect_keys, actions
 from app.domain.authenticated import PauseReason
+from app.domain.effects import EFFECT_TOOLS, EffectKeysError, resolve_effect_keys, unparsed_keys
 from app.domain.local_form_draft import FILL_OPERATION, HANDOVER_OPERATION
 from app.domain.task_status import TaskEventType, TaskStatus, accepts_actions, is_terminal
 from app.repositories.actions import ActionRepository
 from app.repositories.browser import BrowserRepository
 from app.repositories.desktop_actions import DesktopActionRepository
+from app.repositories.effects import UNRESOLVED_STATUSES, EffectLockRepository
 from app.repositories.form_drafts import FormDraftRepository
 from app.repositories.tasks import TaskRepository
 
@@ -84,6 +88,9 @@ class RecoveryService:
         one status a reconciliation route will accept, so the person can be asked again instead of the
         action being stuck forever.
         """
+        async with self._engine.begin() as connection:
+            # M10 S5: no lookup can be in flight before this runtime serves anything.
+            await BrowserRepository(connection).close_orphaned_lookups()
         async with self._engine.connect() as connection:
             stuck = await ActionRepository(connection).list_actions_by_status(ActionStatus.RECONCILING)
         recovered: list[uuid.UUID] = []
@@ -98,6 +105,42 @@ class RecoveryService:
                 len(recovered),
             )
         return recovered
+
+    async def backfill_effect_keys(self) -> list[uuid.UUID]:
+        """Startup (Milestone 10 S5): an in-flight or unresolved effect that holds no keys gets them now.
+
+        Before S5 a booking and a desktop mutation were not keyed at all. Such an action left `EXECUTING`,
+        `OUTCOME_UNKNOWN` or `RECONCILING` by an older runtime must still block what the registry says it
+        blocks, so its keys are derived -- by the same closed registry, from its persisted proposal -- and
+        written before any request is served. Idempotent: an action that holds keys is never touched, and a
+        second start finds nothing to do. An action whose keys cannot be derived is left as it is and logged
+        (it can never start an attempt either: every claim path resolves its keys first).
+        """
+        derivable = sorted(name for name, tool in EFFECT_TOOLS.items() if tool.derive is not None)
+        async with self._engine.begin() as connection:
+            rows = (
+                await connection.execute(
+                    select(actions.c.id, actions.c.tool_name, actions.c.proposal).where(
+                        actions.c.tool_name.in_(derivable),
+                        actions.c.status.in_(UNRESOLVED_STATUSES),
+                        ~exists().where(action_effect_keys.c.action_id == actions.c.id),
+                    )
+                )
+            ).all()
+            filled: list[uuid.UUID] = []
+            locks = EffectLockRepository(connection)
+            for row in rows:
+                try:
+                    keys = resolve_effect_keys(row.tool_name, row.proposal)
+                except EffectKeysError:
+                    # M10 S5 review finding 7: fail closed -- conservative keys of the tool's own kinds.
+                    logger.error("an unresolved effect action's keys could not be derived; it is keyed conservatively")
+                    keys = unparsed_keys(row.tool_name)
+                await locks.insert_keys(action_id=row.id, keys=keys)
+                filled.append(row.id)
+        if filled:
+            logger.warning("Keyed %d unresolved effect action(s) recorded before the effect registry existed.", len(filled))
+        return filled
 
     async def _recover_one_reconciliation(self, action_id: uuid.UUID) -> uuid.UUID | None:
         async with self._engine.begin() as connection:

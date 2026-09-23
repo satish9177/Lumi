@@ -12,7 +12,8 @@ import pytest
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from app.domain.action_status import RiskTier
+from app.domain.action_status import AttemptOutcome, RiskTier
+from app.domain.effects import EffectLockedError
 from app.domain.browser_dispatch import BrowserEffect, DispatchStatus
 from app.repositories.actions import ActionRepository
 from app.repositories.browser import BrowserRepository
@@ -325,10 +326,10 @@ async def test_two_actions_dispatch_independently(
     task_service: TaskService,
     runtime_generation: RuntimeGeneration,
 ) -> None:
-    """The one-per-attempt rule is per attempt, not a global lock."""
+    """The one-per-attempt rule is per attempt. (Since M10 S5 two bookings are never IN FLIGHT at once --
+    the shared effect lock refuses the second claim -- so the second runs after the first is settled.)"""
     worker_generation = await _worker_generation(engine, runtime_generation)
     first_action, first_attempt = await _executing_attempt(action_service, task_service, "a")
-    second_action, second_attempt = await _executing_attempt(action_service, task_service, "b")
 
     await _dispatch(
         engine,
@@ -336,6 +337,10 @@ async def test_two_actions_dispatch_independently(
         attempt_id=first_attempt,
         worker_generation=worker_generation,
     )
+    with pytest.raises(EffectLockedError):
+        await _executing_attempt(action_service, task_service, "b")
+    await action_service.finish_attempt(first_action, outcome=AttemptOutcome.SUCCEEDED)
+    second_action, second_attempt = await _executing_attempt(action_service, task_service, "b")
     await _dispatch(
         engine,
         action_id=second_action,

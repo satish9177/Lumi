@@ -46,7 +46,9 @@ PROPOSAL = {
 }
 PROPOSE = {
     "idempotency_key": "booking-001",
-    "tool_name": "commit_booking",
+    # The generic ledger (Milestone 2). Since M10 S5 the generic routes refuse a registered effect tool, so
+    # this proves ledger recovery on an inert tool; the real booking crash is test_acceptance_f_*.
+    "tool_name": "record_note",
     "risk_tier": "R2",
     "proposal": PROPOSAL,
 }

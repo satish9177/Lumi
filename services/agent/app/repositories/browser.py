@@ -224,6 +224,23 @@ class BrowserRepository:
         row = updated.one_or_none()
         return _dispatch(row) if row is not None else None
 
+    async def close_orphaned_lookups(self) -> int:
+        """Startup only (M10 S5): a read-only booking lookup a dead runtime left open is closed as an unknown.
+
+        A lookup has no attempt, so `close_orphaned_dispatch` never reaches it; left open, it would read as
+        "a lookup is in flight" and pause reconciliation. Nothing is claimed about what it saw.
+        """
+        updated = await self._connection.execute(
+            update(browser_dispatches)
+            .where(
+                browser_dispatches.c.attempt_id.is_(None),
+                browser_dispatches.c.operation == "lookup_booking",
+                browser_dispatches.c.status == DispatchStatus.DISPATCHED.value,
+            )
+            .values(status=DispatchStatus.OUTCOME_UNKNOWN.value, error_code="runtime_restart", finished_at=func.now())
+        )
+        return int(updated.rowcount or 0)
+
     async def close_orphaned_dispatch(self, attempt_id: uuid.UUID) -> DispatchRecord | None:
         """Close a dispatch a dead runtime left open, as an unknown.
 

@@ -254,6 +254,10 @@ export function projectDesktopActionError(status: number, value: unknown): Agent
     return { code: 'desktop_refused', message: describeDesktopActionRefusal(reason) }
   }
   if (code === 'invalid_request') return { code: 'invalid_request', message: 'Lumi refused that desktop request. Nothing was changed.' }
+  if (code === 'effect_locked') {
+    // Milestone 10 S5: an earlier consequential action (on any executor) is in flight or unresolved.
+    return { code: 'effect_locked', message: 'An earlier action may already have happened and is not checked yet. Check it first; nothing was changed.' }
+  }
   if (code === 'action_not_found' || code === 'task_not_found') return { code: 'not_found', message: 'That desktop action no longer exists.' }
   if (code === 'approval_not_usable' || code === 'action_revision_conflict' || code === 'action_transition_invalid') {
     return { code: 'desktop_read_stale', message: 'That approval is no longer available. Nothing was changed.' }
