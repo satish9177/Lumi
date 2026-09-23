@@ -357,6 +357,8 @@ real-account release remains **BLOCKED**.
 
 No new module, dependency or migration (head stays `0020`). `scripts/build-agent-runtime.mjs` additionally checks that the bundled `app/domain/effects.py` and `app/services/recovery.py` are the S5 versions (the effect registry and the startup key backfill).
 
+**`package:dir` at the end of M10 passed (exit 0)**, a change from the S1-S4 ENVIRONMENT-BLOCKED baseline: `unicodedata.pyd` is unchanged and still unsigned, but the bundled interpreter now imports it, so the Windows Application Control block no longer reproduces on this machine. Nothing in Lumi changed WDAC and nothing was self-signed (`Lumi.exe` reports `NotSigned`; electron-builder's "signing with signtool.exe" lines do nothing without a configured certificate). Production signing remains NOT CONFIGURED.
+
 ### Desktop bounded semantic actions (Milestone 9 S4)
 
 No new native dependency and no new executable: `SetValue`/`Select`/`Invoke` are three more calls through

@@ -4,7 +4,7 @@
 > authorized steps. It never gains arbitrary filesystem, shell, browser, desktop or provider
 > authority because several systems take part.
 
-Status: **S1-S5 engineering complete** (reviews: `docs/reviews/milestone-10-s1.md` ... `-s5.md`; final audit: `docs/reviews/milestone-10-final.md`). M10 started from `eda1620` (M9 merged to `main`). It is delivered as five
+Status: **S1-S5 engineering complete and the final cross-slice audit complete** (reviews: `docs/reviews/milestone-10-s1.md` ... `-s5.md`; final audit: `docs/reviews/milestone-10-final.md`). M10 started from `eda1620` (M9 merged to `main`). It is delivered as five
 sequential security slices. Each slice gets its own implementation, adversarial review, validation,
 documentation and commits. If a hard requirement cannot be met, M10 stops at the last completed
 slice. No invariant is weakened to finish.

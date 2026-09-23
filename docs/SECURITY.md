@@ -1001,6 +1001,17 @@ S4 composes S2 (download, placement), S1 (extraction, one provider disclosure) a
 
 **Residual risks (honest).** Only the fixture declares authoritative absence, and bookings have no manual settlement path; an unresolved global-tier effect blocks all keyed work (up to a day with an exhausted lookup budget, or until an unowned project process exits); placement keys use the root id (a re-registered folder or an 8.3 name gets another key, though the no-overwrite rename still refuses a second file); desktop focus/scroll/launch, provider disclosures and the frozen local form fill are not keyed. Details: `docs/reviews/milestone-10-s5.md`.
 
+## Milestone 10 final audit additions
+
+* A stopped or expired workflow's child steps take no new authority (`workflow_not_active`): no document disclosure card, confirmation or claim, no account-reading grant, no transfer confirmation, download or placement. Revoking and recording results stay possible.
+* The private-document disclosure is confirmed again by a native dialog in main, built from the runtime's card, like every other M10 approval. (M8 form and M9 desktop disclosures keep their reviewed renderer cards.)
+* Generic task creation refuses every controller-owned task type.
+* A project start stranded by a crash is settled from the run's final evidence, so the global effect lock can never stay held with nothing able to settle it; the quarantine sweep keeps the evidence of any unresolved transfer step.
+* **Job containment, stated precisely.** Every process the run itself creates starts in its Job Object (no breakaway), and Stop, timeout and shutdown end exactly that job. Project code can still ask out-of-process brokers (WMI, Task Scheduler, COM local servers, shell handlers) to start processes outside the job, and same-user code can read the runtime's memory; the run's warning ("executes code from this project with your user-level permissions") is the control, and a restricted token is future work.
+* Generic `/tasks/{id}/cancel` still leaves the newer M10 grants ACTIVE; every use of them re-checks that the task is open, and the route is not reachable from main.
+
+Details: `docs/reviews/milestone-10-final.md`.
+
 ## Known gaps
 
 - The broker constrains Chromium, not its host process. A compromised browser

@@ -1,5 +1,9 @@
 # Delivery status
 
+## Milestone 10 (bounded cross-app tasks): S1-S5 and the final cross-slice audit complete (branch `lumi-m10`, not merged)
+
+M10 final review: [reviews/milestone-10-final.md](reviews/milestone-10-final.md). Two independent Claude audit passes over `eda1620..HEAD` found no High; one Medium (a project start stranded by a crash could hold the global effect lock for good) and five Lows were fixed, the rest documented. Acceptance C, Acceptance F and the combined preparation workflow (zero submissions) are green.
+
 ## Milestone 9 (Windows semantic computer use): S1-S5 and the final cross-slice audit complete
 
 ```text
@@ -20,6 +24,9 @@ M10 S1 approved documents/broker   COMPLETE  (engineering)
     S3 project recipes             COMPLETE  (engineering)
     S4 cross-app preparation       COMPLETE  (engineering)
     S5 cross-executor recovery     COMPLETE  (engineering; Acceptance F green)
+M10 engineering implementation     COMPLETE
+M10 final cross-slice audit        COMPLETE
+main                               NOT MERGED (M10 lives on lumi-m10)
 ```
 
 M10 S1 (plan: [plans/milestone-10.md](plans/milestone-10.md), review: [reviews/milestone-10-s1.md](reviews/milestone-10-s1.md)) adds read-only local document authority: M10 file roots with explicit permissions, handle-verified reads of a chosen file or the one dropped file, stdlib-only bounded extraction in a contained helper process, local comparison, and ONE exact, single-use provider disclosure of redacted excerpts. No file is written, moved or deleted.
