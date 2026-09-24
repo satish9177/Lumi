@@ -1,10 +1,45 @@
 # Delivery status
 
-## Milestone 11 (general task orchestration): planned, not started
+## Milestone 11 (general task orchestration): engineering and final audit complete (not merged to `main`)
+
+```text
+M11 S1 general routing/catalog         COMPLETE
+M11 S2 durable read-only orchestration COMPLETE
+M11 S3 approved capability composition COMPLETE
+M11 S4 cockpit/pause/resume            COMPLETE
+M11 S5 evals/final audit               COMPLETE
+
+M11 engineering implementation         COMPLETE
+M11 final cross-slice audit            COMPLETE
+
+main                                   NOT MERGED
+```
 
 Plan: [plans/milestone-11.md](plans/milestone-11.md). Composes M1-M10's existing capabilities behind a
 closed, controller-authored catalog and a durable orchestration graph. No new privileged executor, no new
 effect primitive, no capability aggregation beyond what a single catalog entry already grants.
+
+M11 S1 ([review](reviews/milestone-11-s1.md)) establishes the closed capability catalog and general
+request-routing vocabulary only; no capability executes because an intent model named it, and no M1-M10
+approval, grant, disclosure boundary or effect lock changes. M11 S2 ([review](reviews/milestone-11-s2.md),
+migration `0021`) adds the durable read-only orchestration graph and links `public_research` through it
+behind its own existing trusted-scope approval. M11 S3 ([review](reviews/milestone-11-s3.md)) composes
+`project_status` and `project_start` over the same graph, with `project_start` still opening the same R3
+execution warning, the same effect key and the same cross-executor lock a direct request would. M11 S4
+([review](reviews/milestone-11-s4.md), migration `0022`) adds a unified task cockpit with exactly two
+actions of its own -- Continue and Stop -- neither of which amounts to a new approval, plus
+`outcome_unknown` handling and the (still schema-only) `manual_handoff_required` state. M11 S5
+([review](reviews/milestone-11-s5.md)) adds a 20-case generality eval suite (139/139 total) and the final
+two-pass cross-slice audit, which found the authority model sound end to end and one confirmed
+resume/expiry correctness bug, fixed in `853450d`.
+
+Final cross-slice summary: [reviews/milestone-11-final.md](reviews/milestone-11-final.md).
+
+M11 ships honestly narrower than its full plan: of 16 catalog capabilities, only three are composed
+(`public_research`, `project_status`, `project_start`); the other 13 are real-but-uncomposed and refuse
+cleanly (`capability_unavailable`) rather than executing or being guessed at. `manual_handoff_required`
+exists in the schema (migration `0022`) but is reached by no composed capability. `main` remains at
+`045c036` -- M11 is not merged.
 
 ## Milestone 10 (bounded cross-app tasks): S1-S5 and the final cross-slice audit complete (merged to `main`)
 
