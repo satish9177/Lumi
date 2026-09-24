@@ -145,12 +145,16 @@ or page-derived text that merely *looks like* `r1`. Full detail and verified evi
 
 ## S2 -- documents + controlled download composition
 
-Compose `inspect_public_page`, `document_read`, `document_compare`, `download_document`,
-`place_downloaded_file` behind the S1 registry: `public_url_ref` (user-provided or already-observed, never
-planner-invented), `document_ref` (an approved M10 file root entry), `transfer_ref` (a quarantined download,
-single-use through placement), `document_result_ref` (an extraction or comparison result). Document text does
-not automatically enter the orchestration planner's own context -- only a controller-authored result
-descriptor does, per S1's `resultPrivacyClass` classification. Full design and acceptance in
+Planned to compose `inspect_public_page`, `document_read`, `document_compare`, `download_document`,
+`place_downloaded_file` behind the S1 registry. **Shipped: `document_read` and `document_compare`**, via
+`document_ref` (an approved M10 file root entry, added through a trusted action) and `document_result_ref`
+(an extraction result). Document text does not automatically enter the orchestration planner's own context --
+only a controller-authored, numeric-only result descriptor does (a character count, an overlap percentage),
+per S1's `resultPrivacyClass` classification. `inspect_public_page`/`download_document`/
+`place_downloaded_file` (which would need `public_url_ref`/`transfer_ref`) are deliberately deferred: they
+need a trusted "URL as planner-selectable input" mechanism and a download-destination convention this pass
+does not build, and building it hastily alongside documents was judged worse than shipping documents
+reviewed and deferring the rest honestly. Full design, scope rationale and acceptance in
 `docs/reviews/milestone-12-s2.md`.
 
 ## S3 -- account read + real manual handoff

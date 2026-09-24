@@ -4,7 +4,7 @@
 
 ```text
 M12 S1 trusted available-refs foundation        COMPLETE
-M12 S2 documents + controlled download          not started
+M12 S2 documents + controlled download          PARTIAL (documents composed; download/inspection deferred)
 M12 S3 account read + real manual handoff       not started
 M12 S4 desktop + app + project-stop             not started
 M12 S5 form/workflow composition                not started
@@ -25,6 +25,19 @@ result summary, and none of the three accepts a resource as input yet. `orchestr
 regression test derived from the capability catalog's own metadata. One fresh adversarial review found no
 High/Medium findings; one Low/Informational forward-looking note (single-use resource consumption timing) is
 documented as a residual for the slice that first composes a single-use-consuming capability.
+
+S2 ([review](reviews/milestone-12-s2.md), migration `0024`) composes `document_read` and `document_compare`:
+a trusted action (not the planner) adds an already-approved file to this orchestration's own document task
+(`orchestrations.document_task_id`, set once), minting a `document_ref` the planner may cite; reading mints a
+`document_result_ref`; comparing needs two of them, in the same task. Extracted text and every comparison
+detail (terms, headings, quotes) stay local -- only a character count or an overlap percentage ever reaches
+the orchestration's own result summary. `inspect_public_page`/`download_document`/`place_downloaded_file`
+remain deliberately unavailable through the orchestrator: they need a trusted "URL as planner-selectable
+input" mechanism and a download-destination convention not yet built, a scope decision rather than a security
+gap. No renderer control yet calls the new `attachApprovedDocument` IPC method (deferred to the milestone's
+cockpit slice). One fresh adversarial review found no High/Medium findings; three Informational notes were
+fixed in the same pass (a resource-kind check moved earlier, defensive-code documentation, expanded test
+coverage for one refusal check).
 
 ## Milestone 11 (general task orchestration): engineering and final audit complete (not merged to `main`)
 
