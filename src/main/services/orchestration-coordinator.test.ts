@@ -216,6 +216,23 @@ describe('OrchestrationCoordinator.run', () => {
     expect(graph.calls).toEqual(['planner-call'])
   })
 
+  it('surfaces the SAME refusal ProjectService’s own effect lock/one-live-run guarantee would give a direct request, never bypassing it', async () => {
+    // No new authorization path exists for project_start: createProjectRun is ProjectController's own
+    // entry point, so a run already active for this project refuses here exactly as it would outside
+    // orchestration -- the coordinator adds no parallel "try again a different way" behavior.
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'project_start', reason: 'x' }]),
+      createdRun: { ok: false, error: { code: 'project_refused', message: 'A run is already active for this project.' } }
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('unreachable')
+    expect(result.error.code).toBe('project_refused')
+    // No step was ever recorded for the refused attempt -- only the planner call that chose it.
+    expect(graph.calls).toEqual(['planner-call'])
+  })
+
   it('on resume, nudges an approved project_start run forward with the SAME idempotent start(), never a second approval', async () => {
     const graph = new FakeGraph()
     graph.view = orchestration({

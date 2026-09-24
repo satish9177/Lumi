@@ -166,6 +166,44 @@ const CASES = {
     ['an unconfigured research request is still owned by the agent', ts('src/renderer/src/composer-routing-research.test.ts', 'is still claimed, never passed on, when research is not configured')],
     ['an ordinary question still reaches realtime', ts('src/renderer/src/composer-routing-research.test.ts', 'goes to the realtime conversation')],
     ['typed "yes, go ahead" cannot allow research', ts('src/renderer/src/composer-routing-research.test.ts', 'cannot be allowed by typing')]
+  ],
+  // Milestone 11: general task orchestration. Composed capabilities today: public_research,
+  // project_status, project_start -- the remaining catalog stays real-but-uncomposed (S1-S4 reviews),
+  // so breadth here is proven by correct refusal of every uncomposed/unknown/malformed choice, not by
+  // executing domains that are not wired yet. See docs/reviews/milestone-11-s5.md.
+  orchestration: [
+    // task completion, across all three composed capabilities
+    ['public_research task-backed step completes to a grounded answer', py('tests/test_orchestration_service.py', 'test_resume_settles_the_step_once_the_task_is_answered_and_never_before')],
+    ['project_start task-backed step completes once approved and started', py('tests/test_orchestration_service.py', 'test_resume_settles_succeeded_once_the_run_is_approved_and_started')],
+    ['project_status synchronous step completes with no task and no approval', py('tests/test_orchestration_service.py', 'test_project_status_succeeds_immediately_with_no_task_and_no_approval')],
+    // correct capability selection: dispatch always calls that capability's own real entry point
+    ['public_research dispatch goes through its own boundary, never bypassing approval', ts('src/main/services/orchestration-coordinator.test.ts', 'dispatches public_research through its own boundary and pauses for its approval')],
+    ['project_status dispatch is synchronous, no task, no pause', ts('src/main/services/orchestration-coordinator.test.ts', 'dispatches project_status synchronously, with no task and no pause')],
+    // wrong-capability attempts: a real-but-uncomposed or unknown id never executes or crashes
+    ['a real but uncomposed catalog id pauses rather than executing or crashing', py('tests/test_orchestration_service.py', 'test_a_real_but_uncomposed_catalog_id_pauses_rather_than_executing_or_crashing')],
+    ['an unknown capability id is refused outright', py('tests/test_orchestration_service.py', 'test_an_unknown_capability_id_is_refused_outright')],
+    // malformed-planner-output rate
+    ['malformed JSON or a non-object planner reply is refused', ts('src/main/agent/orchestration-planner.test.ts', 'refuses malformed JSON and a non-object reply')],
+    ['a planner reply carrying an extra field (path/URL/command/approval) is refused', ts('src/main/agent/orchestration-planner.test.ts', 'refuses any field outside the closed set')],
+    // planner call count / budget
+    ['planner calls are counted and paused at the bound', py('tests/test_orchestration_service.py', 'test_record_planner_call_increments_and_pauses_at_the_bound')],
+    // approval count: both task-backed capabilities open their own card, never auto-approved
+    ['a freshly linked research task pauses for its own approval', py('tests/test_orchestration_service.py', 'test_a_freshly_created_unprepared_task_pauses_for_approval')],
+    ['a freshly created project run pauses for its own warning card', py('tests/test_orchestration_service.py', 'test_a_freshly_created_run_pauses_for_the_warning_card')],
+    // stale-step / stale-revision rejections
+    ['a stale expected revision is refused, never applied over newer state', py('tests/test_orchestration_service.py', 'test_a_stale_expected_revision_is_refused')],
+    ['re-choosing an already-succeeded capability pauses as a loop, not a second step', py('tests/test_orchestration_service.py', 'test_re_choosing_an_already_succeeded_capability_pauses_as_a_loop_not_a_second_step')],
+    // effect-lock blocks: no parallel authorization path around a capability's own lock
+    ['a project_start refused by the capability\'s own effect lock surfaces the same refusal, never bypassed', ts('src/main/services/orchestration-coordinator.test.ts', 'surfaces the SAME refusal')],
+    // recovery / resume, including the new honest outcome_unknown pause (M11 S4)
+    ['resume re-checks durable state rather than re-choosing a step', ts('src/main/services/orchestration-coordinator.test.ts', 'resumes a paused-for-approval orchestration by re-checking durable state')],
+    ['an ambiguous run outcome pauses with its own honest reason, never mislabeled approval_required', py('tests/test_orchestration_service.py', 'test_an_outcome_unknown_run_pauses_with_its_own_honest_reason_not_approval_required')],
+    // budget exhaustion pauses rather than silently widening
+    ['the step budget pauses rather than silently widening', py('tests/test_orchestration_service.py', 'test_the_step_budget_pauses_rather_than_silently_widening')],
+    // Stop: the M11 S4 regression this slice's review found and fixed
+    ['Stop clears the pause reason so a paused orchestration can still be stopped', py('tests/test_orchestration_service.py', 'test_stop_clears_the_pause_reason_so_a_paused_orchestration_can_still_be_stopped')],
+    // provider disclosure: the planner is shown only bounded, controller-authored summaries
+    ['the planner is shown only trusted controller facts, never a raw private value', ts('src/main/agent/orchestration-planner.test.ts', 'shows only trusted controller facts, never a raw private value')]
   ]
 }
 
@@ -200,7 +238,13 @@ const pytest = tsOnly ? [] : runPytest([...new Set(selected.filter((item) => ite
 const results = selected.map((item) => {
   const pool = item.runner === 'vitest'
     ? vitest.filter((test) => test.file.endsWith(item.file) && test.name.includes(item.test))
-    : pytest.filter((test) => item.file.replace(/\.py$/, '').replaceAll('/', '.').endsWith(test.file) && (test.name === item.test || test.name.startsWith(`${item.test}[`)))
+    : pytest.filter((test) => {
+        const module = item.file.replace(/\.py$/, '').replaceAll('/', '.')
+        // classname is the bare module for a top-level test function, or `${module}.ClassName` for one
+        // defined inside a test class -- either way it must start with the module, never just end with it.
+        return (test.file === module || test.file.startsWith(`${module}.`)) &&
+          (test.name === item.test || test.name.startsWith(`${item.test}[`))
+      })
   const status = pool.length === 0 ? 'missing' : pool.every((test) => test.passed) ? 'pass' : 'fail'
   return { ...item, status, matched: pool.length }
 })
