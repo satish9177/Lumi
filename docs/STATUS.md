@@ -1,5 +1,31 @@
 # Delivery status
 
+## Milestone 12 (trusted resource composition): S1 complete, in progress
+
+```text
+M12 S1 trusted available-refs foundation        COMPLETE
+M12 S2 documents + controlled download          not started
+M12 S3 account read + real manual handoff       not started
+M12 S4 desktop + app + project-stop             not started
+M12 S5 form/workflow composition                not started
+M12 S6 completeness / eval / final audit        not started
+
+main                                            NOT MERGED
+```
+
+Plan: [plans/milestone-12.md](plans/milestone-12.md). Builds a controller-owned, durable resource-ref
+registry (`orchestration_resources`, migration `0023`) over M11's orchestration graph, so a future slice's
+planner can say "capability X, using resource r3" without ever being given a path, URL, native handle or
+account identity -- and so the controller can independently prove that seeing a resource is never, by
+itself, authority to use it with any particular capability. S1 ([review](reviews/milestone-12-s1.md)) ships
+the registry itself and composes no new capability: `public_research`, `project_status` and `project_start`
+keep exactly their M11 behavior, each now also minting a controller-authored resource alongside its existing
+result summary, and none of the three accepts a resource as input yet. `orchestration_planning` moved into
+`PRIVATE_TASK_CLASSES` ahead of any privacy-sensitive capability composition, backed by a structural
+regression test derived from the capability catalog's own metadata. One fresh adversarial review found no
+High/Medium findings; one Low/Informational forward-looking note (single-use resource consumption timing) is
+documented as a residual for the slice that first composes a single-use-consuming capability.
+
 ## Milestone 11 (general task orchestration): engineering and final audit complete (not merged to `main`)
 
 ```text
