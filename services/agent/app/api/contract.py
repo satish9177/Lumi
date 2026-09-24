@@ -167,6 +167,9 @@ ERROR_CODES = (
     "project_state_changed",
     "workflow_refused",
     "workflow_state_changed",
+    # Milestone 11 S2: durable read-only orchestration.
+    "orchestration_refused",
+    "orchestration_state_changed",
     "destination_not_allowed",
     "invalid_action_transition",
     "invalid_booking_criteria",

@@ -1,0 +1,172 @@
+"""Milestone 11 S2: durable read-only orchestration -- the graph, not the planner.
+
+`general planning != general authority`. This module is the closed vocabulary and state machine an
+orchestration graph obeys; it holds no tool of its own. Choosing a capability id means only "the next
+useful step is this one" -- it is never authority to read a path, open an address, or execute an effect.
+Every capability's own approval, grant and disclosure boundary (Milestone 1-10) stays authoritative; the
+orchestrator only records which one was chosen and what its bounded result was.
+
+Two kinds of step:
+
+* **Task-backed** (`public_research` today): the caller (Electron main, which alone drives model calls and
+  knows configured providers) creates the child task through that capability's own existing entry point --
+  exactly the same one a direct request uses -- and hands this module only the resulting `task_id` to link.
+  Its own approval/grant/disclosure requirements are shown to the user exactly as they would be outside an
+  orchestration; nothing here skips them.
+* **Synchronous** (`project_status` today): a pure read with no side effect and no new task. The caller
+  reads it through the capability's own existing method and hands this module only the bounded summary to
+  record.
+
+`COMPOSED_CAPABILITY_IDS` is a small, honestly-scoped subset of the full Milestone 11 S1 catalog
+(`src/shared/agent-capabilities.ts`). Every id in the full catalog is a real, already-reviewed capability;
+choosing one this runtime has not yet composed is refused (`capability_not_composed`), never silently
+mis-executed and never aggregated into another capability's authority.
+"""
+
+import re
+import unicodedata
+from enum import StrEnum
+from typing import Final
+
+MAX_OBJECTIVE_CHARS: Final = 500
+MAX_RESULT_SUMMARY_CHARS: Final = 600
+ORCHESTRATION_TTL_SECONDS: Final = 30 * 60
+
+#: Initial, conservative budgets (Milestone 11's plan doc). Hardened further at the Milestone 11 S5 audit;
+#: exhausting one pauses the orchestration -- it never silently widens the limit.
+MAX_STEPS: Final = 20
+MAX_CHILD_TASKS: Final = 10
+MAX_PLANNER_CALLS: Final = 20
+
+#: The full closed capability catalog, spelled identically to `src/shared/agent-capabilities.ts`'s
+#: `AGENT_CAPABILITY_IDS` and to the `0021` migration's own list (both pinned against this one by
+#: `tests/test_orchestration_domain.py`, since Python and TypeScript cannot share a source file).
+CATALOG_CAPABILITY_IDS: Final[frozenset[str]] = frozenset(
+    {
+        "public_research", "inspect_public_page", "account_read", "document_read", "document_compare",
+        "download_document", "place_downloaded_file", "desktop_observe", "desktop_reason",
+        "desktop_safe_action", "launch_registered_app", "project_status", "project_start", "project_stop",
+        "form_prepare", "workflow_prepare",
+    }
+)
+
+#: Task-backed: the caller creates/owns the child task through its own existing capability boundary and
+#: links it here. `EXPECTED_TASK_TYPE` is the `tasks.request.type` a linked task must actually have --
+#: checked, never trusted, so a caller cannot link an unrelated task under a mismatched capability id.
+TASK_BACKED_CAPABILITY_IDS: Final[frozenset[str]] = frozenset({"public_research"})
+EXPECTED_TASK_TYPE: Final[dict[str, str]] = {"public_research": "public_research"}
+
+#: Synchronous: a pure read, resolved by the caller with no new task and no approval.
+SYNCHRONOUS_CAPABILITY_IDS: Final[frozenset[str]] = frozenset({"project_status"})
+
+#: What this runtime can actually execute today. A strict, honestly-scoped subset of the full catalog.
+COMPOSED_CAPABILITY_IDS: Final[frozenset[str]] = TASK_BACKED_CAPABILITY_IDS | SYNCHRONOUS_CAPABILITY_IDS
+
+
+class OrchestrationStatus(StrEnum):
+    RUNNING = "RUNNING"
+    PAUSED = "PAUSED"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    STOPPED = "STOPPED"
+
+
+TERMINAL_ORCHESTRATION_STATUSES: Final = frozenset(
+    {OrchestrationStatus.SUCCEEDED, OrchestrationStatus.FAILED, OrchestrationStatus.STOPPED}
+)
+
+
+class StepStatus(StrEnum):
+    #: A task-backed step whose child task exists but has not yet produced a usable result and needs no
+    #: further human action Lumi knows about right now (the ordinary case is `AWAITING_APPROVAL`; `PENDING`
+    #: covers the narrow window where the task exists but its resolution has not been checked yet).
+    PENDING = "PENDING"
+    AWAITING_APPROVAL = "AWAITING_APPROVAL"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+
+
+UNRESOLVED_STEP_STATUSES: Final = frozenset({StepStatus.PENDING, StepStatus.AWAITING_APPROVAL})
+
+#: Closed pause-reason vocabulary. Every reason maps to a controller decision, never a model's.
+PAUSE_REASONS: Final = frozenset({"approval_required", "budget_exhausted", "loop_detected", "capability_unavailable"})
+
+#: Refusals that are *state* (the world moved on), not a malformed request -- mapped to 409, not 422.
+STATE_CODES: Final = frozenset(
+    {
+        "orchestration_not_found",
+        "orchestration_not_active",
+        "orchestration_expired",
+        "step_already_resolved",
+        "step_not_pending",
+        "child_task_already_linked",
+    }
+)
+
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+
+
+class OrchestrationRefusal(ValueError):
+    """A refused orchestration request or state. `code` is stable and never carries a value, text or a path."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(f"The orchestration request was refused ({code}).")
+        self.code = code
+
+
+def validate_objective(value: object) -> str:
+    if not isinstance(value, str):
+        raise OrchestrationRefusal("objective_invalid")
+    text = " ".join(unicodedata.normalize("NFC", value).split())
+    if not text or len(text) > MAX_OBJECTIVE_CHARS or _CONTROL.search(text):
+        raise OrchestrationRefusal("objective_invalid")
+    return text
+
+
+def validate_capability_id(value: object) -> str:
+    """A real catalog id, closed and exact -- never a near-miss spelling, never a model invention."""
+    if not isinstance(value, str) or value not in CATALOG_CAPABILITY_IDS:
+        raise OrchestrationRefusal("capability_unknown")
+    return value
+
+
+def bounded_summary(value: str) -> str:
+    """A controller-authored result summary, plain text, bounded. Never raw private evidence verbatim."""
+    text = " ".join(unicodedata.normalize("NFC", value).split())
+    text = _CONTROL.sub(" ", text)
+    if len(text) <= MAX_RESULT_SUMMARY_CHARS:
+        return text
+    return text[: MAX_RESULT_SUMMARY_CHARS - 1] + "…"
+
+
+def result_handle(output_class: str, sequence: int) -> str:
+    """`research_result:3`-shaped, matching the plan doc's `research_result:r1` family in spirit: a
+    controller-authored, opaque reference a planner may cite -- never a path, an id another task minted, or
+    anything a model chose the shape of."""
+    return f"{output_class}:{sequence}"
+
+
+__all__ = [
+    "CATALOG_CAPABILITY_IDS",
+    "COMPOSED_CAPABILITY_IDS",
+    "EXPECTED_TASK_TYPE",
+    "MAX_CHILD_TASKS",
+    "MAX_OBJECTIVE_CHARS",
+    "MAX_PLANNER_CALLS",
+    "MAX_RESULT_SUMMARY_CHARS",
+    "MAX_STEPS",
+    "ORCHESTRATION_TTL_SECONDS",
+    "PAUSE_REASONS",
+    "STATE_CODES",
+    "SYNCHRONOUS_CAPABILITY_IDS",
+    "TASK_BACKED_CAPABILITY_IDS",
+    "TERMINAL_ORCHESTRATION_STATUSES",
+    "UNRESOLVED_STEP_STATUSES",
+    "OrchestrationRefusal",
+    "OrchestrationStatus",
+    "StepStatus",
+    "bounded_summary",
+    "result_handle",
+    "validate_capability_id",
+    "validate_objective",
+]

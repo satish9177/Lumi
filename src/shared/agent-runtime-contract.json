@@ -224,6 +224,8 @@
     "project_state_changed",
     "workflow_refused",
     "workflow_state_changed",
+    "orchestration_refused",
+    "orchestration_state_changed",
     "destination_not_allowed",
     "invalid_action_transition",
     "invalid_booking_criteria",

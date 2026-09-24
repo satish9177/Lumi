@@ -1930,3 +1930,76 @@ workflow_values = Table(
     CheckConstraint("value IS NULL OR length(value) BETWEEN 1 AND 300", name="value_bounded"),
     CheckConstraint("(purged_at IS NULL) = (value IS NOT NULL)", name="purged_means_no_value"),
 )
+
+#: The full closed capability catalog, spelled identically to `src/shared/agent-capabilities.ts`'s
+#: `AGENT_CAPABILITY_IDS` (Milestone 11 S1) and to the migration's own `_CAPABILITY_IDS`, pinned by
+#: `tests/test_orchestration_domain.py`. A step may only ever be tagged with a real catalog id, whether or
+#: not this runtime can execute it yet -- see `app/domain/orchestration.py`'s `COMPOSED_CAPABILITY_IDS`.
+_ORCHESTRATION_CAPABILITY_IDS = (
+    "public_research", "inspect_public_page", "account_read", "document_read", "document_compare",
+    "download_document", "place_downloaded_file", "desktop_observe", "desktop_reason", "desktop_safe_action",
+    "launch_registered_app", "project_status", "project_start", "project_stop", "form_prepare",
+    "workflow_prepare",
+)
+_ORCHESTRATION_CAPABILITY_CK = (
+    "capability_id IN (" + ", ".join(f"'{item}'" for item in _ORCHESTRATION_CAPABILITY_IDS) + ")"
+)
+
+#: Milestone 11 S2: a durable graph over general requests. It holds no authority of its own -- creating one
+#: grants nothing, and it is never a second action ledger.
+orchestrations = Table(
+    "orchestrations",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("objective", String(500), nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("pause_reason", String(32), nullable=True),
+    Column("revision", BigInteger(), nullable=False),
+    Column("step_count", Integer(), nullable=False, server_default=text("0")),
+    Column("child_task_count", Integer(), nullable=False, server_default=text("0")),
+    Column("planner_calls", Integer(), nullable=False, server_default=text("0")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("expires_at", DateTime(timezone=True), nullable=False),
+    Column("stopped_at", DateTime(timezone=True), nullable=True),
+    CheckConstraint("status IN ('RUNNING', 'PAUSED', 'SUCCEEDED', 'FAILED', 'STOPPED')", name="status"),
+    CheckConstraint("(status = 'PAUSED') = (pause_reason IS NOT NULL)", name="pause_reason_set"),
+    CheckConstraint(
+        "pause_reason IS NULL OR pause_reason IN "
+        "('approval_required', 'budget_exhausted', 'loop_detected', 'capability_unavailable')",
+        name="pause_reason_closed",
+    ),
+    CheckConstraint("(status = 'STOPPED') = (stopped_at IS NOT NULL)", name="stopped_at_set"),
+    CheckConstraint("expires_at > created_at", name="expires_after_creation"),
+    CheckConstraint("revision >= 1", name="revision_positive"),
+    CheckConstraint("step_count >= 0 AND child_task_count >= 0 AND planner_calls >= 0", name="counts_nonnegative"),
+)
+
+#: One capability choice, in sequence. `child_task_id` names a task THIS runtime already created through
+#: that capability's own normal boundary (task-backed capabilities); it is NULL for a capability resolved
+#: synchronously with no new task at all (a pure read, e.g. `project_status`).
+orchestration_steps = Table(
+    "orchestration_steps",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("orchestration_id", Uuid(), ForeignKey("orchestrations.id", ondelete="RESTRICT"), nullable=False),
+    Column("sequence", Integer(), nullable=False),
+    Column("capability_id", String(32), nullable=False),
+    Column("status", String(20), nullable=False),
+    Column("child_task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=True),
+    Column("result_handle", String(40), nullable=True),
+    Column("result_summary", String(600), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("orchestration_id", "sequence", name="uq_orchestration_steps_sequence"),
+    UniqueConstraint("child_task_id", name="uq_orchestration_steps_child_task_id"),
+    CheckConstraint(_ORCHESTRATION_CAPABILITY_CK, name="capability_id"),
+    CheckConstraint("status IN ('PENDING', 'AWAITING_APPROVAL', 'SUCCEEDED', 'FAILED')", name="status"),
+    CheckConstraint("sequence >= 1", name="sequence_positive"),
+    CheckConstraint("(status = 'SUCCEEDED') = (result_handle IS NOT NULL)", name="handle_iff_succeeded"),
+    CheckConstraint(
+        "result_summary IS NULL OR status IN ('SUCCEEDED', 'FAILED')", name="summary_only_when_resolved"
+    ),
+)
+
+Index("ix_orchestration_steps_orchestration_id", orchestration_steps.c.orchestration_id)

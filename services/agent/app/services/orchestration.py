@@ -1,0 +1,340 @@
+"""Milestone 11 S2: the durable orchestration controller.
+
+**It is not a planner.** It holds no tool of its own and never decides what happens next -- that is
+Electron main's `OrchestrationPlanner`, the one place in this codebase a model is asked to choose a next
+step, exactly like `ResearchPlanner`/`DesktopPlanner`/`FormPlanner` before it. This service only:
+
+* creates and reads the durable graph (`orchestrations`, `orchestration_steps`);
+* validates a chosen capability id against the closed catalog and this runtime's honestly-scoped composed
+  subset (`app/domain/orchestration.py`);
+* for a **task-backed** capability, links a child task the CALLER already created through that capability's
+  own existing boundary (the same call a direct request would make) and reads that task's OWN service for
+  its current resolution -- it never creates, grants or advances that child task itself;
+* for a **synchronous** capability, records a bounded result summary the caller already computed through
+  that capability's own existing read method;
+* enforces budgets (steps, child tasks, planner calls) and a simple repeat-capability loop guard, pausing
+  rather than silently widening a limit or guessing a step.
+
+Every capability's own approval/grant/disclosure boundary is unchanged and unskippable: choosing
+`public_research` here does exactly what typing a research request today does -- it shows the same trusted
+scope card, and nothing is searched or read until the same trusted click.
+"""
+
+import uuid
+from dataclasses import dataclass
+from datetime import timedelta
+from typing import Any
+
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from app.domain.errors import TaskNotFoundError
+from app.domain.orchestration import (
+    COMPOSED_CAPABILITY_IDS,
+    EXPECTED_TASK_TYPE,
+    MAX_CHILD_TASKS,
+    MAX_PLANNER_CALLS,
+    MAX_STEPS,
+    ORCHESTRATION_TTL_SECONDS,
+    SYNCHRONOUS_CAPABILITY_IDS,
+    TASK_BACKED_CAPABILITY_IDS,
+    OrchestrationRefusal,
+    OrchestrationStatus,
+    StepStatus,
+    bounded_summary,
+    result_handle,
+    validate_capability_id,
+    validate_objective,
+)
+from app.repositories.orchestration import OrchestrationRecord, OrchestrationRepository, StepRecord
+from app.repositories.tasks import TaskRepository
+from app.services.research_tasks import ResearchService
+
+#: capability_id -> the label a result handle carries (`research_result:3`). Closed, spelled here.
+_OUTPUT_CLASS: dict[str, str] = {"public_research": "research_result", "project_status": "project_status"}
+
+_MAX_TEXT = 2000
+
+
+@dataclass(frozen=True, slots=True)
+class OrchestrationView:
+    orchestration: OrchestrationRecord
+    live: bool
+    steps: tuple[StepRecord, ...]
+    #: What this runtime can execute right now -- shown to the planner as its allowed step choices.
+    available_capabilities: tuple[str, ...]
+
+
+class OrchestrationService:
+    def __init__(self, engine: AsyncEngine, *, research: ResearchService) -> None:
+        self._engine = engine
+        self._research = research
+
+    # ---- reads -------------------------------------------------------------------------------------
+
+    async def create(self, *, objective: object) -> OrchestrationView:
+        goal = validate_objective(objective)
+        async with self._engine.begin() as connection:
+            record = await OrchestrationRepository(connection).insert(
+                orchestration_id=uuid.uuid4(), objective=goal, ttl=timedelta(seconds=ORCHESTRATION_TTL_SECONDS)
+            )
+            return await self._view(connection, record.id)
+
+    async def describe(self, orchestration_id: uuid.UUID) -> OrchestrationView:
+        async with self._engine.connect() as connection:
+            record = await OrchestrationRepository(connection).get(orchestration_id)
+            if record is None:
+                raise OrchestrationRefusal("orchestration_not_found")
+            return await self._view(connection, orchestration_id)
+
+    async def latest(self) -> OrchestrationView | None:
+        async with self._engine.connect() as connection:
+            record = await OrchestrationRepository(connection).latest()
+            return None if record is None else await self._view(connection, record.id)
+
+    async def _view(self, connection: Any, orchestration_id: uuid.UUID) -> OrchestrationView:
+        repository = OrchestrationRepository(connection)
+        record = await repository.get(orchestration_id)
+        assert record is not None
+        steps = await repository.steps(orchestration_id)
+        live = await repository.is_live(orchestration_id)
+        available: tuple[str, ...] = ()
+        if live and record.status == OrchestrationStatus.RUNNING:
+            already_succeeded = {step.capability_id for step in steps if step.status == StepStatus.SUCCEEDED}
+            available = tuple(sorted(COMPOSED_CAPABILITY_IDS - already_succeeded))
+        return OrchestrationView(orchestration=record, live=live, steps=tuple(steps), available_capabilities=available)
+
+    # ---- planner-call budget -------------------------------------------------------------------------
+
+    async def record_planner_call(self, orchestration_id: uuid.UUID, *, expected_revision: int) -> OrchestrationView:
+        """Counted the moment a planner call is about to be made, whatever it returns. Pauses on budget
+        exhaustion instead of letting an unbounded number of calls run up against nothing."""
+        async with self._engine.begin() as connection:
+            repository = OrchestrationRepository(connection)
+            record = await self._live_running(repository, orchestration_id, expected_revision)
+            if record.planner_calls >= MAX_PLANNER_CALLS:
+                await repository.pause(orchestration_id, reason="budget_exhausted")
+                return await self._view(connection, orchestration_id)
+            await repository.record_planner_call(orchestration_id)
+            return await self._view(connection, orchestration_id)
+
+    # ---- advancing one step ---------------------------------------------------------------------------
+
+    async def advance(
+        self,
+        orchestration_id: uuid.UUID,
+        *,
+        expected_revision: int,
+        capability_id: object,
+        task_id: object = None,
+        resolved_summary: object = None,
+    ) -> OrchestrationView:
+        capability = validate_capability_id(capability_id)
+
+        if capability not in COMPOSED_CAPABILITY_IDS:
+            # A real catalog id (Milestone 11 S1); this runtime has not composed it yet. Pause with an
+            # honest reason rather than refusing outright or pretending to execute it.
+            return await self._pause(orchestration_id, expected_revision=expected_revision, reason="capability_unavailable")
+
+        if capability in TASK_BACKED_CAPABILITY_IDS:
+            if resolved_summary is not None:
+                raise OrchestrationRefusal("resolved_summary_not_allowed")
+            task_uuid = _require_uuid(task_id, code="task_id_required")
+            status, summary = await self._read_task_backed_resolution(capability, task_uuid)
+            return await self._commit_step(
+                orchestration_id, expected_revision=expected_revision, capability=capability,
+                child_task_id=task_uuid, status=status, summary=summary,
+            )
+
+        # Synchronous (SYNCHRONOUS_CAPABILITY_IDS): the caller already computed the result through that
+        # capability's own existing read method.
+        if task_id is not None:
+            raise OrchestrationRefusal("task_id_not_allowed")
+        summary = bounded_summary(_require_text(resolved_summary, code="resolved_summary_required"))
+        return await self._commit_step(
+            orchestration_id, expected_revision=expected_revision, capability=capability,
+            child_task_id=None, status=StepStatus.SUCCEEDED, summary=summary,
+        )
+
+    async def _read_task_backed_resolution(self, capability: str, task_id: uuid.UUID) -> tuple[StepStatus, str | None]:
+        """Read-only, outside any write transaction: this runtime's own current record of a task-backed
+        capability's resolution. Never creates, grants or advances anything."""
+        async with self._engine.connect() as connection:
+            task = await TaskRepository(connection).get_task(task_id)
+        if task is None:
+            raise OrchestrationRefusal("task_not_found")
+        if task.request.get("type") != EXPECTED_TASK_TYPE[capability]:
+            raise OrchestrationRefusal("task_kind_mismatch")
+        if capability == "public_research":
+            try:
+                view = await self._research.describe(task_id)
+            except TaskNotFoundError:
+                raise OrchestrationRefusal("task_not_found") from None
+            if view.answer is not None:
+                text = f"{view.answer.answer.status}: {view.answer.answer.answer}"
+                return StepStatus.SUCCEEDED, bounded_summary(text)
+            if view.grant is None or view.grant.status.value == "PENDING":
+                return StepStatus.AWAITING_APPROVAL, None
+            if view.grant.status.value in ("REVOKED", "EXPIRED"):
+                # Declined, cancelled, or its window closed unused. Never revived; a new attempt is a new
+                # step, not a resumed one -- exactly like a fresh research grant is a new confirmation.
+                return StepStatus.FAILED, bounded_summary("The research scope was declined, expired, or the task was cancelled.")
+            # ACTIVE (or COMPLETED with no answer recorded, which should not normally happen): work in
+            # progress or interrupted. Stay unresolved; the caller's own research loop, and a later
+            # `resume`, decide when this changes. Never guessed here.
+            return StepStatus.PENDING, None
+        raise AssertionError(f"unreachable: capability {capability!r} is task-backed but has no reader")  # pragma: no cover
+
+    async def _commit_step(
+        self,
+        orchestration_id: uuid.UUID,
+        *,
+        expected_revision: int,
+        capability: str,
+        child_task_id: uuid.UUID | None,
+        status: StepStatus,
+        summary: str | None,
+    ) -> OrchestrationView:
+        async with self._engine.begin() as connection:
+            repository = OrchestrationRepository(connection)
+            record = await self._live_running(repository, orchestration_id, expected_revision)
+            steps = await repository.steps(orchestration_id)
+            if len(steps) >= MAX_STEPS:
+                await repository.pause(orchestration_id, reason="budget_exhausted")
+                return await self._view(connection, orchestration_id)
+            if any(step.capability_id == capability and step.status == StepStatus.SUCCEEDED for step in steps):
+                # Loop guard: re-choosing a capability that already produced a result is not progress.
+                await repository.pause(orchestration_id, reason="loop_detected")
+                return await self._view(connection, orchestration_id)
+            if child_task_id is not None:
+                if await repository.step_for_task(child_task_id) is not None:
+                    raise OrchestrationRefusal("child_task_already_linked")
+                child_count = len({item.child_task_id for item in steps if item.child_task_id is not None})
+                if child_count >= MAX_CHILD_TASKS:
+                    await repository.pause(orchestration_id, reason="budget_exhausted")
+                    return await self._view(connection, orchestration_id)
+
+            sequence = len(steps) + 1
+            handle = result_handle(_OUTPUT_CLASS[capability], sequence) if status == StepStatus.SUCCEEDED else None
+            await repository.insert_step(
+                orchestration_id=orchestration_id, sequence=sequence, capability_id=capability, status=status.value,
+                child_task_id=child_task_id, result_handle=handle, result_summary=summary,
+            )
+            await repository.record_step_added(orchestration_id, new_child_task=child_task_id is not None)
+            if status in (StepStatus.PENDING, StepStatus.AWAITING_APPROVAL):
+                await repository.pause(orchestration_id, reason="approval_required")
+            return await self._view(connection, orchestration_id)
+
+    # ---- resuming a paused orchestration ---------------------------------------------------------------
+
+    async def resume(self, orchestration_id: uuid.UUID, *, expected_revision: int) -> OrchestrationView:
+        """Re-check the current unresolved task-backed step's live state. Idempotent: if nothing has moved,
+        the orchestration stays paused with the same reason. Revalidates freshness every time -- it never
+        assumes a child task resolved just because time passed."""
+        async with self._engine.connect() as connection:
+            record = await OrchestrationRepository(connection).get(orchestration_id)
+            if record is None:
+                raise OrchestrationRefusal("orchestration_not_found")
+            if record.revision != expected_revision:
+                raise OrchestrationRefusal("revision_conflict")
+            if record.status != OrchestrationStatus.PAUSED or record.pause_reason != "approval_required":
+                return await self._view(connection, orchestration_id)
+            step = await OrchestrationRepository(connection).last_step(orchestration_id)
+        if step is None or step.status not in ("PENDING", "AWAITING_APPROVAL") or step.child_task_id is None:
+            return await self.describe(orchestration_id)
+        status, summary = await self._read_task_backed_resolution(step.capability_id, step.child_task_id)
+        if status in (StepStatus.PENDING, StepStatus.AWAITING_APPROVAL):
+            # Nothing new; stays paused for the same reason.
+            return await self.describe(orchestration_id)
+        async with self._engine.begin() as connection:
+            repository = OrchestrationRepository(connection)
+            current = await repository.get(orchestration_id, lock=True)
+            if current is None:
+                raise OrchestrationRefusal("orchestration_not_found")
+            if current.revision != expected_revision:
+                raise OrchestrationRefusal("revision_conflict")
+            fresh_step = await repository.last_step(orchestration_id)
+            if fresh_step is None or fresh_step.id != step.id or fresh_step.status not in ("PENDING", "AWAITING_APPROVAL"):
+                # Someone else already resolved (or the step changed) between the read and this lock.
+                return await self._view(connection, orchestration_id)
+            handle = result_handle(_OUTPUT_CLASS[step.capability_id], step.sequence) if status == StepStatus.SUCCEEDED else None
+            resolved = await repository.resolve_step(step.id, status=status.value, result_handle=handle, result_summary=summary)
+            if resolved is None:
+                return await self._view(connection, orchestration_id)
+            await repository.resume_running(orchestration_id)
+            return await self._view(connection, orchestration_id)
+
+    # ---- ending the orchestration ------------------------------------------------------------------------
+
+    async def finish(self, orchestration_id: uuid.UUID, *, expected_revision: int) -> OrchestrationView:
+        """The planner decided the objective is satisfied. Requires at least one succeeded step: an
+        orchestration cannot finish having done nothing."""
+        async with self._engine.begin() as connection:
+            repository = OrchestrationRepository(connection)
+            record = await self._live_running(repository, orchestration_id, expected_revision)
+            steps = await repository.steps(orchestration_id)
+            if not any(step.status == StepStatus.SUCCEEDED for step in steps):
+                raise OrchestrationRefusal("nothing_to_finish")
+            settled = await repository.succeed(orchestration_id)
+            if settled is None:
+                raise OrchestrationRefusal("orchestration_not_active")
+            return await self._view(connection, orchestration_id)
+
+    async def stop(self, orchestration_id: uuid.UUID, *, expected_revision: int) -> OrchestrationView:
+        """Stops future scheduling only. Never marks an in-flight step failed, never compensates, never
+        touches a child task's own state -- the same rule Milestone 10's Stop already established."""
+        async with self._engine.begin() as connection:
+            repository = OrchestrationRepository(connection)
+            record = await repository.get(orchestration_id, lock=True)
+            if record is None:
+                raise OrchestrationRefusal("orchestration_not_found")
+            if record.revision != expected_revision:
+                raise OrchestrationRefusal("revision_conflict")
+            if record.status not in (OrchestrationStatus.RUNNING, OrchestrationStatus.PAUSED):
+                raise OrchestrationRefusal("orchestration_not_active")
+            await repository.stop(orchestration_id)
+            return await self._view(connection, orchestration_id)
+
+    # ---- helpers -------------------------------------------------------------------------------------
+
+    async def _pause(self, orchestration_id: uuid.UUID, *, expected_revision: int, reason: str) -> OrchestrationView:
+        async with self._engine.begin() as connection:
+            repository = OrchestrationRepository(connection)
+            await self._live_running(repository, orchestration_id, expected_revision)
+            await repository.pause(orchestration_id, reason=reason)
+            return await self._view(connection, orchestration_id)
+
+    @staticmethod
+    async def _live_running(repository: OrchestrationRepository, orchestration_id: uuid.UUID, expected_revision: int) -> OrchestrationRecord:
+        record = await repository.get(orchestration_id, lock=True)
+        if record is None:
+            raise OrchestrationRefusal("orchestration_not_found")
+        if record.revision != expected_revision:
+            raise OrchestrationRefusal("revision_conflict")
+        if record.status != OrchestrationStatus.RUNNING:
+            raise OrchestrationRefusal("orchestration_not_active")
+        if not await repository.is_live(orchestration_id):
+            raise OrchestrationRefusal("orchestration_expired")
+        return record
+
+
+def _require_uuid(value: object, *, code: str) -> uuid.UUID:
+    if value is None:
+        raise OrchestrationRefusal(code)
+    if isinstance(value, uuid.UUID):
+        return value
+    try:
+        return uuid.UUID(str(value))
+    except (ValueError, AttributeError, TypeError):
+        raise OrchestrationRefusal(code) from None
+
+
+def _require_text(value: object, *, code: str) -> str:
+    if not isinstance(value, str):
+        raise OrchestrationRefusal(code)
+    text = " ".join(value.split())
+    if not text or len(text) > _MAX_TEXT:
+        raise OrchestrationRefusal(code)
+    return text
+
+
+__all__ = ["OrchestrationService", "OrchestrationView"]

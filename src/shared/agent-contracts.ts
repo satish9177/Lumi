@@ -1417,6 +1417,9 @@ export const AGENT_ERROR_CODES = [
   'workflow_state_changed',
   // Milestone 11 S1: a general request classified as orchestrated_task, but no orchestrator is wired yet.
   'orchestration_unavailable',
+  // Milestone 11 S2: an orchestration request was refused, or its revision/step moved on since it was read.
+  'orchestration_refused',
+  'orchestration_state_changed',
   'request_failed'
 ] as const
 export type AgentErrorCode = typeof AGENT_ERROR_CODES[number]

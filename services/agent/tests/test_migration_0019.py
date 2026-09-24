@@ -10,7 +10,7 @@ import uuid
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from tests.conftest import M10_S4_TABLES, downgrade, head_revision, migrate, truncate_all
+from tests.conftest import M10_S4_TABLES, M11_S2_TABLES, downgrade, head_revision, migrate, truncate_all
 from tests.test_migration_0013 import exists, insert_grant, insert_task, revision, run
 
 S3_TABLES = ("projects", "project_recipes", "project_runs")
@@ -78,7 +78,7 @@ def test_migration_0019_adds_projects_and_runs_and_downgrades_only_without_audit
             downgrade(url, "0018")
         assert revision(url) == "0019"
 
-        truncate_all(url, without=M10_S4_TABLES)
+        truncate_all(url, without=(*M10_S4_TABLES, *M11_S2_TABLES))
         downgrade(url, "0018")
         assert revision(url) == "0018"
         for table in S3_TABLES:

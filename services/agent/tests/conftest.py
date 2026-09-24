@@ -31,7 +31,7 @@ class _TestEnvironment(BaseSettings):
 
 
 TRUNCATE_ALL = (
-    "TRUNCATE workflow_values, workflow_candidates, workflow_steps, workflows, project_runs, project_recipes, projects, file_transfers, action_effect_keys, document_answers, document_disclosures, documents, file_refs, file_roots, desktop_dispatches, desktop_answers, desktop_disclosures, desktop_action_plans, "
+    "TRUNCATE orchestration_steps, orchestrations, workflow_values, workflow_candidates, workflow_steps, workflows, project_runs, project_recipes, projects, file_transfers, action_effect_keys, document_answers, document_disclosures, documents, file_refs, file_roots, desktop_dispatches, desktop_answers, desktop_disclosures, desktop_action_plans, "
     "desktop_vision_disclosures, desktop_captures, desktop_observations, desktop_worker_generations, form_drafts, protected_values, authenticated_answers, authenticated_observations, research_answers, "
     "research_observations, page_observations, browser_dispatches, "
     "research_sessions, step_authorizations, task_grants, login_attempts, browser_profiles, "
@@ -47,6 +47,8 @@ M10_S2_TABLES = ("file_transfers", "action_effect_keys")
 M10_S3_TABLES = ("project_runs", "project_recipes", "projects")
 #: Milestone 10 S4 tables: absent before `0020`.
 M10_S4_TABLES = ("workflow_values", "workflow_candidates", "workflow_steps", "workflows")
+#: Milestone 11 S2 tables: absent before `0021`.
+M11_S2_TABLES = ("orchestration_steps", "orchestrations")
 
 
 def truncate_all(database_url: str, *, without: tuple[str, ...] = ()) -> None:

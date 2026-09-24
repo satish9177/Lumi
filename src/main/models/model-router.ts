@@ -127,6 +127,13 @@ export const DEFAULT_ROUTES: RoutingTable = {
   document_compare: {
     providers: [{ provider: 'gemini', model: 'gemini-2.5-flash' }, { provider: 'openai' }, { provider: 'deepseek' }],
     maxInputTokens: 8_000, maxOutputTokens: 900, timeoutMs: 45_000
+  },
+  // Milestone 11 S2. One step per call, like `research_planning`: the task-wide budget is enforced by the
+  // orchestration loop, not here. Not private (see `PRIVATE_TASK_CLASSES` below): its context is
+  // controller-authored summaries only, never a private capability's own raw evidence.
+  orchestration_planning: {
+    providers: [{ provider: 'gemini', model: 'gemini-2.5-flash' }, { provider: 'openai' }, { provider: 'deepseek' }],
+    maxInputTokens: 8_000, maxOutputTokens: 500, timeoutMs: 30_000
   }
 }
 

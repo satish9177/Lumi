@@ -1037,3 +1037,47 @@ No schema change: `action_effect_keys` (0018) already allows the `external_mutat
 * **Booking reconciliation:** `POST /actions/{id}/browser-reconciliation` -> `reconciliation_limited` (reasons `lookup_backoff`, `lookup_budget_exhausted`, `lookup_in_flight`) when bounded; the verdict fences authoritative absence on the commit being settled. `browser-execution` refused by the lock -> `effect_locked`, and the refused approval is REJECTED (reason `effect_locked`).
 * **Startup:** `RecoveryService.backfill_effect_keys` and `BrowserRepository.close_orphaned_lookups` join the existing recovery, before serving.
 * New error codes: `effect_route_refused`, `effect_keys_invalid`, `reconciliation_limited` (main maps `effect_locked` and `reconciliation_limited` to their own codes). See `docs/reviews/milestone-10-s5.md`.
+
+## Durable read-only orchestration (M11 S2, migration `0021`)
+
+Migration `0021` adds `orchestrations` (RUNNING/PAUSED/SUCCEEDED/FAILED/STOPPED, 30-minute expiry, a closed
+`pause_reason`) and `orchestration_steps` (one row per capability choice, in sequence; `capability_id`
+constrained by a CHECK to the full Milestone 11 S1 catalog, not just what this runtime composes). A step
+either links an existing child task another capability's own boundary already created (`child_task_id`), or
+is resolved synchronously by the caller with no new task at all.
+
+* **Service** (`app/services/orchestration.py`, `OrchestrationService`): holds no tool of its own. It
+  validates a chosen `capability_id` against the closed catalog, and separately against
+  `COMPOSED_CAPABILITY_IDS` -- the honestly-scoped subset this runtime can actually execute today
+  (`public_research`, task-backed; `project_status`, synchronous). A real catalog id outside that subset
+  pauses the orchestration (`capability_unavailable`) rather than executing anything or crashing. A
+  task-backed step's resolution is read only from that capability's own service (`ResearchService.describe`
+  for `public_research`) -- never guessed, never advanced by the orchestrator itself.
+* **Routes** (`app/api/orchestration_routes.py`, all authenticated; Electron main only):
+  `POST /orchestrations`, `GET /orchestrations/latest|{id}`,
+  `POST /orchestrations/{id}/planner-call` (counts one planner call against the budget before a model is
+  asked anything), `POST /orchestrations/{id}/advance` (`capability_id` plus exactly one of `task_id` or
+  `resolved_summary`), `POST /orchestrations/{id}/resume|finish|stop`. No route accepts a path, a URL, a
+  command or an arbitrary tool payload.
+* **Budgets** (`app/domain/orchestration.py`): `MAX_STEPS = 20`, `MAX_CHILD_TASKS = 10`,
+  `MAX_PLANNER_CALLS = 20`. Exhausting one pauses (`budget_exhausted`), never silently widens. A simple
+  loop guard pauses (`loop_detected`) rather than inserting a new step when the orchestration re-chooses a
+  capability that already succeeded -- finer-grained loop/budget hardening (materially-equivalent state,
+  A-B-A oscillation) is explicitly deferred to Milestone 11 S5, which owns generality hardening.
+* **Planner** (`src/main/agent/orchestration-planner.ts`, `OrchestrationPlanner`, task class
+  `orchestration_planning`): structurally identical to `research-planner.ts` -- one capability id per call,
+  closed schema, no free field. Not in `PRIVATE_TASK_CLASSES`: its context is controller-authored step
+  summaries only, never a private capability's own raw evidence.
+* **Coordinator** (`src/main/services/orchestration-coordinator.ts`, `OrchestrationCoordinator`): the
+  "observe -> choose one capability -> controller validates -> capability runs through its normal boundary
+  -> persist result -> re-plan" loop, bounded client-side at 20 iterations (defensive; the server's own
+  budget pauses first in the ordinary case). Its `dispatch` method is the one closed place a capability id
+  becomes a request to that capability's own existing entry point (`AgentTaskController.createResearchTask`
+  for `public_research`, `ProjectController.getLatestProjectRun` for `project_status`) -- exactly the same
+  call a direct user request makes, including that capability's own approval/grant/disclosure card. A
+  capability with no dispatch handler is refused, never silently skipped.
+* **Not yet wired**: no IPC channel, preload method or renderer UI exists for this slice -- `main`'s typed
+  request interpreter still answers `orchestration_unavailable` for a general request (Milestone 11 S1's
+  behavior, unchanged). Milestone 11 S4 (the unified task cockpit) is what makes an orchestration reachable
+  from the renderer and resumable across a restart from a real UI, not just from tests calling the
+  coordinator directly. See `docs/reviews/milestone-11-s2.md`.

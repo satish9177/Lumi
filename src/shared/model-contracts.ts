@@ -57,7 +57,15 @@ export const MODEL_TASK_CLASSES = [
    * Milestone 10 S1: compare up to two approved local documents from the exact, redacted excerpts a
    * trusted card named. Private, one recipient, no failover, no image, closed grounded output.
    */
-  'document_compare'
+  'document_compare',
+  /**
+   * Milestone 11 S2: choose ONE next capability id from the closed orchestration catalog, one step at a
+   * time, exactly like `research_planning`. The model never sees private task content directly -- only
+   * controller-authored result summaries already produced by that capability's own private planner/answer
+   * call -- so this class is not itself in `PRIVATE_TASK_CLASSES`; see `model-router.ts` for the routing
+   * decision.
+   */
+  'orchestration_planning'
 ] as const
 export type ModelTaskClass = typeof MODEL_TASK_CLASSES[number]
 
