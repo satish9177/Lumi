@@ -147,6 +147,11 @@ class OrchestrationRepository:
     async def pause(self, orchestration_id: uuid.UUID, *, reason: str) -> OrchestrationRecord | None:
         return await self._transition(orchestration_id, expected_statuses=("RUNNING",), status="PAUSED", pause_reason=reason)
 
+    async def relabel_pause(self, orchestration_id: uuid.UUID, *, reason: str) -> OrchestrationRecord | None:
+        """Update an already-paused orchestration's reason without resuming it -- a re-check found the
+        step still unresolved, but for a more (or less) specific reason than before."""
+        return await self._transition(orchestration_id, expected_statuses=("PAUSED",), status="PAUSED", pause_reason=reason)
+
     async def resume_running(self, orchestration_id: uuid.UUID) -> OrchestrationRecord | None:
         return await self._transition(orchestration_id, expected_statuses=("PAUSED",), status="RUNNING", pause_reason=None)
 
@@ -158,7 +163,11 @@ class OrchestrationRepository:
 
     async def stop(self, orchestration_id: uuid.UUID) -> OrchestrationRecord | None:
         return await self._transition(
-            orchestration_id, expected_statuses=("RUNNING", "PAUSED"), status="STOPPED", stopped_at=func.now()
+            orchestration_id,
+            expected_statuses=("RUNNING", "PAUSED"),
+            status="STOPPED",
+            pause_reason=None,
+            stopped_at=func.now()
         )
 
     # ---- steps --------------------------------------------------------------------------------------

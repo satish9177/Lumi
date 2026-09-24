@@ -1966,7 +1966,8 @@ orchestrations = Table(
     CheckConstraint("(status = 'PAUSED') = (pause_reason IS NOT NULL)", name="pause_reason_set"),
     CheckConstraint(
         "pause_reason IS NULL OR pause_reason IN "
-        "('approval_required', 'budget_exhausted', 'loop_detected', 'capability_unavailable')",
+        "('approval_required', 'budget_exhausted', 'loop_detected', 'capability_unavailable', "
+        "'manual_handoff_required', 'outcome_unknown')",
         name="pause_reason_closed",
     ),
     CheckConstraint("(status = 'STOPPED') = (stopped_at IS NOT NULL)", name="stopped_at_set"),

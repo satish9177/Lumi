@@ -4,6 +4,7 @@ import {
   type AgentTaskSnapshot,
   type TypedRequestRoute
 } from '../../shared/agent-contracts'
+import type { AgentOrchestrationView } from '../../shared/orchestration-contracts'
 import {
   PlanWireError,
   clinicQueryFromWire,
@@ -173,6 +174,14 @@ export interface InterpreterDependencies {
   research?: {
     createResearchTask(objective: unknown, origin?: TaskOrigin): Promise<AgentResult<AgentTaskSnapshot>>
   }
+  /**
+   * Milestone 11 S4: create a general orchestration for this objective and run it to its first pause or
+   * terminal state. Every step it takes still goes through that capability's own existing boundary and
+   * approval -- creating the orchestration is classification acted on, never new authority.
+   */
+  orchestration?: {
+    createOrchestratedTask(objective: unknown): Promise<AgentResult<AgentOrchestrationView>>
+  }
   router?: ModelRouter
   controller: { handle(value: unknown, source: CommandSource): Promise<AgentResult<VoiceTaskOutcome>> }
   loadTask: () => Promise<AgentTaskSnapshot | null>
@@ -336,12 +345,30 @@ export class TaskRequestInterpreter {
       }
     }
     if (interpretation.kind === 'orchestrated_task') {
-      // Milestone 11 S1: classification only. No capability catalog entry is
-      // executed because an intent model mentioned one, and there is no
-      // orchestrator to hand this to yet -- S2 wires that. Claimed here,
-      // never passed on to conversation, so a general request never falls
-      // through to a legacy tool.
-      return { handled: true, result: ORCHESTRATION_UNAVAILABLE }
+      // Milestone 11 S4: classification acted on, never new authority. Every step the orchestration takes
+      // still goes through that capability's own existing boundary and approval; creating it here only
+      // starts the same closed loop a person watching the cockpit could start by hand.
+      if (!this.deps.orchestration) return { handled: true, result: ORCHESTRATION_UNAVAILABLE }
+      const created = await this.deps.orchestration.createOrchestratedTask(interpretation.objective)
+      if (!created.ok) return { handled: true, result: created }
+      const snapshot = created.value
+      return {
+        handled: true,
+        result: {
+          ok: true,
+          value: {
+            kind: 'task_status',
+            focus: snapshot.status === 'PAUSED' ? 'approval_card' : 'none',
+            narration: {
+              kind: 'orchestration',
+              orchestrationId: snapshot.orchestrationId,
+              status: snapshot.status,
+              ...(snapshot.pauseReason ? { pauseReason: snapshot.pauseReason } : {})
+            },
+            replayed: false
+          }
+        }
+      }
     }
     if (interpretation.kind === 'conversation' || !inScope(interpretation.scope, task)) return { handled: false }
     const command = interpretation.build({ turnId: requestId, utterance: text })

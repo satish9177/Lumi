@@ -17,6 +17,7 @@ import {
 export interface OrchestrationGraphClient {
   createOrchestration: (objective: unknown) => Promise<AgentResult<AgentOrchestrationView>>
   getOrchestration: (orchestrationId: unknown) => Promise<AgentResult<AgentOrchestrationView>>
+  getLatestOrchestration: () => Promise<AgentResult<AgentOrchestrationView | null>>
   recordPlannerCall: (orchestrationId: string, expectedRevision: number) => Promise<AgentResult<AgentOrchestrationView>>
   advanceOrchestration: (
     orchestrationId: string, expectedRevision: number, capabilityId: AgentCapabilityId,
@@ -84,10 +85,30 @@ export class OrchestrationCoordinator {
   constructor(private readonly deps: OrchestrationCoordinatorDependencies) {}
 
   /** Creates a new orchestration for this objective and runs it to its first pause or terminal state. */
-  async createAndRun(objectiveValue: unknown): Promise<AgentResult<AgentOrchestrationView>> {
+  async createOrchestration(objectiveValue: unknown): Promise<AgentResult<AgentOrchestrationView>> {
     const created = await this.deps.orchestrations.createOrchestration(objectiveValue)
     if (!created.ok) return created
     return this.run(created.value.orchestrationId)
+  }
+
+  /** Read-only passthroughs -- the renderer never needs a raw single-step primitive to see current state. */
+  getOrchestration(orchestrationId: unknown): Promise<AgentResult<AgentOrchestrationView>> {
+    return this.deps.orchestrations.getOrchestration(orchestrationId)
+  }
+
+  getLatestOrchestration(): Promise<AgentResult<AgentOrchestrationView | null>> {
+    return this.deps.orchestrations.getLatestOrchestration()
+  }
+
+  /**
+   * Resumes a paused orchestration and runs it to its next pause or terminal state. Always re-validates
+   * durable state first -- never assumes a paused step resolved just because the user pressed Continue.
+   */
+  continueOrchestration(orchestrationId: unknown): Promise<AgentResult<AgentOrchestrationView>> {
+    if (typeof orchestrationId !== 'string') {
+      return Promise.resolve({ ok: false, error: { code: 'invalid_request', message: 'That orchestration reference is invalid.' } })
+    }
+    return this.run(orchestrationId)
   }
 
   /**
@@ -100,7 +121,10 @@ export class OrchestrationCoordinator {
     if (!loaded.ok) return loaded
     let view = loaded.value
 
-    if (view.status === 'PAUSED' && view.pauseReason === 'approval_required') {
+    // approval_required: the ordinary "waiting on a human" pause. outcome_unknown: a linked capability's
+    // own effect is unresolved -- re-checking is still the right move (a person may have since looked and
+    // settled it through that capability's own reconciliation path), never a reason to stop trying.
+    if (view.status === 'PAUSED' && (view.pauseReason === 'approval_required' || view.pauseReason === 'outcome_unknown')) {
       // A step-specific mechanical continuation, never a second approval: project_start's own approval is
       // the grant becoming ACTIVE through the existing warning card, and start() performs no new effect
       // beyond what that one approval already covers (ProjectService.start() is itself idempotent).
@@ -168,7 +192,7 @@ export class OrchestrationCoordinator {
     return { ok: true, value: view }
   }
 
-  stop(orchestrationId: string): Promise<AgentResult<AgentOrchestrationView>> {
+  stopOrchestration(orchestrationId: unknown): Promise<AgentResult<AgentOrchestrationView>> {
     return this.deps.orchestrations.stopOrchestration(orchestrationId)
   }
 

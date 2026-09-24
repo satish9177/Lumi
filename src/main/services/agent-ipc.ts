@@ -25,6 +25,7 @@ import type { DocumentController } from './document-controller'
 import type { TransferController } from './transfer-controller'
 import type { ProjectController } from './project-controller'
 import type { WorkflowController } from './workflow-controller'
+import type { OrchestrationCoordinator } from './orchestration-coordinator'
 import type { VoiceTaskController } from './voice-task-controller'
 
 /**
@@ -109,6 +110,11 @@ export interface AgentIpcDependencies {
     | 'extractWorkflowCandidates' | 'deriveWorkflowCandidates' | 'proposeWorkflowAdoption' | 'approveWorkflowAdoption'
     | 'rejectWorkflowAdoption' | 'startWorkflowForm' | 'stopWorkflow'
   >
+  /** Milestone 11 S4. Absent in builds without the orchestration capability. */
+  orchestration?: Pick<
+    OrchestrationCoordinator,
+    'createOrchestration' | 'getOrchestration' | 'getLatestOrchestration' | 'continueOrchestration' | 'stopOrchestration'
+  >
 }
 
 const UNAVAILABLE = { code: 'request_failed', message: 'That is not available in this build.' } as const
@@ -128,7 +134,8 @@ function routeWithoutInterpreter(request: unknown): TypedRequestRoute {
 
 export function registerAgentIpc({
   ipcMain, assertTrustedSender, controller, voice, runtimeStatus, restartRuntime, text, memory, diagnostics,
-  browserProfiles, desktopRead, desktopActions, desktopPlanning, desktopVision, documents, transfers, projects, workflows
+  browserProfiles, desktopRead, desktopActions, desktopPlanning, desktopVision, documents, transfers, projects, workflows,
+  orchestration
 }: AgentIpcDependencies): void {
   const handle = (channel: string, listener: (...args: unknown[]) => unknown): void => {
     ipcMain.handle(channel, (event, ...args) => {
@@ -405,4 +412,19 @@ export function registerAgentIpc({
   handle(AGENT_IPC_CHANNELS.startWorkflowForm, (workflowId, profileId, objective, recipientId) =>
     workflows ? workflows.startWorkflowForm(workflowId, profileId, objective, recipientId) : noWorkflows())
   handle(AGENT_IPC_CHANNELS.stopWorkflow, (workflowId) => workflows ? workflows.stopWorkflow(workflowId) : noWorkflows())
+
+  // Milestone 11 S4: five fixed channels for the general orchestration cockpit. Each runs the whole
+  // plan-dispatch-persist loop to its next pause or terminal state; there is no channel that takes a
+  // capability id, a step or anything the renderer could use to bypass a capability's own approval.
+  const noOrchestration = (): Promise<{ ok: false; error: typeof UNAVAILABLE }> => Promise.resolve({ ok: false, error: UNAVAILABLE })
+  handle(AGENT_IPC_CHANNELS.createOrchestration, (objective) =>
+    orchestration ? orchestration.createOrchestration(objective) : noOrchestration())
+  handle(AGENT_IPC_CHANNELS.getOrchestration, (orchestrationId) =>
+    orchestration ? orchestration.getOrchestration(orchestrationId) : noOrchestration())
+  handle(AGENT_IPC_CHANNELS.getLatestOrchestration, () =>
+    orchestration ? orchestration.getLatestOrchestration() : Promise.resolve({ ok: true, value: null }))
+  handle(AGENT_IPC_CHANNELS.continueOrchestration, (orchestrationId) =>
+    orchestration ? orchestration.continueOrchestration(orchestrationId) : noOrchestration())
+  handle(AGENT_IPC_CHANNELS.stopOrchestration, (orchestrationId) =>
+    orchestration ? orchestration.stopOrchestration(orchestrationId) : noOrchestration())
 }

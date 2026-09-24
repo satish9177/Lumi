@@ -19,6 +19,7 @@ import type { AgentDocumentApi } from './document-contracts'
 import type { AgentTransferApi } from './transfer-contracts'
 import type { AgentProjectApi } from './project-contracts'
 import type { AgentWorkflowApi } from './workflow-contracts'
+import type { AgentOrchestrationApi } from './orchestration-contracts'
 import type { VoiceTaskCommand, VoiceTaskOutcome } from './voice-task-contracts'
 import type { AgentPreferenceView, ModelDiagnosticView, PreferenceKey } from './model-contracts'
 
@@ -1437,7 +1438,7 @@ export type AgentResult<T> = { ok: true; value: T } | { ok: false; error: AgentE
  * and the revision the user reviewed; nothing can carry a doctor, time, price,
  * proposal or digest. There is no generic request, URL or dispatch method.
  */
-export interface AgentApi extends AgentDocumentApi, AgentTransferApi, AgentProjectApi, AgentWorkflowApi {
+export interface AgentApi extends AgentDocumentApi, AgentTransferApi, AgentProjectApi, AgentWorkflowApi, AgentOrchestrationApi {
   getRuntimeStatus: () => Promise<AgentRuntimeView>
   onRuntimeStatus: (listener: (status: AgentRuntimeView) => void) => () => void
   restartRuntime: () => Promise<AgentResult<AgentRuntimeView>>
@@ -1844,7 +1845,15 @@ export const AGENT_IPC_CHANNELS = {
   approveWorkflowAdoption: 'lifelens:agent:approve-workflow-adoption',
   rejectWorkflowAdoption: 'lifelens:agent:reject-workflow-adoption',
   startWorkflowForm: 'lifelens:agent:start-workflow-form',
-  stopWorkflow: 'lifelens:agent:stop-workflow'
+  stopWorkflow: 'lifelens:agent:stop-workflow',
+  // Milestone 11 S4: the general task orchestration cockpit. Each call runs the whole plan-dispatch-persist
+  // loop to its next pause or terminal state; there is no single-step primitive the renderer could misuse
+  // to skip a capability's own approval.
+  createOrchestration: 'lifelens:agent:create-orchestration',
+  getOrchestration: 'lifelens:agent:get-orchestration',
+  getLatestOrchestration: 'lifelens:agent:get-latest-orchestration',
+  continueOrchestration: 'lifelens:agent:continue-orchestration',
+  stopOrchestration: 'lifelens:agent:stop-orchestration'
 } as const
 
 /** Actions whose side effect is unresolved or in flight. */

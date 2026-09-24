@@ -1096,3 +1096,49 @@ paused `project_start` step forward (`startProjectRun`) on resume, since grantin
 separate calls (unlike research, where the existing product code already drives the whole flow after one
 grant); the nudge cannot start an unapproved run because `ProjectService.start()` itself refuses a grant
 that is not `ACTIVE`, before anything is created or spawned. See `docs/reviews/milestone-11-s3.md`.
+
+### Unified task cockpit, pause/resume, `outcome_unknown` (M11 S4, migration `0022`)
+
+Migration `0022` widens `ck_orchestrations_pause_reason_closed` to add `manual_handoff_required` (schema-only
+in this slice -- no composed capability reaches it yet) and `outcome_unknown` (reachable: a task-backed
+step's underlying task ended in an ambiguous state).
+
+* **Honest pausing over guessing** (`app/services/orchestration.py`): `_read_task_backed_resolution` now
+  distinguishes "the capability is still working" from "the capability's own state is ambiguous" --
+  `public_research`'s `ResearchView.unresolved_step` and `project_start`'s `RunView.phase ==
+  "outcome_unknown"` both pause with `outcome_unknown` rather than the misleading `approval_required`.
+  `resume()` accepts either reason; if the underlying state is still unresolved but the reason itself
+  should change (e.g. a transient outage clears), the new `OrchestrationRepository.relabel_pause`
+  (PAUSED -> PAUSED) updates it without falsely resuming. `relabel_pause` can only ever be written a value
+  from the closed `{"approval_required", "outcome_unknown"}` set computed server-side -- no route accepts a
+  pause reason as caller input.
+* **IPC surface** (`src/main/services/agent-ipc.ts`, `src/preload/index.ts`): five channels --
+  `createOrchestration`, `getOrchestration`, `getLatestOrchestration`, `continueOrchestration`,
+  `stopOrchestration` -- follow the same optional-dependency `Pick<Controller, ...>` + `noXxx()` fallback
+  pattern as every other agent capability, gated by `assertTrustedSender` like every other channel.
+* **Cockpit** (`src/renderer/src/components/OrchestrationPanel.tsx`): a stateful `OrchestrationPanel` plus a
+  pure `OrchestrationCard` (tested via `renderToStaticMarkup`, the codebase's established convention for
+  presentational sub-components). It shows the objective, status, each step's plain-English status and its
+  own bounded result summary, and a plain-English pause-reason explanation. It offers exactly two actions,
+  **Continue** (only while `PAUSED`) and **Stop** (while `RUNNING` or `PAUSED`) -- it never renders an
+  approve/grant/allow control of its own. Approving any individual capability's action still happens only on
+  that capability's own existing card; the cockpit's `Continue` re-enters the coordinator's observe/dispatch
+  loop, which can only ever advance a step by calling that capability's own service method (traced end to
+  end in review: no path lets `Continue` cross a capability's approval boundary).
+* **Interpreter wiring** (`src/main/agent/task-request-interpreter.ts`): the `orchestrated_task` branch
+  (a stub since S1) now calls `deps.orchestration.createOrchestratedTask(objective)` and narrates the result
+  (`focus: 'approval_card'` only when the fresh orchestration is `PAUSED`, otherwise `'none'`). Voice
+  guidance (`voice-task-tools.ts`) is explicit that voice cannot approve, resume or stop an orchestration.
+* **Stop semantics, deliberately unchanged from Milestone 10's rule**: `OrchestrationService.stop()` stops
+  future scheduling only -- it never marks an in-flight step failed, never compensates, and never reaches
+  into a linked child task's own state, matching the same rule M10 S5 established for every other executor's
+  Stop. A child task a paused orchestration is still waiting on (an open research grant, a running project)
+  stays exactly as it was and remains separately visible and stoppable on that capability's own existing
+  panel; the cockpit's Stop only ends the orchestrator's own further scheduling of it.
+* **Bug found and fixed in review**: `OrchestrationRepository.stop()` did not clear `pause_reason` when
+  transitioning a `PAUSED` orchestration to `STOPPED`, violating `ck_orchestrations_pause_reason_set`
+  (`pause_reason` must be `NULL` whenever `status != PAUSED`) and making Stop fail outright in exactly the
+  state -- paused, waiting on the user -- where a user is most likely to reach for it. Fixed by clearing
+  `pause_reason` alongside the status change; covered by a new regression test,
+  `test_stop_clears_the_pause_reason_so_a_paused_orchestration_can_still_be_stopped`. See
+  `docs/reviews/milestone-11-s4.md`.

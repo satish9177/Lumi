@@ -330,6 +330,24 @@ class TestFinishStopExpiry:
                 stopped.orchestration.id, expected_revision=stopped.orchestration.revision, capability_id="project_status", resolved_summary="x"
             )
 
+    async def test_stop_clears_the_pause_reason_so_a_paused_orchestration_can_still_be_stopped(
+        self, service: OrchestrationService
+    ) -> None:
+        """Regression: `stop()` on a PAUSED orchestration must clear `pause_reason` along with the status
+        change, or the write violates `ck_orchestrations_pause_reason_set` (pause_reason must be NULL
+        whenever status != PAUSED) and the whole call fails -- leaving the orchestration stuck PAUSED
+        forever, in exactly the state a user is most likely to want to stop from."""
+        view = await service.create(objective="prepare a form")
+        paused = await service.advance(
+            view.orchestration.id, expected_revision=view.orchestration.revision, capability_id="form_prepare"
+        )
+        assert paused.orchestration.status == "PAUSED"
+        assert paused.orchestration.pause_reason == "capability_unavailable"
+
+        stopped = await service.stop(paused.orchestration.id, expected_revision=paused.orchestration.revision)
+        assert stopped.orchestration.status == "STOPPED"
+        assert stopped.orchestration.pause_reason is None
+
     async def test_an_expired_orchestration_refuses_a_new_step(self, service: OrchestrationService, engine: AsyncEngine) -> None:
         view = await service.create(objective="do something")
         # Both columns move into the past together: `expires_at > created_at` still holds (the database's
@@ -404,6 +422,32 @@ class TestProjectStartCapability:
         assert step.status == "SUCCEEDED"
         assert step.result_handle == "project_run_result:1"
         assert step.result_summary is not None and "Project run started" in step.result_summary
+
+    async def test_an_outcome_unknown_run_pauses_with_its_own_honest_reason_not_approval_required(
+        self, service: OrchestrationService, project: ProjectService, recipe_id: uuid.UUID, engine: AsyncEngine
+    ) -> None:
+        """A crash between approval and a settled result leaves the run OUTCOME_UNKNOWN
+        (`app/services/projects.py`'s own recovery semantics). The orchestrator must not relabel that as
+        still-awaiting-approval -- a human already approved; what is missing now is proof of what happened,
+        not permission."""
+        view = await service.create(objective="Start my registered project")
+        run = await project.create_run(recipe_id=recipe_id)
+        assert run.grant is not None
+        paused = await service.advance(
+            view.orchestration.id, expected_revision=view.orchestration.revision,
+            capability_id="project_start", task_id=run.task_id,
+        )
+        await project.confirm(run.task_id, grant_id=run.grant.id, expected_revision=run.grant.revision)
+        started = await project.start(run.task_id)
+        assert started.run is not None
+        # Simulate the recovery outcome directly, the same way `test_projects_service.py` pins it: a crash
+        # left this run's own fate unresolved.
+        await _sql(engine, "UPDATE project_runs SET status = 'OUTCOME_UNKNOWN' WHERE id = :id", id=started.run.id)
+
+        resumed = await service.resume(view.orchestration.id, expected_revision=paused.orchestration.revision)
+        assert resumed.orchestration.status == "PAUSED"
+        assert resumed.orchestration.pause_reason == "outcome_unknown"
+        assert resumed.steps[0].status == "AWAITING_APPROVAL"  # still the original step row; not yet settled
 
     async def test_a_declined_warning_card_settles_as_failed(
         self, service: OrchestrationService, project: ProjectService, recipe_id: uuid.UUID

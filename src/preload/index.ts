@@ -253,7 +253,12 @@ const agentApi: AgentApi = {
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.rejectWorkflowAdoption, workflowId, actionId, expectedRevision),
   startWorkflowForm: (workflowId: string, profileId: string, objective: string, recipientId: string) =>
     ipcRenderer.invoke(AGENT_IPC_CHANNELS.startWorkflowForm, workflowId, profileId, objective, recipientId),
-  stopWorkflow: (workflowId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.stopWorkflow, workflowId)
+  stopWorkflow: (workflowId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.stopWorkflow, workflowId),
+  createOrchestration: (objective: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.createOrchestration, objective),
+  getOrchestration: (orchestrationId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getOrchestration, orchestrationId),
+  getLatestOrchestration: () => ipcRenderer.invoke(AGENT_IPC_CHANNELS.getLatestOrchestration),
+  continueOrchestration: (orchestrationId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.continueOrchestration, orchestrationId),
+  stopOrchestration: (orchestrationId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.stopOrchestration, orchestrationId)
 }
 
 // The Gemini Live relay: fixed channels, closed message kinds, validated in

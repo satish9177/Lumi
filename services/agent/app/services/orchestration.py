@@ -149,10 +149,10 @@ class OrchestrationService:
             if resolved_summary is not None:
                 raise OrchestrationRefusal("resolved_summary_not_allowed")
             task_uuid = _require_uuid(task_id, code="task_id_required")
-            status, summary = await self._read_task_backed_resolution(capability, task_uuid)
+            status, summary, pause_reason = await self._read_task_backed_resolution(capability, task_uuid)
             return await self._commit_step(
                 orchestration_id, expected_revision=expected_revision, capability=capability,
-                child_task_id=task_uuid, status=status, summary=summary,
+                child_task_id=task_uuid, status=status, summary=summary, pause_reason=pause_reason,
             )
 
         # Synchronous (SYNCHRONOUS_CAPABILITY_IDS): the caller already computed the result through that
@@ -162,12 +162,16 @@ class OrchestrationService:
         summary = bounded_summary(_require_text(resolved_summary, code="resolved_summary_required"))
         return await self._commit_step(
             orchestration_id, expected_revision=expected_revision, capability=capability,
-            child_task_id=None, status=StepStatus.SUCCEEDED, summary=summary,
+            child_task_id=None, status=StepStatus.SUCCEEDED, summary=summary, pause_reason=None,
         )
 
-    async def _read_task_backed_resolution(self, capability: str, task_id: uuid.UUID) -> tuple[StepStatus, str | None]:
+    async def _read_task_backed_resolution(
+        self, capability: str, task_id: uuid.UUID
+    ) -> tuple[StepStatus, str | None, str | None]:
         """Read-only, outside any write transaction: this runtime's own current record of a task-backed
-        capability's resolution. Never creates, grants or advances anything."""
+        capability's resolution. Never creates, grants or advances anything. The third element is the pause
+        reason to use if the step stays unresolved (`AWAITING_APPROVAL` always -> `approval_required`;
+        `PENDING`'s reason depends on *why* it is still pending)."""
         async with self._engine.connect() as connection:
             task = await TaskRepository(connection).get_task(task_id)
         if task is None:
@@ -181,34 +185,39 @@ class OrchestrationService:
                 raise OrchestrationRefusal("task_not_found") from None
             if view.answer is not None:
                 text = f"{view.answer.answer.status}: {view.answer.answer.answer}"
-                return StepStatus.SUCCEEDED, bounded_summary(text)
+                return StepStatus.SUCCEEDED, bounded_summary(text), None
             if view.grant is None or view.grant.status.value == "PENDING":
-                return StepStatus.AWAITING_APPROVAL, None
+                return StepStatus.AWAITING_APPROVAL, None, "approval_required"
             if view.grant.status.value in ("REVOKED", "EXPIRED"):
                 # Declined, cancelled, or its window closed unused. Never revived; a new attempt is a new
                 # step, not a resumed one -- exactly like a fresh research grant is a new confirmation.
-                return StepStatus.FAILED, bounded_summary("The research scope was declined, expired, or the task was cancelled.")
-            # ACTIVE (or COMPLETED with no answer recorded, which should not normally happen): work in
-            # progress or interrupted. Stay unresolved; the caller's own research loop, and a later
-            # `resume`, decide when this changes. Never guessed here.
-            return StepStatus.PENDING, None
+                return StepStatus.FAILED, bounded_summary("The research scope was declined, expired, or the task was cancelled."), None
+            if view.unresolved_step:
+                # A step of this task has no outcome Lumi can stand behind (interrupted mid-flight, a lost
+                # response). Distinct from "still working": a human may need to look, not just wait.
+                return StepStatus.PENDING, None, "outcome_unknown"
+            # ACTIVE, no answer recorded yet, and nothing unresolved: ordinary work in progress. Stay
+            # unresolved; the caller's own research loop, and a later `resume`, decide when this changes.
+            return StepStatus.PENDING, None, "approval_required"
         if capability == "project_start":
             try:
                 run_view = await self._project.describe(task_id)
             except TaskNotFoundError:
                 raise OrchestrationRefusal("task_not_found") from None
             if run_view.phase == "awaiting_approval":
-                return StepStatus.AWAITING_APPROVAL, None
+                return StepStatus.AWAITING_APPROVAL, None, "approval_required"
             if run_view.phase in _PROJECT_RUN_FAILED_PHASES:
-                return StepStatus.FAILED, bounded_summary(f"The project run ended: {run_view.phase}.")
+                return StepStatus.FAILED, bounded_summary(f"The project run ended: {run_view.phase}."), None
             if run_view.phase in _PROJECT_RUN_ALIVE_PHASES:
                 text = f"Project run started (phase: {run_view.phase}){', ready' if run_view.ready else ''}."
-                return StepStatus.SUCCEEDED, bounded_summary(text)
-            # "approved" (the grant is active but the caller has not yet called start(), or start() has not
-            # finished) or "outcome_unknown": work in progress. Stay unresolved; never guessed here. The
-            # caller (Electron main) is what actually calls start() once the grant is active -- this read
-            # never does, matching "it never creates, grants or advances that child task itself".
-            return StepStatus.PENDING, None
+                return StepStatus.SUCCEEDED, bounded_summary(text), None
+            if run_view.phase == "outcome_unknown":
+                return StepStatus.PENDING, None, "outcome_unknown"
+            # "approved": the grant is active but the caller has not yet called start(), or start() has not
+            # finished. Stay unresolved; never guessed here. The caller (Electron main) is what actually
+            # calls start() once the grant is active -- this read never does, matching "it never creates,
+            # grants or advances that child task itself".
+            return StepStatus.PENDING, None, "approval_required"
         raise AssertionError(f"unreachable: capability {capability!r} is task-backed but has no reader")  # pragma: no cover
 
     async def _commit_step(
@@ -220,6 +229,7 @@ class OrchestrationService:
         child_task_id: uuid.UUID | None,
         status: StepStatus,
         summary: str | None,
+        pause_reason: str | None,
     ) -> OrchestrationView:
         async with self._engine.begin() as connection:
             repository = OrchestrationRepository(connection)
@@ -248,29 +258,37 @@ class OrchestrationService:
             )
             await repository.record_step_added(orchestration_id, new_child_task=child_task_id is not None)
             if status in (StepStatus.PENDING, StepStatus.AWAITING_APPROVAL):
-                await repository.pause(orchestration_id, reason="approval_required")
+                await repository.pause(orchestration_id, reason=pause_reason or "approval_required")
             return await self._view(connection, orchestration_id)
 
     # ---- resuming a paused orchestration ---------------------------------------------------------------
 
     async def resume(self, orchestration_id: uuid.UUID, *, expected_revision: int) -> OrchestrationView:
         """Re-check the current unresolved task-backed step's live state. Idempotent: if nothing has moved,
-        the orchestration stays paused with the same reason. Revalidates freshness every time -- it never
-        assumes a child task resolved just because time passed."""
+        the orchestration stays paused (possibly with an updated, more accurate reason). Revalidates
+        freshness every time -- it never assumes a child task resolved just because time passed."""
         async with self._engine.connect() as connection:
             record = await OrchestrationRepository(connection).get(orchestration_id)
             if record is None:
                 raise OrchestrationRefusal("orchestration_not_found")
             if record.revision != expected_revision:
                 raise OrchestrationRefusal("revision_conflict")
-            if record.status != OrchestrationStatus.PAUSED or record.pause_reason != "approval_required":
+            if record.status != OrchestrationStatus.PAUSED or record.pause_reason not in ("approval_required", "outcome_unknown"):
                 return await self._view(connection, orchestration_id)
             step = await OrchestrationRepository(connection).last_step(orchestration_id)
         if step is None or step.status not in ("PENDING", "AWAITING_APPROVAL") or step.child_task_id is None:
             return await self.describe(orchestration_id)
-        status, summary = await self._read_task_backed_resolution(step.capability_id, step.child_task_id)
+        status, summary, pause_reason = await self._read_task_backed_resolution(step.capability_id, step.child_task_id)
         if status in (StepStatus.PENDING, StepStatus.AWAITING_APPROVAL):
-            # Nothing new; stays paused for the same reason.
+            # Still unresolved. Update the pause reason if it became more (or less) specific, so a
+            # transient outcome_unknown that later needs a fresh approval is relabeled honestly.
+            if pause_reason is not None and pause_reason != record.pause_reason:
+                async with self._engine.begin() as connection:
+                    repository = OrchestrationRepository(connection)
+                    current = await repository.get(orchestration_id, lock=True)
+                    if current is not None and current.revision == expected_revision and current.status == OrchestrationStatus.PAUSED:
+                        await repository.relabel_pause(orchestration_id, reason=pause_reason)
+                    return await self._view(connection, orchestration_id)
             return await self.describe(orchestration_id)
         async with self._engine.begin() as connection:
             repository = OrchestrationRepository(connection)

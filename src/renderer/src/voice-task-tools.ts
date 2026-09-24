@@ -289,6 +289,8 @@ function guidance(narration: VoiceNarration): string {
       return 'This is a web page inspection. You cannot approve it or open the page by voice, and you do not have the page text. Point the user to the inspection card: approval, the answer and its source are shown there.'
     case 'research':
       return 'This is a public web research task. You cannot allow it, run it or read the pages by voice, and you do not have any page text. Point the user to the research card: the permission, the progress, the sources and the answer are all shown there.'
+    case 'orchestration':
+      return 'This is a general task Lumi is composing from its own capabilities. You cannot approve, resume or stop it by voice, and you have no step details or results. Point the user to the task cockpit: every step, its status and any approval it needs are shown there.'
   }
 }
 

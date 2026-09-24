@@ -116,3 +116,11 @@ def test_state_codes_and_pause_reasons_are_disjoint_closed_vocabularies() -> Non
     assert STATE_CODES.isdisjoint(PAUSE_REASONS)
     assert all(isinstance(code, str) and code for code in STATE_CODES)
     assert all(isinstance(reason, str) and reason for reason in PAUSE_REASONS)
+
+
+def test_pause_reasons_matches_the_migration_0022_widened_set() -> None:
+    # Pinned against the exact set migration 0022 widens `ck_orchestrations_pause_reason_closed` to.
+    assert PAUSE_REASONS == {
+        "approval_required", "budget_exhausted", "loop_detected", "capability_unavailable",
+        "manual_handoff_required", "outcome_unknown",
+    }

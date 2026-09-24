@@ -80,6 +80,9 @@ import { DocumentController } from './services/document-controller'
 import { TransferController } from './services/transfer-controller'
 import { WorkflowController } from './services/workflow-controller'
 import { ProjectController } from './services/project-controller'
+import { OrchestrationController } from './services/orchestration-controller'
+import { OrchestrationCoordinator } from './services/orchestration-coordinator'
+import { OrchestrationPlanner } from './agent/orchestration-planner'
 import { RUN_WARNING } from '../shared/project-contracts'
 import { DocumentComparer } from './agent/document-comparer'
 import { LocalOcrEngine } from './vision/ocr-engine'
@@ -1169,6 +1172,9 @@ app.whenReady().then(async () => {
   const authenticatedAnswerer = modelRouter ? new AuthenticatedAnswerer(modelRouter) : undefined
   // Milestone 8b S5. Proposes a `prepare_form` mapping and can act on nothing.
   const formPlanner = modelRouter ? new FormPlanner(modelRouter) : undefined
+  // Milestone 11 S2. Chooses ONE next capability id per call; the runtime validates and the coordinator
+  // requests it through that capability's own existing boundary.
+  const orchestrationPlanner = modelRouter ? new OrchestrationPlanner(modelRouter) : undefined
   const agentTasks = new AgentTaskController(
     {
       // Resolved per call: a packaged runtime is created asynchronously.
@@ -1413,6 +1419,29 @@ At most ${card.maxExcerptBytes} bytes per document, with identifiers redacted.
       return answer.response === 0
     }
   })
+  // Milestone 11 S2/S3: general task orchestration. It holds no tool of its own: every capability it
+  // requests goes through that capability's own existing controller and approval, exactly as a direct
+  // request would. Absent without a configured model, since planning needs one.
+  const orchestrations = orchestrationPlanner
+    ? new OrchestrationCoordinator({
+      orchestrations: new OrchestrationController({
+        request: (method, path, body, timeoutMs) => agentRuntime
+          ? agentRuntime.request(method, path, body, timeoutMs)
+          : Promise.reject(new RuntimeUnavailableError())
+      }),
+      planner: orchestrationPlanner,
+      createResearchTask: (objective) => agentTasks.createResearchTask(objective),
+      getLatestProjectRun: () => projects.getLatestProjectRun(),
+      getRegisteredRecipeId: async () => {
+        const recipes = await projects.listProjectRecipes()
+        if (!recipes.ok) return recipes
+        const active = recipes.value.find((recipe) => recipe.status === 'ACTIVE')
+        return { ok: true, value: active ? active.recipeId : null }
+      },
+      createProjectRun: (recipeId) => projects.createProjectRun(recipeId),
+      startProjectRun: (taskId) => projects.startProjectRun(taskId)
+    })
+    : undefined
   // Milestone 8a S2: screen capture is refused from this process's first
   // instruction and stays refused until durable takeover state has been read.
   // A main-process restart during a live takeover therefore cannot produce a
@@ -1436,6 +1465,9 @@ At most ${card.maxExcerptBytes} bytes per document, with identifiers redacted.
       controller: voiceTasks,
       inspections: agentTasks,
       research: agentTasks,
+      ...(orchestrations
+        ? { orchestration: { createOrchestratedTask: (objective: unknown) => orchestrations.createOrchestration(objective) } }
+        : {}),
       loadTask: async () => {
         const loaded = await agentTasks.loadActiveTask(0)
         return loaded.ok ? loaded.value : null
@@ -1462,6 +1494,7 @@ At most ${card.maxExcerptBytes} bytes per document, with identifiers redacted.
     transfers,
     projects,
     workflows,
+    ...(orchestrations ? { orchestration: orchestrations } : {}),
     diagnostics: () => diagnosticsVisible ? diagnostics.list() : [],
     runtimeStatus: () => agentRuntimeView(),
     restartRuntime: async () => {

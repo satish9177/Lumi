@@ -93,7 +93,18 @@ class StepStatus(StrEnum):
 UNRESOLVED_STEP_STATUSES: Final = frozenset({StepStatus.PENDING, StepStatus.AWAITING_APPROVAL})
 
 #: Closed pause-reason vocabulary. Every reason maps to a controller decision, never a model's.
-PAUSE_REASONS: Final = frozenset({"approval_required", "budget_exhausted", "loop_detected", "capability_unavailable"})
+#: `manual_handoff_required`: a human must act outside Lumi (a login, a CAPTCHA, an unsupported control)
+#: before the orchestration can continue -- not yet reachable from any capability composed as of Milestone
+#: 11 S4 (none of `public_research`/`project_status`/`project_start` involves one), but first-class in the
+#: schema so a later slice composing e.g. `account_read` or `desktop_reason` needs no further migration.
+#: `outcome_unknown`: a linked capability's own effect is unresolved (a research step interrupted
+#: mid-flight; a project run whose own `RunView.phase` is itself `outcome_unknown`).
+PAUSE_REASONS: Final = frozenset(
+    {
+        "approval_required", "budget_exhausted", "loop_detected", "capability_unavailable",
+        "manual_handoff_required", "outcome_unknown",
+    }
+)
 
 #: Refusals that are *state* (the world moved on), not a malformed request -- mapped to 409, not 422.
 STATE_CODES: Final = frozenset(

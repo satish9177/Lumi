@@ -52,6 +52,10 @@ class FakeGraph implements OrchestrationGraphClient {
     return { ok: true, value: this.view }
   }
 
+  async getLatestOrchestration(): Promise<AgentResult<AgentOrchestrationView | null>> {
+    return { ok: true, value: this.view }
+  }
+
   async recordPlannerCall(): Promise<AgentResult<AgentOrchestrationView>> {
     this.calls.push('planner-call')
     this.view = { ...this.view, plannerCalls: this.view.plannerCalls + 1, revision: this.view.revision + 1 }
@@ -307,7 +311,7 @@ describe('OrchestrationCoordinator.run', () => {
     const { coordinator: coord } = coordinator({
       graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'public_research', reason: 'x' }])
     })
-    const result = await coord.createAndRun('Research the Lumi repository and summarize it')
+    const result = await coord.createOrchestration('Research the Lumi repository and summarize it')
     expect(result.ok).toBe(true)
     expect(graph.calls[0]).toBe('create')
   })

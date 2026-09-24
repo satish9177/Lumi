@@ -34,6 +34,7 @@ import {
   DesktopPlanningPanel,
   DesktopVisionPanel,
   DocumentPanel,
+  OrchestrationPanel,
   BrandMark,
   ConfirmDialog,
   DragGrip,
@@ -137,6 +138,7 @@ export default function LifeLensApp() {
   const [desktopPlanningOpen, setDesktopPlanningOpen] = useState(false)
   const [desktopVisionOpen, setDesktopVisionOpen] = useState(false)
   const [documentsOpen, setDocumentsOpen] = useState(false)
+  const [orchestrationOpen, setOrchestrationOpen] = useState(false)
   /** A voice outcome asking the trusted task UI to draw attention somewhere. */
   const [agentFocus, setAgentFocus] = useState<{ target: VoiceTaskFocus; serial: number }>()
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest>()
@@ -1843,6 +1845,9 @@ export default function LifeLensApp() {
             <button className="chip" type="button" onClick={() => setDocumentsOpen(true)} data-testid="open-documents">
               Documents
             </button>
+            <button className="chip" type="button" onClick={() => setOrchestrationOpen(true)} data-testid="open-orchestration">
+              General task
+            </button>
           </div>
 
           <form className="composer" onSubmit={(event) => { event.preventDefault(); void askQuestion() }}>
@@ -1935,6 +1940,12 @@ export default function LifeLensApp() {
             <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Documents">
               <DocumentPanel agent={window.lifeLens.agent} onClose={() => setDocumentsOpen(false)}
                 {...(droppedFile && droppedFile.mediaKind === 'document' ? { droppedFile: { droppedId: droppedFile.droppedId, fileName: droppedFile.fileName } } : {})} />
+            </div>
+          )}
+
+          {orchestrationOpen && (
+            <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="General task">
+              <OrchestrationPanel agent={window.lifeLens.agent} onClose={() => setOrchestrationOpen(false)} />
             </div>
           )}
 

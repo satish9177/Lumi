@@ -18,7 +18,11 @@ export const ORCHESTRATION_STEP_STATUSES = ['PENDING', 'AWAITING_APPROVAL', 'SUC
 export type AgentOrchestrationStepStatus = typeof ORCHESTRATION_STEP_STATUSES[number]
 
 export const ORCHESTRATION_PAUSE_REASONS = [
-  'approval_required', 'budget_exhausted', 'loop_detected', 'capability_unavailable'
+  'approval_required', 'budget_exhausted', 'loop_detected', 'capability_unavailable',
+  /** Milestone 11 S4: a human must act outside Lumi (a login, a CAPTCHA, an unsupported control). */
+  'manual_handoff_required',
+  /** A linked capability's own effect is unresolved -- never guessed, only a person's own look settles it. */
+  'outcome_unknown'
 ] as const
 export type AgentOrchestrationPauseReason = typeof ORCHESTRATION_PAUSE_REASONS[number]
 
@@ -49,10 +53,21 @@ export interface AgentOrchestrationView {
   steps: AgentOrchestrationStepView[]
 }
 
-/** The low-level bridge to the durable graph. `advanceOrchestration` records one already-decided step. */
+/**
+ * Milestone 11 S4: the renderer-facing bridge. `createOrchestration` and `continueOrchestration` each run
+ * the whole "observe -> plan -> dispatch -> persist -> re-plan" loop to its next pause or terminal state in
+ * one call (exactly like the existing `runResearch`), never exposing a raw single-step primitive the
+ * renderer could misuse to skip a capability's own approval.
+ */
 export interface AgentOrchestrationApi {
+  /** Creates a new orchestration for this objective and runs it to its first pause or terminal state. */
   createOrchestration: (objective: string) => Promise<AgentResult<AgentOrchestrationView>>
   getOrchestration: (orchestrationId: string) => Promise<AgentResult<AgentOrchestrationView>>
   getLatestOrchestration: () => Promise<AgentResult<AgentOrchestrationView | null>>
+  /**
+   * Resumes a paused orchestration and runs it to its next pause or terminal state. Always re-validates
+   * durable state first -- never assumes a paused step resolved just because the user pressed Continue.
+   */
+  continueOrchestration: (orchestrationId: string) => Promise<AgentResult<AgentOrchestrationView>>
   stopOrchestration: (orchestrationId: string) => Promise<AgentResult<AgentOrchestrationView>>
 }

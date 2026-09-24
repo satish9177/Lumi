@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { AgentResult, AgentTaskSnapshot, TypedRequestRoute } from '../../shared/agent-contracts'
+import type { AgentOrchestrationView } from '../../shared/orchestration-contracts'
 import type { VoiceTaskOutcome } from '../../shared/voice-task-contracts'
 import type { ModelProvider, ModelRequest, ModelResponse } from '../models/provider'
 import { DEFAULT_ROUTES, ModelRouter, type RoutingTable } from '../models/model-router'
@@ -188,6 +189,66 @@ describe('routing: orchestrated_task is claimed, never passed to conversation', 
     const interpreter = interpreterWithoutRouter()
     const route = await interpreter.route('req_conv_0001', 'Tell me a joke')
     expect(route).toEqual({ handled: false })
+  })
+})
+
+describe('routing: orchestrated_task, wired to a real orchestration dependency (Milestone 11 S4)', () => {
+  function interpreterWithOrchestration(
+    createOrchestratedTask: (objective: unknown) => Promise<AgentResult<AgentOrchestrationView>>
+  ): TaskRequestInterpreter {
+    return new TaskRequestInterpreter({ controller: fakeController(), loadTask: async () => null, orchestration: { createOrchestratedTask } })
+  }
+
+  it('creates the orchestration and reports its id and status, focused on the approval card while paused', async () => {
+    const objectives: unknown[] = []
+    const interpreter = interpreterWithOrchestration(async (objective) => {
+      objectives.push(objective)
+      return {
+        ok: true,
+        value: {
+          orchestrationId: '00000000-0000-4000-8000-000000000001', status: 'PAUSED', pauseReason: 'approval_required',
+          live: true, revision: 2, objective: 'Compare these two documents', stepCount: 1, childTaskCount: 1,
+          plannerCalls: 1, createdAt: '2026-09-24T10:00:00+00:00', expiresAt: '2026-09-24T10:30:00+00:00',
+          availableCapabilities: [], steps: []
+        }
+      }
+    })
+    const result = await interpreter.submit('req_orch_wired_0001', 'Compare these two documents')
+    expect(objectives).toEqual(['Compare these two documents'])
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('unreachable')
+    expect(result.value.focus).toBe('approval_card')
+    expect(result.value.narration).toEqual({
+      kind: 'orchestration', orchestrationId: '00000000-0000-4000-8000-000000000001', status: 'PAUSED', pauseReason: 'approval_required'
+    })
+  })
+
+  it('does not focus the approval card once the orchestration is running or finished', async () => {
+    const interpreter = interpreterWithOrchestration(async () => ({
+      ok: true,
+      value: {
+        orchestrationId: '00000000-0000-4000-8000-000000000002', status: 'SUCCEEDED', live: false, revision: 4,
+        objective: 'x', stepCount: 1, childTaskCount: 0, plannerCalls: 1, createdAt: '2026-09-24T10:00:00+00:00',
+        expiresAt: '2026-09-24T10:30:00+00:00', availableCapabilities: [], steps: []
+      }
+    }))
+    const result = await interpreter.submit('req_orch_wired_0002', 'Is my registered Lumi project currently running?')
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('unreachable')
+    expect(result.value.focus).toBe('none')
+    expect(result.value.narration).toMatchObject({ kind: 'orchestration', status: 'SUCCEEDED' })
+  })
+
+  it('propagates a refusal from the orchestration dependency as the result, never falls through to conversation', async () => {
+    const interpreter = interpreterWithOrchestration(async () => ({
+      ok: false, error: { code: 'orchestration_refused', message: 'Lumi could not decide the next step right now.' }
+    }))
+    const route = await interpreter.route('req_orch_wired_0003', 'Start my registered project')
+    expect(route.handled).toBe(true)
+    if (!route.handled) throw new Error('unreachable')
+    expect(route.result.ok).toBe(false)
+    if (route.result.ok) throw new Error('unreachable')
+    expect(route.result.error.code).toBe('orchestration_refused')
   })
 })
 

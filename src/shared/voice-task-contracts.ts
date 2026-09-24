@@ -7,6 +7,7 @@ import type {
   AgentTaskStatus
 } from './agent-contracts'
 import type { PreferenceKey, PreferenceValue } from './model-contracts'
+import type { AgentOrchestrationPauseReason, AgentOrchestrationStatus } from './orchestration-contracts'
 import type { RelativeDayPhrase } from './relative-dates'
 
 /**
@@ -315,6 +316,13 @@ export type VoiceNarration =
    * text is ever spoken from here.
    */
   | { kind: 'research'; state: VoiceResearchState }
+  /**
+   * Milestone 11 S4. An orchestration is not a `tasks` row (`taskId`/`taskStatus`/`taskKind` on the
+   * outcome do not apply to it), so its own id and closed state travel here instead. `pauseReason` is
+   * present only while `status` is `'PAUSED'`. The step list and result summaries stay on the trusted
+   * cockpit; nothing here is spoken or shown that a capability's own card does not already show.
+   */
+  | { kind: 'orchestration'; orchestrationId: string; status: AgentOrchestrationStatus; pauseReason?: AgentOrchestrationPauseReason }
   | { kind: 'preference_saved'; preference: PreferenceValue }
   | { kind: 'refused'; code: AgentErrorCode }
 

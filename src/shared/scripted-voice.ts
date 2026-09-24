@@ -157,6 +157,11 @@ export function narrateScripted(output: Json): ScriptedNarration {
         default:
           return { text: 'The research task is shown on the card.' }
       }
+    case 'orchestration':
+      if (facts.status === 'PAUSED') {
+        return { text: 'The general task Lumi is working on needs your attention. Please check the task cockpit.' }
+      }
+      return { text: 'The general task Lumi is working on is shown in the task cockpit.' }
     case 'inspection':
       switch (facts.state) {
         case 'approval_required':
