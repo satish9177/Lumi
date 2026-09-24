@@ -184,6 +184,24 @@ export function researchObjectiveFromWire(value: unknown): string {
   return objective
 }
 
+/**
+ * Milestone 11 S1: the objective of a general orchestrated-task request. One
+ * bounded string, exactly like `researchObjectiveFromWire`: there is no field
+ * for a capability id, a URL, a path or a step, so a model can describe what
+ * the user wants and nothing more. Interpretation only -- classifying a
+ * request this way executes nothing by itself.
+ */
+export function orchestrationObjectiveFromWire(value: unknown): string {
+  const args = record(value)
+  onlyKeys(args, ['objective'])
+  const objective = typeof args.objective === 'string' ? args.objective.replace(/\s+/g, ' ').trim() : ''
+  // eslint-disable-next-line no-control-regex
+  if (!objective || objective.length > 500 || /[\x00-\x1f\x7f]/.test(objective)) {
+    throw new PlanWireError('Say what task Lumi should work on.')
+  }
+  return objective
+}
+
 export function preferenceFromWire(value: unknown): PreferenceValue {
   const args = record(value)
   onlyKeys(args, ['key', 'value'])
@@ -284,6 +302,14 @@ export const RESEARCH_SCHEMA_PROPERTIES = {
     type: 'string',
     maxLength: 500,
     description: 'What to find out from public web pages, in the user own words. Never a URL Lumi invented, never a selector or a script.'
+  }
+} as const
+
+export const ORCHESTRATION_SCHEMA_PROPERTIES = {
+  objective: {
+    type: 'string',
+    maxLength: 500,
+    description: 'What general task Lumi should work on, in the user\'s own words. Never a capability id, a URL Lumi invented, a selector or a script.'
   }
 } as const
 

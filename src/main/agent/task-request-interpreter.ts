@@ -7,10 +7,12 @@ import {
 import {
   PlanWireError,
   clinicQueryFromWire,
+  orchestrationObjectiveFromWire,
   planFromWire,
   preferenceFromWire,
   researchObjectiveFromWire,
   CLINIC_QUERY_SCHEMA_PROPERTIES,
+  ORCHESTRATION_SCHEMA_PROPERTIES,
   PLAN_SCHEMA_PROPERTIES,
   PREFERENCE_SCHEMA_PROPERTIES,
   RESEARCH_SCHEMA_PROPERTIES
@@ -45,10 +47,11 @@ import type { TaskOrigin } from '../services/agent-tasks'
 
 export const INTERPRETATION_RULES = [
   'You convert one user request for the Lumi desktop assistant into JSON. You never act, and nothing you write is executed directly.',
-  'Output exactly one JSON object with an "intent" field and, depending on it, "plan", "clinic" or "preference". No prose.',
-  'intent is one of: appointment_plan (find, change, pick, prepare an appointment, or "book it"), clinic_info (doctor hours, fee, languages, address, walk-ins), public_research (find something out from public web pages: a repository, a public profile, public job listings, public documentation, anything the user asks Lumi to look up on the web), status, check_booking (check an uncertain booking), cancel_task, remember_preference (only when the user explicitly says remember), conversation (anything else).',
+  'Output exactly one JSON object with an "intent" field and, depending on it, "plan", "clinic", "research", "orchestration" or "preference". No prose.',
+  'intent is one of: appointment_plan (find, change, pick, prepare an appointment, or "book it"), clinic_info (doctor hours, fee, languages, address, walk-ins), public_research (find something out from public web pages: a repository, a public profile, public job listings, public documentation, anything the user asks Lumi to look up on the web), orchestrated_task (a general task that needs Lumi\'s other capabilities: reading, comparing or downloading a document or file, checking, starting or stopping a registered project, looking at an open desktop application, preparing a form, or a request that mixes more than one of those), status, check_booking (check an uncertain booking), cancel_task, remember_preference (only when the user explicitly says remember), conversation (anything else).',
   'For public_research, "research" has one key, "objective": what to find out, in the user\'s own words. You never choose a web address, a step, a selector or a script; Lumi asks the user for permission first and then plans each step itself.',
   'Use public_research only when the user wants something looked up on the public web. A question you can answer from your own knowledge, without opening a page, is conversation.',
+  'For orchestrated_task, "orchestration" has one key, "objective": the user\'s task, in their own words. You never name a capability, a file path, a URL, a selector or a script; Lumi\'s own controller decides which of its already-reviewed capabilities to use and asks for permission at each boundary. Use orchestrated_task only when the request is not cleanly appointment_plan, clinic_info or public_research.',
   'plan has optional keys: search (a NEW search), refine (change the current search), choose, prepare (boolean), show_for_approval (boolean). Never both search and refine. prepare needs choose. At most four steps.',
   `specialty is exactly one of: ${VOICE_SPECIALTIES.join(', ')} ("dermatologist" or "skin doctor" is Dermatology, "dentist" is Dentistry).`,
   'Constraint fields: specialty, when ({kind: today|tomorrow|day_after_tomorrow|weekday|next_weekday|this_weekend|next_weekend|date, weekday, date}), part_of_day (morning|afternoon|evening|any), earliest_time and latest_time (24-hour HH:MM, clinic-local), max_price_inr (integer rupees). refine may also have clear: [specialty|day|time|price].',
@@ -63,10 +66,11 @@ export const INTERPRETATION_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    intent: { type: 'string', enum: ['appointment_plan', 'clinic_info', 'public_research', 'status', 'check_booking', 'cancel_task', 'remember_preference', 'conversation'] },
+    intent: { type: 'string', enum: ['appointment_plan', 'clinic_info', 'public_research', 'orchestrated_task', 'status', 'check_booking', 'cancel_task', 'remember_preference', 'conversation'] },
     plan: { type: 'object', additionalProperties: false, properties: PLAN_SCHEMA_PROPERTIES },
     clinic: { type: 'object', additionalProperties: false, properties: CLINIC_QUERY_SCHEMA_PROPERTIES },
     research: { type: 'object', additionalProperties: false, properties: RESEARCH_SCHEMA_PROPERTIES },
+    orchestration: { type: 'object', additionalProperties: false, properties: ORCHESTRATION_SCHEMA_PROPERTIES },
     preference: { type: 'object', additionalProperties: false, properties: PREFERENCE_SCHEMA_PROPERTIES }
   },
   required: ['intent']
@@ -86,6 +90,13 @@ export type Interpretation =
    * card, and stops there -- an interpretation can never grant the scope.
    */
   | { kind: 'research'; objective: string }
+  /**
+   * Milestone 11 S1. Classification only: no capability is executed because
+   * an intent model mentioned one. Milestone 11 S2 wires this to a durable
+   * orchestrator; until then it is claimed and answered as not yet available
+   * (see `ORCHESTRATION_UNAVAILABLE`), never passed on to conversation.
+   */
+  | { kind: 'orchestrated_task'; objective: string }
   | { kind: 'conversation' }
 
 /** Strictly parse model (or rule) JSON. Throws on anything outside the contract. */
@@ -102,6 +113,7 @@ export function parseInterpretation(text: string): Interpretation {
     appointment_plan: ['intent', 'plan'],
     clinic_info: ['intent', 'clinic'],
     public_research: ['intent', 'research'],
+    orchestrated_task: ['intent', 'orchestration'],
     remember_preference: ['intent', 'preference'],
     status: ['intent'], check_booking: ['intent'], cancel_task: ['intent'], conversation: ['intent']
   }
@@ -123,6 +135,8 @@ export function parseInterpretation(text: string): Interpretation {
     }
     case 'public_research':
       return { kind: 'research', objective: researchObjectiveFromWire(wire.research) }
+    case 'orchestrated_task':
+      return { kind: 'orchestrated_task', objective: orchestrationObjectiveFromWire(wire.orchestration) }
     case 'remember_preference': {
       const preference = preferenceFromWire(wire.preference)
       return { kind: 'command', scope: 'standalone', build: (turn) => ({ kind: 'remember_preference', turn, preference }) }
@@ -176,6 +190,10 @@ const REQUEST_FAILED = { ok: false, error: { code: 'request_failed', message: 'L
 const RESEARCH_UNAVAILABLE = {
   ok: false,
   error: { code: 'research_unavailable', message: 'Public web research is not set up on this computer. Nothing was searched or opened.' }
+} as const
+const ORCHESTRATION_UNAVAILABLE = {
+  ok: false,
+  error: { code: 'orchestration_unavailable', message: 'General task orchestration is not available yet. Nothing was done.' }
 } as const
 const NOT_UNDERSTOOD: VoiceTaskOutcome = {
   kind: 'task_status', focus: 'none', replayed: false, narration: { kind: 'needs_clarification', reason: 'not_understood' }
@@ -316,6 +334,14 @@ export class TaskRequestInterpreter {
           }
         }
       }
+    }
+    if (interpretation.kind === 'orchestrated_task') {
+      // Milestone 11 S1: classification only. No capability catalog entry is
+      // executed because an intent model mentioned one, and there is no
+      // orchestrator to hand this to yet -- S2 wires that. Claimed here,
+      // never passed on to conversation, so a general request never falls
+      // through to a legacy tool.
+      return { handled: true, result: ORCHESTRATION_UNAVAILABLE }
     }
     if (interpretation.kind === 'conversation' || !inScope(interpretation.scope, task)) return { handled: false }
     const command = interpretation.build({ turnId: requestId, utterance: text })

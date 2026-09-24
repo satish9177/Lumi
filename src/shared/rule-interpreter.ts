@@ -16,6 +16,7 @@ export type InterpretationIntent =
   | 'appointment_plan'
   | 'clinic_info'
   | 'public_research'
+  | 'orchestrated_task'
   | 'status'
   | 'check_booking'
   | 'cancel_task'
@@ -29,6 +30,7 @@ export interface InterpretationWire {
   plan?: Json
   clinic?: Json
   research?: Json
+  orchestration?: Json
   preference?: Json
 }
 
@@ -49,6 +51,28 @@ const RESEARCH_CUES = [
 
 export function looksLikeResearch(text: string): boolean {
   return RESEARCH_CUES.some((cue) => cue.test(text))
+}
+
+/**
+ * Milestone 11 S1: cues for a general task that needs a non-research,
+ * non-appointment capability -- documents, downloads, a registered project or
+ * an open desktop application, or a request that mixes more than one of
+ * those. Deliberately distinctive nouns only, so this narrow last-resort
+ * fallback does not swallow an ordinary "check my booking" or "status" ask.
+ */
+const ORCHESTRATION_CUES = [
+  /\b(document|documents|pdf|docx|resume file)\b/,
+  /\bcompare\b[^.]*\b(document|documents|file|files|resume|pdf)\b/,
+  /\bdownload\b[^.]*\b(pdf|file|document|documents)\b/,
+  /\b(project|vs code|vscode)\b[^.]*\b(start|running|status|stop|restart|health|healthy)\b/,
+  /\b(start|running|status|stop|restart)\b[^.]*\b(project|vs code|vscode)\b/,
+  /\b(this|the) (open |current )?(application|app|window)\b/,
+  /\bprepare\b[^.]*\bform\b/,
+  /\bfill\b[^.]*\bform\b/
+]
+
+export function looksLikeOrchestration(text: string): boolean {
+  return ORCHESTRATION_CUES.some((cue) => cue.test(text))
 }
 
 export interface RuleContext {
@@ -166,6 +190,13 @@ const INFO_TOPICS: Array<[RegExp, string]> = [
 export function interpretByRules(raw: string, context: RuleContext = {}): InterpretationWire {
   const text = raw.toLowerCase().replace(/\s+/g, ' ').trim()
   if (!text) return { intent: 'conversation' }
+
+  // Checked before "check"/"status" so "check whether my project is running"
+  // is not mistaken for check_booking, and before appointment/clinic cues so
+  // a document- or project-shaped request never becomes a clinic question.
+  if (looksLikeOrchestration(text)) {
+    return { intent: 'orchestrated_task', orchestration: { objective: raw.trim() } }
+  }
 
   if (/\bremember\b/.test(text)) {
     const part = /\b(morning|afternoon|evening)\b/.exec(text)

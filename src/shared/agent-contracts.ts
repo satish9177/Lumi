@@ -1415,6 +1415,8 @@ export const AGENT_ERROR_CODES = [
   // Milestone 10 S4: a workflow request was refused, or its lineage/candidate moved on since it was reviewed.
   'workflow_refused',
   'workflow_state_changed',
+  // Milestone 11 S1: a general request classified as orchestrated_task, but no orchestrator is wired yet.
+  'orchestration_unavailable',
   'request_failed'
 ] as const
 export type AgentErrorCode = typeof AGENT_ERROR_CODES[number]
