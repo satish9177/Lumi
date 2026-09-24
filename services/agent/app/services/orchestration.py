@@ -268,14 +268,19 @@ class OrchestrationService:
         the orchestration stays paused (possibly with an updated, more accurate reason). Revalidates
         freshness every time -- it never assumes a child task resolved just because time passed."""
         async with self._engine.connect() as connection:
-            record = await OrchestrationRepository(connection).get(orchestration_id)
+            repository = OrchestrationRepository(connection)
+            record = await repository.get(orchestration_id)
             if record is None:
                 raise OrchestrationRefusal("orchestration_not_found")
             if record.revision != expected_revision:
                 raise OrchestrationRefusal("revision_conflict")
             if record.status != OrchestrationStatus.PAUSED or record.pause_reason not in ("approval_required", "outcome_unknown"):
                 return await self._view(connection, orchestration_id)
-            step = await OrchestrationRepository(connection).last_step(orchestration_id)
+            # A PAUSED orchestration is never revived once its TTL has passed -- checked before any of the
+            # capability reads below, matching `_live_running`'s own fail-fast shape for every other write.
+            if not await repository.is_live(orchestration_id):
+                raise OrchestrationRefusal("orchestration_expired")
+            step = await repository.last_step(orchestration_id)
         if step is None or step.status not in ("PENDING", "AWAITING_APPROVAL") or step.child_task_id is None:
             return await self.describe(orchestration_id)
         status, summary, pause_reason = await self._read_task_backed_resolution(step.capability_id, step.child_task_id)
@@ -301,6 +306,10 @@ class OrchestrationService:
             if fresh_step is None or fresh_step.id != step.id or fresh_step.status not in ("PENDING", "AWAITING_APPROVAL"):
                 # Someone else already resolved (or the step changed) between the read and this lock.
                 return await self._view(connection, orchestration_id)
+            # Re-checked here too, under the same lock as the write: the capability reads above
+            # (`_read_task_backed_resolution`) are real I/O and could themselves cross the TTL boundary.
+            if not await repository.is_live(orchestration_id):
+                raise OrchestrationRefusal("orchestration_expired")
             handle = result_handle(_OUTPUT_CLASS[step.capability_id], step.sequence) if status == StepStatus.SUCCEEDED else None
             resolved = await repository.resolve_step(step.id, status=status.value, result_handle=handle, result_summary=summary)
             if resolved is None:

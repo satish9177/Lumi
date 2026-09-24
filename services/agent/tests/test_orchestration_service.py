@@ -238,6 +238,29 @@ class TestTaskBackedCapability:
         assert step.result_handle == "research_result:1"
         assert step.result_summary is not None and "could not verify" in step.result_summary
 
+    async def test_resume_refuses_once_the_orchestration_has_expired_rather_than_reviving_it(
+        self, service: OrchestrationService, task_service: TaskService, engine: AsyncEngine
+    ) -> None:
+        """Regression: `resume()` must never revive a PAUSED-but-expired orchestration to RUNNING. Before
+        this fix it skipped the liveness check every other write path (`_live_running`) enforces, so an
+        orchestration a user came back to after its 30-minute TTL passed could be settled straight to
+        RUNNING -- only to immediately refuse `orchestration_expired` on the very next call, a stuck,
+        undocumented state."""
+        view = await service.create(objective=OBJECTIVE)
+        task_id = await _research_task(task_service)
+        paused = await service.advance(
+            view.orchestration.id, expected_revision=view.orchestration.revision, capability_id="public_research", task_id=task_id
+        )
+        assert paused.orchestration.status == "PAUSED"
+        await _sql(
+            engine,
+            "UPDATE orchestrations SET created_at = now() - interval '2 hours', "
+            "expires_at = now() - interval '1 minute' WHERE id = :id",
+            id=view.orchestration.id,
+        )
+        with pytest.raises(OrchestrationRefusal, match="orchestration_expired"):
+            await service.resume(view.orchestration.id, expected_revision=paused.orchestration.revision)
+
     async def test_a_declined_scope_settles_the_step_as_failed_not_stuck_forever(
         self, service: OrchestrationService, research: ResearchService, task_service: TaskService
     ) -> None:

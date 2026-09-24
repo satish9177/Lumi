@@ -197,6 +197,7 @@ const CASES = {
     ['a project_start refused by the capability\'s own effect lock surfaces the same refusal, never bypassed', ts('src/main/services/orchestration-coordinator.test.ts', 'surfaces the SAME refusal')],
     // recovery / resume, including the new honest outcome_unknown pause (M11 S4)
     ['resume re-checks durable state rather than re-choosing a step', ts('src/main/services/orchestration-coordinator.test.ts', 'resumes a paused-for-approval orchestration by re-checking durable state')],
+    ['resume refuses rather than reviving an orchestration once it has expired', py('tests/test_orchestration_service.py', 'test_resume_refuses_once_the_orchestration_has_expired_rather_than_reviving_it')],
     ['an ambiguous run outcome pauses with its own honest reason, never mislabeled approval_required', py('tests/test_orchestration_service.py', 'test_an_outcome_unknown_run_pauses_with_its_own_honest_reason_not_approval_required')],
     // budget exhaustion pauses rather than silently widening
     ['the step budget pauses rather than silently widening', py('tests/test_orchestration_service.py', 'test_the_step_budget_pauses_rather_than_silently_widening')],

@@ -1142,3 +1142,17 @@ step's underlying task ended in an ambiguous state).
   `pause_reason` alongside the status change; covered by a new regression test,
   `test_stop_clears_the_pause_reason_so_a_paused_orchestration_can_still_be_stopped`. See
   `docs/reviews/milestone-11-s4.md`.
+
+### Generality evals and final audit (M11 S5, no migration)
+
+A 20-case `orchestration` category in `scripts/run-evals.mjs` covers every metric the plan names for S5
+(task completion, correct capability selection, wrong-capability/malformed-output refusal, planner-call
+budget, approval count, stale-revision/loop rejection, effect-lock blocking, resume/recovery, step-budget
+exhaustion, Stop, provider disclosure) -- 139/139 pass. Two independent fresh-Claude audit passes over the
+complete M11 diff found the authority model sound across all five slices and one confirmed, reproduced
+bug, now fixed: `OrchestrationService.resume()` did not check orchestration liveness/expiry the way every
+other write path (`_live_running`) does, so a `PAUSED` orchestration past its 30-minute TTL could be
+revived to `RUNNING` by `resume()` and then get stuck (the very next call would refuse
+`orchestration_expired`). Fixed by checking `is_live()` both before `resume()` reads any capability state
+and again under the final locked write, immediately before `resume_running()`. See
+`docs/reviews/milestone-11-s5.md`.
