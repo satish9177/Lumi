@@ -22,7 +22,7 @@ scope card, and nothing is searched or read until the same trusted click.
 
 import uuid
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Final
 
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -45,7 +45,15 @@ from app.domain.orchestration import (
     validate_capability_id,
     validate_objective,
 )
+from app.domain.orchestration_resources import (
+    CAPABILITY_OUTPUT_RESOURCE,
+    CAPABILITY_RESOURCE_REQUIREMENTS,
+    next_ref,
+    safe_label,
+    validate_resource_refs,
+)
 from app.repositories.orchestration import OrchestrationRecord, OrchestrationRepository, StepRecord
+from app.repositories.orchestration_resources import OrchestrationResourceRepository, ResourceRecord
 from app.repositories.tasks import TaskRepository
 from app.services.projects import ProjectService
 from app.services.research_tasks import ResearchService
@@ -71,6 +79,10 @@ class OrchestrationView:
     steps: tuple[StepRecord, ...]
     #: What this runtime can execute right now -- shown to the planner as its allowed step choices.
     available_capabilities: tuple[str, ...]
+    #: Milestone 12 S1: resources this orchestration currently owns and may cite (not consumed, not
+    #: expired). Seeing one here is never authority to use it with any particular capability --
+    #: `CAPABILITY_RESOURCE_REQUIREMENTS` decides that, independently, every time `advance()` is called.
+    resources: tuple[ResourceRecord, ...] = ()
 
 
 class OrchestrationService:
@@ -111,7 +123,11 @@ class OrchestrationService:
         if live and record.status == OrchestrationStatus.RUNNING:
             already_succeeded = {step.capability_id for step in steps if step.status == StepStatus.SUCCEEDED}
             available = tuple(sorted(COMPOSED_CAPABILITY_IDS - already_succeeded))
-        return OrchestrationView(orchestration=record, live=live, steps=tuple(steps), available_capabilities=available)
+        resources = await OrchestrationResourceRepository(connection).available(orchestration_id)
+        return OrchestrationView(
+            orchestration=record, live=live, steps=tuple(steps), available_capabilities=available,
+            resources=tuple(resources),
+        )
 
     # ---- planner-call budget -------------------------------------------------------------------------
 
@@ -137,13 +153,25 @@ class OrchestrationService:
         capability_id: object,
         task_id: object = None,
         resolved_summary: object = None,
+        resources: object = None,
     ) -> OrchestrationView:
         capability = validate_capability_id(capability_id)
+        resource_refs = validate_resource_refs(resources)
 
         if capability not in COMPOSED_CAPABILITY_IDS:
             # A real catalog id (Milestone 11 S1); this runtime has not composed it yet. Pause with an
             # honest reason rather than refusing outright or pretending to execute it.
             return await self._pause(orchestration_id, expected_revision=expected_revision, reason="capability_unavailable")
+
+        # Milestone 12 S1: a capability's own resource requirement is closed, static data -- checked before
+        # any resource is even looked up, so citing a resource against a capability that accepts none is
+        # refused the same way whether or not the cited ref happens to exist. "The planner can see r1" is
+        # never, by itself, "the planner may use r1 with this capability".
+        requirement = CAPABILITY_RESOURCE_REQUIREMENTS.get(capability, ())
+        if resource_refs and not requirement:
+            raise OrchestrationRefusal("resources_not_supported")
+        if requirement and len(resource_refs) != len(requirement):
+            raise OrchestrationRefusal("resources_not_supported")
 
         if capability in TASK_BACKED_CAPABILITY_IDS:
             if resolved_summary is not None:
@@ -153,6 +181,7 @@ class OrchestrationService:
             return await self._commit_step(
                 orchestration_id, expected_revision=expected_revision, capability=capability,
                 child_task_id=task_uuid, status=status, summary=summary, pause_reason=pause_reason,
+                resource_refs=resource_refs, requirement=requirement,
             )
 
         # Synchronous (SYNCHRONOUS_CAPABILITY_IDS): the caller already computed the result through that
@@ -163,6 +192,7 @@ class OrchestrationService:
         return await self._commit_step(
             orchestration_id, expected_revision=expected_revision, capability=capability,
             child_task_id=None, status=StepStatus.SUCCEEDED, summary=summary, pause_reason=None,
+            resource_refs=resource_refs, requirement=requirement,
         )
 
     async def _read_task_backed_resolution(
@@ -230,9 +260,12 @@ class OrchestrationService:
         status: StepStatus,
         summary: str | None,
         pause_reason: str | None,
+        resource_refs: tuple[str, ...] = (),
+        requirement: tuple[str, ...] = (),
     ) -> OrchestrationView:
         async with self._engine.begin() as connection:
             repository = OrchestrationRepository(connection)
+            resource_repository = OrchestrationResourceRepository(connection)
             record = await self._live_running(repository, orchestration_id, expected_revision)
             steps = await repository.steps(orchestration_id)
             if len(steps) >= MAX_STEPS:
@@ -250,13 +283,43 @@ class OrchestrationService:
                     await repository.pause(orchestration_id, reason="budget_exhausted")
                     return await self._view(connection, orchestration_id)
 
+            # Milestone 12 S1: resolve every cited resource fresh, under the same orchestration row lock
+            # `_live_running` just took -- never from an earlier, now-possibly-stale read. A ref that does not
+            # resolve for THIS orchestration (invented, another orchestration's, or already consumed/expired)
+            # refuses the whole step; nothing is partially consumed.
+            resolved_resources: list[ResourceRecord] = []
+            for position, ref in enumerate(resource_refs):
+                resource = await resource_repository.get(orchestration_id, ref)
+                if resource is None:
+                    raise OrchestrationRefusal("resource_not_found")
+                if resource.consumed_at is not None:
+                    raise OrchestrationRefusal("resource_consumed")
+                if resource.expires_at is not None and resource.expires_at <= _now_utc():
+                    raise OrchestrationRefusal("resource_expired")
+                if position < len(requirement) and resource.kind != requirement[position]:
+                    raise OrchestrationRefusal("resource_kind_mismatch")
+                resolved_resources.append(resource)
+            for resource in resolved_resources:
+                if resource.single_use:
+                    if await resource_repository.consume(resource.id) is None:
+                        raise OrchestrationRefusal("resource_consumed")
+
             sequence = len(steps) + 1
             handle = result_handle(_OUTPUT_CLASS[capability], sequence) if status == StepStatus.SUCCEEDED else None
-            await repository.insert_step(
+            step = await repository.insert_step(
                 orchestration_id=orchestration_id, sequence=sequence, capability_id=capability, status=status.value,
                 child_task_id=child_task_id, result_handle=handle, result_summary=summary,
             )
             await repository.record_step_added(orchestration_id, new_child_task=child_task_id is not None)
+            if status == StepStatus.SUCCEEDED:
+                output = CAPABILITY_OUTPUT_RESOURCE.get(capability)
+                if output is not None:
+                    ref = next_ref(await resource_repository.count(orchestration_id))
+                    await resource_repository.mint(
+                        orchestration_id=orchestration_id, ref=ref, kind=output.kind,
+                        producing_step_id=step.id, privacy_class=output.privacy_class,
+                        safe_label=_capability_safe_label(capability, sequence), single_use=output.single_use,
+                    )
             if status in (StepStatus.PENDING, StepStatus.AWAITING_APPROVAL):
                 await repository.pause(orchestration_id, reason=pause_reason or "approval_required")
             return await self._view(connection, orchestration_id)
@@ -314,6 +377,16 @@ class OrchestrationService:
             resolved = await repository.resolve_step(step.id, status=status.value, result_handle=handle, result_summary=summary)
             if resolved is None:
                 return await self._view(connection, orchestration_id)
+            if status == StepStatus.SUCCEEDED:
+                output = CAPABILITY_OUTPUT_RESOURCE.get(step.capability_id)
+                if output is not None:
+                    resource_repository = OrchestrationResourceRepository(connection)
+                    ref = next_ref(await resource_repository.count(orchestration_id))
+                    await resource_repository.mint(
+                        orchestration_id=orchestration_id, ref=ref, kind=output.kind,
+                        producing_step_id=step.id, privacy_class=output.privacy_class,
+                        safe_label=_capability_safe_label(step.capability_id, step.sequence), single_use=output.single_use,
+                    )
             await repository.resume_running(orchestration_id)
             return await self._view(connection, orchestration_id)
 
@@ -369,6 +442,17 @@ class OrchestrationService:
         if not await repository.is_live(orchestration_id):
             raise OrchestrationRefusal("orchestration_expired")
         return record
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _capability_safe_label(capability: str, sequence: int) -> str:
+    """Controller-authored, template-only text -- never a capability's own result content. Deliberately the
+    same shape for every capability so adding a new `CAPABILITY_OUTPUT_RESOURCE` entry later cannot
+    accidentally start passing through page/document/account/desktop text just by matching this signature."""
+    return safe_label(f"{capability} result (step {sequence})")
 
 
 def _require_uuid(value: object, *, code: str) -> uuid.UUID:

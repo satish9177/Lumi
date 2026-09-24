@@ -9,7 +9,7 @@ import uuid
 import pytest
 from sqlalchemy.exc import IntegrityError
 
-from tests.conftest import M11_S2_TABLES, downgrade, head_revision, migrate, truncate_all
+from tests.conftest import M11_S2_TABLES, M12_S1_TABLES, downgrade, head_revision, migrate, truncate_all
 from tests.test_migration_0013 import exists, insert_task, revision, run
 
 S4_TABLES = ("workflows", "workflow_steps", "workflow_candidates", "workflow_values")
@@ -132,7 +132,7 @@ def test_migration_0020_enforces_lineage_and_provenance_and_downgrades_only_with
             downgrade(url, "0019")
         assert revision(url) == "0020"
 
-        truncate_all(url, without=M11_S2_TABLES)
+        truncate_all(url, without=(*M11_S2_TABLES, *M12_S1_TABLES))
         downgrade(url, "0019")
         assert revision(url) == "0019"
         for table in S4_TABLES:

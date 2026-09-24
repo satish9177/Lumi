@@ -144,10 +144,10 @@ class RecordingProvider implements ModelProvider {
 describe('the router, for account-private classes', () => {
   const context = { rules: 'rules', utterance: 'question', untrusted: { label: 'pages', lines: ['[o1 b1] private text'] } }
 
-  it('lists exactly the seven private classes, and exactly one is vision-capable', () => {
+  it('lists exactly the eight private classes, and exactly one is vision-capable', () => {
     expect([...PRIVATE_TASK_CLASSES].sort()).toEqual([
       'authenticated_answer', 'authenticated_planning', 'desktop_action_planning', 'desktop_planning',
-      'desktop_vision', 'document_compare', 'form_planning'
+      'desktop_vision', 'document_compare', 'form_planning', 'orchestration_planning'
     ])
     expect([...PRIVATE_VISION_TASK_CLASSES]).toEqual(['desktop_vision'])
     for (const taskClass of PRIVATE_TASK_CLASSES) {

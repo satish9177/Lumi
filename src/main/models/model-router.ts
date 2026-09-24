@@ -149,9 +149,19 @@ export const DEFAULT_ROUTES: RoutingTable = {
  *   screenshot never reaches any provider that is merely private; only the one, separately reviewed,
  *   vision-capable class below may carry an image at all.
  */
+/**
+ * Milestone 12 S1: `orchestration_planning` joined this list before any privacy-sensitive capability
+ * (`account_read`, `desktop_reason`, `document_compare`, `form_prepare`, `workflow_prepare`) is composed
+ * through the general orchestrator -- a precondition the Milestone 11 final review flagged and Milestone 12
+ * S1 resolves structurally rather than by comment: `agent-capabilities.test.ts`'s catalog carries a
+ * `resultPrivacyClass` field, and `orchestration-planning-privacy.test.ts` asserts that whenever the catalog
+ * contains a disclosing, privacy-sensitive capability -- which it already does today -- this class must be
+ * private. A future catalog edit that adds such a capability without also keeping this membership therefore
+ * fails a test, not merely a slice author's memory of a residual note.
+ */
 export const PRIVATE_TASK_CLASSES: readonly ModelTaskClass[] = [
   'authenticated_planning', 'authenticated_answer', 'form_planning', 'desktop_planning',
-  'desktop_action_planning', 'desktop_vision', 'document_compare'
+  'desktop_action_planning', 'desktop_vision', 'document_compare', 'orchestration_planning'
 ]
 
 /**

@@ -21,7 +21,7 @@ export interface OrchestrationGraphClient {
   recordPlannerCall: (orchestrationId: string, expectedRevision: number) => Promise<AgentResult<AgentOrchestrationView>>
   advanceOrchestration: (
     orchestrationId: string, expectedRevision: number, capabilityId: AgentCapabilityId,
-    options: { taskId?: string; resolvedSummary?: string }
+    options: { taskId?: string; resolvedSummary?: string; resources?: readonly string[] }
   ) => Promise<AgentResult<AgentOrchestrationView>>
   resumeOrchestration: (orchestrationId: string, expectedRevision: number) => Promise<AgentResult<AgentOrchestrationView>>
   finishOrchestration: (orchestrationId: string, expectedRevision: number) => Promise<AgentResult<AgentOrchestrationView>>
@@ -39,6 +39,7 @@ export interface OrchestrationPlannerLike {
     facts: readonly string[]
     resultLines: readonly string[]
     available: readonly AgentCapabilityId[]
+    availableResources: readonly string[]
   }) => Promise<OrchestrationPlanOutcome>
 }
 
@@ -140,8 +141,10 @@ export class OrchestrationCoordinator {
       view = counted.value
       if (view.status !== 'RUNNING') break
 
+      const availableResources = (view.resources ?? []).map((resource) => resource.ref)
       let decisionKind: 'step' | 'finish' | 'stop'
       let capability: AgentCapabilityId | undefined
+      let resources: readonly string[] = []
       try {
         const outcome = await this.deps.planner.next({
           objective: view.objective,
@@ -155,15 +158,18 @@ export class OrchestrationCoordinator {
             plannerCalls: view.plannerCalls,
             maxPlannerCalls: 20,
             available: view.availableCapabilities,
-            steps: view.steps.map((step) => ({ sequence: step.sequence, capabilityId: step.capabilityId, status: step.status }))
+            steps: view.steps.map((step) => ({ sequence: step.sequence, capabilityId: step.capabilityId, status: step.status })),
+            resources: (view.resources ?? []).map((resource) => ({ ref: resource.ref, kind: resource.kind, safeLabel: resource.safeLabel }))
           }),
           resultLines: orchestrationResultLines(
             view.steps.map((step) => ({ sequence: step.sequence, capabilityId: step.capabilityId, resultSummary: step.resultSummary ?? null }))
           ),
-          available: view.availableCapabilities
+          available: view.availableCapabilities,
+          availableResources
         })
         decisionKind = outcome.decision.kind
         capability = outcome.decision.kind === 'step' ? outcome.decision.capability : undefined
+        resources = outcome.decision.kind === 'step' ? (outcome.decision.resources ?? []) : []
       } catch (error) {
         if (!(error instanceof ModelRoutingError)) throw error
         // No provider could decide the next step. The orchestration stays RUNNING (a transient outage is
@@ -184,7 +190,7 @@ export class OrchestrationCoordinator {
         break
       }
 
-      const dispatched = await this.dispatch(orchestrationId, view.revision, capability, view.objective)
+      const dispatched = await this.dispatch(orchestrationId, view.revision, capability, view.objective, resources)
       if (!dispatched.ok) return dispatched
       view = dispatched.value
     }
@@ -214,12 +220,13 @@ export class OrchestrationCoordinator {
    * this module does not explicitly name to reach anything.
    */
   private async dispatch(
-    orchestrationId: string, revision: number, capability: AgentCapabilityId, objective: string
+    orchestrationId: string, revision: number, capability: AgentCapabilityId, objective: string,
+    resources: readonly string[]
   ): Promise<AgentResult<AgentOrchestrationView>> {
     if (capability === 'public_research') {
       const created = await this.deps.createResearchTask(objective)
       if (!created.ok) return created
-      return this.deps.orchestrations.advanceOrchestration(orchestrationId, revision, capability, { taskId: created.value.task.taskId })
+      return this.deps.orchestrations.advanceOrchestration(orchestrationId, revision, capability, { taskId: created.value.task.taskId, resources })
     }
     if (capability === 'project_status') {
       const latest = await this.deps.getLatestProjectRun()
@@ -227,7 +234,7 @@ export class OrchestrationCoordinator {
       const summary = latest.value
         ? `Project run phase: ${latest.value.phase}${latest.value.ready ? ', ready' : ', not ready yet'}.`
         : 'No project run has been started yet.'
-      return this.deps.orchestrations.advanceOrchestration(orchestrationId, revision, capability, { resolvedSummary: summary })
+      return this.deps.orchestrations.advanceOrchestration(orchestrationId, revision, capability, { resolvedSummary: summary, resources })
     }
     if (capability === 'project_start') {
       const recipe = await this.deps.getRegisteredRecipeId()
@@ -237,7 +244,7 @@ export class OrchestrationCoordinator {
       }
       const created = await this.deps.createProjectRun(recipe.value)
       if (!created.ok) return created
-      return this.deps.orchestrations.advanceOrchestration(orchestrationId, revision, capability, { taskId: created.value.taskId })
+      return this.deps.orchestrations.advanceOrchestration(orchestrationId, revision, capability, { taskId: created.value.taskId, resources })
     }
     // Not reachable in the ordinary case: the runtime only ever offers a planner the capabilities it has
     // itself composed. Fail closed rather than silently doing nothing.

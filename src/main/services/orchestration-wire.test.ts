@@ -24,6 +24,7 @@ function orchestrationBody(overrides: Record<string, unknown> = {}): Record<stri
     expires_at: '2026-09-24T10:30:00+00:00',
     stopped_at: null,
     available_capabilities: ['public_research', 'project_status'],
+    resources: [],
     steps: [],
     ...overrides
   }
@@ -72,6 +73,36 @@ describe('parseOrchestration', () => {
     const body = orchestrationBody()
     delete body.revision
     expect(() => parseOrchestration(body)).toThrow(WireError)
+  })
+
+  it('parses Milestone 12 S1 resources, by their controller-authored shape', () => {
+    const view = parseOrchestration(orchestrationBody({
+      resources: [
+        { ref: 'r1', kind: 'research_result_ref', privacy_class: 'public', safe_label: 'public_research result (step 1)', single_use: false }
+      ]
+    }))
+    expect(view.resources).toEqual([
+      { ref: 'r1', kind: 'research_result_ref', privacyClass: 'public', safeLabel: 'public_research result (step 1)', singleUse: false }
+    ])
+  })
+
+  it('rejects a response missing the resources array outright, never defaulting it to empty', () => {
+    const body = orchestrationBody()
+    delete body.resources
+    expect(() => parseOrchestration(body)).toThrow(WireError)
+  })
+
+  it('rejects a malformed resource -- bad ref shape, unknown kind, unknown privacy class', () => {
+    const base = { ref: 'r1', kind: 'research_result_ref', privacy_class: 'public', safe_label: 'x', single_use: false }
+    for (const bad of [
+      { ...base, ref: '00000000-0000-4000-8000-000000000001' }, // a UUID is not an opaque ref
+      { ...base, ref: 'r0' }, // r0 is not a valid ref (starts at r1)
+      { ...base, kind: 'account_id' },
+      { ...base, privacy_class: 'secret' },
+      { ...base, single_use: 'false' }
+    ]) {
+      expect(() => parseOrchestration(orchestrationBody({ resources: [bad] }))).toThrow(WireError)
+    }
   })
 })
 

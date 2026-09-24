@@ -4,6 +4,7 @@ import {
   ORCHESTRATION_PAUSE_REASONS,
   ORCHESTRATION_STATUSES,
   ORCHESTRATION_STEP_STATUSES,
+  type AgentOrchestrationResourceView,
   type AgentOrchestrationStepView,
   type AgentOrchestrationView
 } from '../../shared/orchestration-contracts'
@@ -20,8 +21,22 @@ type Json = Record<string, unknown>
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})$/
+const REF = /^r[1-9][0-9]{0,5}$/
+//: Milestone 12 S1's closed resource-kind vocabulary, spelled identically to
+//: `app/domain/orchestration_resources.py`'s `RESOURCE_KINDS`. A kind outside this list is refused here even
+//: if it is otherwise shaped like a plausible identifier.
+const RESOURCE_KINDS = [
+  'public_url_ref', 'research_result_ref',
+  'account_context_ref', 'account_result_ref',
+  'document_ref', 'document_result_ref', 'transfer_ref',
+  'desktop_target_ref', 'desktop_snapshot_ref', 'desktop_result_ref',
+  'app_ref', 'project_ref', 'project_status_ref',
+  'form_target_ref', 'form_result_ref', 'workflow_ref'
+] as const
+const PRIVACY_CLASSES = ['public', 'private', 'none'] as const
 const MAX_LIST = 32
 const MAX_SUMMARY = 600
+const MAX_SAFE_LABEL = 200
 
 function record(value: unknown, what: string): Json {
   if (!isRecord(value)) throw new WireError(what)
@@ -77,6 +92,19 @@ function step(value: unknown): AgentOrchestrationStepView {
   }
 }
 
+function resource(value: unknown): AgentOrchestrationResourceView {
+  const raw = record(value, 'orchestration.resource')
+  if (typeof raw.ref !== 'string' || !REF.test(raw.ref)) throw new WireError('orchestration.resource.ref')
+  if (typeof raw.single_use !== 'boolean') throw new WireError('orchestration.resource.single_use')
+  return {
+    ref: raw.ref,
+    kind: member(RESOURCE_KINDS, raw.kind, 'orchestration.resource.kind'),
+    privacyClass: member(PRIVACY_CLASSES, raw.privacy_class, 'orchestration.resource.privacy_class'),
+    safeLabel: label(raw.safe_label, 'orchestration.resource.safe_label', MAX_SAFE_LABEL),
+    singleUse: raw.single_use
+  }
+}
+
 export function parseOrchestration(value: unknown): AgentOrchestrationView {
   const raw = record(value, 'orchestration')
   if (typeof raw.live !== 'boolean') throw new WireError('orchestration.live')
@@ -97,6 +125,7 @@ export function parseOrchestration(value: unknown): AgentOrchestrationView {
     ...(stoppedAt !== undefined ? { stoppedAt } : {}),
     availableCapabilities: list(raw.available_capabilities, 'orchestration.available_capabilities')
       .map((item) => capabilityId(item, 'orchestration.available_capabilities.item')),
+    resources: list(raw.resources, 'orchestration.resources').map(resource),
     steps: list(raw.steps, 'orchestration.steps').map(step)
   }
 }
@@ -120,7 +149,13 @@ const REASONS: Record<string, string> = {
   task_id_not_allowed: 'That capability does not take a task reference.',
   resolved_summary_not_allowed: 'That capability does not take a result summary directly.',
   resolved_summary_required: 'That capability needs a result to record.',
-  nothing_to_finish: 'Lumi has not completed a step yet, so there is nothing to finish.'
+  nothing_to_finish: 'Lumi has not completed a step yet, so there is nothing to finish.',
+  resources_invalid: 'That resource reference was not in a form Lumi recognises.',
+  resources_not_supported: 'That capability does not take a resource reference.',
+  resource_not_found: 'That resource no longer exists for this task.',
+  resource_consumed: 'That resource has already been used.',
+  resource_expired: 'That resource is no longer fresh enough to use.',
+  resource_kind_mismatch: 'That resource is not the right kind for this capability.'
 }
 
 const CODE = /^[a-z][a-z0-9_]{0,63}$/

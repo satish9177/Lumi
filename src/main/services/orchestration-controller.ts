@@ -126,17 +126,20 @@ export class OrchestrationController {
    * Record one already-decided capability choice. `taskId` for a task-backed capability (the caller
    * already created it through that capability's own boundary); `resolvedSummary` for a synchronous one
    * (the caller already computed it through that capability's own existing read method). Never both.
+   * `resources`: Milestone 12 S1's opaque refs the planner cited, passed through verbatim -- ownership,
+   * kind and freshness are re-checked by the runtime, never trusted from what the planner said here.
    */
   advanceOrchestration(
     orchestrationId: string, expectedRevision: number, capabilityId: AgentCapabilityId,
-    options: { taskId?: string; resolvedSummary?: string }
+    options: { taskId?: string; resolvedSummary?: string; resources?: readonly string[] }
   ): Promise<AgentResult<AgentOrchestrationView>> {
     return this.guarded(`orchestrations:step:${orchestrationId}`, () => undefined, async () =>
       this.post(orchestrationId, 'advance', {
         expected_revision: expectedRevision,
         capability_id: capabilityId,
         ...(options.taskId !== undefined ? { task_id: options.taskId } : {}),
-        ...(options.resolvedSummary !== undefined ? { resolved_summary: options.resolvedSummary } : {})
+        ...(options.resolvedSummary !== undefined ? { resolved_summary: options.resolvedSummary } : {}),
+        ...(options.resources !== undefined && options.resources.length > 0 ? { resources: options.resources } : {})
       }, TIMEOUTS.write))
   }
 

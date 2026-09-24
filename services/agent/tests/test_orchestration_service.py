@@ -18,6 +18,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.domain.orchestration import MAX_STEPS, OrchestrationRefusal
+from app.domain.orchestration_resources import CAPABILITY_RESOURCE_REQUIREMENTS
 from app.domain.research import ResearchAnswer, ResearchBudgets
 from app.services.actions import ActionService
 from app.services.orchestration import OrchestrationService
@@ -510,3 +511,198 @@ class TestPlannerCallBudget:
         counted = await service.record_planner_call(view.orchestration.id, expected_revision=latest.orchestration.revision)
         assert counted.orchestration.status == "PAUSED"
         assert counted.orchestration.pause_reason == "budget_exhausted"
+
+
+class TestResourceRegistry:
+    """Milestone 12 S1: the trusted resource-ref registry. `project_status` (trivial, synchronous, mints
+    `project_status_ref`) plays the minting role throughout; `public_research` (task-backed, needs only a
+    fresh task id -- no filesystem/recipe rig) plays the citing role, with its own
+    `CAPABILITY_RESOURCE_REQUIREMENTS` entry monkeypatched per test to prove the general resolution/kind/
+    freshness/consumption mechanics ahead of the real slice that gives any capability a non-empty one."""
+
+    async def test_a_succeeded_synchronous_capability_mints_a_controller_authored_resource(
+        self, service: OrchestrationService
+    ) -> None:
+        view = await service.create(objective="check my project")
+        advanced = await service.advance(
+            view.orchestration.id, expected_revision=view.orchestration.revision,
+            capability_id="project_status", resolved_summary="Project run phase: running, ready.",
+        )
+        assert len(advanced.resources) == 1
+        resource = advanced.resources[0]
+        assert resource.ref == "r1"
+        assert resource.kind == "project_status_ref"
+        assert resource.privacy_class == "none"
+        assert resource.single_use is False
+        # Controller-authored template only -- never the resolved_summary's own content.
+        assert "running" not in resource.safe_label
+        assert resource.safe_label == "project_status result (step 1)"
+
+    async def test_a_succeeded_task_backed_capability_mints_a_resource_via_resume(
+        self, service: OrchestrationService, research: ResearchService, task_service: TaskService
+    ) -> None:
+        view = await service.create(objective=OBJECTIVE)
+        task_id = await _research_task(task_service)
+        paused = await service.advance(
+            view.orchestration.id, expected_revision=view.orchestration.revision, capability_id="public_research", task_id=task_id
+        )
+        assert paused.resources == ()  # nothing minted yet -- the step has not resolved
+        prepared = await research.prepare(task_id, disclosure=DISCLOSURE, budgets=ResearchBudgets())
+        assert prepared.grant is not None
+        await research.confirm(task_id, grant_id=prepared.grant.id, expected_revision=prepared.grant.revision)
+        await research.execute_step(task_id, _envelope(SEARCH_STEP, request_id="req-resource-0001"))
+        await research.record_answer(
+            task_id,
+            answer=ResearchAnswer(status="not_found", stop_reason="no_evidence", answer="Lumi could not verify that publicly."),
+            provider="scripted", model="scripted-1", planner_calls=1,
+        )
+        resumed = await service.resume(view.orchestration.id, expected_revision=paused.orchestration.revision)
+        assert len(resumed.resources) == 1
+        resource = resumed.resources[0]
+        assert resource.kind == "research_result_ref"
+        assert resource.privacy_class == "public"
+        # Controller-authored template only -- never the model's own grounded answer text.
+        assert "verify" not in resource.safe_label
+        assert resource.safe_label == "public_research result (step 1)"
+
+    async def test_citing_any_resource_is_refused_for_a_capability_that_accepts_none_even_when_owned_and_fresh(
+        self, service: OrchestrationService, task_service: TaskService
+    ) -> None:
+        view = await service.create(objective=OBJECTIVE)
+        minted = await service.advance(
+            view.orchestration.id, expected_revision=view.orchestration.revision,
+            capability_id="project_status", resolved_summary="Project run phase: running, ready.",
+        )
+        assert minted.resources[0].ref == "r1"
+        task_id = await _research_task(task_service)
+        with pytest.raises(OrchestrationRefusal, match="resources_not_supported"):
+            await service.advance(
+                minted.orchestration.id, expected_revision=minted.orchestration.revision,
+                capability_id="public_research", task_id=task_id, resources=["r1"],
+            )
+        # Nothing was partially committed by the refused attempt.
+        latest = await service.describe(view.orchestration.id)
+        assert len(latest.steps) == 1
+        assert len(latest.resources) == 1
+
+    async def test_advance_refuses_a_malformed_resources_list_before_any_capability_check(
+        self, service: OrchestrationService
+    ) -> None:
+        view = await service.create(objective="do something")
+        for bad in (
+            ["not-a-ref"],
+            ["00000000-0000-4000-8000-000000000001"],  # a UUID is not an opaque ref
+            ["r1", "r1"],  # duplicate
+            [f"r{i}" for i in range(1, 6)],  # over the per-step bound
+            "r1",  # not a list at all
+        ):
+            with pytest.raises(OrchestrationRefusal, match="resources_invalid"):
+                await service.advance(
+                    view.orchestration.id, expected_revision=view.orchestration.revision,
+                    capability_id="project_status", resolved_summary="x", resources=bad,
+                )
+        # None of the malformed attempts were committed.
+        assert (await service.describe(view.orchestration.id)).steps == ()
+
+    async def test_the_model_cannot_invent_a_resource_that_was_never_minted(
+        self, service: OrchestrationService, task_service: TaskService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(CAPABILITY_RESOURCE_REQUIREMENTS, "public_research", ("project_status_ref",))
+        view = await service.create(objective=OBJECTIVE)
+        task_id = await _research_task(task_service)
+        with pytest.raises(OrchestrationRefusal, match="resource_not_found"):
+            await service.advance(
+                view.orchestration.id, expected_revision=view.orchestration.revision,
+                capability_id="public_research", task_id=task_id, resources=["r99"],
+            )
+
+    async def test_a_resource_from_another_orchestration_cannot_be_cited(
+        self, service: OrchestrationService, task_service: TaskService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        owner = await service.create(objective="check my project")
+        minted = await service.advance(
+            owner.orchestration.id, expected_revision=owner.orchestration.revision,
+            capability_id="project_status", resolved_summary="Project run phase: running, ready.",
+        )
+        assert minted.resources[0].ref == "r1"
+
+        monkeypatch.setitem(CAPABILITY_RESOURCE_REQUIREMENTS, "public_research", ("project_status_ref",))
+        stranger = await service.create(objective=OBJECTIVE)
+        task_id = await _research_task(task_service)
+        with pytest.raises(OrchestrationRefusal, match="resource_not_found"):
+            await service.advance(
+                stranger.orchestration.id, expected_revision=stranger.orchestration.revision,
+                capability_id="public_research", task_id=task_id, resources=["r1"],
+            )
+
+    async def test_a_resource_of_the_wrong_kind_is_refused_even_though_it_is_real_fresh_and_owned(
+        self, service: OrchestrationService, task_service: TaskService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        view = await service.create(objective=OBJECTIVE)
+        minted = await service.advance(
+            view.orchestration.id, expected_revision=view.orchestration.revision,
+            capability_id="project_status", resolved_summary="Project run phase: running, ready.",
+        )
+        assert minted.resources[0].kind == "project_status_ref"
+
+        monkeypatch.setitem(CAPABILITY_RESOURCE_REQUIREMENTS, "public_research", ("research_result_ref",))
+        task_id = await _research_task(task_service)
+        with pytest.raises(OrchestrationRefusal, match="resource_kind_mismatch"):
+            await service.advance(
+                minted.orchestration.id, expected_revision=minted.orchestration.revision,
+                capability_id="public_research", task_id=task_id, resources=["r1"],
+            )
+
+    async def test_a_single_use_resource_that_a_capability_already_spent_cannot_be_cited_again(
+        self, service: OrchestrationService, task_service: TaskService, engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`public_research`'s own first citation pauses the orchestration for its approval card (a real
+        task-backed step always does), so a genuine second `advance()` call in the same orchestration would
+        refuse `orchestration_not_active` before ever reaching resource resolution -- an unrelated property,
+        not the one under test. A single-use resource a capability already spent is set up directly here,
+        the same way `test_an_expired_resource_is_refused_...` sets up an already-expired one, so the
+        citation attempt itself exercises exactly the `resource_consumed` path."""
+        monkeypatch.setitem(CAPABILITY_RESOURCE_REQUIREMENTS, "public_research", ("project_status_ref",))
+        view = await service.create(objective=OBJECTIVE)
+        minted = await service.advance(
+            view.orchestration.id, expected_revision=view.orchestration.revision,
+            capability_id="project_status", resolved_summary="Project run phase: running, ready.",
+        )
+        assert minted.resources[0].ref == "r1"
+        await _sql(
+            engine, "UPDATE orchestration_resources SET single_use = true, consumed_at = now() "
+            "WHERE orchestration_id = :id AND ref = 'r1'",
+            id=view.orchestration.id,
+        )
+        latest = await service.describe(view.orchestration.id)
+        assert latest.resources == ()  # already excluded from the available list
+
+        task_id = await _research_task(task_service)
+        with pytest.raises(OrchestrationRefusal, match="resource_consumed"):
+            await service.advance(
+                minted.orchestration.id, expected_revision=minted.orchestration.revision,
+                capability_id="public_research", task_id=task_id, resources=["r1"],
+            )
+
+    async def test_an_expired_resource_is_refused_even_though_it_is_real_and_owned(
+        self, service: OrchestrationService, task_service: TaskService, engine: AsyncEngine, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(CAPABILITY_RESOURCE_REQUIREMENTS, "public_research", ("project_status_ref",))
+        view = await service.create(objective=OBJECTIVE)
+        minted = await service.advance(
+            view.orchestration.id, expected_revision=view.orchestration.revision,
+            capability_id="project_status", resolved_summary="Project run phase: running, ready.",
+        )
+        await _sql(
+            engine, "UPDATE orchestration_resources SET expires_at = now() - interval '1 minute' WHERE orchestration_id = :id",
+            id=view.orchestration.id,
+        )
+        latest = await service.describe(view.orchestration.id)
+        assert latest.resources == ()  # already excluded from the available list
+
+        task_id = await _research_task(task_service)
+        with pytest.raises(OrchestrationRefusal, match="resource_expired"):
+            await service.advance(
+                minted.orchestration.id, expected_revision=minted.orchestration.revision,
+                capability_id="public_research", task_id=task_id, resources=["r1"],
+            )

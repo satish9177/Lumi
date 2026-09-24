@@ -43,6 +43,10 @@ class AdvanceOrchestrationBody(_Body):
     #: Synchronous capabilities only: a bounded result the caller already computed through that
     #: capability's own existing read method. Mutually exclusive with `task_id`.
     resolved_summary: str | None = Field(default=None, min_length=1, max_length=2000)
+    #: Milestone 12 S1: opaque refs the planner cites from this orchestration's own registry. Shape is
+    #: bounded here; ownership, kind, freshness and per-capability compatibility are re-checked by the
+    #: service, never trusted from this wire shape alone.
+    resources: list[str] | None = Field(default=None, max_length=4)
 
 
 class OrchestrationStepResponse(BaseModel):
@@ -52,6 +56,14 @@ class OrchestrationStepResponse(BaseModel):
     child_task_id: uuid.UUID | None
     result_handle: str | None
     result_summary: str | None
+
+
+class OrchestrationResourceResponse(BaseModel):
+    ref: str
+    kind: str
+    privacy_class: str
+    safe_label: str
+    single_use: bool
 
 
 class OrchestrationResponse(BaseModel):
@@ -69,6 +81,9 @@ class OrchestrationResponse(BaseModel):
     stopped_at: datetime | None
     #: What this runtime can execute right now -- the planner's only allowed step choices.
     available_capabilities: list[str]
+    #: Milestone 12 S1: resources this orchestration currently owns (not consumed, not expired). Seeing one
+    #: here is never authority to use it with any particular capability.
+    resources: list[OrchestrationResourceResponse]
     steps: list[OrchestrationStepResponse]
 
     @classmethod
@@ -88,6 +103,16 @@ class OrchestrationResponse(BaseModel):
             expires_at=record.expires_at,
             stopped_at=record.stopped_at,
             available_capabilities=list(view.available_capabilities),
+            resources=[
+                OrchestrationResourceResponse(
+                    ref=resource.ref,
+                    kind=resource.kind,
+                    privacy_class=resource.privacy_class,
+                    safe_label=resource.safe_label,
+                    single_use=resource.single_use,
+                )
+                for resource in view.resources
+            ],
             steps=[
                 OrchestrationStepResponse(
                     sequence=step.sequence,
@@ -165,6 +190,7 @@ async def orchestration_advance(
             capability_id=body.capability_id,
             task_id=body.task_id,
             resolved_summary=body.resolved_summary,
+            resources=body.resources,
         )
     )
 

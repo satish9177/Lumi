@@ -58,6 +58,15 @@ export interface AgentCapabilityDescriptor {
   readonly hasSideEffects: boolean
   /** Whether an unresolved global-tier effect (`app/domain/effects.py`) blocks this capability. */
   readonly blockedByEffectLock: boolean
+  /**
+   * Milestone 12 S1: whether this capability's own result could carry content from a source the general
+   * public does not already have -- an account, a local document, a desktop window, a saved form detail --
+   * as opposed to `'public'` (public web content) or `'none'` (a Lumi-authored status/control fact with no
+   * meaningful content either way). Combined with `mayDiscloseToProvider`, this is the structural signal
+   * `model-router.ts`'s `orchestration_planning` privacy requirement is derived from, so a future capability
+   * addition cannot silently reopen that boundary without also failing a test.
+   */
+  readonly resultPrivacyClass: 'public' | 'private' | 'none'
 }
 
 /**
@@ -74,7 +83,8 @@ export const AGENT_CAPABILITY_CATALOG: Readonly<Record<AgentCapabilityId, AgentC
     requiresApproval: true,
     mayDiscloseToProvider: true,
     hasSideEffects: false,
-    blockedByEffectLock: false
+    blockedByEffectLock: false,
+    resultPrivacyClass: 'public'
   },
   inspect_public_page: {
     id: 'inspect_public_page',
@@ -84,7 +94,8 @@ export const AGENT_CAPABILITY_CATALOG: Readonly<Record<AgentCapabilityId, AgentC
     requiresApproval: true,
     mayDiscloseToProvider: true,
     hasSideEffects: false,
-    blockedByEffectLock: false
+    blockedByEffectLock: false,
+    resultPrivacyClass: 'public'
   },
   account_read: {
     id: 'account_read',
@@ -94,7 +105,8 @@ export const AGENT_CAPABILITY_CATALOG: Readonly<Record<AgentCapabilityId, AgentC
     requiresApproval: true,
     mayDiscloseToProvider: true,
     hasSideEffects: false,
-    blockedByEffectLock: false
+    blockedByEffectLock: false,
+    resultPrivacyClass: 'private'
   },
   document_read: {
     id: 'document_read',
@@ -104,7 +116,8 @@ export const AGENT_CAPABILITY_CATALOG: Readonly<Record<AgentCapabilityId, AgentC
     requiresApproval: false,
     mayDiscloseToProvider: false,
     hasSideEffects: false,
-    blockedByEffectLock: false
+    blockedByEffectLock: false,
+    resultPrivacyClass: 'private'
   },
   document_compare: {
     id: 'document_compare',
@@ -114,7 +127,8 @@ export const AGENT_CAPABILITY_CATALOG: Readonly<Record<AgentCapabilityId, AgentC
     requiresApproval: true,
     mayDiscloseToProvider: true,
     hasSideEffects: false,
-    blockedByEffectLock: false
+    blockedByEffectLock: false,
+    resultPrivacyClass: 'private'
   },
   download_document: {
     id: 'download_document',
@@ -124,7 +138,8 @@ export const AGENT_CAPABILITY_CATALOG: Readonly<Record<AgentCapabilityId, AgentC
     requiresApproval: true,
     mayDiscloseToProvider: false,
     hasSideEffects: true,
-    blockedByEffectLock: true
+    blockedByEffectLock: true,
+    resultPrivacyClass: 'none'
   },
   place_downloaded_file: {
     id: 'place_downloaded_file',
@@ -134,7 +149,8 @@ export const AGENT_CAPABILITY_CATALOG: Readonly<Record<AgentCapabilityId, AgentC
     requiresApproval: true,
     mayDiscloseToProvider: false,
     hasSideEffects: true,
-    blockedByEffectLock: true
+    blockedByEffectLock: true,
+    resultPrivacyClass: 'none'
   },
   desktop_observe: {
     id: 'desktop_observe',
@@ -144,7 +160,8 @@ export const AGENT_CAPABILITY_CATALOG: Readonly<Record<AgentCapabilityId, AgentC
     requiresApproval: false,
     mayDiscloseToProvider: false,
     hasSideEffects: false,
-    blockedByEffectLock: false
+    blockedByEffectLock: false,
+    resultPrivacyClass: 'private'
   },
   desktop_reason: {
     id: 'desktop_reason',
@@ -154,7 +171,8 @@ export const AGENT_CAPABILITY_CATALOG: Readonly<Record<AgentCapabilityId, AgentC
     requiresApproval: true,
     mayDiscloseToProvider: true,
     hasSideEffects: false,
-    blockedByEffectLock: false
+    blockedByEffectLock: false,
+    resultPrivacyClass: 'private'
   },
   desktop_safe_action: {
     id: 'desktop_safe_action',
@@ -164,7 +182,8 @@ export const AGENT_CAPABILITY_CATALOG: Readonly<Record<AgentCapabilityId, AgentC
     requiresApproval: true,
     mayDiscloseToProvider: false,
     hasSideEffects: true,
-    blockedByEffectLock: false
+    blockedByEffectLock: false,
+    resultPrivacyClass: 'none'
   },
   launch_registered_app: {
     id: 'launch_registered_app',
@@ -174,7 +193,8 @@ export const AGENT_CAPABILITY_CATALOG: Readonly<Record<AgentCapabilityId, AgentC
     requiresApproval: true,
     mayDiscloseToProvider: false,
     hasSideEffects: true,
-    blockedByEffectLock: false
+    blockedByEffectLock: false,
+    resultPrivacyClass: 'none'
   },
   project_status: {
     id: 'project_status',
@@ -184,7 +204,8 @@ export const AGENT_CAPABILITY_CATALOG: Readonly<Record<AgentCapabilityId, AgentC
     requiresApproval: false,
     mayDiscloseToProvider: false,
     hasSideEffects: false,
-    blockedByEffectLock: false
+    blockedByEffectLock: false,
+    resultPrivacyClass: 'none'
   },
   project_start: {
     id: 'project_start',
@@ -194,7 +215,8 @@ export const AGENT_CAPABILITY_CATALOG: Readonly<Record<AgentCapabilityId, AgentC
     requiresApproval: true,
     mayDiscloseToProvider: false,
     hasSideEffects: true,
-    blockedByEffectLock: true
+    blockedByEffectLock: true,
+    resultPrivacyClass: 'none'
   },
   project_stop: {
     id: 'project_stop',
@@ -204,7 +226,8 @@ export const AGENT_CAPABILITY_CATALOG: Readonly<Record<AgentCapabilityId, AgentC
     requiresApproval: false,
     mayDiscloseToProvider: false,
     hasSideEffects: true,
-    blockedByEffectLock: false
+    blockedByEffectLock: false,
+    resultPrivacyClass: 'none'
   },
   form_prepare: {
     id: 'form_prepare',
@@ -214,7 +237,8 @@ export const AGENT_CAPABILITY_CATALOG: Readonly<Record<AgentCapabilityId, AgentC
     requiresApproval: true,
     mayDiscloseToProvider: true,
     hasSideEffects: false,
-    blockedByEffectLock: false
+    blockedByEffectLock: false,
+    resultPrivacyClass: 'private'
   },
   workflow_prepare: {
     id: 'workflow_prepare',
@@ -224,7 +248,8 @@ export const AGENT_CAPABILITY_CATALOG: Readonly<Record<AgentCapabilityId, AgentC
     requiresApproval: true,
     mayDiscloseToProvider: true,
     hasSideEffects: true,
-    blockedByEffectLock: true
+    blockedByEffectLock: true,
+    resultPrivacyClass: 'private'
   }
 } as const
 

@@ -2004,3 +2004,47 @@ orchestration_steps = Table(
 )
 
 Index("ix_orchestration_steps_orchestration_id", orchestration_steps.c.orchestration_id)
+
+#: Milestone 12 S1: the closed resource-ref registry, spelled identically to
+#: `app/domain/orchestration_resources.py`'s `RESOURCE_KINDS` and to migration `0023`'s own list, pinned by
+#: `tests/test_orchestration_resources_domain.py`. A resource is always looked up scoped to
+#: `(orchestration_id, ref)`, so a ref from another orchestration cannot resolve here by construction.
+_ORCHESTRATION_RESOURCE_KINDS = (
+    "public_url_ref", "research_result_ref",
+    "account_context_ref", "account_result_ref",
+    "document_ref", "document_result_ref", "transfer_ref",
+    "desktop_target_ref", "desktop_snapshot_ref", "desktop_result_ref",
+    "app_ref", "project_ref", "project_status_ref",
+    "form_target_ref", "form_result_ref", "workflow_ref",
+)
+_ORCHESTRATION_RESOURCE_KIND_CK = (
+    "kind IN (" + ", ".join(f"'{item}'" for item in _ORCHESTRATION_RESOURCE_KINDS) + ")"
+)
+
+orchestration_resources = Table(
+    "orchestration_resources",
+    metadata,
+    Column("id", Uuid(), primary_key=True),
+    Column("orchestration_id", Uuid(), ForeignKey("orchestrations.id", ondelete="RESTRICT"), nullable=False),
+    Column("ref", String(8), nullable=False),
+    Column("kind", String(32), nullable=False),
+    Column("producing_step_id", Uuid(), ForeignKey("orchestration_steps.id", ondelete="RESTRICT"), nullable=True),
+    Column("parent_resource_id", Uuid(), ForeignKey("orchestration_resources.id", ondelete="RESTRICT"), nullable=True),
+    Column("revision", Integer(), nullable=False, server_default=text("1")),
+    Column("privacy_class", String(16), nullable=False),
+    Column("safe_label", String(200), nullable=False),
+    Column("single_use", Boolean(), nullable=False, server_default=false()),
+    Column("consumed_at", DateTime(timezone=True), nullable=True),
+    Column("expires_at", DateTime(timezone=True), nullable=True),
+    Column("binding_digest", String(64), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
+    UniqueConstraint("orchestration_id", "ref", name="uq_orchestration_resources_orchestration_id_ref"),
+    CheckConstraint(_ORCHESTRATION_RESOURCE_KIND_CK, name="kind"),
+    CheckConstraint("privacy_class IN ('public', 'private', 'none')", name="privacy_class"),
+    CheckConstraint("revision >= 1", name="revision_positive"),
+    CheckConstraint("consumed_at IS NULL OR single_use", name="consumed_only_if_single_use"),
+    CheckConstraint("ref ~ '^r[1-9][0-9]{0,5}$'", name="ref_shape"),
+)
+
+Index("ix_orchestration_resources_orchestration_id", orchestration_resources.c.orchestration_id)

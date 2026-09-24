@@ -28,6 +28,7 @@ from app.domain.workflows import STATE_CODES as WORKFLOW_STATE_CODES
 from app.domain.workflows import WorkflowRefusal
 from app.domain.orchestration import STATE_CODES as ORCHESTRATION_STATE_CODES
 from app.domain.orchestration import OrchestrationRefusal
+from app.domain.orchestration_resources import RESOURCE_STATE_CODES as ORCHESTRATION_RESOURCE_STATE_CODES
 from app.domain.transfers import STATE_CODES as TRANSFER_STATE_CODES
 from app.domain.transfers import TransferRefusal
 from app.domain.desktop_disclosure import STATE_CODES as DESKTOP_DISCLOSURE_STATE_CODES
@@ -720,7 +721,7 @@ def register_error_handlers(app: FastAPI) -> None:
     # --- Milestone 11 S2 durable read-only orchestration ---------------------------------
     async def orchestration_refused(_: Request, exc: Exception) -> JSONResponse:
         assert isinstance(exc, OrchestrationRefusal)
-        stale = exc.code in ORCHESTRATION_STATE_CODES
+        stale = exc.code in ORCHESTRATION_STATE_CODES or exc.code in ORCHESTRATION_RESOURCE_STATE_CODES
         return _error(
             status.HTTP_409_CONFLICT if stale else status.HTTP_422_UNPROCESSABLE_CONTENT,
             ErrorDetail(

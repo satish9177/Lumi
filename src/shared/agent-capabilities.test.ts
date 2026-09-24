@@ -44,6 +44,7 @@ describe('the closed capability catalog', () => {
       expect(typeof descriptor.mayDiscloseToProvider).toBe('boolean')
       expect(typeof descriptor.hasSideEffects).toBe('boolean')
       expect(typeof descriptor.blockedByEffectLock).toBe('boolean')
+      expect(['public', 'private', 'none']).toContain(descriptor.resultPrivacyClass)
     }
   })
 

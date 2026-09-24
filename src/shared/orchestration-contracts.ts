@@ -35,6 +35,19 @@ export interface AgentOrchestrationStepView {
   resultSummary?: string
 }
 
+/**
+ * Milestone 12 S1: a controller-issued, opaque resource this orchestration currently owns (not consumed,
+ * not expired). `safeLabel` is controller-authored template text, never the underlying page, document,
+ * account or desktop content. Seeing one here is never authority to use it with any particular capability.
+ */
+export interface AgentOrchestrationResourceView {
+  ref: string
+  kind: string
+  privacyClass: 'public' | 'private' | 'none'
+  safeLabel: string
+  singleUse: boolean
+}
+
 export interface AgentOrchestrationView {
   orchestrationId: string
   status: AgentOrchestrationStatus
@@ -50,6 +63,8 @@ export interface AgentOrchestrationView {
   stoppedAt?: string
   /** What the planner may choose right now -- a subset of the full Milestone 11 S1 catalog. */
   availableCapabilities: AgentCapabilityId[]
+  /** Milestone 12 S1: resources the planner may cite right now. Optional for callers that predate S1. */
+  resources?: AgentOrchestrationResourceView[]
   steps: AgentOrchestrationStepView[]
 }
 
