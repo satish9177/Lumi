@@ -116,7 +116,7 @@ What each suite proves and how to run the opt-in live provider checks: [docs/EVA
 
 ## Status
 
-Milestones 1–9 are complete on `main`. Milestone 10 (bounded cross-app tasks: approved documents, one controlled download with no-overwrite placement, registered project runs, a preparation workflow that stops before submit, and one shared recovery boundary) is complete and audited on the `lumi-m10` branch, not yet merged. Production signing is not configured and real-account release remains blocked. See [docs/STATUS.md](docs/STATUS.md) and [docs/reviews/milestone-10-final.md](docs/reviews/milestone-10-final.md).
+Milestones 1–10 are complete and merged on `main`. Milestone 10 (bounded cross-app tasks: approved documents, one controlled download with no-overwrite placement, registered project runs, a preparation workflow that stops before submit, and one shared recovery boundary) is complete and audited. Milestone 11 (general task orchestration, composing the existing capabilities behind a closed catalog) is planned on `lumi-m11`, not yet started. Production signing is not configured and real-account release remains blocked. See [docs/STATUS.md](docs/STATUS.md) and [docs/reviews/milestone-10-final.md](docs/reviews/milestone-10-final.md).
 
 ## License
 

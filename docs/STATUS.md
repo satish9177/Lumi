@@ -1,6 +1,12 @@
 # Delivery status
 
-## Milestone 10 (bounded cross-app tasks): S1-S5 and the final cross-slice audit complete (branch `lumi-m10`, not merged)
+## Milestone 11 (general task orchestration): planned, not started
+
+Plan: [plans/milestone-11.md](plans/milestone-11.md). Composes M1-M10's existing capabilities behind a
+closed, controller-authored catalog and a durable orchestration graph. No new privileged executor, no new
+effect primitive, no capability aggregation beyond what a single catalog entry already grants.
+
+## Milestone 10 (bounded cross-app tasks): S1-S5 and the final cross-slice audit complete (merged to `main`)
 
 M10 final review: [reviews/milestone-10-final.md](reviews/milestone-10-final.md). Two independent Claude audit passes over `eda1620..HEAD` found no High; one Medium (a project start stranded by a crash could hold the global effect lock for good) and five Lows were fixed, the rest documented. Acceptance C, Acceptance F and the combined preparation workflow (zero submissions) are green.
 
@@ -26,7 +32,7 @@ M10 S1 approved documents/broker   COMPLETE  (engineering)
     S5 cross-executor recovery     COMPLETE  (engineering; Acceptance F green)
 M10 engineering implementation     COMPLETE
 M10 final cross-slice audit        COMPLETE
-main                               NOT MERGED (M10 lives on lumi-m10)
+main                               MERGED (M10 is on main)
 ```
 
 M10 S1 (plan: [plans/milestone-10.md](plans/milestone-10.md), review: [reviews/milestone-10-s1.md](reviews/milestone-10-s1.md)) adds read-only local document authority: M10 file roots with explicit permissions, handle-verified reads of a chosen file or the one dropped file, stdlib-only bounded extraction in a contained helper process, local comparison, and ONE exact, single-use provider disclosure of redacted excerpts. No file is written, moved or deleted.
