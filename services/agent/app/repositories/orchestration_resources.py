@@ -33,6 +33,11 @@ class ResourceRecord:
     consumed_at: datetime | None
     expires_at: datetime | None
     binding_digest: str | None
+    #: Milestone 12 S2: model-invisible backing identity. `backing_id` is the file/document id inside
+    #: `orchestrations.document_task_id` (`document_ref`/`document_result_ref`); `backing_text` is the
+    #: canonical, policy-checked URL (`public_url_ref`). At most one is ever set.
+    backing_id: uuid.UUID | None
+    backing_text: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -52,6 +57,8 @@ def _record(row: Row[Any]) -> ResourceRecord:
         consumed_at=row.consumed_at,
         expires_at=row.expires_at,
         binding_digest=row.binding_digest,
+        backing_id=row.backing_id,
+        backing_text=row.backing_text,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
@@ -85,6 +92,8 @@ class OrchestrationResourceRepository:
         parent_resource_id: uuid.UUID | None = None,
         expires_at: datetime | None = None,
         binding_digest: str | None = None,
+        backing_id: uuid.UUID | None = None,
+        backing_text: str | None = None,
     ) -> ResourceRecord:
         result = await self._connection.execute(
             insert(orchestration_resources)
@@ -100,6 +109,8 @@ class OrchestrationResourceRepository:
                 single_use=single_use,
                 expires_at=expires_at,
                 binding_digest=binding_digest,
+                backing_id=backing_id,
+                backing_text=backing_text,
             )
             .returning(*orchestration_resources.c)
         )

@@ -1853,7 +1853,10 @@ export const AGENT_IPC_CHANNELS = {
   getOrchestration: 'lifelens:agent:get-orchestration',
   getLatestOrchestration: 'lifelens:agent:get-latest-orchestration',
   continueOrchestration: 'lifelens:agent:continue-orchestration',
-  stopOrchestration: 'lifelens:agent:stop-orchestration'
+  stopOrchestration: 'lifelens:agent:stop-orchestration',
+  // Milestone 12 S2: makes one already-approved document available as a resource. Never reachable from
+  // the planner or the model.
+  attachApprovedDocument: 'lifelens:agent:attach-approved-document'
 } as const
 
 /** Actions whose side effect is unresolved or in flight. */

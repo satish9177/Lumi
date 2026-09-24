@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { AgentCapabilityId } from '../../shared/agent-capabilities'
 import type { AgentResult, AgentTaskSnapshot } from '../../shared/agent-contracts'
 import type { AgentProjectRunView } from '../../shared/project-contracts'
+import type { AgentDocumentTaskView, AgentLocalComparisonView } from '../../shared/document-contracts'
 import type { AgentOrchestrationStepView, AgentOrchestrationView } from '../../shared/orchestration-contracts'
 import { ModelRoutingError, type OrchestrationDecision, type OrchestrationPlanOutcome } from '../agent/orchestration-planner'
 import {
@@ -99,6 +100,28 @@ class FakeGraph implements OrchestrationGraphClient {
     this.view = { ...this.view, status: 'STOPPED', revision: this.view.revision + 1 }
     return { ok: true, value: this.view }
   }
+
+  async registerResource(
+    _id: string, _revision: number,
+    options: { kind: string; safeLabel: string; backingId?: string; backingText?: string; documentTaskId?: string }
+  ): Promise<AgentResult<AgentOrchestrationView>> {
+    this.calls.push(`register:${options.kind}`)
+    const sequence = (this.view.resources ?? []).length + 1
+    this.view = {
+      ...this.view,
+      revision: this.view.revision + 1,
+      ...(options.documentTaskId !== undefined ? { documentTaskId: options.documentTaskId } : {}),
+      resources: [
+        ...(this.view.resources ?? []),
+        {
+          ref: `r${sequence}`, kind: options.kind, privacyClass: 'private', safeLabel: options.safeLabel,
+          singleUse: false, ...(options.backingId !== undefined ? { backingId: options.backingId } : {}),
+          ...(options.backingText !== undefined ? { backingText: options.backingText } : {})
+        }
+      ]
+    }
+    return { ok: true, value: this.view }
+  }
 }
 
 class ScriptedPlanner implements OrchestrationPlannerLike {
@@ -126,9 +149,16 @@ function coordinator(input: {
   recipeId?: AgentResult<string | null>
   createdRun?: AgentResult<AgentProjectRunView>
   startedRun?: AgentResult<AgentProjectRunView>
-}): { coordinator: OrchestrationCoordinator; researchCalls: string[]; startCalls: string[] } {
+  extracted?: AgentResult<AgentDocumentTaskView>
+  compared?: AgentResult<AgentLocalComparisonView>
+}): {
+  coordinator: OrchestrationCoordinator; researchCalls: string[]; startCalls: string[]
+  extractCalls: Array<{ taskId: string; fileId: string }>; compareCalls: Array<{ taskId: string; first: string; second: string }>
+} {
   const researchCalls: string[] = []
   const startCalls: string[] = []
+  const extractCalls: Array<{ taskId: string; fileId: string }> = []
+  const compareCalls: Array<{ taskId: string; first: string; second: string }> = []
   const coord = new OrchestrationCoordinator({
     orchestrations: input.graph,
     planner: input.planner,
@@ -148,9 +178,31 @@ function coordinator(input: {
     startProjectRun: async (taskId) => {
       startCalls.push(taskId)
       return input.startedRun ?? { ok: true, value: { taskId, phase: 'approved' } as unknown as AgentProjectRunView }
+    },
+    createDocumentTask: async (objective) => ({
+      ok: true, value: { taskId: randomUUID(), objective, files: [], documents: [] } as unknown as AgentDocumentTaskView
+    }),
+    addDocumentFromRoot: async (taskId, rootId, relativePath) => ({
+      ok: true,
+      value: {
+        taskId,
+        files: [{ fileId: randomUUID(), source: 'ROOT_FILE', displayName: relativePath, rootId, format: 'PDF', sizeBytes: 1, addedAt: '' }],
+        documents: []
+      } as unknown as AgentDocumentTaskView
+    }),
+    extractDocument: async (taskId, fileId) => {
+      extractCalls.push({ taskId, fileId })
+      return input.extracted ?? {
+        ok: true,
+        value: { taskId, documents: [{ documentId: randomUUID(), fileId, textChars: 1234 }] } as unknown as AgentDocumentTaskView
+      }
+    },
+    compareDocumentsLocally: async (taskId, first, second) => {
+      compareCalls.push({ taskId, first, second })
+      return input.compared ?? { ok: true, value: { overlap: 0.5 } as unknown as AgentLocalComparisonView }
     }
   })
-  return { coordinator: coord, researchCalls, startCalls }
+  return { coordinator: coord, researchCalls, startCalls, extractCalls, compareCalls }
 }
 
 describe('OrchestrationCoordinator.run', () => {
@@ -337,13 +389,119 @@ describe('OrchestrationCoordinator.run', () => {
     // Not reachable through the real Python catalog (it only ever offers composed capabilities), but the
     // coordinator's own closed dispatch must still fail closed if it ever were.
     const graph = new FakeGraph()
-    graph.view = orchestration({ availableCapabilities: ['document_read'] })
+    graph.view = orchestration({ availableCapabilities: ['account_read'] })
     const { coordinator: coord } = coordinator({
-      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'document_read', reason: 'x' }])
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'account_read', reason: 'x' }])
     })
     const result = await coord.run(graph.view.orchestrationId)
     expect(result.ok).toBe(false)
     if (result.ok) throw new Error('unreachable')
     expect(result.error.code).toBe('orchestration_refused')
+  })
+
+  it('dispatches document_read by resolving the cited resource’s backing id, never trusting the planner’s own text', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({
+      availableCapabilities: ['document_read'],
+      documentTaskId: '00000000-0000-4000-8000-0000000000dd',
+      resources: [{ ref: 'r1', kind: 'document_ref', privacyClass: 'private', safeLabel: 'resume.pdf', singleUse: false, backingId: '00000000-0000-4000-8000-0000000000ff' }]
+    })
+    const { coordinator: coord, extractCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([
+        { kind: 'step', capability: 'document_read', resources: ['r1'], reason: 'x' },
+        { kind: 'finish', reason: 'done' }
+      ])
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(true)
+    expect(extractCalls).toEqual([{ taskId: '00000000-0000-4000-8000-0000000000dd', fileId: '00000000-0000-4000-8000-0000000000ff' }])
+    expect(graph.calls).toContain('advance:document_read')
+  })
+
+  it('refuses document_read when the cited ref is the wrong kind, before calling DocumentService at all', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({
+      availableCapabilities: ['document_read'],
+      documentTaskId: '00000000-0000-4000-8000-0000000000dd',
+      // A document_result_ref, not the document_ref document_read requires.
+      resources: [{ ref: 'r1', kind: 'document_result_ref', privacyClass: 'private', safeLabel: 'x', singleUse: false, backingId: '00000000-0000-4000-8000-0000000000ff' }]
+    })
+    const { coordinator: coord, extractCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'document_read', resources: ['r1'], reason: 'x' }])
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(false)
+    expect(extractCalls).toEqual([])
+  })
+
+  it('refuses document_read when the cited ref is not in the fresh available set', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({
+      availableCapabilities: ['document_read'], documentTaskId: '00000000-0000-4000-8000-0000000000dd', resources: []
+    })
+    const { coordinator: coord, extractCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'document_read', resources: ['r1'], reason: 'x' }])
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(false)
+    expect(extractCalls).toEqual([])
+  })
+
+  it('dispatches document_compare by resolving both cited resources, and reports only the numeric overlap', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({
+      availableCapabilities: ['document_compare'],
+      documentTaskId: '00000000-0000-4000-8000-0000000000dd',
+      resources: [
+        { ref: 'r1', kind: 'document_result_ref', privacyClass: 'private', safeLabel: 'a', singleUse: false, backingId: '00000000-0000-4000-8000-000000000001' },
+        { ref: 'r2', kind: 'document_result_ref', privacyClass: 'private', safeLabel: 'b', singleUse: false, backingId: '00000000-0000-4000-8000-000000000002' }
+      ]
+    })
+    const { coordinator: coord, compareCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([
+        { kind: 'step', capability: 'document_compare', resources: ['r1', 'r2'], reason: 'x' },
+        { kind: 'finish', reason: 'done' }
+      ])
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(true)
+    expect(compareCalls).toEqual([{
+      taskId: '00000000-0000-4000-8000-0000000000dd',
+      first: '00000000-0000-4000-8000-000000000001', second: '00000000-0000-4000-8000-000000000002'
+    }])
+    const step = result.ok ? result.value.steps.find((item) => item.capabilityId === 'document_compare') : undefined
+    expect(step?.resultSummary).toContain('%')
+  })
+})
+
+describe('OrchestrationCoordinator.attachApprovedDocument', () => {
+  it('creates the shared document task on first use and registers a document_ref', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({ graph, planner: new FailingPlanner() })
+    const result = await coord.attachApprovedDocument(graph.view.orchestrationId, 'root-1', 'resume.pdf')
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('unreachable')
+    expect(result.value.documentTaskId).toBeDefined()
+    expect(result.value.resources?.[0]?.kind).toBe('document_ref')
+    expect(result.value.resources?.[0]?.safeLabel).toBe('resume.pdf')
+    expect(graph.calls).toContain('register:document_ref')
+  })
+
+  it('reuses the same document task on a second attach', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({ graph, planner: new FailingPlanner() })
+    const first = await coord.attachApprovedDocument(graph.view.orchestrationId, 'root-1', 'resume.pdf')
+    expect(first.ok).toBe(true)
+    const taskId = first.ok ? first.value.documentTaskId : undefined
+    const second = await coord.attachApprovedDocument(graph.view.orchestrationId, 'root-1', 'job.txt')
+    expect(second.ok).toBe(true)
+    expect(second.ok && second.value.documentTaskId).toBe(taskId)
+  })
+
+  it('refuses a non-string argument rather than forwarding it', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({ graph, planner: new FailingPlanner() })
+    const result = await coord.attachApprovedDocument(42, 'root-1', 'resume.pdf')
+    expect(result.ok).toBe(false)
   })
 })

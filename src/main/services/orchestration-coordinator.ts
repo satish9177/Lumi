@@ -1,7 +1,8 @@
 import type { AgentCapabilityId } from '../../shared/agent-capabilities'
 import type { AgentResult, AgentTaskSnapshot } from '../../shared/agent-contracts'
 import type { AgentProjectRunView } from '../../shared/project-contracts'
-import type { AgentOrchestrationView } from '../../shared/orchestration-contracts'
+import type { AgentDocumentTaskView, AgentLocalComparisonView } from '../../shared/document-contracts'
+import type { AgentOrchestrationResourceView, AgentOrchestrationView } from '../../shared/orchestration-contracts'
 import {
   ModelRoutingError,
   orchestrationResultLines,
@@ -21,11 +22,16 @@ export interface OrchestrationGraphClient {
   recordPlannerCall: (orchestrationId: string, expectedRevision: number) => Promise<AgentResult<AgentOrchestrationView>>
   advanceOrchestration: (
     orchestrationId: string, expectedRevision: number, capabilityId: AgentCapabilityId,
-    options: { taskId?: string; resolvedSummary?: string; resources?: readonly string[] }
+    options: { taskId?: string; resolvedSummary?: string; resources?: readonly string[]; resultBackingId?: string }
   ) => Promise<AgentResult<AgentOrchestrationView>>
   resumeOrchestration: (orchestrationId: string, expectedRevision: number) => Promise<AgentResult<AgentOrchestrationView>>
   finishOrchestration: (orchestrationId: string, expectedRevision: number) => Promise<AgentResult<AgentOrchestrationView>>
   stopOrchestration: (orchestrationId: unknown) => Promise<AgentResult<AgentOrchestrationView>>
+  /** Milestone 12 S2: makes a trusted input resource available. Never reachable from the planner. */
+  registerResource: (
+    orchestrationId: string, expectedRevision: number,
+    options: { kind: string; safeLabel: string; backingId?: string; backingText?: string; documentTaskId?: string }
+  ) => Promise<AgentResult<AgentOrchestrationView>>
 }
 
 /**
@@ -80,6 +86,16 @@ export interface OrchestrationCoordinatorDependencies {
    * the grant is active, where it is simply refused. Never a second, orchestrator-only start path.
    */
   startProjectRun: (taskId: string) => Promise<AgentResult<AgentProjectRunView>>
+  /** Milestone 10 S1's own entry point: no approval, needs only an already-approved root. */
+  createDocumentTask: (objective: string) => Promise<AgentResult<AgentDocumentTaskView>>
+  /** Milestone 10 S1's own entry point: adds a file from an already-approved root. No approval of its own. */
+  addDocumentFromRoot: (taskId: string, rootId: string, relativePath: string) => Promise<AgentResult<AgentDocumentTaskView>>
+  /** Milestone 10 S1's own entry point: bounded local extraction. No approval, no provider call. */
+  extractDocument: (taskId: string, fileId: string) => Promise<AgentResult<AgentDocumentTaskView>>
+  /** Milestone 10 S1's own entry point: deterministic local comparison. No approval, no provider call. */
+  compareDocumentsLocally: (
+    taskId: string, firstDocumentId: string, secondDocumentId: string
+  ) => Promise<AgentResult<AgentLocalComparisonView>>
 }
 
 export class OrchestrationCoordinator {
@@ -190,7 +206,9 @@ export class OrchestrationCoordinator {
         break
       }
 
-      const dispatched = await this.dispatch(orchestrationId, view.revision, capability, view.objective, resources)
+      const dispatched = await this.dispatch(
+        orchestrationId, view.revision, capability, view.objective, resources, view.resources ?? [], view.documentTaskId
+      )
       if (!dispatched.ok) return dispatched
       view = dispatched.value
     }
@@ -215,13 +233,46 @@ export class OrchestrationCoordinator {
   }
 
   /**
+   * Milestone 12 S2: makes one already-approved document available to this orchestration as a
+   * `document_ref` resource. Never reachable from the planner or the model -- this is the trusted renderer
+   * action that supplies the resource a later `document_read` step will cite. Lazily creates the one shared
+   * document task this orchestration's document resources refer into (`documentTaskId`), reusing it on
+   * every later call so a comparison always has both documents in the same task
+   * (`DocumentService.compare_local` requires that).
+   */
+  async attachApprovedDocument(orchestrationIdValue: unknown, rootIdValue: unknown, relativePathValue: unknown): Promise<AgentResult<AgentOrchestrationView>> {
+    if (typeof orchestrationIdValue !== 'string' || typeof rootIdValue !== 'string' || typeof relativePathValue !== 'string') {
+      return { ok: false, error: { code: 'invalid_request', message: 'That document reference is invalid.' } }
+    }
+    const orchestrationId = orchestrationIdValue
+    const current = await this.deps.orchestrations.getOrchestration(orchestrationId)
+    if (!current.ok) return current
+    let taskId = current.value.documentTaskId
+    if (taskId === undefined) {
+      const created = await this.deps.createDocumentTask(current.value.objective)
+      if (!created.ok) return created
+      taskId = created.value.taskId
+    }
+    const added = await this.deps.addDocumentFromRoot(taskId, rootIdValue, relativePathValue)
+    if (!added.ok) return added
+    const file = added.value.files.at(-1)
+    if (file === undefined) {
+      return { ok: false, error: { code: 'orchestration_refused', message: 'Lumi could not add that document.' } }
+    }
+    return this.deps.orchestrations.registerResource(orchestrationId, current.value.revision, {
+      kind: 'document_ref', safeLabel: file.displayName, backingId: file.fileId, documentTaskId: taskId
+    })
+  }
+
+  /**
    * The one closed place a capability id becomes a request to that capability's own boundary. Every branch
    * is a real, already-reviewed entry point; there is no default/dynamic dispatch and no way for a string
    * this module does not explicitly name to reach anything.
    */
   private async dispatch(
     orchestrationId: string, revision: number, capability: AgentCapabilityId, objective: string,
-    resources: readonly string[]
+    resources: readonly string[], availableResources: readonly AgentOrchestrationResourceView[],
+    documentTaskId: string | undefined
   ): Promise<AgentResult<AgentOrchestrationView>> {
     if (capability === 'public_research') {
       const created = await this.deps.createResearchTask(objective)
@@ -246,8 +297,84 @@ export class OrchestrationCoordinator {
       if (!created.ok) return created
       return this.deps.orchestrations.advanceOrchestration(orchestrationId, revision, capability, { taskId: created.value.taskId, resources })
     }
+    if (capability === 'document_read') {
+      return this.dispatchDocumentRead(orchestrationId, revision, resources, availableResources, documentTaskId)
+    }
+    if (capability === 'document_compare') {
+      return this.dispatchDocumentCompare(orchestrationId, revision, resources, availableResources, documentTaskId)
+    }
     // Not reachable in the ordinary case: the runtime only ever offers a planner the capabilities it has
     // itself composed. Fail closed rather than silently doing nothing.
     return { ok: false, error: { code: 'orchestration_refused', message: 'Lumi does not yet know how to use that capability.' } }
+  }
+
+  /**
+   * `document_read`: the planner cited exactly one `document_ref` (the runtime itself enforces this;
+   * anything else is refused before this is ever called). Extracts through `DocumentService`'s own existing
+   * no-approval method, then reports a summary built ONLY from a character count -- never any extracted
+   * text, term or heading, matching `document_read`'s `document_private` classification.
+   */
+  private async dispatchDocumentRead(
+    orchestrationId: string, revision: number, resources: readonly string[],
+    availableResources: readonly AgentOrchestrationResourceView[], documentTaskId: string | undefined
+  ): Promise<AgentResult<AgentOrchestrationView>> {
+    const resolved = this.resolveDocumentResource(resources[0], availableResources, documentTaskId, 'document_ref')
+    if (resolved === null) {
+      return { ok: false, error: { code: 'orchestration_refused', message: 'Lumi could not resolve that document.' } }
+    }
+    const extracted = await this.deps.extractDocument(resolved.taskId, resolved.backingId)
+    if (!extracted.ok) return extracted
+    const document = extracted.value.documents.filter((item) => item.fileId === resolved.backingId).at(-1)
+    if (document === undefined) {
+      return { ok: false, error: { code: 'orchestration_refused', message: 'Lumi could not extract that document.' } }
+    }
+    return this.deps.orchestrations.advanceOrchestration(orchestrationId, revision, 'document_read', {
+      resources, resultBackingId: document.documentId,
+      resolvedSummary: `Extracted ${document.textChars} characters from an approved document.`
+    })
+  }
+
+  /**
+   * `document_compare`: the planner cited exactly two `document_result_ref`s. Compares through
+   * `DocumentService`'s own existing local method, then reports a summary built ONLY from the numeric
+   * overlap fraction -- never any shared term, heading or quote from either document.
+   */
+  private async dispatchDocumentCompare(
+    orchestrationId: string, revision: number, resources: readonly string[],
+    availableResources: readonly AgentOrchestrationResourceView[], documentTaskId: string | undefined
+  ): Promise<AgentResult<AgentOrchestrationView>> {
+    const first = this.resolveDocumentResource(resources[0], availableResources, documentTaskId, 'document_result_ref')
+    const second = this.resolveDocumentResource(resources[1], availableResources, documentTaskId, 'document_result_ref')
+    // `first.taskId !== second.taskId` cannot actually differ today (both come from the one
+    // `documentTaskId` this orchestration owns) -- kept as defense in depth against a future change that
+    // gives documents more than one task, not as the primary guarantee (that is documentTaskId itself).
+    if (first === null || second === null || first.taskId !== second.taskId) {
+      return { ok: false, error: { code: 'orchestration_refused', message: 'Lumi could not resolve those documents.' } }
+    }
+    const compared = await this.deps.compareDocumentsLocally(first.taskId, first.backingId, second.backingId)
+    if (!compared.ok) return compared
+    const overlapPercent = Math.round(compared.value.overlap * 100)
+    return this.deps.orchestrations.advanceOrchestration(orchestrationId, revision, 'document_compare', {
+      resources,
+      resolvedSummary: `Local comparison: ${overlapPercent}% term overlap between two approved documents.`
+    })
+  }
+
+  /**
+   * Resolves a cited ref to its backing document task/id, from the SAME fresh `view` the planner was shown
+   * for this call -- never a stale or separately-fetched one, and never instance state shared across
+   * concurrent orchestrations. `null` if the ref is missing, is the wrong kind for this call, carries no
+   * backing id, or no document task exists yet. The runtime's own `advance()` re-checks kind/ownership/
+   * freshness independently and is the actual authority; this check exists so a wrong-kind citation fails
+   * here, before any local `DocumentService` call is even attempted, rather than only after one runs.
+   */
+  private resolveDocumentResource(
+    ref: string | undefined, availableResources: readonly AgentOrchestrationResourceView[],
+    documentTaskId: string | undefined, expectedKind: 'document_ref' | 'document_result_ref'
+  ): { taskId: string; backingId: string } | null {
+    if (ref === undefined || documentTaskId === undefined) return null
+    const resource = availableResources.find((item) => item.ref === ref)
+    if (resource === undefined || resource.kind !== expectedKind || resource.backingId === undefined) return null
+    return { taskId: documentTaskId, backingId: resource.backingId }
   }
 }

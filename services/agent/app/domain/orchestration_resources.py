@@ -50,11 +50,18 @@ PRIVACY_CLASSES: Final[frozenset[str]] = frozenset({"public", "private", "none"}
 
 @dataclass(frozen=True, slots=True)
 class ResourceOutputSpec:
-    """What a capability's own successful step mints. Controller data, never model-authored."""
+    """What a capability's own successful step mints. Controller data, never model-authored.
+
+    `needs_backing_id`: whether the caller (Electron main, which already performed the real action through
+    that capability's own existing method) must supply the new resource's backing id -- e.g. `document_read`
+    must say which `document_id` its own extraction produced. The model never supplies this; it travels only
+    from main's own trusted call into `advance()`, exactly like `task_id`/`resolved_summary` already do.
+    """
 
     kind: str
     privacy_class: str
     single_use: bool = False
+    needs_backing_id: bool = False
 
     def __post_init__(self) -> None:
         assert self.kind in RESOURCE_KINDS, f"unknown resource kind {self.kind!r}"
@@ -68,6 +75,10 @@ CAPABILITY_OUTPUT_RESOURCE: Final[dict[str, ResourceOutputSpec]] = {
     "public_research": ResourceOutputSpec(kind="research_result_ref", privacy_class="public"),
     "project_status": ResourceOutputSpec(kind="project_status_ref", privacy_class="none"),
     "project_start": ResourceOutputSpec(kind="project_status_ref", privacy_class="none"),
+    #: Milestone 12 S2. Extracted text is `document_private` (`app/domain/documents.py`); the resource
+    #: itself carries no text, only a controller-authored template label -- see `safe_label()`. Its backing
+    #: id is the new `document_id` `DocumentService.extract()` produced, supplied by main.
+    "document_read": ResourceOutputSpec(kind="document_result_ref", privacy_class="private", needs_backing_id=True),
 }
 
 #: capability_id -> the exact ordered resource kinds it accepts as input. Absent or empty means "accepts no
@@ -79,7 +90,17 @@ CAPABILITY_RESOURCE_REQUIREMENTS: Final[dict[str, tuple[str, ...]]] = {
     "public_research": (),
     "project_status": (),
     "project_start": (),
+    "document_read": ("document_ref",),
+    #: `document_compare`'s M11 catalog descriptor names `document_ref` in its coarse `inputClasses`, but its
+    #: own description says "two ALREADY-READ documents" -- `compare_local()` needs post-extraction document
+    #: ids, so this requires the *result* of two `document_read` steps, not two unread file references.
+    "document_compare": ("document_result_ref", "document_result_ref"),
 }
+
+#: Milestone 12 S2: resource kinds a trusted action outside the planner loop may register directly (never
+#: minted by a capability's own success). Each entry here needs its own review before being added -- these
+#: are the only two ways a resource may exist without ever having been produced by `_commit_step`/`resume`.
+REGISTERABLE_RESOURCE_KINDS: Final[frozenset[str]] = frozenset({"document_ref", "public_url_ref"})
 
 _REF_PATTERN: Final = re.compile(r"^r[1-9][0-9]{0,5}$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
@@ -128,6 +149,16 @@ def safe_label(value: str) -> str:
     return text[: MAX_SAFE_LABEL_CHARS - 1] + "…"
 
 
+def trusted_input_label(value: str) -> str:
+    """Bounds and sanitises a label the same way `safe_label` does, for the different, narrower case of
+    `REGISTERABLE_RESOURCE_KINDS`: a resource the user themselves made available through a trusted action
+    (picking an already-approved file, typing a URL Lumi already checked) -- never a capability's own result
+    content. Echoing the user's own already-seen file name or URL back to the planner discloses nothing they
+    did not already provide; this is categorically different from `safe_label`'s template-only rule for a
+    resource a capability's own execution produced."""
+    return safe_label(value)
+
+
 def next_ref(existing_count: int) -> str:
     """The next opaque ref for an orchestration that already has `existing_count` resources. Controller-only:
     nothing here is ever handed a model- or renderer-supplied number."""
@@ -140,12 +171,14 @@ __all__ = [
     "MAX_RESOURCES_PER_STEP",
     "MAX_SAFE_LABEL_CHARS",
     "PRIVACY_CLASSES",
+    "REGISTERABLE_RESOURCE_KINDS",
     "RESOURCE_KINDS",
     "RESOURCE_STATE_CODES",
     "OrchestrationResourceRefusal",
     "ResourceOutputSpec",
     "next_ref",
     "safe_label",
+    "trusted_input_label",
     "validate_ref",
     "validate_resource_refs",
 ]

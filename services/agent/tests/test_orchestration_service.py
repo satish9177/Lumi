@@ -22,9 +22,12 @@ from app.domain.orchestration_resources import CAPABILITY_RESOURCE_REQUIREMENTS
 from app.domain.research import ResearchAnswer, ResearchBudgets
 from app.services.actions import ActionService
 from app.services.orchestration import OrchestrationService
+from app.services.documents import DocumentService
 from app.services.projects import ProjectService
 from app.services.research_tasks import ResearchService
 from app.services.tasks import TaskService
+from tests.document_fixtures import make_pdf, make_text
+from tests.test_documents_service import _two_documents
 from tests.test_research_authorization import DISCLOSURE, OBJECTIVE, SEARCH_STEP, _envelope, build_service
 
 
@@ -65,7 +68,9 @@ class TestCreateAndRead:
         assert view.orchestration.revision == 1
         assert view.live is True
         assert view.steps == ()
-        assert set(view.available_capabilities) == {"public_research", "project_status", "project_start"}
+        assert set(view.available_capabilities) == {
+            "public_research", "project_status", "project_start", "document_read", "document_compare"
+        }
 
     async def test_create_refuses_an_invalid_objective(self, service: OrchestrationService) -> None:
         with pytest.raises(OrchestrationRefusal, match="objective_invalid"):
@@ -705,4 +710,303 @@ class TestResourceRegistry:
             await service.advance(
                 minted.orchestration.id, expected_revision=minted.orchestration.revision,
                 capability_id="public_research", task_id=task_id, resources=["r1"],
+            )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the M10 file broker ships on Windows")
+class TestDocumentComposition:
+    """Milestone 12 S2: `document_read`/`document_compare`, against a real PostgreSQL database and a real
+    directory tree. Main already performs the real extraction/comparison through `DocumentService`'s own
+    existing, no-new-approval methods (exactly as a direct request does) before ever calling `advance()` --
+    these tests build the same fixtures `test_documents_service.py` uses to prove that."""
+
+    @pytest.fixture
+    def documents(self, engine: AsyncEngine) -> DocumentService:
+        return DocumentService(engine, grant_ttl_seconds=600, protected_folders=((), ()))
+
+    @pytest.fixture
+    def folder(self, tmp_path: Path) -> Path:
+        # Matches `test_documents_service.py`'s own fixture shape exactly: `_two_documents` (reused below)
+        # hardcodes "resume.pdf" and "Jobs/job.txt".
+        root = tmp_path / "Approved Docs"
+        (root / "Jobs").mkdir(parents=True)
+        (root / "resume.pdf").write_bytes(make_pdf())
+        (root / "Jobs" / "job.txt").write_bytes(make_text())
+        return root
+
+    async def test_register_resource_mints_a_document_ref_and_sets_the_shared_task(
+        self, service: OrchestrationService, documents: DocumentService, folder: Path
+    ) -> None:
+        root = await documents.register_root(path=str(folder), label="Docs", can_read=True, can_create=False, can_modify=False)
+        task = await documents.create_task(objective="read my resume")
+        added = await documents.add_root_file(task.task_id, root_id=root.root_id, relative_path="resume.pdf")
+        file_id = added.files[0].file_id
+
+        view = await service.create(objective="read my resume")
+        registered = await service.register_resource(
+            view.orchestration.id, expected_revision=view.orchestration.revision,
+            kind="document_ref", safe_label_text="resume.pdf", backing_id=file_id, document_task_id=task.task_id,
+        )
+        assert registered.orchestration.document_task_id == task.task_id
+        assert len(registered.resources) == 1
+        resource = registered.resources[0]
+        assert resource.kind == "document_ref"
+        assert resource.safe_label == "resume.pdf"
+        assert resource.backing_id == file_id
+        assert resource.backing_text is None
+        assert resource.privacy_class == "private"
+
+    async def test_a_second_document_ref_must_use_the_same_shared_task(
+        self, service: OrchestrationService, documents: DocumentService, folder: Path
+    ) -> None:
+        root = await documents.register_root(path=str(folder), label="Docs", can_read=True, can_create=False, can_modify=False)
+        task_a = await documents.create_task(objective="a")
+        task_b = await documents.create_task(objective="b")
+        added = await documents.add_root_file(task_a.task_id, root_id=root.root_id, relative_path="resume.pdf")
+
+        view = await service.create(objective="x")
+        registered = await service.register_resource(
+            view.orchestration.id, expected_revision=view.orchestration.revision,
+            kind="document_ref", safe_label_text="resume.pdf", backing_id=added.files[0].file_id,
+            document_task_id=task_a.task_id,
+        )
+        with pytest.raises(OrchestrationRefusal, match="document_task_mismatch"):
+            await service.register_resource(
+                view.orchestration.id, expected_revision=registered.orchestration.revision,
+                kind="document_ref", safe_label_text="job.txt", backing_id=uuid.uuid4(),
+                document_task_id=task_b.task_id,
+            )
+
+    async def test_register_resource_refuses_an_unregisterable_kind(self, service: OrchestrationService) -> None:
+        view = await service.create(objective="x")
+        with pytest.raises(OrchestrationRefusal, match="resources_invalid"):
+            await service.register_resource(
+                view.orchestration.id, expected_revision=view.orchestration.revision,
+                kind="research_result_ref", safe_label_text="x",
+            )
+
+    async def test_register_resource_document_ref_requires_backing_id_and_task(self, service: OrchestrationService) -> None:
+        view = await service.create(objective="x")
+        with pytest.raises(OrchestrationRefusal, match="resources_invalid"):
+            await service.register_resource(
+                view.orchestration.id, expected_revision=view.orchestration.revision,
+                kind="document_ref", safe_label_text="x",
+            )
+
+    async def test_register_resource_document_ref_refuses_backing_text(self, service: OrchestrationService) -> None:
+        view = await service.create(objective="x")
+        with pytest.raises(OrchestrationRefusal, match="resources_invalid"):
+            await service.register_resource(
+                view.orchestration.id, expected_revision=view.orchestration.revision,
+                kind="document_ref", safe_label_text="x", backing_id=uuid.uuid4(), backing_text="oops",
+                document_task_id=uuid.uuid4(),
+            )
+
+    async def test_register_resource_public_url_ref(self, service: OrchestrationService) -> None:
+        view = await service.create(objective="inspect a page")
+        registered = await service.register_resource(
+            view.orchestration.id, expected_revision=view.orchestration.revision,
+            kind="public_url_ref", safe_label_text="example.com", backing_text="https://example.com/page",
+        )
+        assert len(registered.resources) == 1
+        resource = registered.resources[0]
+        assert resource.kind == "public_url_ref"
+        assert resource.backing_text == "https://example.com/page"
+        assert resource.backing_id is None
+        assert resource.privacy_class == "public"
+
+    async def test_register_resource_public_url_ref_refuses_backing_id(self, service: OrchestrationService) -> None:
+        view = await service.create(objective="x")
+        with pytest.raises(OrchestrationRefusal, match="resources_invalid"):
+            await service.register_resource(
+                view.orchestration.id, expected_revision=view.orchestration.revision,
+                kind="public_url_ref", safe_label_text="x", backing_id=uuid.uuid4(), backing_text="https://example.com",
+            )
+
+    async def _registered_document_ref(
+        self, service: OrchestrationService, orchestration_id: uuid.UUID, expected_revision: int,
+        *, task_id: uuid.UUID, file_id: uuid.UUID, label: str,
+    ) -> Any:
+        return await service.register_resource(
+            orchestration_id, expected_revision=expected_revision,
+            kind="document_ref", safe_label_text=label, backing_id=file_id, document_task_id=task_id,
+        )
+
+    async def test_document_read_mints_a_document_result_ref_with_a_template_only_label(
+        self, service: OrchestrationService, documents: DocumentService, folder: Path
+    ) -> None:
+        root = await documents.register_root(path=str(folder), label="Docs", can_read=True, can_create=False, can_modify=False)
+        task = await documents.create_task(objective="read my resume")
+        added = await documents.add_root_file(task.task_id, root_id=root.root_id, relative_path="resume.pdf")
+        file_id = added.files[0].file_id
+
+        view = await service.create(objective="read my resume")
+        registered = await self._registered_document_ref(
+            service, view.orchestration.id, view.orchestration.revision,
+            task_id=task.task_id, file_id=file_id, label="resume.pdf",
+        )
+        extracted = await documents.extract(task.task_id, file_id=file_id)
+        document_id = extracted.documents[0].document_id
+        read = await service.advance(
+            registered.orchestration.id, expected_revision=registered.orchestration.revision,
+            capability_id="document_read", resources=["r1"], result_backing_id=document_id,
+            resolved_summary=f"Extracted {extracted.documents[0].text_chars} characters from an approved document.",
+        )
+        assert read.orchestration.status == "RUNNING"  # no approval needed
+        assert len(read.resources) == 2  # r1 (document_ref) is still available; r2 is the new result
+        result = next(item for item in read.resources if item.ref == "r2")
+        assert result.kind == "document_result_ref"
+        assert result.backing_id == document_id
+        # Controller-authored template only -- character COUNT is fine, but never any extracted text.
+        assert result.safe_label == "document_read result (step 1)"
+        assert "resume" not in result.safe_label.lower()
+
+    async def test_document_read_refuses_a_document_ref_from_a_different_orchestration(
+        self, service: OrchestrationService, documents: DocumentService, folder: Path
+    ) -> None:
+        root = await documents.register_root(path=str(folder), label="Docs", can_read=True, can_create=False, can_modify=False)
+        task = await documents.create_task(objective="read my resume")
+        added = await documents.add_root_file(task.task_id, root_id=root.root_id, relative_path="resume.pdf")
+
+        owner = await service.create(objective="owner")
+        await self._registered_document_ref(
+            service, owner.orchestration.id, owner.orchestration.revision,
+            task_id=task.task_id, file_id=added.files[0].file_id, label="resume.pdf",
+        )
+        stranger = await service.create(objective="stranger")
+        with pytest.raises(OrchestrationRefusal, match="resource_not_found"):
+            await service.advance(
+                stranger.orchestration.id, expected_revision=stranger.orchestration.revision,
+                capability_id="document_read", resources=["r1"], result_backing_id=uuid.uuid4(),
+                resolved_summary="Extracted 10 characters.",
+            )
+
+    async def test_document_read_refuses_the_wrong_count_of_resources(
+        self, service: OrchestrationService, documents: DocumentService, folder: Path
+    ) -> None:
+        root = await documents.register_root(path=str(folder), label="Docs", can_read=True, can_create=False, can_modify=False)
+        task = await documents.create_task(objective="read my resume")
+        added = await documents.add_root_file(task.task_id, root_id=root.root_id, relative_path="resume.pdf")
+        view = await service.create(objective="read my resume")
+        registered = await self._registered_document_ref(
+            service, view.orchestration.id, view.orchestration.revision,
+            task_id=task.task_id, file_id=added.files[0].file_id, label="resume.pdf",
+        )
+        with pytest.raises(OrchestrationRefusal, match="resources_not_supported"):
+            await service.advance(
+                registered.orchestration.id, expected_revision=registered.orchestration.revision,
+                capability_id="document_read", resources=[], resolved_summary="Extracted 10 characters.",
+            )
+
+    async def test_document_read_requires_a_result_backing_id(
+        self, service: OrchestrationService, documents: DocumentService, folder: Path
+    ) -> None:
+        root = await documents.register_root(path=str(folder), label="Docs", can_read=True, can_create=False, can_modify=False)
+        task = await documents.create_task(objective="read my resume")
+        added = await documents.add_root_file(task.task_id, root_id=root.root_id, relative_path="resume.pdf")
+        view = await service.create(objective="read my resume")
+        registered = await self._registered_document_ref(
+            service, view.orchestration.id, view.orchestration.revision,
+            task_id=task.task_id, file_id=added.files[0].file_id, label="resume.pdf",
+        )
+        with pytest.raises(OrchestrationRefusal, match="result_backing_id_required"):
+            await service.advance(
+                registered.orchestration.id, expected_revision=registered.orchestration.revision,
+                capability_id="document_read", resources=["r1"], resolved_summary="Extracted 10 characters.",
+            )
+
+    @pytest.mark.parametrize("capability_id", ["project_status", "public_research", "project_start"])
+    async def test_a_capability_with_no_backing_id_output_refuses_one(
+        self, service: OrchestrationService, capability_id: str
+    ) -> None:
+        # The check is one blanket guard applied before any capability-specific branching, so it fires
+        # identically for every capability whose own output spec does not declare `needs_backing_id` --
+        # even one that also needs a task_id or resources it was never given, since this check runs first.
+        view = await service.create(objective="check my project")
+        with pytest.raises(OrchestrationRefusal, match="result_backing_id_not_allowed"):
+            await service.advance(
+                view.orchestration.id, expected_revision=view.orchestration.revision,
+                capability_id=capability_id, result_backing_id=uuid.uuid4(),
+            )
+
+    async def test_document_read_may_repeat_without_tripping_the_loop_guard(
+        self, service: OrchestrationService, documents: DocumentService, folder: Path
+    ) -> None:
+        root = await documents.register_root(path=str(folder), label="Docs", can_read=True, can_create=False, can_modify=False)
+        task = await documents.create_task(objective="read two files")
+        added = await documents.add_root_file(task.task_id, root_id=root.root_id, relative_path="resume.pdf")
+        added = await documents.add_root_file(task.task_id, root_id=root.root_id, relative_path="Jobs/job.txt")
+        view = await service.create(objective="read two files")
+        registered = view
+        for item in added.files:
+            registered = await self._registered_document_ref(
+                service, registered.orchestration.id, registered.orchestration.revision,
+                task_id=task.task_id, file_id=item.file_id, label=item.display_name,
+            )
+        refs = [resource.ref for resource in registered.resources]
+        assert len(refs) == 2
+        for index, ref in enumerate(refs):
+            extracted = await documents.extract(task.task_id, file_id=added.files[index].file_id)
+            registered = await service.advance(
+                registered.orchestration.id, expected_revision=registered.orchestration.revision,
+                capability_id="document_read", resources=[ref], result_backing_id=extracted.documents[-1].document_id,
+                resolved_summary=f"Extracted {extracted.documents[-1].text_chars} characters from an approved document.",
+            )
+        assert registered.orchestration.status == "RUNNING"  # neither call paused as loop_detected
+        assert sum(1 for step in registered.steps if step.capability_id == "document_read") == 2
+        assert all(step.status == "SUCCEEDED" for step in registered.steps if step.capability_id == "document_read")
+
+    async def test_document_compare_requires_exactly_two_document_result_refs(
+        self, service: OrchestrationService, documents: DocumentService, folder: Path
+    ) -> None:
+        view_docs = await _two_documents(documents, folder)
+        view = await service.create(objective="compare my documents")
+        registered = view
+        result_refs: list[str] = []
+        for item in view_docs.documents:
+            registered = await self._registered_document_ref(
+                service, registered.orchestration.id, registered.orchestration.revision,
+                task_id=view_docs.task_id, file_id=item.file_id, label="a document",
+            )
+            ref = registered.resources[-1].ref
+            registered = await service.advance(
+                registered.orchestration.id, expected_revision=registered.orchestration.revision,
+                capability_id="document_read", resources=[ref], result_backing_id=item.document_id,
+                resolved_summary=f"Extracted {item.text_chars} characters from an approved document.",
+            )
+            result_refs.append(next(r.ref for r in registered.resources if r.backing_id == item.document_id))
+
+        local = await documents.compare_local(view_docs.task_id, first_id=view_docs.documents[0].document_id, second_id=view_docs.documents[1].document_id)
+        compared = await service.advance(
+            registered.orchestration.id, expected_revision=registered.orchestration.revision,
+            capability_id="document_compare", resources=result_refs,
+            resolved_summary=f"Local comparison: {round(local.overlap * 100)}% term overlap between two approved documents.",
+        )
+        assert compared.orchestration.status == "RUNNING"
+        step = next(s for s in compared.steps if s.capability_id == "document_compare")
+        assert step.status == "SUCCEEDED"
+        assert step.result_summary is not None and "%" in step.result_summary
+        # Never the documents' own vocabulary.
+        assert "resume" not in (step.result_summary or "").lower()
+
+    async def test_document_compare_refuses_a_single_document_ref(
+        self, service: OrchestrationService, documents: DocumentService, folder: Path
+    ) -> None:
+        view_docs = await _two_documents(documents, folder)
+        view = await service.create(objective="compare my documents")
+        registered = await self._registered_document_ref(
+            service, view.orchestration.id, view.orchestration.revision,
+            task_id=view_docs.task_id, file_id=view_docs.documents[0].file_id, label="a document",
+        )
+        ref = registered.resources[-1].ref
+        read = await service.advance(
+            registered.orchestration.id, expected_revision=registered.orchestration.revision,
+            capability_id="document_read", resources=[ref], result_backing_id=view_docs.documents[0].document_id,
+            resolved_summary=f"Extracted {view_docs.documents[0].text_chars} characters from an approved document.",
+        )
+        result_ref = next(r.ref for r in read.resources if r.backing_id == view_docs.documents[0].document_id)
+        with pytest.raises(OrchestrationRefusal, match="resources_not_supported"):
+            await service.advance(
+                read.orchestration.id, expected_revision=read.orchestration.revision,
+                capability_id="document_compare", resources=[result_ref], resolved_summary="Local comparison: 0% overlap.",
             )

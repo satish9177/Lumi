@@ -59,10 +59,14 @@ describe('M10 S1 document firewall', () => {
     const bridge = preload.slice(start, preload.indexOf('\n', end))
     expect(bridge).not.toMatch(/\bpath\s*:|absolutePath|filePath|getPathForFile|folderPath/)
     // M10 S4's `startWorkflowDocuments` takes only a workflow id; it is pinned in workflow-controller.test.ts.
+    // M12 S2's `attachApprovedDocument` is the orchestration system's own channel, not a new document
+    // capability: it takes exactly `addDocumentFromRoot`'s own (orchestrationId, rootId, relativePath) shape
+    // and forwards to that same existing, already-reviewed entry point -- pinned in
+    // orchestration-coordinator.test.ts.
     expect(Object.keys(AGENT_IPC_CHANNELS).filter((key) => /Document|FileRoot/.test(key) && !/Workflow/.test(key)).sort()).toEqual([
-      'addDocumentFromRoot', 'addDroppedDocument', 'addFileRoot', 'compareDocumentsLocally', 'createDocumentDisclosure',
-      'createDocumentTask', 'declineDocumentDisclosure', 'extractDocument', 'getDocumentTask', 'grantDocumentDisclosure',
-      'listFileRootFiles', 'listFileRoots', 'revokeFileRoot', 'runDocumentDisclosure'
+      'addDocumentFromRoot', 'addDroppedDocument', 'addFileRoot', 'attachApprovedDocument', 'compareDocumentsLocally',
+      'createDocumentDisclosure', 'createDocumentTask', 'declineDocumentDisclosure', 'extractDocument', 'getDocumentTask',
+      'grantDocumentDisclosure', 'listFileRootFiles', 'listFileRoots', 'revokeFileRoot', 'runDocumentDisclosure'
     ])
   })
 

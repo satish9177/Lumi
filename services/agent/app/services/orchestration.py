@@ -35,6 +35,7 @@ from app.domain.orchestration import (
     MAX_PLANNER_CALLS,
     MAX_STEPS,
     ORCHESTRATION_TTL_SECONDS,
+    REPEATABLE_CAPABILITY_IDS,
     SYNCHRONOUS_CAPABILITY_IDS,
     TASK_BACKED_CAPABILITY_IDS,
     OrchestrationRefusal,
@@ -48,8 +49,10 @@ from app.domain.orchestration import (
 from app.domain.orchestration_resources import (
     CAPABILITY_OUTPUT_RESOURCE,
     CAPABILITY_RESOURCE_REQUIREMENTS,
+    REGISTERABLE_RESOURCE_KINDS,
     next_ref,
     safe_label,
+    trusted_input_label,
     validate_resource_refs,
 )
 from app.repositories.orchestration import OrchestrationRecord, OrchestrationRepository, StepRecord
@@ -60,7 +63,8 @@ from app.services.research_tasks import ResearchService
 
 #: capability_id -> the label a result handle carries (`research_result:3`). Closed, spelled here.
 _OUTPUT_CLASS: dict[str, str] = {
-    "public_research": "research_result", "project_status": "project_status", "project_start": "project_run_result"
+    "public_research": "research_result", "project_status": "project_status", "project_start": "project_run_result",
+    "document_read": "document_result", "document_compare": "document_comparison",
 }
 
 #: `RunView.phase` (`app/services/projects.py`'s own closed vocabulary) -> this step's resolution. A run
@@ -121,13 +125,75 @@ class OrchestrationService:
         live = await repository.is_live(orchestration_id)
         available: tuple[str, ...] = ()
         if live and record.status == OrchestrationStatus.RUNNING:
-            already_succeeded = {step.capability_id for step in steps if step.status == StepStatus.SUCCEEDED}
+            already_succeeded = {
+                step.capability_id for step in steps
+                if step.status == StepStatus.SUCCEEDED and step.capability_id not in REPEATABLE_CAPABILITY_IDS
+            }
             available = tuple(sorted(COMPOSED_CAPABILITY_IDS - already_succeeded))
         resources = await OrchestrationResourceRepository(connection).available(orchestration_id)
         return OrchestrationView(
             orchestration=record, live=live, steps=tuple(steps), available_capabilities=available,
             resources=tuple(resources),
         )
+
+    # ---- registering a trusted input resource -----------------------------------------------------------
+
+    async def register_resource(
+        self,
+        orchestration_id: uuid.UUID,
+        *,
+        expected_revision: int,
+        kind: object,
+        safe_label_text: object,
+        backing_id: object = None,
+        backing_text: object = None,
+        document_task_id: object = None,
+    ) -> OrchestrationView:
+        """Milestone 12 S2: makes a resource available that a trusted action outside the planner loop
+        provided -- an already-approved document the user picked, or a URL Lumi already policy-checked --
+        never a capability's own result. The model never reaches this method; only Electron main calls it,
+        after it has already performed the trusted action (adding a file to a document task, checking a URL)
+        through that capability's own existing boundary."""
+        if not isinstance(kind, str) or kind not in REGISTERABLE_RESOURCE_KINDS:
+            raise OrchestrationRefusal("resources_invalid")
+        label = trusted_input_label(_require_text(safe_label_text, code="resources_invalid"))
+
+        if kind == "document_ref":
+            if backing_text is not None:
+                raise OrchestrationRefusal("resources_invalid")
+            file_id = _require_uuid(backing_id, code="resources_invalid")
+            task_id = _require_uuid(document_task_id, code="resources_invalid")
+            async with self._engine.begin() as connection:
+                repository = OrchestrationRepository(connection)
+                # `_live` takes the same row lock `_live_running` does, so nothing else can set
+                # `document_task_id` between this read and the write below -- there is no race to fence.
+                record = await self._live(repository, orchestration_id, expected_revision)
+                if record.document_task_id is None:
+                    await repository.set_document_task_id(orchestration_id, document_task_id=task_id)
+                elif record.document_task_id != task_id:
+                    raise OrchestrationRefusal("document_task_mismatch")
+                resource_repository = OrchestrationResourceRepository(connection)
+                ref = next_ref(await resource_repository.count(orchestration_id))
+                await resource_repository.mint(
+                    orchestration_id=orchestration_id, ref=ref, kind="document_ref", producing_step_id=None,
+                    privacy_class="private", safe_label=label, backing_id=file_id,
+                )
+                return await self._view(connection, orchestration_id)
+
+        # public_url_ref
+        if backing_id is not None:
+            raise OrchestrationRefusal("resources_invalid")
+        url = _require_text(backing_text, code="resources_invalid", limit=2048)
+        async with self._engine.begin() as connection:
+            repository = OrchestrationRepository(connection)
+            await self._live(repository, orchestration_id, expected_revision)
+            resource_repository = OrchestrationResourceRepository(connection)
+            ref = next_ref(await resource_repository.count(orchestration_id))
+            await resource_repository.mint(
+                orchestration_id=orchestration_id, ref=ref, kind="public_url_ref", producing_step_id=None,
+                privacy_class="public", safe_label=label, backing_text=url,
+            )
+            return await self._view(connection, orchestration_id)
 
     # ---- planner-call budget -------------------------------------------------------------------------
 
@@ -154,6 +220,7 @@ class OrchestrationService:
         task_id: object = None,
         resolved_summary: object = None,
         resources: object = None,
+        result_backing_id: object = None,
     ) -> OrchestrationView:
         capability = validate_capability_id(capability_id)
         resource_refs = validate_resource_refs(resources)
@@ -173,6 +240,16 @@ class OrchestrationService:
         if requirement and len(resource_refs) != len(requirement):
             raise OrchestrationRefusal("resources_not_supported")
 
+        # Milestone 12 S2: some outputs (document_read's document_result_ref) need a backing id only main
+        # can supply, since main already performed the real extraction/comparison. Required exactly when the
+        # capability's own output spec says so -- never optional, never guessed, never model-supplied.
+        output_spec = CAPABILITY_OUTPUT_RESOURCE.get(capability)
+        result_backing_uuid: uuid.UUID | None = None
+        if output_spec is not None and output_spec.needs_backing_id:
+            result_backing_uuid = _require_uuid(result_backing_id, code="result_backing_id_required")
+        elif result_backing_id is not None:
+            raise OrchestrationRefusal("result_backing_id_not_allowed")
+
         if capability in TASK_BACKED_CAPABILITY_IDS:
             if resolved_summary is not None:
                 raise OrchestrationRefusal("resolved_summary_not_allowed")
@@ -181,7 +258,7 @@ class OrchestrationService:
             return await self._commit_step(
                 orchestration_id, expected_revision=expected_revision, capability=capability,
                 child_task_id=task_uuid, status=status, summary=summary, pause_reason=pause_reason,
-                resource_refs=resource_refs, requirement=requirement,
+                resource_refs=resource_refs, requirement=requirement, result_backing_id=result_backing_uuid,
             )
 
         # Synchronous (SYNCHRONOUS_CAPABILITY_IDS): the caller already computed the result through that
@@ -192,7 +269,7 @@ class OrchestrationService:
         return await self._commit_step(
             orchestration_id, expected_revision=expected_revision, capability=capability,
             child_task_id=None, status=StepStatus.SUCCEEDED, summary=summary, pause_reason=None,
-            resource_refs=resource_refs, requirement=requirement,
+            resource_refs=resource_refs, requirement=requirement, result_backing_id=result_backing_uuid,
         )
 
     async def _read_task_backed_resolution(
@@ -262,6 +339,7 @@ class OrchestrationService:
         pause_reason: str | None,
         resource_refs: tuple[str, ...] = (),
         requirement: tuple[str, ...] = (),
+        result_backing_id: uuid.UUID | None = None,
     ) -> OrchestrationView:
         async with self._engine.begin() as connection:
             repository = OrchestrationRepository(connection)
@@ -271,8 +349,11 @@ class OrchestrationService:
             if len(steps) >= MAX_STEPS:
                 await repository.pause(orchestration_id, reason="budget_exhausted")
                 return await self._view(connection, orchestration_id)
-            if any(step.capability_id == capability and step.status == StepStatus.SUCCEEDED for step in steps):
-                # Loop guard: re-choosing a capability that already produced a result is not progress.
+            if capability not in REPEATABLE_CAPABILITY_IDS and any(
+                step.capability_id == capability and step.status == StepStatus.SUCCEEDED for step in steps
+            ):
+                # Loop guard: re-choosing a capability that already produced a result is not progress --
+                # except the few (document_read, document_compare) that legitimately answer more than once.
                 await repository.pause(orchestration_id, reason="loop_detected")
                 return await self._view(connection, orchestration_id)
             if child_task_id is not None:
@@ -319,6 +400,7 @@ class OrchestrationService:
                         orchestration_id=orchestration_id, ref=ref, kind=output.kind,
                         producing_step_id=step.id, privacy_class=output.privacy_class,
                         safe_label=_capability_safe_label(capability, sequence), single_use=output.single_use,
+                        backing_id=result_backing_id,
                     )
             if status in (StepStatus.PENDING, StepStatus.AWAITING_APPROVAL):
                 await repository.pause(orchestration_id, reason=pause_reason or "approval_required")
@@ -443,6 +525,22 @@ class OrchestrationService:
             raise OrchestrationRefusal("orchestration_expired")
         return record
 
+    @staticmethod
+    async def _live(repository: OrchestrationRepository, orchestration_id: uuid.UUID, expected_revision: int) -> OrchestrationRecord:
+        """Like `_live_running`, but for Milestone 12 S2's `register_resource`: a trusted action outside the
+        planner loop, allowed while RUNNING or PAUSED (e.g. attaching a document while a different step
+        awaits approval) -- never once the orchestration has concluded (succeeded/failed/stopped/expired)."""
+        record = await repository.get(orchestration_id, lock=True)
+        if record is None:
+            raise OrchestrationRefusal("orchestration_not_found")
+        if record.revision != expected_revision:
+            raise OrchestrationRefusal("revision_conflict")
+        if record.status not in (OrchestrationStatus.RUNNING, OrchestrationStatus.PAUSED):
+            raise OrchestrationRefusal("orchestration_not_active")
+        if not await repository.is_live(orchestration_id):
+            raise OrchestrationRefusal("orchestration_expired")
+        return record
+
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -466,11 +564,11 @@ def _require_uuid(value: object, *, code: str) -> uuid.UUID:
         raise OrchestrationRefusal(code) from None
 
 
-def _require_text(value: object, *, code: str) -> str:
+def _require_text(value: object, *, code: str, limit: int = _MAX_TEXT) -> str:
     if not isinstance(value, str):
         raise OrchestrationRefusal(code)
     text = " ".join(value.split())
-    if not text or len(text) > _MAX_TEXT:
+    if not text or len(text) > limit:
         raise OrchestrationRefusal(code)
     return text
 

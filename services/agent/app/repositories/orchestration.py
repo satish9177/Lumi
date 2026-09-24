@@ -26,6 +26,8 @@ class OrchestrationRecord:
     updated_at: datetime
     expires_at: datetime
     stopped_at: datetime | None
+    #: Milestone 12 S2: the one document task this orchestration's document resources refer into. Set once.
+    document_task_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +58,7 @@ def _orchestration(row: Row[Any]) -> OrchestrationRecord:
         updated_at=row.updated_at,
         expires_at=row.expires_at,
         stopped_at=row.stopped_at,
+        document_task_id=row.document_task_id,
     )
 
 
@@ -143,6 +146,18 @@ class OrchestrationRepository:
         if new_child_task:
             values["child_task_count"] = orchestrations.c.child_task_count + 1
         await self._connection.execute(update(orchestrations).where(orchestrations.c.id == orchestration_id).values(**values))
+
+    async def set_document_task_id(self, orchestration_id: uuid.UUID, *, document_task_id: uuid.UUID) -> OrchestrationRecord | None:
+        """Set-once: only while `document_task_id` is still NULL. `None` means it was already set (to this
+        task or a different one) -- the caller re-reads the current value rather than assuming success."""
+        result = await self._connection.execute(
+            update(orchestrations)
+            .where(orchestrations.c.id == orchestration_id, orchestrations.c.document_task_id.is_(None))
+            .values(document_task_id=document_task_id, revision=orchestrations.c.revision + 1, updated_at=func.now())
+            .returning(*orchestrations.c)
+        )
+        row = result.one_or_none()
+        return _orchestration(row) if row is not None else None
 
     async def pause(self, orchestration_id: uuid.UUID, *, reason: str) -> OrchestrationRecord | None:
         return await self._transition(orchestration_id, expected_statuses=("RUNNING",), status="PAUSED", pause_reason=reason)

@@ -128,10 +128,12 @@ export class OrchestrationController {
    * (the caller already computed it through that capability's own existing read method). Never both.
    * `resources`: Milestone 12 S1's opaque refs the planner cited, passed through verbatim -- ownership,
    * kind and freshness are re-checked by the runtime, never trusted from what the planner said here.
+   * `resultBackingId`: Milestone 12 S2, for the few capabilities (document_read) whose own output resource
+   * needs a backing id only main can supply, since main already performed the real action.
    */
   advanceOrchestration(
     orchestrationId: string, expectedRevision: number, capabilityId: AgentCapabilityId,
-    options: { taskId?: string; resolvedSummary?: string; resources?: readonly string[] }
+    options: { taskId?: string; resolvedSummary?: string; resources?: readonly string[]; resultBackingId?: string }
   ): Promise<AgentResult<AgentOrchestrationView>> {
     return this.guarded(`orchestrations:step:${orchestrationId}`, () => undefined, async () =>
       this.post(orchestrationId, 'advance', {
@@ -139,7 +141,27 @@ export class OrchestrationController {
         capability_id: capabilityId,
         ...(options.taskId !== undefined ? { task_id: options.taskId } : {}),
         ...(options.resolvedSummary !== undefined ? { resolved_summary: options.resolvedSummary } : {}),
-        ...(options.resources !== undefined && options.resources.length > 0 ? { resources: options.resources } : {})
+        ...(options.resources !== undefined && options.resources.length > 0 ? { resources: options.resources } : {}),
+        ...(options.resultBackingId !== undefined ? { result_backing_id: options.resultBackingId } : {})
+      }, TIMEOUTS.write))
+  }
+
+  /**
+   * Milestone 12 S2: makes a trusted input resource available -- an approved document's file id, or a
+   * policy-checked URL. Never reachable from the planner or the model.
+   */
+  registerResource(
+    orchestrationId: string, expectedRevision: number,
+    options: { kind: string; safeLabel: string; backingId?: string; backingText?: string; documentTaskId?: string }
+  ): Promise<AgentResult<AgentOrchestrationView>> {
+    return this.guarded(`orchestrations:step:${orchestrationId}`, () => undefined, async () =>
+      this.post(orchestrationId, 'resources', {
+        expected_revision: expectedRevision,
+        kind: options.kind,
+        safe_label: options.safeLabel,
+        ...(options.backingId !== undefined ? { backing_id: options.backingId } : {}),
+        ...(options.backingText !== undefined ? { backing_text: options.backingText } : {}),
+        ...(options.documentTaskId !== undefined ? { document_task_id: options.documentTaskId } : {})
       }, TIMEOUTS.write))
   }
 

@@ -47,6 +47,23 @@ class AdvanceOrchestrationBody(_Body):
     #: bounded here; ownership, kind, freshness and per-capability compatibility are re-checked by the
     #: service, never trusted from this wire shape alone.
     resources: list[str] | None = Field(default=None, max_length=4)
+    #: Milestone 12 S2: the new resource's backing id, for a capability whose output needs one (e.g.
+    #: document_read's new document_id) -- main already performed the real action and knows this value.
+    #: Required or forbidden per capability; the service decides which, never trusted from this shape alone.
+    result_backing_id: uuid.UUID | None = None
+
+
+class RegisterResourceBody(_Body):
+    expected_revision: int = Field(ge=1)
+    #: Closed to `REGISTERABLE_RESOURCE_KINDS`; re-checked by the service, not trusted from this wire shape.
+    kind: str = Field(min_length=1, max_length=32)
+    safe_label: str = Field(min_length=1, max_length=200)
+    #: `document_ref` only: the file id within `document_task_id`.
+    backing_id: uuid.UUID | None = None
+    #: `public_url_ref` only: the canonical, already policy-checked URL.
+    backing_text: str | None = Field(default=None, min_length=1, max_length=2048)
+    #: `document_ref` only: the document task this file belongs to. Set once per orchestration.
+    document_task_id: uuid.UUID | None = None
 
 
 class OrchestrationStepResponse(BaseModel):
@@ -64,6 +81,12 @@ class OrchestrationResourceResponse(BaseModel):
     privacy_class: str
     safe_label: str
     single_use: bool
+    #: Milestone 12 S2: model-invisible backing identity, projected here ONLY because this whole response is
+    #: main-process-internal (never forwarded verbatim to the planner -- `orchestration-coordinator.ts`
+    #: builds the planner's own facts from `ref`/`kind`/`safe_label` alone). Lets main resolve which file,
+    #: document or URL a cited resource actually is, to call that capability's own existing service method.
+    backing_id: uuid.UUID | None = None
+    backing_text: str | None = None
 
 
 class OrchestrationResponse(BaseModel):
@@ -79,6 +102,9 @@ class OrchestrationResponse(BaseModel):
     created_at: datetime
     expires_at: datetime
     stopped_at: datetime | None
+    #: Milestone 12 S2: the one document task this orchestration's document resources refer into, if any.
+    #: Main-only; never shown to the planner.
+    document_task_id: uuid.UUID | None
     #: What this runtime can execute right now -- the planner's only allowed step choices.
     available_capabilities: list[str]
     #: Milestone 12 S1: resources this orchestration currently owns (not consumed, not expired). Seeing one
@@ -102,6 +128,7 @@ class OrchestrationResponse(BaseModel):
             created_at=record.created_at,
             expires_at=record.expires_at,
             stopped_at=record.stopped_at,
+            document_task_id=record.document_task_id,
             available_capabilities=list(view.available_capabilities),
             resources=[
                 OrchestrationResourceResponse(
@@ -110,6 +137,8 @@ class OrchestrationResponse(BaseModel):
                     privacy_class=resource.privacy_class,
                     safe_label=resource.safe_label,
                     single_use=resource.single_use,
+                    backing_id=resource.backing_id,
+                    backing_text=resource.backing_text,
                 )
                 for resource in view.resources
             ],
@@ -164,6 +193,28 @@ async def get_orchestration(orchestration_id: uuid.UUID, service: OrchestrationS
 
 
 @router.post(
+    "/orchestrations/{orchestration_id}/resources", status_code=status.HTTP_201_CREATED,
+    response_model=OrchestrationResponse, responses=_RESPONSES,
+    summary="Milestone 12 S2: make a trusted input resource available -- an approved document or a "
+    "policy-checked URL Lumi already validated. Never reachable from the planner or the model",
+)
+async def register_orchestration_resource(
+    orchestration_id: uuid.UUID, body: RegisterResourceBody, service: OrchestrationServiceDep
+) -> OrchestrationResponse:
+    return OrchestrationResponse.from_view(
+        await service.register_resource(
+            orchestration_id,
+            expected_revision=body.expected_revision,
+            kind=body.kind,
+            safe_label_text=body.safe_label,
+            backing_id=body.backing_id,
+            backing_text=body.backing_text,
+            document_task_id=body.document_task_id,
+        )
+    )
+
+
+@router.post(
     "/orchestrations/{orchestration_id}/planner-call", response_model=OrchestrationResponse, responses=_RESPONSES,
     summary="Count one planner call against the budget before Electron main asks a model anything",
 )
@@ -191,6 +242,7 @@ async def orchestration_advance(
             task_id=body.task_id,
             resolved_summary=body.resolved_summary,
             resources=body.resources,
+            result_backing_id=body.result_backing_id,
         )
     )
 

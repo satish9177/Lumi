@@ -1439,7 +1439,11 @@ At most ${card.maxExcerptBytes} bytes per document, with identifiers redacted.
         return { ok: true, value: active ? active.recipeId : null }
       },
       createProjectRun: (recipeId) => projects.createProjectRun(recipeId),
-      startProjectRun: (taskId) => projects.startProjectRun(taskId)
+      startProjectRun: (taskId) => projects.startProjectRun(taskId),
+      createDocumentTask: (objective) => documents.createDocumentTask(objective),
+      addDocumentFromRoot: (taskId, rootId, relativePath) => documents.addDocumentFromRoot(taskId, rootId, relativePath),
+      extractDocument: (taskId, fileId) => documents.extractDocument(taskId, fileId),
+      compareDocumentsLocally: (taskId, firstId, secondId) => documents.compareDocumentsLocally(taskId, firstId, secondId)
     })
     : undefined
   // Milestone 8a S2: screen capture is refused from this process's first

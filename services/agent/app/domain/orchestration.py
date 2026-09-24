@@ -60,8 +60,19 @@ CATALOG_CAPABILITY_IDS: Final[frozenset[str]] = frozenset(
 TASK_BACKED_CAPABILITY_IDS: Final[frozenset[str]] = frozenset({"public_research", "project_start"})
 EXPECTED_TASK_TYPE: Final[dict[str, str]] = {"public_research": "public_research", "project_start": "project_run_task"}
 
-#: Synchronous: a pure read, resolved by the caller with no new task and no approval.
-SYNCHRONOUS_CAPABILITY_IDS: Final[frozenset[str]] = frozenset({"project_status"})
+#: Synchronous: a pure read, resolved by the caller with no new task and no approval. `document_read` and
+#: `document_compare` (Milestone 12 S2) join this set: the caller (Electron main) has already extracted or
+#: compared through `DocumentService`'s own existing, no-new-approval methods before calling `advance()`;
+#: this module only records the bounded, controller-authored fact and, for `document_read`, mints the
+#: resulting `document_result_ref` (see `app/domain/orchestration_resources.py`).
+SYNCHRONOUS_CAPABILITY_IDS: Final[frozenset[str]] = frozenset({"project_status", "document_read", "document_compare"})
+
+#: Milestone 12 S2. The M11 loop guard ("re-choosing an already-succeeded capability is not progress") assumed
+#: every composed capability answers exactly one thing per orchestration -- true for `public_research`/
+#: `project_status`/`project_start`, false for `document_read` (up to `MAX_FILES_PER_TASK` files) and
+#: `document_compare` (a person may reasonably compare more than one pair). These two are exempted from that
+#: guard; `MAX_STEPS` still bounds the total regardless, exactly as it already bounds every other capability.
+REPEATABLE_CAPABILITY_IDS: Final[frozenset[str]] = frozenset({"document_read", "document_compare"})
 
 #: What this runtime can actually execute today. A strict, honestly-scoped subset of the full catalog.
 COMPOSED_CAPABILITY_IDS: Final[frozenset[str]] = TASK_BACKED_CAPABILITY_IDS | SYNCHRONOUS_CAPABILITY_IDS
@@ -172,6 +183,7 @@ __all__ = [
     "MAX_STEPS",
     "ORCHESTRATION_TTL_SECONDS",
     "PAUSE_REASONS",
+    "REPEATABLE_CAPABILITY_IDS",
     "STATE_CODES",
     "SYNCHRONOUS_CAPABILITY_IDS",
     "TASK_BACKED_CAPABILITY_IDS",

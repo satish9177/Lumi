@@ -92,16 +92,22 @@ function step(value: unknown): AgentOrchestrationStepView {
   }
 }
 
+const MAX_BACKING_TEXT = 2048
+
 function resource(value: unknown): AgentOrchestrationResourceView {
   const raw = record(value, 'orchestration.resource')
   if (typeof raw.ref !== 'string' || !REF.test(raw.ref)) throw new WireError('orchestration.resource.ref')
   if (typeof raw.single_use !== 'boolean') throw new WireError('orchestration.resource.single_use')
+  const backingId = optional(raw.backing_id, (v) => uuid(v, 'orchestration.resource.backing_id'))
+  const backingText = optional(raw.backing_text, (v) => label(v, 'orchestration.resource.backing_text', MAX_BACKING_TEXT))
   return {
     ref: raw.ref,
     kind: member(RESOURCE_KINDS, raw.kind, 'orchestration.resource.kind'),
     privacyClass: member(PRIVACY_CLASSES, raw.privacy_class, 'orchestration.resource.privacy_class'),
     safeLabel: label(raw.safe_label, 'orchestration.resource.safe_label', MAX_SAFE_LABEL),
-    singleUse: raw.single_use
+    singleUse: raw.single_use,
+    ...(backingId !== undefined ? { backingId } : {}),
+    ...(backingText !== undefined ? { backingText } : {})
   }
 }
 
@@ -126,6 +132,9 @@ export function parseOrchestration(value: unknown): AgentOrchestrationView {
     availableCapabilities: list(raw.available_capabilities, 'orchestration.available_capabilities')
       .map((item) => capabilityId(item, 'orchestration.available_capabilities.item')),
     resources: list(raw.resources, 'orchestration.resources').map(resource),
+    ...(optional(raw.document_task_id, (v) => uuid(v, 'orchestration.document_task_id')) !== undefined
+      ? { documentTaskId: raw.document_task_id as string }
+      : {}),
     steps: list(raw.steps, 'orchestration.steps').map(step)
   }
 }
@@ -155,7 +164,10 @@ const REASONS: Record<string, string> = {
   resource_not_found: 'That resource no longer exists for this task.',
   resource_consumed: 'That resource has already been used.',
   resource_expired: 'That resource is no longer fresh enough to use.',
-  resource_kind_mismatch: 'That resource is not the right kind for this capability.'
+  resource_kind_mismatch: 'That resource is not the right kind for this capability.',
+  document_task_mismatch: 'That document belongs to a different task than the one already in use here.',
+  result_backing_id_required: 'That capability needs to say which result it produced.',
+  result_backing_id_not_allowed: 'That capability does not take a result reference.'
 }
 
 const CODE = /^[a-z][a-z0-9_]{0,63}$/

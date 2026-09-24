@@ -1962,6 +1962,10 @@ orchestrations = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("expires_at", DateTime(timezone=True), nullable=False),
     Column("stopped_at", DateTime(timezone=True), nullable=True),
+    #: Milestone 12 S2: the one lazily-created document task this orchestration's `document_ref` /
+    #: `document_result_ref` resources refer into (M10 S1 requires both halves of a comparison to live in
+    #: the same task). Set once; never reassigned to a different task.
+    Column("document_task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=True),
     CheckConstraint("status IN ('RUNNING', 'PAUSED', 'SUCCEEDED', 'FAILED', 'STOPPED')", name="status"),
     CheckConstraint("(status = 'PAUSED') = (pause_reason IS NOT NULL)", name="pause_reason_set"),
     CheckConstraint(
@@ -2037,6 +2041,12 @@ orchestration_resources = Table(
     Column("consumed_at", DateTime(timezone=True), nullable=True),
     Column("expires_at", DateTime(timezone=True), nullable=True),
     Column("binding_digest", String(64), nullable=True),
+    #: Milestone 12 S2: model-invisible backing identity, projected only to the trusted runtime API
+    #: response (never the planner's own context). `backing_id` is the file id (`document_ref`) or document
+    #: id (`document_result_ref`) inside `orchestrations.document_task_id`. `backing_text` is the canonical
+    #: policy-checked URL (`public_url_ref`). A resource carries at most one of the two.
+    Column("backing_id", Uuid(), nullable=True),
+    Column("backing_text", String(2048), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     UniqueConstraint("orchestration_id", "ref", name="uq_orchestration_resources_orchestration_id_ref"),
@@ -2045,6 +2055,7 @@ orchestration_resources = Table(
     CheckConstraint("revision >= 1", name="revision_positive"),
     CheckConstraint("consumed_at IS NULL OR single_use", name="consumed_only_if_single_use"),
     CheckConstraint("ref ~ '^r[1-9][0-9]{0,5}$'", name="ref_shape"),
+    CheckConstraint("backing_id IS NULL OR backing_text IS NULL", name="backing_exclusive"),
 )
 
 Index("ix_orchestration_resources_orchestration_id", orchestration_resources.c.orchestration_id)

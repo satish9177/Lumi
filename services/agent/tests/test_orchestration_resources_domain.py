@@ -55,11 +55,18 @@ def test_every_output_kind_and_privacy_class_is_real() -> None:
         assert spec.privacy_class in PRIVACY_CLASSES
 
 
-def test_milestone_12_s1_composes_no_capability_that_accepts_a_resource_yet() -> None:
-    # The core Milestone 12 S1 invariant: today, "the planner can see a resource" is never, by itself,
-    # "the planner may use it with any capability" -- because no requirement is non-empty yet.
-    for capability_id, requirement in CAPABILITY_RESOURCE_REQUIREMENTS.items():
-        assert requirement == (), f"{capability_id} unexpectedly accepts a resource before its own review slice"
+def test_the_three_m11_capabilities_still_accept_no_resource() -> None:
+    # public_research/project_status/project_start were composed before the resource registry existed
+    # (Milestone 11) and still take no resource input as of Milestone 12 S2 -- unchanged.
+    for capability_id in ("public_research", "project_status", "project_start"):
+        assert CAPABILITY_RESOURCE_REQUIREMENTS[capability_id] == ()
+
+
+def test_document_capabilities_require_exactly_the_kinds_document_service_needs() -> None:
+    # Milestone 12 S2's own invariant, now that a real consumer exists: the requirement is closed, ordered
+    # and exact -- never inferred from what happens to be available.
+    assert CAPABILITY_RESOURCE_REQUIREMENTS["document_read"] == ("document_ref",)
+    assert CAPABILITY_RESOURCE_REQUIREMENTS["document_compare"] == ("document_result_ref", "document_result_ref")
 
 
 def test_validate_ref_accepts_only_the_opaque_shape() -> None:

@@ -46,6 +46,13 @@ export interface AgentOrchestrationResourceView {
   privacyClass: 'public' | 'private' | 'none'
   safeLabel: string
   singleUse: boolean
+  /**
+   * Milestone 12 S2: model-invisible backing identity (a file/document id, or a checked URL). Main-process
+   * use only -- `orchestration-coordinator.ts` never forwards these into the planner's own context, which
+   * is built from `ref`/`kind`/`safeLabel` alone (see `orchestrationStateLines` in `orchestration-planner.ts`).
+   */
+  backingId?: string
+  backingText?: string
 }
 
 export interface AgentOrchestrationView {
@@ -65,6 +72,11 @@ export interface AgentOrchestrationView {
   availableCapabilities: AgentCapabilityId[]
   /** Milestone 12 S1: resources the planner may cite right now. Optional for callers that predate S1. */
   resources?: AgentOrchestrationResourceView[]
+  /**
+   * Milestone 12 S2: the one document task this orchestration's document resources refer into, if any.
+   * Main-process use only (attaching a further document); never shown to the planner.
+   */
+  documentTaskId?: string
   steps: AgentOrchestrationStepView[]
 }
 
@@ -85,4 +97,12 @@ export interface AgentOrchestrationApi {
    */
   continueOrchestration: (orchestrationId: string) => Promise<AgentResult<AgentOrchestrationView>>
   stopOrchestration: (orchestrationId: string) => Promise<AgentResult<AgentOrchestrationView>>
+  /**
+   * Milestone 12 S2: makes one already-approved document (from an already-approved root) available to this
+   * orchestration as a `document_ref` resource. Never reachable from the planner or the model -- this is a
+   * trusted renderer action, exactly like approving a file root itself.
+   */
+  attachApprovedDocument: (
+    orchestrationId: string, rootId: string, relativePath: string
+  ) => Promise<AgentResult<AgentOrchestrationView>>
 }
