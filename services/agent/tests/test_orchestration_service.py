@@ -7,8 +7,10 @@ honesty, budgets, the repeat-capability loop guard, revision/expiry fencing, and
 skipped -- not about research's own step loop, which `test_research_authorization.py` already covers.
 """
 
+import sys
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -19,6 +21,7 @@ from app.domain.orchestration import MAX_STEPS, OrchestrationRefusal
 from app.domain.research import ResearchAnswer, ResearchBudgets
 from app.services.actions import ActionService
 from app.services.orchestration import OrchestrationService
+from app.services.projects import ProjectService
 from app.services.research_tasks import ResearchService
 from app.services.tasks import TaskService
 from tests.test_research_authorization import DISCLOSURE, OBJECTIVE, SEARCH_STEP, _envelope, build_service
@@ -32,8 +35,16 @@ async def research(
 
 
 @pytest.fixture
-def service(engine: AsyncEngine, research: ResearchService) -> OrchestrationService:
-    return OrchestrationService(engine, research=research)
+def project(engine: AsyncEngine, action_service: ActionService, runtime_generation: Any, tmp_path: Path) -> ProjectService:
+    return ProjectService(
+        engine, actions=action_service, runtime_generation=runtime_generation.id, grant_ttl_seconds=600,
+        protected_folders=((), ()), run_root=str(tmp_path / "runs"), poll_seconds=0.1,
+    )
+
+
+@pytest.fixture
+def service(engine: AsyncEngine, research: ResearchService, project: ProjectService) -> OrchestrationService:
+    return OrchestrationService(engine, research=research, project=project)
 
 
 async def _sql(engine: AsyncEngine, statement: str, **params: Any) -> Any:
@@ -53,7 +64,7 @@ class TestCreateAndRead:
         assert view.orchestration.revision == 1
         assert view.live is True
         assert view.steps == ()
-        assert set(view.available_capabilities) == {"public_research", "project_status"}
+        assert set(view.available_capabilities) == {"public_research", "project_status", "project_start"}
 
     async def test_create_refuses_an_invalid_objective(self, service: OrchestrationService) -> None:
         with pytest.raises(OrchestrationRefusal, match="objective_invalid"):
@@ -332,6 +343,95 @@ class TestFinishStopExpiry:
         with pytest.raises(OrchestrationRefusal, match="orchestration_expired"):
             await service.advance(
                 view.orchestration.id, expected_revision=view.orchestration.revision, capability_id="project_status", resolved_summary="x"
+            )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="M10 S3 project runs ship on Windows")
+class TestProjectStartCapability:
+    """Milestone 11 S3: project_start, against a real synthetic Node project and a real `node.exe`
+    process -- the same rig `test_projects_service.py` uses. The property under test is the same one S2
+    proved for research: the orchestrator only ever links a task ProjectService's own boundary already
+    created, and the R3 "this executes code" warning is never skipped."""
+
+    @pytest.fixture
+    async def recipe_id(self, project: ProjectService, tmp_path: Path) -> uuid.UUID:
+        from tests.project_fixtures import make_project
+        from tests.test_projects_service import _project, _recipe
+
+        folder = tmp_path / "synthetic-project"
+        make_project(folder)
+        project_id = await _project(project, folder)
+        return await _recipe(project, project_id, "check", timeout=30)
+
+    async def test_a_freshly_created_run_pauses_for_the_warning_card(
+        self, service: OrchestrationService, project: ProjectService, recipe_id: uuid.UUID
+    ) -> None:
+        view = await service.create(objective="Start my registered project")
+        run = await project.create_run(recipe_id=recipe_id)
+        assert run.phase == "awaiting_approval"
+        advanced = await service.advance(
+            view.orchestration.id, expected_revision=view.orchestration.revision,
+            capability_id="project_start", task_id=run.task_id,
+        )
+        assert advanced.orchestration.status == "PAUSED"
+        assert advanced.orchestration.pause_reason == "approval_required"
+        assert advanced.steps[0].status == "AWAITING_APPROVAL"
+        assert advanced.steps[0].result_handle is None
+
+    async def test_resume_settles_succeeded_once_the_run_is_approved_and_started(
+        self, service: OrchestrationService, project: ProjectService, recipe_id: uuid.UUID
+    ) -> None:
+        view = await service.create(objective="Start my registered project")
+        run = await project.create_run(recipe_id=recipe_id)
+        assert run.grant is not None
+        paused = await service.advance(
+            view.orchestration.id, expected_revision=view.orchestration.revision,
+            capability_id="project_start", task_id=run.task_id,
+        )
+        assert paused.orchestration.status == "PAUSED"
+
+        # The trusted click, through ProjectService's OWN boundary, exactly like a direct request.
+        confirmed = await project.confirm(run.task_id, grant_id=run.grant.id, expected_revision=run.grant.revision)
+        assert confirmed.phase == "approved"
+        # start() is a mechanical continuation of that one approval -- idempotent, never a second approval.
+        started = await project.start(run.task_id)
+        assert started.phase in ("starting", "running", "succeeded")
+
+        latest = await service.describe(view.orchestration.id)
+        resumed = await service.resume(view.orchestration.id, expected_revision=latest.orchestration.revision)
+        assert resumed.orchestration.status == "RUNNING"
+        step = resumed.steps[0]
+        assert step.status == "SUCCEEDED"
+        assert step.result_handle == "project_run_result:1"
+        assert step.result_summary is not None and "Project run started" in step.result_summary
+
+    async def test_a_declined_warning_card_settles_as_failed(
+        self, service: OrchestrationService, project: ProjectService, recipe_id: uuid.UUID
+    ) -> None:
+        view = await service.create(objective="Start my registered project")
+        run = await project.create_run(recipe_id=recipe_id)
+        assert run.grant is not None
+        await service.advance(
+            view.orchestration.id, expected_revision=view.orchestration.revision,
+            capability_id="project_start", task_id=run.task_id,
+        )
+        await project.revoke(run.task_id, grant_id=run.grant.id, expected_revision=run.grant.revision)
+
+        latest = await service.describe(view.orchestration.id)
+        resumed = await service.resume(view.orchestration.id, expected_revision=latest.orchestration.revision)
+        assert resumed.orchestration.status == "RUNNING"
+        assert resumed.steps[0].status == "FAILED"
+        assert resumed.steps[0].result_handle is None
+
+    async def test_a_task_of_the_wrong_kind_is_refused_for_project_start(
+        self, service: OrchestrationService, task_service: TaskService
+    ) -> None:
+        view = await service.create(objective="Start my registered project")
+        wrong = await task_service.create_task({"type": "public_research", "objective": "x"})
+        with pytest.raises(OrchestrationRefusal, match="task_kind_mismatch"):
+            await service.advance(
+                view.orchestration.id, expected_revision=view.orchestration.revision,
+                capability_id="project_start", task_id=wrong.id,
             )
 
 

@@ -53,8 +53,12 @@ CATALOG_CAPABILITY_IDS: Final[frozenset[str]] = frozenset(
 #: Task-backed: the caller creates/owns the child task through its own existing capability boundary and
 #: links it here. `EXPECTED_TASK_TYPE` is the `tasks.request.type` a linked task must actually have --
 #: checked, never trusted, so a caller cannot link an unrelated task under a mismatched capability id.
-TASK_BACKED_CAPABILITY_IDS: Final[frozenset[str]] = frozenset({"public_research"})
-EXPECTED_TASK_TYPE: Final[dict[str, str]] = {"public_research": "public_research"}
+#: `project_start` is Milestone 11 S3's one composed effectful capability: its own effect key
+#: (`app/domain/effects.py`'s `PROJECT_RUN`, a global-tier kind) and cross-executor lock apply exactly as
+#: they do to a direct request, because starting still happens through `ProjectService.start()` itself --
+#: this module never claims or checks an effect key of its own.
+TASK_BACKED_CAPABILITY_IDS: Final[frozenset[str]] = frozenset({"public_research", "project_start"})
+EXPECTED_TASK_TYPE: Final[dict[str, str]] = {"public_research": "public_research", "project_start": "project_run_task"}
 
 #: Synchronous: a pure read, resolved by the caller with no new task and no approval.
 SYNCHRONOUS_CAPABILITY_IDS: Final[frozenset[str]] = frozenset({"project_status"})

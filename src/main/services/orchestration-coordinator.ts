@@ -68,6 +68,16 @@ export interface OrchestrationCoordinatorDependencies {
   createResearchTask: (objective: string) => Promise<AgentResult<AgentTaskSnapshot>>
   /** Milestone 10 S3's own entry point: a pure read, no side effect. */
   getLatestProjectRun: () => Promise<AgentResult<AgentProjectRunView | null>>
+  /** The registered project's current recipe id, if any -- never chosen or invented by a planner. */
+  getRegisteredRecipeId: () => Promise<AgentResult<string | null>>
+  /** Milestone 10 S3's own entry point: opens the R3 "this executes code" warning card. Never approves it. */
+  createProjectRun: (recipeId: string) => Promise<AgentResult<AgentProjectRunView>>
+  /**
+   * Milestone 10 S3's own entry point: starts a run whose grant is already ACTIVE. Idempotent ("one start
+   * per approval, ever" -- `ProjectService.start()`'s own guarantee) and safe to call speculatively before
+   * the grant is active, where it is simply refused. Never a second, orchestrator-only start path.
+   */
+  startProjectRun: (taskId: string) => Promise<AgentResult<AgentProjectRunView>>
 }
 
 export class OrchestrationCoordinator {
@@ -91,6 +101,10 @@ export class OrchestrationCoordinator {
     let view = loaded.value
 
     if (view.status === 'PAUSED' && view.pauseReason === 'approval_required') {
+      // A step-specific mechanical continuation, never a second approval: project_start's own approval is
+      // the grant becoming ACTIVE through the existing warning card, and start() performs no new effect
+      // beyond what that one approval already covers (ProjectService.start() is itself idempotent).
+      await this.progressPendingStep(view)
       const resumed = await this.deps.orchestrations.resumeOrchestration(orchestrationId, view.revision)
       if (!resumed.ok) return resumed
       view = resumed.value
@@ -159,6 +173,18 @@ export class OrchestrationCoordinator {
   }
 
   /**
+   * Best-effort: for the one capability whose own approval does not by itself finish the effect
+   * (`project_start`: the grant becoming ACTIVE still needs `start()` called), nudge it forward. A refusal
+   * here (not yet approved, already started, a missing dependency) is swallowed -- the orchestration's own
+   * `resume` re-reads the real state afterward and reports it honestly either way.
+   */
+  private async progressPendingStep(view: AgentOrchestrationView): Promise<void> {
+    const pending = view.steps.find((step) => step.status === 'AWAITING_APPROVAL' || step.status === 'PENDING')
+    if (!pending?.childTaskId || pending.capabilityId !== 'project_start') return
+    await this.deps.startProjectRun(pending.childTaskId)
+  }
+
+  /**
    * The one closed place a capability id becomes a request to that capability's own boundary. Every branch
    * is a real, already-reviewed entry point; there is no default/dynamic dispatch and no way for a string
    * this module does not explicitly name to reach anything.
@@ -178,6 +204,16 @@ export class OrchestrationCoordinator {
         ? `Project run phase: ${latest.value.phase}${latest.value.ready ? ', ready' : ', not ready yet'}.`
         : 'No project run has been started yet.'
       return this.deps.orchestrations.advanceOrchestration(orchestrationId, revision, capability, { resolvedSummary: summary })
+    }
+    if (capability === 'project_start') {
+      const recipe = await this.deps.getRegisteredRecipeId()
+      if (!recipe.ok) return recipe
+      if (recipe.value === null) {
+        return { ok: false, error: { code: 'orchestration_refused', message: 'No project recipe is registered to start.' } }
+      }
+      const created = await this.deps.createProjectRun(recipe.value)
+      if (!created.ok) return created
+      return this.deps.orchestrations.advanceOrchestration(orchestrationId, revision, capability, { taskId: created.value.taskId })
     }
     // Not reachable in the ordinary case: the runtime only ever offers a planner the capabilities it has
     // itself composed. Fail closed rather than silently doing nothing.

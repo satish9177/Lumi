@@ -1081,3 +1081,18 @@ is resolved synchronously by the caller with no new task at all.
   behavior, unchanged). Milestone 11 S4 (the unified task cockpit) is what makes an orchestration reachable
   from the renderer and resumable across a restart from a real UI, not just from tests calling the
   coordinator directly. See `docs/reviews/milestone-11-s2.md`.
+
+### Effectful capability composition (M11 S3, no migration)
+
+`project_start` joins `public_research`/`project_status` as a third composed capability -- the first
+**effectful** one. `OrchestrationService` gains a required `ProjectService` dependency; its
+`_read_task_backed_resolution` reads `ProjectService.describe()`'s own `RunView.phase` vocabulary
+exhaustively, never guessing. No new effect primitive: starting still happens through
+`ProjectService.start()` itself, so the existing `PROJECT_RUN` effect key, its global-tier cross-executor
+lock, and the one-live-run-per-project database constraint all apply exactly as they would to a direct
+request. `OrchestrationCoordinator.dispatch()`'s `project_start` branch never lets the planner name a
+recipe id -- it resolves "the" registered recipe itself. Its new `progressPendingStep()` method nudges a
+paused `project_start` step forward (`startProjectRun`) on resume, since granting and starting are two
+separate calls (unlike research, where the existing product code already drives the whole flow after one
+grant); the nudge cannot start an unapproved run because `ProjectService.start()` itself refuses a grant
+that is not `ACTIVE`, before anything is created or spawned. See `docs/reviews/milestone-11-s3.md`.

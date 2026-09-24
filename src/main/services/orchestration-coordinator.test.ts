@@ -119,8 +119,12 @@ function coordinator(input: {
   planner: OrchestrationPlannerLike
   research?: AgentResult<AgentTaskSnapshot>
   projectRun?: AgentResult<AgentProjectRunView | null>
-}): { coordinator: OrchestrationCoordinator; researchCalls: string[] } {
+  recipeId?: AgentResult<string | null>
+  createdRun?: AgentResult<AgentProjectRunView>
+  startedRun?: AgentResult<AgentProjectRunView>
+}): { coordinator: OrchestrationCoordinator; researchCalls: string[]; startCalls: string[] } {
   const researchCalls: string[] = []
+  const startCalls: string[] = []
   const coord = new OrchestrationCoordinator({
     orchestrations: input.graph,
     planner: input.planner,
@@ -131,9 +135,18 @@ function coordinator(input: {
         value: { task: { taskId: randomUUID(), kind: 'public_research', status: 'WAITING_APPROVAL' } } as unknown as AgentTaskSnapshot
       }
     },
-    getLatestProjectRun: async () => input.projectRun ?? { ok: true, value: null }
+    getLatestProjectRun: async () => input.projectRun ?? { ok: true, value: null },
+    getRegisteredRecipeId: async () => input.recipeId ?? { ok: true, value: '00000000-0000-4000-8000-0000000000rc' },
+    createProjectRun: async () => input.createdRun ?? {
+      ok: true,
+      value: { taskId: randomUUID(), phase: 'awaiting_approval' } as unknown as AgentProjectRunView
+    },
+    startProjectRun: async (taskId) => {
+      startCalls.push(taskId)
+      return input.startedRun ?? { ok: true, value: { taskId, phase: 'approved' } as unknown as AgentProjectRunView }
+    }
   })
-  return { coordinator: coord, researchCalls }
+  return { coordinator: coord, researchCalls, startCalls }
 }
 
 describe('OrchestrationCoordinator.run', () => {
@@ -169,6 +182,66 @@ describe('OrchestrationCoordinator.run', () => {
     expect(result.value.steps[0].status).toBe('SUCCEEDED')
     expect(result.value.steps[0].resultSummary).toContain('running')
     expect(graph.calls).toEqual(['planner-call', 'advance:project_status', 'planner-call', 'finish'])
+  })
+
+  it('dispatches project_start through its own boundary and pauses for its warning card, never starting unapproved', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord, startCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'project_start', reason: 'x' }])
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('unreachable')
+    expect(result.value.status).toBe('PAUSED')
+    expect(result.value.pauseReason).toBe('approval_required')
+    expect(graph.calls).toEqual(['planner-call', 'advance:project_start'])
+    // Linking the freshly-created run never itself calls start(): nothing was approved yet.
+    expect(startCalls).toEqual([])
+  })
+
+  it('refuses project_start when no recipe is registered, rather than inventing one', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'project_start', reason: 'x' }]),
+      recipeId: { ok: true, value: null }
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('unreachable')
+    expect(result.error.code).toBe('orchestration_refused')
+    expect(graph.calls).toEqual(['planner-call'])
+  })
+
+  it('on resume, nudges an approved project_start run forward with the SAME idempotent start(), never a second approval', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({
+      status: 'PAUSED',
+      pauseReason: 'approval_required',
+      stepCount: 1,
+      steps: [{ sequence: 1, capabilityId: 'project_start', status: 'AWAITING_APPROVAL', childTaskId: '00000000-0000-4000-8000-0000000000aa' }],
+      availableCapabilities: []
+    })
+    const { coordinator: coord, startCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'finish', reason: 'done' }])
+    })
+    await coord.run(graph.view.orchestrationId)
+    expect(startCalls).toEqual(['00000000-0000-4000-8000-0000000000aa'])
+  })
+
+  it('never nudges start() for a capability other than project_start', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({
+      status: 'PAUSED',
+      pauseReason: 'approval_required',
+      stepCount: 1,
+      steps: [{ sequence: 1, capabilityId: 'public_research', status: 'AWAITING_APPROVAL', childTaskId: '00000000-0000-4000-8000-0000000000bb' }],
+      availableCapabilities: []
+    })
+    const { coordinator: coord, startCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'finish', reason: 'done' }])
+    })
+    await coord.run(graph.view.orchestrationId)
+    expect(startCalls).toEqual([])
   })
 
   it('stops when the planner says stop, and touches no capability', async () => {

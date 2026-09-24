@@ -368,10 +368,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     check_profile=app.state.authenticated_read_service.check_profile,
                 )
                 await app.state.workflow_service.sweep()
-                # Milestone 11 S2: durable read-only orchestration. It holds no authority of its own --
-                # a task-backed step links a task the caller already created through that capability's
-                # own boundary; a synchronous step records a result the caller already read.
-                app.state.orchestration_service = OrchestrationService(engine, research=research_service)
                 # Milestone 10 S3: registered project recipes. No run can survive a runtime restart (its job's
                 # only handle died with the old runtime); recovery proves that from (pid, creation time).
                 app.state.project_service = ProjectService(
@@ -392,6 +388,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     run_root=resolved.project_run_root or default_run_root(),
                 )
                 await app.state.project_service.recover()
+                # Milestone 11 S2/S3: durable read-only/effectful orchestration. It holds no authority of
+                # its own -- a task-backed step links a task the caller already created through that
+                # capability's own boundary (research or project); a synchronous step records a result the
+                # caller already read.
+                app.state.orchestration_service = OrchestrationService(
+                    engine, research=research_service, project=app.state.project_service
+                )
                 # A research session belongs to the process that created it.
                 # Sessions a dead runtime left open describe browser contexts
                 # that no longer exist, so every semantic ref they issued has

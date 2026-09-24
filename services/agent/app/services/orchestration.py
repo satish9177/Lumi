@@ -23,7 +23,7 @@ scope card, and nothing is searched or read until the same trusted click.
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
-from typing import Any
+from typing import Any, Final
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -47,10 +47,19 @@ from app.domain.orchestration import (
 )
 from app.repositories.orchestration import OrchestrationRecord, OrchestrationRepository, StepRecord
 from app.repositories.tasks import TaskRepository
+from app.services.projects import ProjectService
 from app.services.research_tasks import ResearchService
 
 #: capability_id -> the label a result handle carries (`research_result:3`). Closed, spelled here.
-_OUTPUT_CLASS: dict[str, str] = {"public_research": "research_result", "project_status": "project_status"}
+_OUTPUT_CLASS: dict[str, str] = {
+    "public_research": "research_result", "project_status": "project_status", "project_start": "project_run_result"
+}
+
+#: `RunView.phase` (`app/services/projects.py`'s own closed vocabulary) -> this step's resolution. A run
+#: that is alive in any form (starting/running/ready) already counts as the effect having happened; whether
+#: it is *ready* is what the separate, synchronous `project_status` capability reports.
+_PROJECT_RUN_ALIVE_PHASES: Final = frozenset({"starting", "running", "ready", "succeeded"})
+_PROJECT_RUN_FAILED_PHASES: Final = frozenset({"declined", "expired", "failed", "stopped", "ended_with_runtime"})
 
 _MAX_TEXT = 2000
 
@@ -65,9 +74,10 @@ class OrchestrationView:
 
 
 class OrchestrationService:
-    def __init__(self, engine: AsyncEngine, *, research: ResearchService) -> None:
+    def __init__(self, engine: AsyncEngine, *, research: ResearchService, project: ProjectService) -> None:
         self._engine = engine
         self._research = research
+        self._project = project
 
     # ---- reads -------------------------------------------------------------------------------------
 
@@ -181,6 +191,23 @@ class OrchestrationService:
             # ACTIVE (or COMPLETED with no answer recorded, which should not normally happen): work in
             # progress or interrupted. Stay unresolved; the caller's own research loop, and a later
             # `resume`, decide when this changes. Never guessed here.
+            return StepStatus.PENDING, None
+        if capability == "project_start":
+            try:
+                run_view = await self._project.describe(task_id)
+            except TaskNotFoundError:
+                raise OrchestrationRefusal("task_not_found") from None
+            if run_view.phase == "awaiting_approval":
+                return StepStatus.AWAITING_APPROVAL, None
+            if run_view.phase in _PROJECT_RUN_FAILED_PHASES:
+                return StepStatus.FAILED, bounded_summary(f"The project run ended: {run_view.phase}.")
+            if run_view.phase in _PROJECT_RUN_ALIVE_PHASES:
+                text = f"Project run started (phase: {run_view.phase}){', ready' if run_view.ready else ''}."
+                return StepStatus.SUCCEEDED, bounded_summary(text)
+            # "approved" (the grant is active but the caller has not yet called start(), or start() has not
+            # finished) or "outcome_unknown": work in progress. Stay unresolved; never guessed here. The
+            # caller (Electron main) is what actually calls start() once the grant is active -- this read
+            # never does, matching "it never creates, grants or advances that child task itself".
             return StepStatus.PENDING, None
         raise AssertionError(f"unreachable: capability {capability!r} is task-backed but has no reader")  # pragma: no cover
 
