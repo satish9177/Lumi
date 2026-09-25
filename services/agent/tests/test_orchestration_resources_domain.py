@@ -109,7 +109,10 @@ def test_next_ref_is_deterministic_and_never_model_chosen() -> None:
 
 
 def test_resource_state_codes_are_a_real_subset_of_stable_refusal_codes() -> None:
-    assert RESOURCE_STATE_CODES == {"resource_not_found", "resource_consumed", "resource_expired"}
+    assert RESOURCE_STATE_CODES == {
+        "resource_not_found", "resource_consumed", "resource_expired", "desktop_target_unavailable",
+        "project_run_not_live"
+    }
     # resources_not_supported / resources_invalid / resource_kind_mismatch are deliberately NOT state codes
     # (422, a static shape/policy mismatch), matching orchestration.py's own task_kind_mismatch convention.
     assert "resources_not_supported" not in RESOURCE_STATE_CODES

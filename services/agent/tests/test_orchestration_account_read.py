@@ -34,6 +34,9 @@ from app.services import authenticated_read as service_module
 from app.services.actions import ActionService
 from app.services.authenticated_read import AuthenticatedReadService
 from app.services.browser_profiles import BrowserProfileService
+from app.services.desktop import DesktopService
+from app.services.desktop_actions import DesktopActionService
+from app.services.desktop_disclosure import DesktopDisclosureService
 from app.services.orchestration import OrchestrationService
 from app.services.projects import ProjectService
 from app.services.research_tasks import ResearchService
@@ -47,7 +50,7 @@ from tests.test_authenticated_read import (
     credential_surface,
     page_observation,
 )
-from tests.test_orchestration_service import project, research  # noqa: F401 -- reused fixtures
+from tests.test_orchestration_service import desktop, desktop_action, desktop_disclosure, project, research  # noqa: F401 -- reused fixtures
 
 OBJECTIVE = "Which of my repositories are private?"
 
@@ -120,8 +123,12 @@ def worker(authenticated_rig: tuple[AuthenticatedReadService, uuid.UUID, FakeWor
 @pytest.fixture
 def service(
     engine: AsyncEngine, research: ResearchService, project: ProjectService, authenticated_service: AuthenticatedReadService,
+    desktop: DesktopService, desktop_disclosure: DesktopDisclosureService, desktop_action: DesktopActionService,
 ) -> OrchestrationService:
-    return OrchestrationService(engine, research=research, project=project, authenticated=authenticated_service)
+    return OrchestrationService(
+        engine, research=research, project=project, authenticated=authenticated_service,
+        desktop=desktop, desktop_disclosure=desktop_disclosure, desktop_action=desktop_action,
+    )
 
 
 async def _account_task(task_service: TaskService, *, profile_id: uuid.UUID, objective: str = OBJECTIVE) -> uuid.UUID:

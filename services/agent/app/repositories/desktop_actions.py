@@ -174,6 +174,18 @@ class DesktopActionRepository:
             query = query.where(actions.c.id != excluding)
         return int((await self._connection.execute(query)).scalar_one())
 
+    async def action_for_task(self, task_id: uuid.UUID) -> uuid.UUID | None:
+        """The one desktop action `_open_locked` created together with this task, if any. Milestone 12 S4:
+        `OrchestrationService` links a `desktop_action` task, never an action id directly, so resolving a
+        step's own linked task back to its action is how `desktop_safe_action`/`launch_registered_app` read
+        the current state of the effect they proposed."""
+        row = (
+            await self._connection.execute(
+                select(actions.c.id).where(actions.c.task_id == task_id, actions.c.tool_name.like(f"{TOOL_PREFIX}%"))
+            )
+        ).first()
+        return row.id if row is not None else None
+
     async def action_for_plan(self, plan_id: uuid.UUID) -> uuid.UUID | None:
         """The execution action already opened from this plan, if any (`propose_from_plan` is
         idempotent: a plan funds at most one execution card, ever)."""

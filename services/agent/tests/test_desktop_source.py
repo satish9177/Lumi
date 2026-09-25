@@ -603,6 +603,12 @@ def test_only_the_desktop_boundary_and_the_reviewed_s2_disclosure_path_import_de
         "api/desktop_planning_schemas.py",     # S4: the closed wire shapes
         "services/desktop_vision.py",          # S5: capture consent, a fresh worker capture, vision disclosure
         "domain/desktop_vision.py",            # S5: fallback eligibility, grant scopes, the closed vision result
+        # Milestone 12 S4: the orchestrator composes desktop_observe/desktop_reason/desktop_safe_action/
+        # launch_registered_app over these SAME reviewed services -- it reads only `list_surfaces` (S1),
+        # `describe`'s own bounded phase/answer facts (S2's `DesktopDisclosureService`) and
+        # `describe_task`'s own bounded status/operation facts (S3's `DesktopActionService`), never a raw
+        # observation, a snapshot or a node.
+        "services/orchestration.py",
     }, outside
 
 

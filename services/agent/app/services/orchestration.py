@@ -27,10 +27,15 @@ from typing import Any, Final
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.desktop.protocol import APP_ID_PATTERN
+from app.domain.action_status import ActionStatus
 from app.domain.authenticated import PauseReason as AuthenticatedPauseReason
+from app.domain.desktop_actions import ScrollProposal
 from app.domain.errors import TaskNotFoundError
 from app.domain.orchestration import (
     COMPOSED_CAPABILITY_IDS,
+    DESKTOP_LAUNCH_OPERATIONS,
+    DESKTOP_SAFE_ACTION_OPERATIONS,
     EXPECTED_TASK_TYPE,
     MAX_CHILD_TASKS,
     MAX_PLANNER_CALLS,
@@ -52,6 +57,7 @@ from app.domain.orchestration_resources import (
     CAPABILITY_RESOURCE_REQUIREMENTS,
     REGISTERABLE_RESOURCE_KINDS,
     next_ref,
+    parse_desktop_target_backing,
     safe_label,
     trusted_input_label,
     validate_resource_refs,
@@ -60,6 +66,9 @@ from app.repositories.orchestration import OrchestrationRecord, OrchestrationRep
 from app.repositories.orchestration_resources import OrchestrationResourceRepository, ResourceRecord
 from app.repositories.tasks import TaskRepository
 from app.services.authenticated_read import AuthenticatedReadService
+from app.services.desktop import DesktopService
+from app.services.desktop_actions import DesktopActionError, DesktopActionService
+from app.services.desktop_disclosure import DesktopDisclosureService
 from app.services.projects import ProjectService
 from app.services.research_tasks import ResearchService
 
@@ -67,6 +76,9 @@ from app.services.research_tasks import ResearchService
 _OUTPUT_CLASS: dict[str, str] = {
     "public_research": "research_result", "project_status": "project_status", "project_start": "project_run_result",
     "document_read": "document_result", "document_compare": "document_comparison", "account_read": "account_result",
+    "desktop_observe": "desktop_observation", "desktop_reason": "desktop_result",
+    "desktop_safe_action": "desktop_action_result", "launch_registered_app": "desktop_launch_result",
+    "project_stop": "project_run_result",
 }
 
 #: Milestone 12 S3. `AuthenticatedReadService`'s own, already-reviewed pause reasons that mean "a human must
@@ -129,12 +141,16 @@ class OrchestrationView:
 class OrchestrationService:
     def __init__(
         self, engine: AsyncEngine, *, research: ResearchService, project: ProjectService,
-        authenticated: AuthenticatedReadService,
+        authenticated: AuthenticatedReadService, desktop: DesktopService,
+        desktop_disclosure: DesktopDisclosureService, desktop_action: DesktopActionService,
     ) -> None:
         self._engine = engine
         self._research = research
         self._project = project
         self._authenticated = authenticated
+        self._desktop = desktop
+        self._desktop_disclosure = desktop_disclosure
+        self._desktop_action = desktop_action
 
     # ---- reads -------------------------------------------------------------------------------------
 
@@ -242,6 +258,75 @@ class OrchestrationService:
                 await resource_repository.mint(
                     orchestration_id=orchestration_id, ref=ref, kind="account_context_ref", producing_step_id=None,
                     privacy_class="private", safe_label=label, backing_id=profile_id,
+                )
+                return await self._view(connection, orchestration_id)
+
+        if kind == "desktop_target_ref":
+            # Milestone 12 S4. `backing_text` carries the whole identity (`worker_generation|surface_ref
+            # |surface_epoch`): a desktop target is three fields, not one uuid, and the schema allows only
+            # one of `backing_id`/`backing_text` at a time. Re-listed and re-matched fresh, right now, under
+            # THIS request -- never trusted from whatever the renderer's own, separately-timed listing showed.
+            if backing_id is not None:
+                raise OrchestrationRefusal("resources_invalid")
+            clean_backing_text = _require_text(backing_text, code="resources_invalid", limit=100)
+            target = parse_desktop_target_backing(clean_backing_text)
+            listing = await self._desktop.list_surfaces()
+            if str(listing.worker_generation) != target.worker_generation or not any(
+                surface.surface_ref == target.surface_ref and surface.surface_epoch == target.surface_epoch
+                for surface in listing.surfaces
+            ):
+                raise OrchestrationRefusal("desktop_target_unavailable")
+            async with self._engine.begin() as connection:
+                repository = OrchestrationRepository(connection)
+                await self._live(repository, orchestration_id, expected_revision)
+                resource_repository = OrchestrationResourceRepository(connection)
+                ref = next_ref(await resource_repository.count(orchestration_id))
+                await resource_repository.mint(
+                    orchestration_id=orchestration_id, ref=ref, kind="desktop_target_ref", producing_step_id=None,
+                    privacy_class="private", safe_label=label, backing_text=clean_backing_text,
+                )
+                return await self._view(connection, orchestration_id)
+
+        if kind == "app_ref":
+            # Milestone 12 S4. The app id names a registered application only; `DesktopActionService
+            # .propose_launch` independently re-checks the registry again at dispatch, so a registration Lumi
+            # accepted here can never itself widen what may be launched.
+            if backing_id is not None:
+                raise OrchestrationRefusal("resources_invalid")
+            app_id = _require_text(backing_text, code="resources_invalid", limit=32)
+            if not APP_ID_PATTERN.fullmatch(app_id):
+                raise OrchestrationRefusal("resources_invalid")
+            async with self._engine.begin() as connection:
+                repository = OrchestrationRepository(connection)
+                await self._live(repository, orchestration_id, expected_revision)
+                resource_repository = OrchestrationResourceRepository(connection)
+                ref = next_ref(await resource_repository.count(orchestration_id))
+                await resource_repository.mint(
+                    orchestration_id=orchestration_id, ref=ref, kind="app_ref", producing_step_id=None,
+                    privacy_class="none", safe_label=label, backing_text=app_id,
+                )
+                return await self._view(connection, orchestration_id)
+
+        if kind == "project_ref":
+            # Milestone 12 S4. `backing_id` is the owned run's own task id. Re-confirmed live right now,
+            # under this request, exactly like `desktop_target_ref`'s own fresh re-check --
+            # `ProjectService.stop()` independently re-resolves and re-checks ownership/phase again at
+            # dispatch, but a registration should not itself mint a resource naming a task that does not
+            # exist, is not a project run, or has already ended.
+            if backing_text is not None:
+                raise OrchestrationRefusal("resources_invalid")
+            task_id = _require_uuid(backing_id, code="resources_invalid")
+            run_view = await self._project.describe(task_id)
+            if run_view.phase not in ("starting", "running", "ready"):
+                raise OrchestrationRefusal("project_run_not_live")
+            async with self._engine.begin() as connection:
+                repository = OrchestrationRepository(connection)
+                await self._live(repository, orchestration_id, expected_revision)
+                resource_repository = OrchestrationResourceRepository(connection)
+                ref = next_ref(await resource_repository.count(orchestration_id))
+                await resource_repository.mint(
+                    orchestration_id=orchestration_id, ref=ref, kind="project_ref", producing_step_id=None,
+                    privacy_class="none", safe_label=label, backing_id=task_id,
                 )
                 return await self._view(connection, orchestration_id)
 
@@ -436,6 +521,69 @@ class OrchestrationService:
                 return StepStatus.PENDING, None, "outcome_unknown", None
             # ACTIVE, no answer recorded yet, no pause, nothing unresolved: ordinary work in progress.
             return StepStatus.PENDING, None, "approval_required", None
+        if capability == "desktop_reason":
+            try:
+                read_view = await self._desktop_disclosure.describe(task_id)
+            except TaskNotFoundError:
+                raise OrchestrationRefusal("task_not_found") from None
+            if read_view.answer is not None:
+                # Template-only, exactly like `account_read`'s own fix (`docs/reviews/milestone-12-s3.md`):
+                # the answer's closed-vocabulary kind and a quoted-evidence count, never `answer.answer`
+                # itself -- that text is `desktop_private`, and the confirmed disclosure card's one named
+                # recipient is the only provider the user approved to see it. `result_summary` is what later
+                # feeds the separately-configured `orchestration_planning` model on every planner tick.
+                evidence_count = len(read_view.answer.evidence)
+                text = (
+                    f"Desktop reasoning finished: {read_view.answer.kind} "
+                    f"({evidence_count} quoted item{'s' if evidence_count != 1 else ''} of evidence)."
+                )
+                return StepStatus.SUCCEEDED, bounded_summary(text), None, None
+            if read_view.phase in ("failed", "declined", "expired"):
+                # Declined, expired, or a failed/ungrounded provider attempt. Never revived: a fresh
+                # `desktop_reason` step needs a brand new observation and a brand new disclosure card, over a
+                # fresh `desktop_target_ref`, exactly like `account_read` and `public_research`.
+                return StepStatus.FAILED, bounded_summary(
+                    "Desktop reasoning was declined, expired, or did not complete, and was not continued."
+                ), None, None
+            if read_view.phase == "outcome_unknown":
+                return StepStatus.PENDING, None, "outcome_unknown", None
+            # awaiting_approval / approved / reasoning: the ordinary wait on the existing desktop-read card
+            # (Allow, then Send) -- identical in shape to `public_research`'s own first pause.
+            return StepStatus.PENDING, None, "approval_required", None
+        if capability in ("desktop_safe_action", "launch_registered_app"):
+            # Both link the SAME `desktop_action` task type S3's focus/scroll/launch and S4's mutations all
+            # share -- so the linked task's own `operation` is re-checked here, never trusted from
+            # `EXPECTED_TASK_TYPE` alone, before this capability is allowed to resolve as its result. A
+            # `set_control_value`/`select_control`/`invoke_control` task can never satisfy either check.
+            allowed_operations = DESKTOP_SAFE_ACTION_OPERATIONS if capability == "desktop_safe_action" else DESKTOP_LAUNCH_OPERATIONS
+            if task.request.get("operation") not in allowed_operations:
+                raise OrchestrationRefusal("task_kind_mismatch")
+            try:
+                action_view = await self._desktop_action.describe_task(task_id)
+            except DesktopActionError:
+                raise OrchestrationRefusal("task_not_found") from None
+            status = action_view.status
+            if status in (ActionStatus.PROPOSED, ActionStatus.WAITING_APPROVAL):
+                return StepStatus.AWAITING_APPROVAL, None, "approval_required", None
+            if status in (ActionStatus.APPROVED, ActionStatus.AUTHORIZED, ActionStatus.EXECUTING):
+                # Momentary: `approve()` runs the whole effect synchronously from the same trusted click.
+                # Genuinely unresolved if seen mid-flight (a crash between the claim and the answer), so
+                # `outcome_unknown` is the honest reason, exactly like a research step interrupted mid-call.
+                return StepStatus.PENDING, None, "outcome_unknown", None
+            if status in (ActionStatus.OUTCOME_UNKNOWN, ActionStatus.RECONCILING):
+                return StepStatus.PENDING, None, "outcome_unknown", None
+            if status is ActionStatus.REJECTED:
+                return StepStatus.FAILED, bounded_summary("The desktop action was declined."), None, None
+            if status is ActionStatus.FAILED:
+                return StepStatus.FAILED, bounded_summary(
+                    f"Desktop action failed: {action_view.operation.value}."
+                ), None, None
+            # SUCCEEDED. Built only from closed, controller-known vocabulary (the operation, and for a
+            # scroll its closed step) -- never `application_label`/`window_title`/`control_name`, which are
+            # untrusted application text this summary must never carry into a second provider's context.
+            detail = f" ({action_view.proposal.step.value})" if isinstance(action_view.proposal, ScrollProposal) else ""
+            text = f"Desktop action succeeded: {action_view.operation.value}{detail}."
+            return StepStatus.SUCCEEDED, bounded_summary(text), None, None
         raise AssertionError(f"unreachable: capability {capability!r} is task-backed but has no reader")  # pragma: no cover
 
     async def _commit_step(

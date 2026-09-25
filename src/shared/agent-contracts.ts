@@ -1138,6 +1138,8 @@ export interface AgentDesktopActionResultView {
 
 export interface AgentDesktopActionView {
   actionId: string
+  /** Milestone 12 S4: the linked action-ledger task's own id -- as opaque as `actionId`, never a new identity. */
+  taskId: string
   revision: number
   status: AgentDesktopActionStatus
   operation: AgentDesktopActionOperation
@@ -1859,7 +1861,12 @@ export const AGENT_IPC_CHANNELS = {
   attachApprovedDocument: 'lifelens:agent:attach-approved-document',
   // Milestone 12 S3: makes one already-authenticated browser profile available as a resource. Never
   // reachable from the planner or the model.
-  attachApprovedAccount: 'lifelens:agent:attach-approved-account'
+  attachApprovedAccount: 'lifelens:agent:attach-approved-account',
+  // Milestone 12 S4: makes a currently-live desktop window, a registered application, or the one
+  // Lumi-owned live project run available as a resource. Never reachable from the planner or the model.
+  attachApprovedDesktopTarget: 'lifelens:agent:attach-approved-desktop-target',
+  attachApprovedApp: 'lifelens:agent:attach-approved-app',
+  attachApprovedProject: 'lifelens:agent:attach-approved-project'
 } as const
 
 /** Actions whose side effect is unresolved or in flight. */

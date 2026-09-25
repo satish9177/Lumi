@@ -395,6 +395,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 app.state.orchestration_service = OrchestrationService(
                     engine, research=research_service, project=app.state.project_service,
                     authenticated=app.state.authenticated_read_service,
+                    desktop=app.state.desktop_service,
+                    desktop_disclosure=app.state.desktop_disclosure_service,
+                    desktop_action=app.state.desktop_action_service,
                 )
                 # A research session belongs to the process that created it.
                 # Sessions a dead runtime left open describe browser contexts

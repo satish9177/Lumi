@@ -115,6 +115,7 @@ export interface AgentIpcDependencies {
     OrchestrationCoordinator,
     'createOrchestration' | 'getOrchestration' | 'getLatestOrchestration' | 'continueOrchestration' | 'stopOrchestration'
     | 'attachApprovedDocument' | 'attachApprovedAccount'
+    | 'attachApprovedDesktopTarget' | 'attachApprovedApp' | 'attachApprovedProject'
   >
 }
 
@@ -433,4 +434,12 @@ export function registerAgentIpc({
     orchestration ? orchestration.attachApprovedDocument(orchestrationId, rootId, relativePath) : noOrchestration())
   handle(AGENT_IPC_CHANNELS.attachApprovedAccount, (orchestrationId, profileId) =>
     orchestration ? orchestration.attachApprovedAccount(orchestrationId, profileId) : noOrchestration())
+  // Milestone 12 S4: makes a currently-live desktop window, a registered application, or the one
+  // Lumi-owned live project run available. Never reachable from the planner.
+  handle(AGENT_IPC_CHANNELS.attachApprovedDesktopTarget, (orchestrationId, workerGeneration, surfaceRef, surfaceEpoch) =>
+    orchestration ? orchestration.attachApprovedDesktopTarget(orchestrationId, workerGeneration, surfaceRef, surfaceEpoch) : noOrchestration())
+  handle(AGENT_IPC_CHANNELS.attachApprovedApp, (orchestrationId, appId) =>
+    orchestration ? orchestration.attachApprovedApp(orchestrationId, appId) : noOrchestration())
+  handle(AGENT_IPC_CHANNELS.attachApprovedProject, (orchestrationId) =>
+    orchestration ? orchestration.attachApprovedProject(orchestrationId) : noOrchestration())
 }

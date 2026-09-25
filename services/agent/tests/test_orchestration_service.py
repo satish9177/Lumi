@@ -18,12 +18,16 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from app.browser.profile_paths import PROFILE_ROOT_VARIABLE, resolve_profile_paths
+from app.desktop.registry import AppRegistry
 from app.domain.orchestration import MAX_STEPS, OrchestrationRefusal
 from app.domain.orchestration_resources import CAPABILITY_RESOURCE_REQUIREMENTS
 from app.domain.research import ResearchAnswer, ResearchBudgets
 from app.services.actions import ActionService
 from app.services.authenticated_read import AuthenticatedReadService
 from app.services.browser_profiles import BrowserProfileService
+from app.services.desktop import DesktopService
+from app.services.desktop_actions import DesktopActionService
+from app.services.desktop_disclosure import DesktopDisclosureService
 from app.services.orchestration import OrchestrationService
 from app.services.documents import DocumentService
 from app.services.projects import ProjectService
@@ -69,10 +73,32 @@ def authenticated(
 
 
 @pytest.fixture
+def desktop(engine: AsyncEngine, runtime_generation: Any) -> DesktopService:
+    """Milestone 12 S4: a real `DesktopService` with no worker configured -- `OrchestrationService` only
+    needs it for `desktop_target_ref` registration's freshness check, which these tests never exercise
+    (see `test_orchestration_desktop.py` for that)."""
+    return DesktopService(engine, runtime_generation=runtime_generation.id, worker=None, timeout_seconds=5.0)
+
+
+@pytest.fixture
+def desktop_disclosure(engine: AsyncEngine, desktop: DesktopService) -> DesktopDisclosureService:
+    return DesktopDisclosureService(engine, desktop=desktop, grant_ttl_seconds=600)
+
+
+@pytest.fixture
+def desktop_action(engine: AsyncEngine, action_service: ActionService, task_service: TaskService, desktop: DesktopService) -> DesktopActionService:
+    return DesktopActionService(engine, actions=action_service, tasks=task_service, desktop=desktop, registry=AppRegistry())
+
+
+@pytest.fixture
 def service(
-    engine: AsyncEngine, research: ResearchService, project: ProjectService, authenticated: AuthenticatedReadService
+    engine: AsyncEngine, research: ResearchService, project: ProjectService, authenticated: AuthenticatedReadService,
+    desktop: DesktopService, desktop_disclosure: DesktopDisclosureService, desktop_action: DesktopActionService,
 ) -> OrchestrationService:
-    return OrchestrationService(engine, research=research, project=project, authenticated=authenticated)
+    return OrchestrationService(
+        engine, research=research, project=project, authenticated=authenticated,
+        desktop=desktop, desktop_disclosure=desktop_disclosure, desktop_action=desktop_action,
+    )
 
 
 async def _sql(engine: AsyncEngine, statement: str, **params: Any) -> Any:
@@ -94,7 +120,8 @@ class TestCreateAndRead:
         assert view.steps == ()
         assert set(view.available_capabilities) == {
             "public_research", "project_status", "project_start", "document_read", "document_compare",
-            "account_read",
+            "account_read", "desktop_observe", "desktop_reason", "desktop_safe_action", "launch_registered_app",
+            "project_stop",
         }
 
     async def test_create_refuses_an_invalid_objective(self, service: OrchestrationService) -> None:

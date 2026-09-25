@@ -40,6 +40,8 @@ const render = (props: Partial<Parameters<typeof OrchestrationCard>[0]> = {}): s
       objective="" busy={false}
       onObjectiveChange={noop} onCreate={noop} onRefresh={noop} onContinue={noop} onStop={noop}
       accountProfiles={[]} accountProfile="" onAccountProfileChange={noop} onAttachAccount={noop}
+      desktopSurfaces={[]} desktopSurface="" onDesktopSurfaceChange={noop} onAttachDesktopTarget={noop}
+      desktopApps={[]} desktopApp="" onDesktopAppChange={noop} onAttachApp={noop} onAttachProject={noop}
       {...props}
     />
   )
@@ -161,5 +163,47 @@ describe('the general task cockpit card', () => {
       accountProfiles: [{ profileId: 'p1', label: 'GitHub - Personal', site: 'github.com', status: 'AUTHENTICATED', revision: 1 }]
     })
     expect(html).not.toContain('data-testid="orchestration-attach-account"')
+  })
+
+  it('offers a picker of only the currently-visible windows, and disables attaching until one is chosen', () => {
+    const html = render({
+      orchestration: view({ status: 'RUNNING' }),
+      desktopSurfaces: [{ surfaceRef: 's1', surfaceEpoch: 1, applicationLabel: 'Editor', windowTitle: 'notes.txt', visible: true, minimized: false }],
+      desktopSurface: ''
+    })
+    expect(html).toContain('data-testid="orchestration-desktop-select"')
+    expect(html).toContain('Editor')
+    const button = html.match(/<button[^>]*data-testid="orchestration-attach-desktop-button"[^>]*>/)
+    expect(button).not.toBeNull()
+    expect(button![0]).toContain('disabled=""')
+  })
+
+  it('offers a picker of only the registered applications, and disables attaching until one is chosen', () => {
+    const html = render({
+      orchestration: view({ status: 'RUNNING' }),
+      desktopApps: [{ appId: 'notepad', label: 'Notepad' }],
+      desktopApp: ''
+    })
+    expect(html).toContain('data-testid="orchestration-app-select"')
+    expect(html).toContain('Notepad')
+    const button = html.match(/<button[^>]*data-testid="orchestration-attach-app-button"[^>]*>/)
+    expect(button).not.toBeNull()
+    expect(button![0]).toContain('disabled=""')
+  })
+
+  it('offers a project-attach button with no picker of its own', () => {
+    const html = render({ orchestration: view({ status: 'RUNNING' }) })
+    expect(html).toContain('data-testid="orchestration-attach-project-button"')
+  })
+
+  it('offers no desktop, app or project attachment once the task is terminal', () => {
+    const html = render({
+      orchestration: view({ status: 'SUCCEEDED' }),
+      desktopSurfaces: [{ surfaceRef: 's1', surfaceEpoch: 1, applicationLabel: 'Editor', windowTitle: 'notes.txt', visible: true, minimized: false }],
+      desktopApps: [{ appId: 'notepad', label: 'Notepad' }]
+    })
+    expect(html).not.toContain('data-testid="orchestration-attach-desktop"')
+    expect(html).not.toContain('data-testid="orchestration-attach-app"')
+    expect(html).not.toContain('data-testid="orchestration-attach-project"')
   })
 })

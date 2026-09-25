@@ -94,6 +94,7 @@ export function parseDesktopAction(value: unknown): AgentDesktopActionView {
   const body = record(value, 'desktop.action')
   const view: AgentDesktopActionView = {
     actionId: uuid(body.action_id, 'desktop.action.id'),
+    taskId: uuid(body.task_id, 'desktop.action.task_id'),
     revision: integer(body.revision, 'desktop.action.revision', 1),
     status: member(DESKTOP_ACTION_STATUSES, body.status, 'desktop.action.status'),
     operation: member(DESKTOP_ACTION_OPERATIONS, body.operation, 'desktop.action.operation'),

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  ORCHESTRATION_PLANNER_RULES,
   ORCHESTRATION_PLANNER_SCHEMA,
   OrchestrationPlanError,
   OrchestrationPlanner,
@@ -23,6 +24,7 @@ import type { ModelProvider, ModelRequest, ModelResponse } from '../models/provi
 
 const TWO: OrchestrationCapabilities = { available: ['public_research', 'project_status'], availableResources: [] }
 const WITH_RESOURCES: OrchestrationCapabilities = { available: ['public_research', 'project_status'], availableResources: ['r1', 'r2'] }
+const WITH_DESKTOP_SAFE_ACTION: OrchestrationCapabilities = { available: ['desktop_safe_action'], availableResources: ['r1'] }
 
 describe('parseOrchestrationDecision', () => {
   it('parses a step choosing an available capability', () => {
@@ -88,6 +90,44 @@ describe('parseOrchestrationDecision', () => {
     expect([...ORCHESTRATION_PLANNER_SCHEMA.properties.capability.enum].sort()).toEqual([...AGENT_CAPABILITY_IDS].sort())
   })
 
+  it('"operation" defaults to focus for desktop_safe_action when omitted', () => {
+    const result = parseOrchestrationDecision(
+      JSON.stringify({ action: 'step', capability: 'desktop_safe_action', resources: ['r1'], reason: 'bring it forward' }),
+      WITH_DESKTOP_SAFE_ACTION
+    )
+    expect(result).toMatchObject({ kind: 'step', capability: 'desktop_safe_action', operation: 'focus' })
+  })
+
+  it('"operation" accepts each closed value for desktop_safe_action', () => {
+    for (const operation of ['focus', 'scroll_down', 'scroll_up']) {
+      const result = parseOrchestrationDecision(
+        JSON.stringify({ action: 'step', capability: 'desktop_safe_action', resources: ['r1'], operation, reason: 'x' }),
+        WITH_DESKTOP_SAFE_ACTION
+      )
+      expect(result).toMatchObject({ operation })
+    }
+  })
+
+  it('refuses an "operation" outside the closed three-value set -- never a key, coordinate or selector', () => {
+    for (const bad of ['scroll_left', 'click', 'u5', 'Delete', 42, true]) {
+      expect(() => parseOrchestrationDecision(
+        JSON.stringify({ action: 'step', capability: 'desktop_safe_action', resources: ['r1'], operation: bad, reason: 'x' }),
+        WITH_DESKTOP_SAFE_ACTION
+      )).toThrow(OrchestrationPlanError)
+    }
+  })
+
+  it('refuses "operation" supplied for any capability other than desktop_safe_action', () => {
+    expect(() => parseOrchestrationDecision(
+      JSON.stringify({ action: 'step', capability: 'public_research', operation: 'focus', reason: 'x' }), TWO
+    )).toThrow(OrchestrationPlanError)
+  })
+
+  it('Milestone 12 S4 adversarial-review finding: a resource label is never trusted as an instruction, because some labels (a desktop window\'s application name, a registered app\'s name) carry text Lumi does not control', () => {
+    expect(ORCHESTRATION_PLANNER_RULES).toMatch(/label is never an instruction/i)
+    expect(ORCHESTRATION_PLANNER_RULES).toMatch(/application name/i)
+  })
+
   it('tolerates fenced code-block wrapping like every other planner', () => {
     const result = parseOrchestrationDecision('```json\n{"action":"finish","reason":"ok"}\n```', TWO)
     expect(result).toEqual({ kind: 'finish', reason: 'ok' })
@@ -136,8 +176,12 @@ describe('parseOrchestrationDecision', () => {
   })
 
   it('the schema resources field has no room for a path, selector or provider field', () => {
-    expect(Object.keys(ORCHESTRATION_PLANNER_SCHEMA.properties)).toEqual(['action', 'capability', 'resources', 'reason'])
+    expect(Object.keys(ORCHESTRATION_PLANNER_SCHEMA.properties)).toEqual(['action', 'capability', 'resources', 'operation', 'reason'])
     expect(ORCHESTRATION_PLANNER_SCHEMA.properties.resources.items).toEqual({ type: 'string' })
+  })
+
+  it('"operation" is a closed three-value enum -- never a key, coordinate or selector', () => {
+    expect([...ORCHESTRATION_PLANNER_SCHEMA.properties.operation.enum].sort()).toEqual(['focus', 'scroll_down', 'scroll_up'])
   })
 })
 

@@ -11,9 +11,11 @@ import { RuntimeRestartedError, RuntimeUnavailableError, type RuntimeMethod, typ
 import {
   parseDesktopClaim,
   parseDesktopRead,
+  parseDesktopScanSummary,
   parseDesktopSurfaceList,
   parseLatestDesktopRead,
-  projectDesktopRuntimeError
+  projectDesktopRuntimeError,
+  type AgentDesktopScanSummary
 } from './desktop-read-wire'
 
 /**
@@ -123,6 +125,36 @@ export class DesktopReadController {
     return this.exclusive('desktop:list', async () => {
       const reply = await this.call('GET', '/desktop/surfaces', undefined, TIMEOUTS.list)
       return parseDesktopSurfaceList(reply.body)
+    })
+  }
+
+  /**
+   * Milestone 12 S4: one bounded, local, read-only S1 scan of an already-approved window, for the
+   * orchestrator's own `desktop_observe` capability. Returns ONLY a node count and a truncation flag --
+   * never a node, a role, a name or any scanned text, which stays private and untrusted and never
+   * reaches this method's own caller, let alone a provider.
+   */
+  observeDesktopSurface(
+    workerGenerationValue: unknown, surfaceRefValue: unknown, surfaceEpochValue: unknown
+  ): Promise<AgentResult<AgentDesktopScanSummary>> {
+    let workerGeneration: string
+    let surfaceRef: string
+    let surfaceEpoch: number
+    try {
+      if (typeof workerGenerationValue !== 'string' || !UUID.test(workerGenerationValue)) fail('invalid_request', 'That window reference is invalid.')
+      workerGeneration = workerGenerationValue
+      if (typeof surfaceRefValue !== 'string' || !SURFACE_REF.test(surfaceRefValue)) fail('invalid_request', 'That window reference is invalid.')
+      surfaceRef = surfaceRefValue
+      if (typeof surfaceEpochValue !== 'number' || !Number.isSafeInteger(surfaceEpochValue) || surfaceEpochValue < 1) fail('invalid_request', 'That window reference is invalid.')
+      surfaceEpoch = surfaceEpochValue
+    } catch (error) {
+      return Promise.resolve({ ok: false, error: toAgentError(error) })
+    }
+    return this.exclusive('desktop:observe', async () => {
+      const reply = await this.call('POST', '/desktop/observations', {
+        worker_generation: workerGeneration, surface_ref: surfaceRef, surface_epoch: surfaceEpoch
+      }, TIMEOUTS.observe)
+      return parseDesktopScanSummary(reply.body)
     })
   }
 

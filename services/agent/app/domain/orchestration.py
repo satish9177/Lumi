@@ -29,6 +29,8 @@ from enum import StrEnum
 from typing import Final
 
 from app.domain.authenticated import AUTHENTICATED_READ_TASK_TYPE
+from app.domain.desktop_actions import DESKTOP_ACTION_TASK_TYPE
+from app.domain.desktop_disclosure import DESKTOP_READ_TASK_TYPE
 
 MAX_OBJECTIVE_CHARS: Final = 500
 MAX_RESULT_SUMMARY_CHARS: Final = 600
@@ -63,26 +65,53 @@ CATALOG_CAPABILITY_IDS: Final[frozenset[str]] = frozenset(
 #: links a `public_research` one: Electron main creates it through `AuthenticatedReadService`'s own existing
 #: boundary (its own scope card, grant and disclosure recipient, unchanged), and this module only reads that
 #: task's own current resolution -- see `_read_task_backed_resolution` in `app/services/orchestration.py`.
-TASK_BACKED_CAPABILITY_IDS: Final[frozenset[str]] = frozenset({"public_research", "project_start", "account_read"})
+#: `desktop_reason` (Milestone 12 S4) links a `desktop_read` task exactly the same way: Electron main creates
+#: it through `DesktopDisclosureService.create()`'s own existing disclosure card, unchanged. `desktop_safe_action`
+#: and `launch_registered_app` both link a `desktop_action` task -- the SAME task type `DesktopActionService`
+#: already uses for every desktop effect, S3 and S4 alike, so `_read_task_backed_resolution` additionally
+#: checks the linked task's own `operation` field (never trusted from `EXPECTED_TASK_TYPE` alone) to refuse a
+#: `set_control_value`/`select_control`/`invoke_control` task ever resolving as either of these two.
+TASK_BACKED_CAPABILITY_IDS: Final[frozenset[str]] = frozenset(
+    {"public_research", "project_start", "account_read", "desktop_reason", "desktop_safe_action", "launch_registered_app"}
+)
 EXPECTED_TASK_TYPE: Final[dict[str, str]] = {
     "public_research": "public_research",
     "project_start": "project_run_task",
     "account_read": AUTHENTICATED_READ_TASK_TYPE,
+    "desktop_reason": DESKTOP_READ_TASK_TYPE,
+    "desktop_safe_action": DESKTOP_ACTION_TASK_TYPE,
+    "launch_registered_app": DESKTOP_ACTION_TASK_TYPE,
 }
+
+#: `desktop_safe_action`/`launch_registered_app` share `DESKTOP_ACTION_TASK_TYPE` with the S4 mutation
+#: operations that stay excluded from orchestration entirely; this is the second check
+#: `_read_task_backed_resolution` makes (`task.request["operation"]`) before ever trusting a linked
+#: `desktop_action` task as one of these two capabilities' own.
+DESKTOP_SAFE_ACTION_OPERATIONS: Final[frozenset[str]] = frozenset({"focus_surface", "scroll_control"})
+DESKTOP_LAUNCH_OPERATIONS: Final[frozenset[str]] = frozenset({"launch_app"})
 
 #: Synchronous: a pure read, resolved by the caller with no new task and no approval. `document_read` and
 #: `document_compare` (Milestone 12 S2) join this set: the caller (Electron main) has already extracted or
 #: compared through `DocumentService`'s own existing, no-new-approval methods before calling `advance()`;
 #: this module only records the bounded, controller-authored fact and, for `document_read`, mints the
-#: resulting `document_result_ref` (see `app/domain/orchestration_resources.py`).
-SYNCHRONOUS_CAPABILITY_IDS: Final[frozenset[str]] = frozenset({"project_status", "document_read", "document_compare"})
+#: resulting `document_result_ref` (see `app/domain/orchestration_resources.py`). `desktop_observe` and
+#: `project_stop` (Milestone 12 S4) join this set for the same reason: main already performed the real,
+#: read-only observation or the real stop through that capability's own existing, no-new-approval method
+#: before calling `advance()`.
+SYNCHRONOUS_CAPABILITY_IDS: Final[frozenset[str]] = frozenset(
+    {"project_status", "document_read", "document_compare", "desktop_observe", "project_stop"}
+)
 
 #: Milestone 12 S2. The M11 loop guard ("re-choosing an already-succeeded capability is not progress") assumed
 #: every composed capability answers exactly one thing per orchestration -- true for `public_research`/
 #: `project_status`/`project_start`, false for `document_read` (up to `MAX_FILES_PER_TASK` files) and
 #: `document_compare` (a person may reasonably compare more than one pair). These two are exempted from that
 #: guard; `MAX_STEPS` still bounds the total regardless, exactly as it already bounds every other capability.
-REPEATABLE_CAPABILITY_IDS: Final[frozenset[str]] = frozenset({"document_read", "document_compare"})
+#: `desktop_safe_action` (Milestone 12 S4) joins them: focusing a window and then scrolling it, or scrolling
+#: it more than once, is ordinary use of a read-only-effect capability, and each individual action still
+#: needs its own fresh freshness check and its own exact approval regardless of how many times this
+#: capability is chosen.
+REPEATABLE_CAPABILITY_IDS: Final[frozenset[str]] = frozenset({"document_read", "document_compare", "desktop_safe_action"})
 
 #: What this runtime can actually execute today. A strict, honestly-scoped subset of the full catalog.
 COMPOSED_CAPABILITY_IDS: Final[frozenset[str]] = TASK_BACKED_CAPABILITY_IDS | SYNCHRONOUS_CAPABILITY_IDS
@@ -189,6 +218,8 @@ def result_handle(output_class: str, sequence: int) -> str:
 __all__ = [
     "CATALOG_CAPABILITY_IDS",
     "COMPOSED_CAPABILITY_IDS",
+    "DESKTOP_LAUNCH_OPERATIONS",
+    "DESKTOP_SAFE_ACTION_OPERATIONS",
     "EXPECTED_TASK_TYPE",
     "MAX_CHILD_TASKS",
     "MAX_OBJECTIVE_CHARS",

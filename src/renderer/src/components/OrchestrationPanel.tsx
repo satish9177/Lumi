@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { AgentApi, AgentBrowserProfileView } from '../../../shared/agent-contracts'
+import type { AgentApi, AgentBrowserProfileView, AgentDesktopSurface, AgentRegisteredApp } from '../../../shared/agent-contracts'
 import type {
   AgentOrchestrationPauseReason,
   AgentOrchestrationStepStatus,
@@ -54,6 +54,18 @@ export interface OrchestrationCardProps {
   accountProfile: string
   onAccountProfileChange: (value: string) => void
   onAttachAccount: () => void
+  /** Milestone 12 S4: the currently-live windows the user may attach as a desktop-target resource. */
+  desktopSurfaces: AgentDesktopSurface[]
+  desktopSurface: string
+  onDesktopSurfaceChange: (value: string) => void
+  onAttachDesktopTarget: () => void
+  /** Milestone 12 S4: the registered applications the user may attach as an app resource. */
+  desktopApps: AgentRegisteredApp[]
+  desktopApp: string
+  onDesktopAppChange: (value: string) => void
+  onAttachApp: () => void
+  /** Milestone 12 S4: attaches the one currently Lumi-owned, live supervised project run. No picker. */
+  onAttachProject: () => void
 }
 
 /**
@@ -66,11 +78,15 @@ export interface OrchestrationCardProps {
  */
 export function OrchestrationCard({
   orchestration, objective, busy, message, onObjectiveChange, onCreate, onRefresh, onContinue, onStop,
-  accountProfiles, accountProfile, onAccountProfileChange, onAttachAccount
+  accountProfiles, accountProfile, onAccountProfileChange, onAttachAccount,
+  desktopSurfaces, desktopSurface, onDesktopSurfaceChange, onAttachDesktopTarget,
+  desktopApps, desktopApp, onDesktopAppChange, onAttachApp, onAttachProject
 }: OrchestrationCardProps) {
   const empty = !orchestration || orchestration.status === 'STOPPED'
   const canContinue = orchestration?.status === 'PAUSED'
   const canStop = orchestration?.status === 'RUNNING' || orchestration?.status === 'PAUSED'
+  // Milestone 12 S4: every trusted resource attachment is allowed in the same states -- the orchestration
+  // still exists and has not concluded. Shared with the account picker (S3), unchanged.
   const canAttachAccount = orchestration?.status === 'RUNNING' || orchestration?.status === 'PAUSED'
   const isManualHandoff = orchestration?.status === 'PAUSED' && orchestration.pauseReason === 'manual_handoff_required'
   const handoffInstruction = isManualHandoff ? orchestration?.steps.at(-1)?.pendingNote : undefined
@@ -157,6 +173,64 @@ export function OrchestrationCard({
         </div>
       )}
 
+      {canAttachAccount && (
+        <div data-testid="orchestration-attach-desktop">
+          <h4>Desktop window</h4>
+          {desktopSurfaces.length === 0 ? (
+            <p className="workspace-note">No window is currently visible to attach.</p>
+          ) : (
+            <>
+              <label>Window
+                <select value={desktopSurface} data-testid="orchestration-desktop-select"
+                  onChange={(event) => onDesktopSurfaceChange(event.target.value)}>
+                  {desktopSurfaces.map((surface) => (
+                    <option key={surface.surfaceRef} value={surface.surfaceRef}><bdi>{surface.applicationLabel}</bdi></option>
+                  ))}
+                </select>
+              </label>
+              <button className="text-button" type="button" disabled={busy || !desktopSurface}
+                onClick={onAttachDesktopTarget} data-testid="orchestration-attach-desktop-button">
+                Make this window available to this task
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {canAttachAccount && (
+        <div data-testid="orchestration-attach-app">
+          <h4>Application</h4>
+          {desktopApps.length === 0 ? (
+            <p className="workspace-note">No application is registered to attach.</p>
+          ) : (
+            <>
+              <label>Registered application
+                <select value={desktopApp} data-testid="orchestration-app-select"
+                  onChange={(event) => onDesktopAppChange(event.target.value)}>
+                  {desktopApps.map((app) => (
+                    <option key={app.appId} value={app.appId}>{app.label}</option>
+                  ))}
+                </select>
+              </label>
+              <button className="text-button" type="button" disabled={busy || !desktopApp}
+                onClick={onAttachApp} data-testid="orchestration-attach-app-button">
+                Make this application available to this task
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
+      {canAttachAccount && (
+        <div data-testid="orchestration-attach-project">
+          <h4>Project</h4>
+          <button className="text-button" type="button" disabled={busy}
+            onClick={onAttachProject} data-testid="orchestration-attach-project-button">
+            Make the current project run available to this task
+          </button>
+        </div>
+      )}
+
       <h4>Steps</h4>
       {orchestration.steps.length === 0 ? (
         <p className="workspace-note">Lumi has not chosen a first step yet.</p>
@@ -182,6 +256,11 @@ export function OrchestrationPanel({ agent, onClose }: OrchestrationPanelProps) 
   const [busy, setBusy] = useState(false)
   const [accountProfiles, setAccountProfiles] = useState<AgentBrowserProfileView[]>([])
   const [accountProfile, setAccountProfile] = useState('')
+  const [desktopSurfaces, setDesktopSurfaces] = useState<AgentDesktopSurface[]>([])
+  const [desktopWorkerGeneration, setDesktopWorkerGeneration] = useState('')
+  const [desktopSurface, setDesktopSurface] = useState('')
+  const [desktopApps, setDesktopApps] = useState<AgentRegisteredApp[]>([])
+  const [desktopApp, setDesktopApp] = useState('')
   const mounted = useRef(true)
 
   useEffect(() => {
@@ -217,6 +296,34 @@ export function OrchestrationPanel({ agent, onClose }: OrchestrationPanelProps) 
     return () => { active = false }
   }, [agent])
 
+  // Milestone 12 S4: which windows may be attached as a `desktop_target_ref`. The same listing
+  // `DesktopReadPanel`/`DesktopActionPanel` already offer for a direct request -- never a renderer-invented
+  // one -- so an attachment names only an opaque `(workerGeneration, surfaceRef, surfaceEpoch)` this same
+  // fresh read just showed.
+  useEffect(() => {
+    let active = true
+    void agent.listDesktopSurfaces().then((result) => {
+      if (!active || !mounted.current) return
+      const surfaces = result.ok ? result.value.surfaces : []
+      setDesktopWorkerGeneration(result.ok ? result.value.workerGeneration : '')
+      setDesktopSurfaces(surfaces)
+      setDesktopSurface((current) => (surfaces.some((surface) => surface.surfaceRef === current) ? current : surfaces[0]?.surfaceRef ?? ''))
+    })
+    return () => { active = false }
+  }, [agent])
+
+  // Milestone 12 S4: which registered applications may be attached as an `app_ref`.
+  useEffect(() => {
+    let active = true
+    void agent.listDesktopApps().then((result) => {
+      if (!active || !mounted.current) return
+      const apps = result.ok ? result.value : []
+      setDesktopApps(apps)
+      setDesktopApp((current) => (apps.some((app) => app.appId === current) ? current : apps[0]?.appId ?? ''))
+    })
+    return () => { active = false }
+  }, [agent])
+
   return (
     <div className="agent-task-panel" data-testid="orchestration-panel">
       <header className="settings-header">
@@ -241,6 +348,29 @@ export function OrchestrationPanel({ agent, onClose }: OrchestrationPanelProps) 
             if (orchestration && accountProfile) {
               void run(() => agent.attachApprovedAccount(orchestration.orchestrationId, accountProfile), setOrchestration)
             }
+          }}
+          desktopSurfaces={desktopSurfaces}
+          desktopSurface={desktopSurface}
+          onDesktopSurfaceChange={setDesktopSurface}
+          onAttachDesktopTarget={() => {
+            const surface = desktopSurfaces.find((item) => item.surfaceRef === desktopSurface)
+            if (orchestration && surface && desktopWorkerGeneration) {
+              void run(
+                () => agent.attachApprovedDesktopTarget(orchestration.orchestrationId, desktopWorkerGeneration, surface.surfaceRef, surface.surfaceEpoch),
+                setOrchestration
+              )
+            }
+          }}
+          desktopApps={desktopApps}
+          desktopApp={desktopApp}
+          onDesktopAppChange={setDesktopApp}
+          onAttachApp={() => {
+            if (orchestration && desktopApp) {
+              void run(() => agent.attachApprovedApp(orchestration.orchestrationId, desktopApp), setOrchestration)
+            }
+          }}
+          onAttachProject={() => {
+            if (orchestration) void run(() => agent.attachApprovedProject(orchestration.orchestrationId), setOrchestration)
           }}
         />
       </div>

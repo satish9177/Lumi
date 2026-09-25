@@ -401,6 +401,16 @@ class DesktopActionService:
             row = await DesktopActionRepository(connection).latest_desktop_action_id()
         return await self.get(row) if row is not None else None
 
+    async def describe_task(self, task_id: uuid.UUID) -> DesktopActionView:
+        """Milestone 12 S4: the one desktop action `_open_locked` opened together with this task. Used only
+        by `OrchestrationService._read_task_backed_resolution` to read a linked `desktop_action` task's
+        current state -- never to create or approve anything."""
+        async with self._engine.connect() as connection:
+            action_id = await DesktopActionRepository(connection).action_for_task(task_id)
+        if action_id is None:
+            raise DesktopActionError("desktop_action_not_found")
+        return await self.get(action_id)
+
     async def decline(self, action_id: uuid.UUID, *, expected_revision: int) -> DesktopActionView:
         current = await self.get(action_id)
         if current.status not in (ActionStatus.PROPOSED, ActionStatus.WAITING_APPROVAL):

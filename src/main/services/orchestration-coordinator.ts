@@ -1,5 +1,15 @@
 import type { AgentCapabilityId } from '../../shared/agent-capabilities'
-import type { AgentBrowserProfileView, AgentResult, AgentTaskSnapshot } from '../../shared/agent-contracts'
+import type {
+  AgentBrowserProfileView,
+  AgentDesktopActionView,
+  AgentDesktopReadView,
+  AgentDesktopScrollStep,
+  AgentDesktopScrollTargetList,
+  AgentDesktopSurfaceList,
+  AgentRegisteredApp,
+  AgentResult,
+  AgentTaskSnapshot
+} from '../../shared/agent-contracts'
 import type { AgentProjectRunView } from '../../shared/project-contracts'
 import type { AgentDocumentTaskView, AgentLocalComparisonView } from '../../shared/document-contracts'
 import type { AgentOrchestrationResourceView, AgentOrchestrationView } from '../../shared/orchestration-contracts'
@@ -7,8 +17,15 @@ import {
   ModelRoutingError,
   orchestrationResultLines,
   orchestrationStateLines,
+  type OrchestrationDesktopSafeActionOperation,
   type OrchestrationPlanOutcome
 } from '../agent/orchestration-planner'
+
+/** Milestone 12 S4: phases in which a supervised run may still be meaningfully stopped. */
+const STOPPABLE_PROJECT_PHASES: ReadonlySet<string> = new Set(['starting', 'running', 'ready'])
+
+/** `s1`..`s16` `|` a monotonic epoch, exactly `DESKTOP_TARGET_BACKING_PATTERN` on the Python side. */
+const DESKTOP_TARGET_REF_PATTERN = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\|(s(?:[1-9]|1[0-6]))\|([1-9][0-9]{0,8})$/
 
 /**
  * What the coordinator needs from the durable graph client -- an interface, not the concrete
@@ -108,6 +125,44 @@ export interface OrchestrationCoordinatorDependencies {
   continueAccountRead: (taskId: string) => Promise<AgentResult<AgentTaskSnapshot>>
   /** Milestone 8a S2's own entry point: every browser profile main knows about, signed-in or not. */
   listBrowserProfiles: () => Promise<AgentResult<AgentBrowserProfileView[]>>
+  /** Milestone 9 S1's own entry point: the user-visible Windows surfaces, read-only. */
+  listDesktopSurfaces: () => Promise<AgentResult<AgentDesktopSurfaceList>>
+  /**
+   * Milestone 9 S1's own entry point: one bounded, local, read-only observation. Never disclosed to any
+   * provider or forwarded into the orchestrator's own context beyond the bounded facts this method itself
+   * returns -- desktop text stays private and untrusted, exactly as M9 S1 requires.
+   */
+  observeDesktopTarget: (
+    workerGeneration: string, surfaceRef: string, surfaceEpoch: number
+  ) => Promise<AgentResult<{ nodeCount: number; truncated: boolean }>>
+  /**
+   * Milestone 9 S2's own entry point: observes the surface locally and opens the existing disclosure card.
+   * Nothing is sent to a provider until the human approves and runs it on that card's own existing surface.
+   */
+  createDesktopReasonTask: (
+    objective: string, target: { workerGeneration: string; surfaceRef: string; surfaceEpoch: number }
+  ) => Promise<AgentResult<AgentDesktopReadView>>
+  /** Milestone 9 S3's own entry point: opens the exact focus approval card. Nothing happens yet. */
+  proposeDesktopFocus: (
+    workerGeneration: string, surfaceRef: string, surfaceEpoch: number
+  ) => Promise<AgentResult<AgentDesktopActionView>>
+  /**
+   * Milestone 9 S3's own entry point: a fresh local observation listing only the scrollable controls.
+   * Trusted code -- never the planner -- chooses which one a scroll step actually targets.
+   */
+  findDesktopScrollTargets: (
+    workerGeneration: string, surfaceRef: string, surfaceEpoch: number
+  ) => Promise<AgentResult<AgentDesktopScrollTargetList>>
+  /** Milestone 9 S3's own entry point: opens the exact scroll approval card. Nothing happens yet. */
+  proposeDesktopScroll: (
+    workerGeneration: string, observationId: string, controlRef: string, step: AgentDesktopScrollStep
+  ) => Promise<AgentResult<AgentDesktopActionView>>
+  /** Milestone 9 S3's own entry point: every application the user has already registered. */
+  listDesktopApps: () => Promise<AgentResult<AgentRegisteredApp[]>>
+  /** Milestone 9 S3's own entry point: opens the exact launch approval card for a registered app. */
+  proposeDesktopLaunch: (appId: string) => Promise<AgentResult<AgentDesktopActionView>>
+  /** Milestone 10 S3's own entry point: ends only this run's own supervised process job. */
+  stopProjectRun: (taskId: string) => Promise<AgentResult<AgentProjectRunView>>
 }
 
 export class OrchestrationCoordinator {
@@ -181,6 +236,7 @@ export class OrchestrationCoordinator {
       let decisionKind: 'step' | 'finish' | 'stop'
       let capability: AgentCapabilityId | undefined
       let resources: readonly string[] = []
+      let operation: OrchestrationDesktopSafeActionOperation | undefined
       try {
         const outcome = await this.deps.planner.next({
           objective: view.objective,
@@ -206,6 +262,7 @@ export class OrchestrationCoordinator {
         decisionKind = outcome.decision.kind
         capability = outcome.decision.kind === 'step' ? outcome.decision.capability : undefined
         resources = outcome.decision.kind === 'step' ? (outcome.decision.resources ?? []) : []
+        operation = outcome.decision.kind === 'step' ? outcome.decision.operation : undefined
       } catch (error) {
         if (!(error instanceof ModelRoutingError)) throw error
         // No provider could decide the next step. The orchestration stays RUNNING (a transient outage is
@@ -227,7 +284,8 @@ export class OrchestrationCoordinator {
       }
 
       const dispatched = await this.dispatch(
-        orchestrationId, view.revision, capability, view.objective, resources, view.resources ?? [], view.documentTaskId
+        orchestrationId, view.revision, capability, view.objective, resources, view.resources ?? [], view.documentTaskId,
+        operation
       )
       if (!dispatched.ok) return dispatched
       view = dispatched.value
@@ -326,6 +384,89 @@ export class OrchestrationCoordinator {
   }
 
   /**
+   * Milestone 12 S4: makes one currently-live Windows window available to this orchestration as a
+   * `desktop_target_ref` resource. Never reachable from the planner or the model -- the renderer supplies
+   * only an opaque choice from `listDesktopSurfaces()`'s own current listing; main re-checks that choice
+   * against a FRESH listing of its own before registering (and the runtime itself re-checks a third time --
+   * see `app/services/orchestration.py`'s own `register_resource`), so a stale or invented window cannot be
+   * attached even if the renderer's own listing was already out of date by the time this call arrives.
+   */
+  async attachApprovedDesktopTarget(
+    orchestrationIdValue: unknown, workerGenerationValue: unknown, surfaceRefValue: unknown, surfaceEpochValue: unknown
+  ): Promise<AgentResult<AgentOrchestrationView>> {
+    if (
+      typeof orchestrationIdValue !== 'string' || typeof workerGenerationValue !== 'string' ||
+      typeof surfaceRefValue !== 'string' || typeof surfaceEpochValue !== 'number'
+    ) {
+      return { ok: false, error: { code: 'invalid_request', message: 'That desktop window reference is invalid.' } }
+    }
+    const surfaces = await this.deps.listDesktopSurfaces()
+    if (!surfaces.ok) return surfaces
+    if (surfaces.value.workerGeneration !== workerGenerationValue) {
+      return { ok: false, error: { code: 'orchestration_refused', message: 'That window is no longer available. Choose one of the windows Lumi currently sees.' } }
+    }
+    const surface = surfaces.value.surfaces.find(
+      (item) => item.surfaceRef === surfaceRefValue && item.surfaceEpoch === surfaceEpochValue
+    )
+    if (surface === undefined) {
+      return { ok: false, error: { code: 'orchestration_refused', message: 'That window is no longer available. Choose one of the windows Lumi currently sees.' } }
+    }
+    const current = await this.deps.orchestrations.getOrchestration(orchestrationIdValue)
+    if (!current.ok) return current
+    return this.deps.orchestrations.registerResource(orchestrationIdValue, current.value.revision, {
+      kind: 'desktop_target_ref',
+      safeLabel: `approved desktop window: ${surface.applicationLabel}`,
+      backingText: `${workerGenerationValue}|${surfaceRefValue}|${surfaceEpochValue}`
+    })
+  }
+
+  /**
+   * Milestone 12 S4: makes one already-registered application available to this orchestration as an
+   * `app_ref` resource. The renderer supplies only an app id from `listDesktopApps()`'s own trusted
+   * registry listing; main re-checks membership before registering, and `DesktopActionService.propose_launch`
+   * independently re-checks the registry again at dispatch.
+   */
+  async attachApprovedApp(orchestrationIdValue: unknown, appIdValue: unknown): Promise<AgentResult<AgentOrchestrationView>> {
+    if (typeof orchestrationIdValue !== 'string' || typeof appIdValue !== 'string') {
+      return { ok: false, error: { code: 'invalid_request', message: 'That application reference is invalid.' } }
+    }
+    const apps = await this.deps.listDesktopApps()
+    if (!apps.ok) return apps
+    const app = apps.value.find((item) => item.appId === appIdValue)
+    if (app === undefined) {
+      return { ok: false, error: { code: 'orchestration_refused', message: 'Choose one of your registered applications.' } }
+    }
+    const current = await this.deps.orchestrations.getOrchestration(orchestrationIdValue)
+    if (!current.ok) return current
+    return this.deps.orchestrations.registerResource(orchestrationIdValue, current.value.revision, {
+      kind: 'app_ref', safeLabel: app.label, backingText: app.appId
+    })
+  }
+
+  /**
+   * Milestone 12 S4: makes the one currently Lumi-owned, live supervised project run available to this
+   * orchestration as a `project_ref` resource. There is no picker: the renderer may only attach the SAME
+   * run `getLatestProjectRun()` -- the same read `project_status` already uses -- currently reports, never a
+   * run it names itself. `ProjectService.stop()` independently re-checks ownership and phase again at
+   * dispatch.
+   */
+  async attachApprovedProject(orchestrationIdValue: unknown): Promise<AgentResult<AgentOrchestrationView>> {
+    if (typeof orchestrationIdValue !== 'string') {
+      return { ok: false, error: { code: 'invalid_request', message: 'That orchestration reference is invalid.' } }
+    }
+    const run = await this.deps.getLatestProjectRun()
+    if (!run.ok) return run
+    if (run.value === null || !STOPPABLE_PROJECT_PHASES.has(run.value.phase)) {
+      return { ok: false, error: { code: 'orchestration_refused', message: 'There is no running project to attach.' } }
+    }
+    const current = await this.deps.orchestrations.getOrchestration(orchestrationIdValue)
+    if (!current.ok) return current
+    return this.deps.orchestrations.registerResource(orchestrationIdValue, current.value.revision, {
+      kind: 'project_ref', safeLabel: 'registered project run', backingId: run.value.taskId
+    })
+  }
+
+  /**
    * The one closed place a capability id becomes a request to that capability's own boundary. Every branch
    * is a real, already-reviewed entry point; there is no default/dynamic dispatch and no way for a string
    * this module does not explicitly name to reach anything.
@@ -333,7 +474,7 @@ export class OrchestrationCoordinator {
   private async dispatch(
     orchestrationId: string, revision: number, capability: AgentCapabilityId, objective: string,
     resources: readonly string[], availableResources: readonly AgentOrchestrationResourceView[],
-    documentTaskId: string | undefined
+    documentTaskId: string | undefined, operation: OrchestrationDesktopSafeActionOperation | undefined
   ): Promise<AgentResult<AgentOrchestrationView>> {
     if (capability === 'public_research') {
       const created = await this.deps.createResearchTask(objective)
@@ -367,9 +508,150 @@ export class OrchestrationCoordinator {
     if (capability === 'account_read') {
       return this.dispatchAccountRead(orchestrationId, revision, objective, resources, availableResources)
     }
+    if (capability === 'desktop_observe') {
+      return this.dispatchDesktopObserve(orchestrationId, revision, resources, availableResources)
+    }
+    if (capability === 'desktop_reason') {
+      return this.dispatchDesktopReason(orchestrationId, revision, objective, resources, availableResources)
+    }
+    if (capability === 'desktop_safe_action') {
+      return this.dispatchDesktopSafeAction(orchestrationId, revision, resources, availableResources, operation ?? 'focus')
+    }
+    if (capability === 'launch_registered_app') {
+      return this.dispatchLaunchRegisteredApp(orchestrationId, revision, resources, availableResources)
+    }
+    if (capability === 'project_stop') {
+      return this.dispatchProjectStop(orchestrationId, revision, resources, availableResources)
+    }
     // Not reachable in the ordinary case: the runtime only ever offers a planner the capabilities it has
     // itself composed. Fail closed rather than silently doing nothing.
     return { ok: false, error: { code: 'orchestration_refused', message: 'Lumi does not yet know how to use that capability.' } }
+  }
+
+  /**
+   * Resolves a cited ref to the desktop window identity it names -- `(workerGeneration, surfaceRef,
+   * surfaceEpoch)` only, never a HWND, a PID or a coordinate. `null` if the ref is missing, the wrong kind,
+   * or its backing text is not shaped as `DESKTOP_TARGET_BACKING_PATTERN` demands (defense in depth: the
+   * runtime's own `register_resource` already refused anything else at mint time). The freshness re-check
+   * itself happens inside the EXISTING M9 call this identity is handed to next (`observeDesktopTarget`,
+   * `createDesktopReasonTask`, `proposeDesktopFocus`/`proposeDesktopScroll`) -- never here, and never
+   * skipped: a recreated or closed window fails there exactly as a direct request already would.
+   */
+  private resolveDesktopTarget(
+    ref: string | undefined, availableResources: readonly AgentOrchestrationResourceView[]
+  ): { workerGeneration: string; surfaceRef: string; surfaceEpoch: number } | null {
+    if (ref === undefined) return null
+    const resource = availableResources.find((item) => item.ref === ref)
+    if (resource === undefined || resource.kind !== 'desktop_target_ref' || resource.backingText === undefined) return null
+    const match = DESKTOP_TARGET_REF_PATTERN.exec(resource.backingText)
+    if (match === null) return null
+    return { workerGeneration: match[1], surfaceRef: match[2], surfaceEpoch: Number(match[3]) }
+  }
+
+  /**
+   * `desktop_observe`: reads the approved window locally, through M9 S1's own existing, unchanged
+   * observation call, then reports a summary built ONLY from a bounded node count -- never a role, a name
+   * or any observed text. Application UI stays `untrusted_environment`; nothing here lets it reach the
+   * planner's own context or become a capability request.
+   */
+  private async dispatchDesktopObserve(
+    orchestrationId: string, revision: number, resources: readonly string[], availableResources: readonly AgentOrchestrationResourceView[]
+  ): Promise<AgentResult<AgentOrchestrationView>> {
+    const target = this.resolveDesktopTarget(resources[0], availableResources)
+    if (target === null) {
+      return { ok: false, error: { code: 'orchestration_refused', message: 'Lumi could not resolve that desktop window.' } }
+    }
+    const observed = await this.deps.observeDesktopTarget(target.workerGeneration, target.surfaceRef, target.surfaceEpoch)
+    if (!observed.ok) return observed
+    const summary = `Desktop observation completed: ${observed.value.nodeCount} element(s) observed${observed.value.truncated ? ', truncated' : ''}.`
+    return this.deps.orchestrations.advanceOrchestration(orchestrationId, revision, 'desktop_observe', { resolvedSummary: summary, resources })
+  }
+
+  /**
+   * `desktop_reason`: opens the SAME existing desktop-disclosure card a direct request would, over the
+   * approved window the ref resolves to. Nothing is read or sent until the human approves and runs it on
+   * that card's own existing surface -- selecting `desktop_reason` here is never itself approval.
+   */
+  private async dispatchDesktopReason(
+    orchestrationId: string, revision: number, objective: string,
+    resources: readonly string[], availableResources: readonly AgentOrchestrationResourceView[]
+  ): Promise<AgentResult<AgentOrchestrationView>> {
+    const target = this.resolveDesktopTarget(resources[0], availableResources)
+    if (target === null) {
+      return { ok: false, error: { code: 'orchestration_refused', message: 'Lumi could not resolve that desktop window.' } }
+    }
+    const created = await this.deps.createDesktopReasonTask(objective, target)
+    if (!created.ok) return created
+    return this.deps.orchestrations.advanceOrchestration(orchestrationId, revision, 'desktop_reason', { taskId: created.value.taskId, resources })
+  }
+
+  /**
+   * `desktop_safe_action`: focus or one semantic scroll step, matching the catalog's own closed
+   * description -- never M9 S4's `SetValue`/`Select`/`Invoke` mutations, which this module never opens a
+   * task for under any capability. `operation` is the one closed sub-choice `OrchestrationPlanner` allows
+   * for this capability alone; a scroll's actual target control is chosen by trusted code
+   * (`findDesktopScrollTargets`'s own first result), never by the planner.
+   */
+  private async dispatchDesktopSafeAction(
+    orchestrationId: string, revision: number, resources: readonly string[],
+    availableResources: readonly AgentOrchestrationResourceView[], operation: OrchestrationDesktopSafeActionOperation
+  ): Promise<AgentResult<AgentOrchestrationView>> {
+    const target = this.resolveDesktopTarget(resources[0], availableResources)
+    if (target === null) {
+      return { ok: false, error: { code: 'orchestration_refused', message: 'Lumi could not resolve that desktop window.' } }
+    }
+    if (operation === 'focus') {
+      const proposed = await this.deps.proposeDesktopFocus(target.workerGeneration, target.surfaceRef, target.surfaceEpoch)
+      if (!proposed.ok) return proposed
+      return this.deps.orchestrations.advanceOrchestration(orchestrationId, revision, 'desktop_safe_action', { taskId: proposed.value.taskId, resources })
+    }
+    const targets = await this.deps.findDesktopScrollTargets(target.workerGeneration, target.surfaceRef, target.surfaceEpoch)
+    if (!targets.ok) return targets
+    const first = targets.value.targets[0]
+    if (first === undefined) {
+      return { ok: false, error: { code: 'orchestration_refused', message: 'Lumi found nothing scrollable in that window.' } }
+    }
+    const step: AgentDesktopScrollStep = operation === 'scroll_down' ? 'small_down' : 'small_up'
+    const proposed = await this.deps.proposeDesktopScroll(target.workerGeneration, targets.value.observationId, first.controlRef, step)
+    if (!proposed.ok) return proposed
+    return this.deps.orchestrations.advanceOrchestration(orchestrationId, revision, 'desktop_safe_action', { taskId: proposed.value.taskId, resources })
+  }
+
+  /**
+   * `launch_registered_app`: the planner cited exactly one `app_ref`. Opens the SAME existing launch
+   * approval card a direct request would, for the registered application that ref resolves to -- never an
+   * exe path, an argument or an unregistered location.
+   */
+  private async dispatchLaunchRegisteredApp(
+    orchestrationId: string, revision: number, resources: readonly string[], availableResources: readonly AgentOrchestrationResourceView[]
+  ): Promise<AgentResult<AgentOrchestrationView>> {
+    const ref = resources[0]
+    const resource = ref === undefined ? undefined : availableResources.find((item) => item.ref === ref)
+    if (resource === undefined || resource.kind !== 'app_ref' || resource.backingText === undefined) {
+      return { ok: false, error: { code: 'orchestration_refused', message: 'Lumi could not resolve that application.' } }
+    }
+    const proposed = await this.deps.proposeDesktopLaunch(resource.backingText)
+    if (!proposed.ok) return proposed
+    return this.deps.orchestrations.advanceOrchestration(orchestrationId, revision, 'launch_registered_app', { taskId: proposed.value.taskId, resources })
+  }
+
+  /**
+   * `project_stop`: the planner cited exactly one `project_ref`. Stops through `ProjectService.stop()`'s
+   * own existing entry point -- ending only that run's own supervised process job -- and reports a summary
+   * built ONLY from the resulting phase, exactly like `project_status`.
+   */
+  private async dispatchProjectStop(
+    orchestrationId: string, revision: number, resources: readonly string[], availableResources: readonly AgentOrchestrationResourceView[]
+  ): Promise<AgentResult<AgentOrchestrationView>> {
+    const ref = resources[0]
+    const resource = ref === undefined ? undefined : availableResources.find((item) => item.ref === ref)
+    if (resource === undefined || resource.kind !== 'project_ref' || resource.backingId === undefined) {
+      return { ok: false, error: { code: 'orchestration_refused', message: 'Lumi could not resolve that project run.' } }
+    }
+    const stopped = await this.deps.stopProjectRun(resource.backingId)
+    if (!stopped.ok) return stopped
+    const summary = `Project run stopped (phase: ${stopped.value.phase}).`
+    return this.deps.orchestrations.advanceOrchestration(orchestrationId, revision, 'project_stop', { resolvedSummary: summary, resources })
   }
 
   /**

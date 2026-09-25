@@ -117,4 +117,25 @@ export interface AgentOrchestrationApi {
    * action, exactly like attaching a document.
    */
   attachApprovedAccount: (orchestrationId: string, profileId: string) => Promise<AgentResult<AgentOrchestrationView>>
+  /**
+   * Milestone 12 S4: makes one currently-live Windows window available to this orchestration as a
+   * `desktop_target_ref` resource. Never reachable from the planner or the model -- a trusted renderer
+   * action: the renderer supplies only an opaque choice from `listDesktopSurfaces()`'s own current listing,
+   * never a handle, a PID or a coordinate it invented.
+   */
+  attachApprovedDesktopTarget: (
+    orchestrationId: string, workerGeneration: string, surfaceRef: string, surfaceEpoch: number
+  ) => Promise<AgentResult<AgentOrchestrationView>>
+  /**
+   * Milestone 12 S4: makes one already-registered application available to this orchestration as an
+   * `app_ref` resource. Never reachable from the planner or the model -- a trusted renderer action: the
+   * renderer supplies only an app id from `listDesktopApps()`'s own trusted registry listing.
+   */
+  attachApprovedApp: (orchestrationId: string, appId: string) => Promise<AgentResult<AgentOrchestrationView>>
+  /**
+   * Milestone 12 S4: makes the one currently Lumi-owned, live supervised project run available to this
+   * orchestration as a `project_ref` resource. Never reachable from the planner or the model, and takes no
+   * argument of its own -- there is no picker, only the same run `getLatestProjectRun` already reports.
+   */
+  attachApprovedProject: (orchestrationId: string) => Promise<AgentResult<AgentOrchestrationView>>
 }

@@ -58,9 +58,10 @@ class RegisterResourceBody(_Body):
     #: Closed to `REGISTERABLE_RESOURCE_KINDS`; re-checked by the service, not trusted from this wire shape.
     kind: str = Field(min_length=1, max_length=32)
     safe_label: str = Field(min_length=1, max_length=200)
-    #: `document_ref` only: the file id within `document_task_id`.
+    #: `document_ref`/`project_ref`: the file id, or the owned run's own task id.
     backing_id: uuid.UUID | None = None
-    #: `public_url_ref` only: the canonical, already policy-checked URL.
+    #: `public_url_ref`/`desktop_target_ref`/`app_ref`: the canonical policy-checked URL, the desktop window
+    #: identity (`worker_generation|surface_ref|surface_epoch`), or the registered application id.
     backing_text: str | None = Field(default=None, min_length=1, max_length=2048)
     #: `document_ref` only: the document task this file belongs to. Set once per orchestration.
     document_task_id: uuid.UUID | None = None

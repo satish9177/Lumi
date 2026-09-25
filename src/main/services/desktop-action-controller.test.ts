@@ -124,7 +124,7 @@ describe('the desktop action controller', () => {
     const text = JSON.stringify(view)
     for (const leaked of ['197780', '4321', 'notepad.exe', 'btnSave', 'hunter2', 'C:\\\\x']) expect(text).not.toContain(leaked)
     expect(Object.keys(view).sort()).toEqual(
-      ['actionId', 'applicationLabel', 'expiresAt', 'operation', 'result', 'revision', 'status', 'windowTitle'].sort()
+      ['actionId', 'applicationLabel', 'expiresAt', 'operation', 'result', 'revision', 'status', 'taskId', 'windowTitle'].sort()
     )
   })
 

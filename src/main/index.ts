@@ -1446,7 +1446,23 @@ At most ${card.maxExcerptBytes} bytes per document, with identifiers redacted.
       compareDocumentsLocally: (taskId, firstId, secondId) => documents.compareDocumentsLocally(taskId, firstId, secondId),
       createAccountReadTask: (objective, profileId) => agentTasks.createAccountReadTask(objective, profileId),
       continueAccountRead: (taskId) => agentTasks.continueAccountRead(taskId),
-      listBrowserProfiles: () => browserProfiles.listBrowserProfiles()
+      listBrowserProfiles: () => browserProfiles.listBrowserProfiles(),
+      // Milestone 12 S4: desktop + app + project-stop composition, each over that capability's own
+      // existing entry point -- never a new observation, disclosure, action ledger or launch path.
+      listDesktopSurfaces: () => desktopRead.listDesktopSurfaces(),
+      observeDesktopTarget: (workerGeneration, surfaceRef, surfaceEpoch) =>
+        desktopRead.observeDesktopSurface(workerGeneration, surfaceRef, surfaceEpoch),
+      createDesktopReasonTask: (objective, target) =>
+        desktopRead.createDesktopRead(objective, target.workerGeneration, target.surfaceRef, target.surfaceEpoch),
+      proposeDesktopFocus: (workerGeneration, surfaceRef, surfaceEpoch) =>
+        desktopActions.proposeDesktopFocus(workerGeneration, surfaceRef, surfaceEpoch),
+      findDesktopScrollTargets: (workerGeneration, surfaceRef, surfaceEpoch) =>
+        desktopActions.findDesktopScrollTargets(workerGeneration, surfaceRef, surfaceEpoch),
+      proposeDesktopScroll: (workerGeneration, observationId, controlRef, step) =>
+        desktopActions.proposeDesktopScroll(workerGeneration, observationId, controlRef, step),
+      listDesktopApps: () => desktopActions.listDesktopApps(),
+      proposeDesktopLaunch: (appId) => desktopActions.proposeDesktopLaunch(appId),
+      stopProjectRun: (taskId) => projects.stopProjectRun(taskId)
     })
     : undefined
   // Milestone 8a S2: screen capture is refused from this process's first

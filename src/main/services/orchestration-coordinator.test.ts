@@ -1,7 +1,16 @@
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import type { AgentCapabilityId } from '../../shared/agent-capabilities'
-import type { AgentBrowserProfileView, AgentResult, AgentTaskSnapshot } from '../../shared/agent-contracts'
+import type {
+  AgentBrowserProfileView,
+  AgentDesktopActionView,
+  AgentDesktopReadView,
+  AgentDesktopScrollTargetList,
+  AgentDesktopSurfaceList,
+  AgentRegisteredApp,
+  AgentResult,
+  AgentTaskSnapshot
+} from '../../shared/agent-contracts'
 import type { AgentProjectRunView } from '../../shared/project-contracts'
 import type { AgentDocumentTaskView, AgentLocalComparisonView } from '../../shared/document-contracts'
 import type { AgentOrchestrationStepView, AgentOrchestrationView } from '../../shared/orchestration-contracts'
@@ -21,6 +30,8 @@ import {
  * pause rather than guessing past it, and a malformed/unavailable planner never silently continues.
  * `test_orchestration_service.py` is the source of truth for the durable engine's own behavior.
  */
+
+const WORKER = '99999999-2222-4333-8444-555555555555'
 
 function orchestration(overrides: Partial<AgentOrchestrationView> = {}): AgentOrchestrationView {
   return {
@@ -154,10 +165,26 @@ function coordinator(input: {
   accountReadTask?: AgentResult<AgentTaskSnapshot>
   continuedAccountRead?: AgentResult<AgentTaskSnapshot>
   profiles?: AgentResult<AgentBrowserProfileView[]>
+  desktopSurfaces?: AgentResult<AgentDesktopSurfaceList>
+  desktopObservation?: AgentResult<{ nodeCount: number; truncated: boolean }>
+  desktopReasonTask?: AgentResult<AgentDesktopReadView>
+  desktopFocusAction?: AgentResult<AgentDesktopActionView>
+  desktopScrollTargets?: AgentResult<AgentDesktopScrollTargetList>
+  desktopScrollAction?: AgentResult<AgentDesktopActionView>
+  desktopApps?: AgentResult<AgentRegisteredApp[]>
+  desktopLaunchAction?: AgentResult<AgentDesktopActionView>
+  stoppedRun?: AgentResult<AgentProjectRunView>
 }): {
   coordinator: OrchestrationCoordinator; researchCalls: string[]; startCalls: string[]
   extractCalls: Array<{ taskId: string; fileId: string }>; compareCalls: Array<{ taskId: string; first: string; second: string }>
   accountReadCalls: Array<{ objective: string; profileId: string }>; continueAccountReadCalls: string[]
+  observeCalls: Array<{ workerGeneration: string; surfaceRef: string; surfaceEpoch: number }>
+  desktopReasonCalls: Array<{ objective: string; workerGeneration: string; surfaceRef: string; surfaceEpoch: number }>
+  focusCalls: Array<{ workerGeneration: string; surfaceRef: string; surfaceEpoch: number }>
+  scrollTargetCalls: Array<{ workerGeneration: string; surfaceRef: string; surfaceEpoch: number }>
+  scrollCalls: Array<{ workerGeneration: string; observationId: string; controlRef: string; step: string }>
+  launchCalls: string[]
+  stopProjectCalls: string[]
 } {
   const researchCalls: string[] = []
   const startCalls: string[] = []
@@ -165,6 +192,13 @@ function coordinator(input: {
   const compareCalls: Array<{ taskId: string; first: string; second: string }> = []
   const accountReadCalls: Array<{ objective: string; profileId: string }> = []
   const continueAccountReadCalls: string[] = []
+  const observeCalls: Array<{ workerGeneration: string; surfaceRef: string; surfaceEpoch: number }> = []
+  const desktopReasonCalls: Array<{ objective: string; workerGeneration: string; surfaceRef: string; surfaceEpoch: number }> = []
+  const focusCalls: Array<{ workerGeneration: string; surfaceRef: string; surfaceEpoch: number }> = []
+  const scrollTargetCalls: Array<{ workerGeneration: string; surfaceRef: string; surfaceEpoch: number }> = []
+  const scrollCalls: Array<{ workerGeneration: string; observationId: string; controlRef: string; step: string }> = []
+  const launchCalls: string[] = []
+  const stopProjectCalls: string[] = []
   const coord = new OrchestrationCoordinator({
     orchestrations: input.graph,
     planner: input.planner,
@@ -226,9 +260,60 @@ function coordinator(input: {
         profileId: '00000000-0000-4000-8000-0000000000aa', label: 'GitHub - Personal', site: 'github.com',
         status: 'AUTHENTICATED', revision: 1
       }] as AgentBrowserProfileView[]
+    },
+    listDesktopSurfaces: async () => input.desktopSurfaces ?? {
+      ok: true,
+      value: {
+        workerGeneration: WORKER, surfaces: [{ surfaceRef: 's1', surfaceEpoch: 1, applicationLabel: 'Editor', windowTitle: 'notes.txt', visible: true, minimized: false }],
+        truncated: false
+      }
+    },
+    observeDesktopTarget: async (workerGeneration, surfaceRef, surfaceEpoch) => {
+      observeCalls.push({ workerGeneration, surfaceRef, surfaceEpoch })
+      return input.desktopObservation ?? { ok: true, value: { nodeCount: 5, truncated: false } }
+    },
+    createDesktopReasonTask: async (objective, target) => {
+      desktopReasonCalls.push({ objective, ...target })
+      return input.desktopReasonTask ?? {
+        ok: true, value: { taskId: randomUUID() } as unknown as AgentDesktopReadView
+      }
+    },
+    proposeDesktopFocus: async (workerGeneration, surfaceRef, surfaceEpoch) => {
+      focusCalls.push({ workerGeneration, surfaceRef, surfaceEpoch })
+      return input.desktopFocusAction ?? {
+        ok: true, value: { actionId: randomUUID(), taskId: randomUUID() } as unknown as AgentDesktopActionView
+      }
+    },
+    findDesktopScrollTargets: async (workerGeneration, surfaceRef, surfaceEpoch) => {
+      scrollTargetCalls.push({ workerGeneration, surfaceRef, surfaceEpoch })
+      return input.desktopScrollTargets ?? {
+        ok: true, value: { observationId: randomUUID(), targets: [{ controlRef: 'u2', role: 'list', name: 'Results' }] }
+      }
+    },
+    proposeDesktopScroll: async (workerGeneration, observationId, controlRef, step) => {
+      scrollCalls.push({ workerGeneration, observationId, controlRef, step })
+      return input.desktopScrollAction ?? {
+        ok: true, value: { actionId: randomUUID(), taskId: randomUUID() } as unknown as AgentDesktopActionView
+      }
+    },
+    listDesktopApps: async () => input.desktopApps ?? {
+      ok: true, value: [{ appId: 'notepad', label: 'Notepad' }]
+    },
+    proposeDesktopLaunch: async (appId) => {
+      launchCalls.push(appId)
+      return input.desktopLaunchAction ?? {
+        ok: true, value: { actionId: randomUUID(), taskId: randomUUID() } as unknown as AgentDesktopActionView
+      }
+    },
+    stopProjectRun: async (taskId) => {
+      stopProjectCalls.push(taskId)
+      return input.stoppedRun ?? { ok: true, value: { taskId, phase: 'stopped' } as unknown as AgentProjectRunView }
     }
   })
-  return { coordinator: coord, researchCalls, startCalls, extractCalls, compareCalls, accountReadCalls, continueAccountReadCalls }
+  return {
+    coordinator: coord, researchCalls, startCalls, extractCalls, compareCalls, accountReadCalls, continueAccountReadCalls,
+    observeCalls, desktopReasonCalls, focusCalls, scrollTargetCalls, scrollCalls, launchCalls, stopProjectCalls
+  }
 }
 
 describe('OrchestrationCoordinator.run', () => {
@@ -469,6 +554,169 @@ describe('OrchestrationCoordinator.run', () => {
     expect(accountReadCalls).toEqual([])
   })
 
+  // ---- Milestone 12 S4: desktop + app + project-stop composition ---------------------------------
+
+  const DESKTOP_TARGET_RESOURCE = {
+    ref: 'r1', kind: 'desktop_target_ref', privacyClass: 'private' as const,
+    safeLabel: 'approved desktop window: Editor', singleUse: false, backingText: `${WORKER}|s1|1`
+  }
+  const APP_RESOURCE = {
+    ref: 'r1', kind: 'app_ref', privacyClass: 'none' as const, safeLabel: 'Notepad', singleUse: false, backingText: 'notepad'
+  }
+  const PROJECT_RESOURCE = {
+    ref: 'r1', kind: 'project_ref', privacyClass: 'none' as const, safeLabel: 'registered project run', singleUse: false,
+    backingId: '00000000-0000-4000-8000-0000000000pp'
+  }
+
+  it('dispatches desktop_observe by resolving the cited desktop_target_ref into (workerGeneration, surfaceRef, surfaceEpoch), never a native identity', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({ availableCapabilities: ['desktop_observe'], resources: [DESKTOP_TARGET_RESOURCE] })
+    const { coordinator: coord, observeCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([
+        { kind: 'step', capability: 'desktop_observe', resources: ['r1'], reason: 'x' },
+        { kind: 'finish', reason: 'done' }
+      ])
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(true)
+    expect(observeCalls).toEqual([{ workerGeneration: WORKER, surfaceRef: 's1', surfaceEpoch: 1 }])
+    expect(graph.calls).toContain('advance:desktop_observe')
+  })
+
+  it('refuses desktop_observe when no desktop_target_ref was cited', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({ availableCapabilities: ['desktop_observe'], resources: [] })
+    const { coordinator: coord, observeCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'desktop_observe', reason: 'x' }])
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(false)
+    expect(observeCalls).toEqual([])
+  })
+
+  it('refuses desktop_observe when the cited resource is not shaped like a desktop target', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({
+      availableCapabilities: ['desktop_observe'],
+      resources: [{ ...DESKTOP_TARGET_RESOURCE, backingText: 'not-shaped-at-all' }]
+    })
+    const { coordinator: coord, observeCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'desktop_observe', resources: ['r1'], reason: 'x' }])
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(false)
+    expect(observeCalls).toEqual([])
+  })
+
+  it('dispatches desktop_reason by opening the existing desktop-read card over the resolved window', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({ availableCapabilities: ['desktop_reason'], resources: [DESKTOP_TARGET_RESOURCE] })
+    const { coordinator: coord, desktopReasonCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'desktop_reason', resources: ['r1'], reason: 'x' }])
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(true)
+    expect(desktopReasonCalls).toEqual([{ objective: graph.view.objective, workerGeneration: WORKER, surfaceRef: 's1', surfaceEpoch: 1 }])
+    expect(graph.calls).toContain('advance:desktop_reason')
+  })
+
+  it('dispatches desktop_safe_action defaulting to focus when the planner omits "operation"', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({ availableCapabilities: ['desktop_safe_action'], resources: [DESKTOP_TARGET_RESOURCE] })
+    const { coordinator: coord, focusCalls, scrollTargetCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'desktop_safe_action', resources: ['r1'], reason: 'x' }])
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(true)
+    expect(focusCalls).toEqual([{ workerGeneration: WORKER, surfaceRef: 's1', surfaceEpoch: 1 }])
+    expect(scrollTargetCalls).toEqual([])
+    expect(graph.calls).toContain('advance:desktop_safe_action')
+  })
+
+  it('dispatches desktop_safe_action scroll_down by letting trusted code choose the first scrollable control, never the planner', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({ availableCapabilities: ['desktop_safe_action'], resources: [DESKTOP_TARGET_RESOURCE] })
+    const { coordinator: coord, scrollTargetCalls, scrollCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'desktop_safe_action', resources: ['r1'], operation: 'scroll_down', reason: 'x' }])
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(true)
+    expect(scrollTargetCalls).toEqual([{ workerGeneration: WORKER, surfaceRef: 's1', surfaceEpoch: 1 }])
+    expect(scrollCalls).toHaveLength(1)
+    expect(scrollCalls[0]).toMatchObject({ workerGeneration: WORKER, controlRef: 'u2', step: 'small_down' })
+    expect(graph.calls).toContain('advance:desktop_safe_action')
+  })
+
+  it('dispatches desktop_safe_action scroll_up as the closed opposite step', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({ availableCapabilities: ['desktop_safe_action'], resources: [DESKTOP_TARGET_RESOURCE] })
+    const { coordinator: coord, scrollCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'desktop_safe_action', resources: ['r1'], operation: 'scroll_up', reason: 'x' }])
+    })
+    await coord.run(graph.view.orchestrationId)
+    expect(scrollCalls[0]).toMatchObject({ step: 'small_up' })
+  })
+
+  it('refuses desktop_safe_action when no desktop_target_ref was cited', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({ availableCapabilities: ['desktop_safe_action'], resources: [] })
+    const { coordinator: coord, focusCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'desktop_safe_action', reason: 'x' }])
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(false)
+    expect(focusCalls).toEqual([])
+  })
+
+  it('dispatches launch_registered_app by resolving the cited app_ref, never an exe path or argument', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({ availableCapabilities: ['launch_registered_app'], resources: [APP_RESOURCE] })
+    const { coordinator: coord, launchCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'launch_registered_app', resources: ['r1'], reason: 'x' }])
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(true)
+    expect(launchCalls).toEqual(['notepad'])
+    expect(graph.calls).toContain('advance:launch_registered_app')
+  })
+
+  it('refuses launch_registered_app when no app_ref was cited', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({ availableCapabilities: ['launch_registered_app'], resources: [] })
+    const { coordinator: coord, launchCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'launch_registered_app', reason: 'x' }])
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(false)
+    expect(launchCalls).toEqual([])
+  })
+
+  it('dispatches project_stop by resolving the cited project_ref into a task id, never a PID or job handle', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({ availableCapabilities: ['project_stop'], resources: [PROJECT_RESOURCE] })
+    const { coordinator: coord, stopProjectCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([
+        { kind: 'step', capability: 'project_stop', resources: ['r1'], reason: 'x' },
+        { kind: 'finish', reason: 'done' }
+      ])
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(true)
+    expect(stopProjectCalls).toEqual(['00000000-0000-4000-8000-0000000000pp'])
+    expect(graph.calls).toContain('advance:project_stop')
+  })
+
+  it('refuses project_stop when no project_ref was cited', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({ availableCapabilities: ['project_stop'], resources: [] })
+    const { coordinator: coord, stopProjectCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'project_stop', reason: 'x' }])
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(false)
+    expect(stopProjectCalls).toEqual([])
+  })
+
   it('Milestone 12 S3: Continue on a manual_handoff_required pause re-observes through continueAccountRead before resuming, never assumes the human already acted', async () => {
     const graph = new FakeGraph()
     graph.view = orchestration({
@@ -657,6 +905,115 @@ describe('OrchestrationCoordinator.attachApprovedAccount', () => {
     const graph = new FakeGraph()
     const { coordinator: coord } = coordinator({ graph, planner: new FailingPlanner() })
     const result = await coord.attachApprovedAccount(42, '00000000-0000-4000-8000-0000000000aa')
+    expect(result.ok).toBe(false)
+  })
+})
+
+describe('OrchestrationCoordinator.attachApprovedDesktopTarget', () => {
+  it('registers a desktop_target_ref for a window the fresh listing still shows', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({ graph, planner: new FailingPlanner() })
+    const result = await coord.attachApprovedDesktopTarget(graph.view.orchestrationId, WORKER, 's1', 1)
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('unreachable')
+    expect(result.value.resources?.[0]?.kind).toBe('desktop_target_ref')
+    expect(result.value.resources?.[0]?.backingText).toBe(`${WORKER}|s1|1`)
+    expect(result.value.resources?.[0]?.safeLabel).toBe('approved desktop window: Editor')
+    expect(graph.calls).toContain('register:desktop_target_ref')
+  })
+
+  it('refuses a window whose epoch no longer matches the fresh listing -- the window closed and reopened', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({ graph, planner: new FailingPlanner() })
+    const result = await coord.attachApprovedDesktopTarget(graph.view.orchestrationId, WORKER, 's1', 2)
+    expect(result.ok).toBe(false)
+    expect(graph.calls).not.toContain('register:desktop_target_ref')
+  })
+
+  it('refuses a different worker generation -- the desktop worker restarted', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({ graph, planner: new FailingPlanner() })
+    const result = await coord.attachApprovedDesktopTarget(graph.view.orchestrationId, '00000000-0000-4000-8000-000000000000', 's1', 1)
+    expect(result.ok).toBe(false)
+    expect(graph.calls).not.toContain('register:desktop_target_ref')
+  })
+
+  it('refuses malformed input rather than forwarding it', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({ graph, planner: new FailingPlanner() })
+    expect((await coord.attachApprovedDesktopTarget(42, WORKER, 's1', 1)).ok).toBe(false)
+    expect((await coord.attachApprovedDesktopTarget(graph.view.orchestrationId, WORKER, 'hwnd:5', 1)).ok).toBe(false)
+    expect((await coord.attachApprovedDesktopTarget(graph.view.orchestrationId, WORKER, 's1', 'one' as unknown as number)).ok).toBe(false)
+  })
+})
+
+describe('OrchestrationCoordinator.attachApprovedApp', () => {
+  it('registers an app_ref for a registered application', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({ graph, planner: new FailingPlanner() })
+    const result = await coord.attachApprovedApp(graph.view.orchestrationId, 'notepad')
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('unreachable')
+    expect(result.value.resources?.[0]?.kind).toBe('app_ref')
+    expect(result.value.resources?.[0]?.backingText).toBe('notepad')
+    expect(result.value.resources?.[0]?.safeLabel).toBe('Notepad')
+    expect(graph.calls).toContain('register:app_ref')
+  })
+
+  it('refuses an unregistered app id, never registering a resource for it', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({ graph, planner: new FailingPlanner() })
+    const result = await coord.attachApprovedApp(graph.view.orchestrationId, 'not-registered')
+    expect(result.ok).toBe(false)
+    expect(graph.calls).not.toContain('register:app_ref')
+  })
+
+  it('refuses a non-string argument rather than forwarding it', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({ graph, planner: new FailingPlanner() })
+    const result = await coord.attachApprovedApp(42, 'notepad')
+    expect(result.ok).toBe(false)
+  })
+})
+
+describe('OrchestrationCoordinator.attachApprovedProject', () => {
+  it('registers a project_ref for the one currently live, Lumi-owned run', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({
+      graph, planner: new FailingPlanner(),
+      projectRun: { ok: true, value: { taskId: '00000000-0000-4000-8000-0000000000pp', phase: 'running' } as unknown as AgentProjectRunView }
+    })
+    const result = await coord.attachApprovedProject(graph.view.orchestrationId)
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('unreachable')
+    expect(result.value.resources?.[0]?.kind).toBe('project_ref')
+    expect(result.value.resources?.[0]?.backingId).toBe('00000000-0000-4000-8000-0000000000pp')
+    expect(graph.calls).toContain('register:project_ref')
+  })
+
+  it('refuses when there is no live run to attach', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({ graph, planner: new FailingPlanner(), projectRun: { ok: true, value: null } })
+    const result = await coord.attachApprovedProject(graph.view.orchestrationId)
+    expect(result.ok).toBe(false)
+    expect(graph.calls).not.toContain('register:project_ref')
+  })
+
+  it('refuses a run that has already ended -- only a live run may be attached', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({
+      graph, planner: new FailingPlanner(),
+      projectRun: { ok: true, value: { taskId: '00000000-0000-4000-8000-0000000000pp', phase: 'stopped' } as unknown as AgentProjectRunView }
+    })
+    const result = await coord.attachApprovedProject(graph.view.orchestrationId)
+    expect(result.ok).toBe(false)
+    expect(graph.calls).not.toContain('register:project_ref')
+  })
+
+  it('refuses a non-string argument rather than forwarding it', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({ graph, planner: new FailingPlanner() })
+    const result = await coord.attachApprovedProject(42)
     expect(result.ok).toBe(false)
   })
 })

@@ -115,6 +115,25 @@ export function parseDesktopSurfaceList(value: unknown): AgentDesktopSurfaceList
   }
 }
 
+/**
+ * Milestone 12 S4: the ONLY two bounded facts `desktop_observe`'s orchestration composition ever reads out
+ * of a raw S1 scan -- a node count and whether it was truncated. Every other field the runtime's
+ * `POST /desktop/observations` response carries (a role, a name, any scanned text) is deliberately never
+ * parsed here at all, so it cannot reach `orchestration-coordinator.ts` even by a future accidental read.
+ */
+export interface AgentDesktopScanSummary {
+  nodeCount: number
+  truncated: boolean
+}
+
+export function parseDesktopScanSummary(value: unknown): AgentDesktopScanSummary {
+  const body = record(value, 'desktop.observation')
+  return {
+    nodeCount: integer(body.node_count, 'desktop.observation.node_count', 0),
+    truncated: bool(body.truncated, 'desktop.observation.truncated')
+  }
+}
+
 // ---- one desktop read -----------------------------------------------------------------------
 
 function recipient(value: unknown, what: string): AgentDesktopCardView['recipient'] {

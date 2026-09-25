@@ -37,6 +37,17 @@ import { isAllowedRuntimeRoute } from '../services/agent-runtime-supervisor'
  * allowed to carry an image. Its output is a closed candidate list (`AgentVisionCandidate`) -- evidence
  * only, never an action, a click or a coordinate -- and nothing anywhere in this codebase turns one
  * into either. `runDesktopCapture` runs local OCR as a side effect and returns no pixel to the renderer.
+ *
+ * Milestone 12, slice 4 composes `desktop_observe`/`desktop_reason`/`desktop_safe_action`/
+ * `launch_registered_app` into the general orchestrator, over these SAME reviewed S1-S3 entry points --
+ * no new desktop route, verb or wire shape. `OrchestrationCoordinator` (`src/main/services/
+ * orchestration-coordinator.ts`) becomes a new, reviewed caller of `proposeDesktopFocus`/
+ * `proposeDesktopScroll`/`proposeDesktopLaunch` (S3's own three effect proposals, unchanged) and of a
+ * new read-only method, `DesktopReadController.observeDesktopSurface` (S1's own observation call,
+ * returning ONLY a bounded node count and truncation flag -- never a node, a role, a name or any
+ * scanned text). One new renderer-bridge method, `attachApprovedDesktopTarget`, lets the user pick a
+ * window from the SAME `listDesktopSurfaces` listing the S2 disclosure card already offers; it mints an
+ * opaque resource ref, never itself an observation, a focus, a scroll or a launch.
  */
 
 const ROOT = join(__dirname, '..', '..', '..')
@@ -257,11 +268,16 @@ describe('the desktop firewall', () => {
     'createDesktopCapture', 'getDesktopCapture', 'grantDesktopCapture', 'declineDesktopCapture', 'runDesktopCapture',
     'createDesktopVisionDisclosure', 'grantDesktopVisionDisclosure', 'declineDesktopVisionDisclosure', 'runDesktopVisionDisclosure'
   ]
+  // Milestone 12 S4: ONE new renderer-bridge method -- a trusted attach action that mints an opaque
+  // `desktop_target_ref` resource from the SAME S1 surface listing. It performs no desktop verb of its
+  // own (no observe, focus, scroll or launch); `attachApprovedApp`/`attachApprovedProject` do not match
+  // `/Desktop/` and so are not counted here, but are reviewed alongside it in `docs/reviews/milestone-12-s4.md`.
+  const M12_S4_METHODS = ['attachApprovedDesktopTarget']
   const ALL_DESKTOP_METHODS = [
-    ...S2_METHODS, ...S3_METHODS, ...S4_EXECUTION_METHODS, ...S4_PLANNING_METHODS, ...S5_METHODS
+    ...S2_METHODS, ...S3_METHODS, ...S4_EXECUTION_METHODS, ...S4_PLANNING_METHODS, ...S5_METHODS, ...M12_S4_METHODS
   ].sort()
 
-  it('exposes exactly the six S2, eight S3, seven S4 and nine S5 typed desktop methods on the renderer bridge and no other verb', () => {
+  it('exposes exactly the six S2, eight S3, seven S4, nine S5 and one M12 S4 typed desktop methods on the renderer bridge and no other verb', () => {
     const bridge = source(join(ROOT, 'src', 'preload', 'index.ts'))
     const methods = [...bridge.matchAll(/^\s{2}(\w*Desktop\w*):/gm)].map((match) => match[1]).sort()
     expect(methods).toEqual(ALL_DESKTOP_METHODS)
@@ -277,7 +293,7 @@ describe('the desktop firewall', () => {
     expect(bridge).not.toMatch(/(executeDesktop|computer)\s*[:(]/)
   })
 
-  it('registers exactly the six S2, eight S3, seven S4 and nine S5 desktop channels, none of which can click, type or run anything', () => {
+  it('registers exactly the six S2, eight S3, seven S4, nine S5 and one M12 S4 desktop channels, none of which can click, type or run anything', () => {
     const channels = Object.keys(AGENT_IPC_CHANNELS).filter((name) => /desktop/i.test(name)).sort()
     expect(channels).toEqual(ALL_DESKTOP_METHODS)
     for (const name of channels) {
@@ -297,10 +313,15 @@ describe('the desktop firewall', () => {
       'src/main/services/agent-ipc.ts',
       'src/main/services/desktop-action-controller.ts'
     ])
-    // Focus, scroll and launch are named nowhere in Electron main except the controller, wire, IPC and contracts.
+    // Focus, scroll and launch are named nowhere in Electron main except the controller, wire, IPC and
+    // contracts, plus (Milestone 12 S4) the two files that compose them into the general orchestrator:
+    // `index.ts` wires the dependency, and `orchestration-coordinator.ts` is the one new, reviewed
+    // caller -- it still only ever proposes the SAME three S3 cards, never a fourth verb.
     expect(mentioning(/proposeDesktop(Focus|Scroll|Launch)/)).toEqual([
+      'src/main/index.ts',
       'src/main/services/agent-ipc.ts',
       'src/main/services/desktop-action-controller.ts',
+      'src/main/services/orchestration-coordinator.ts',
       'src/preload/index.ts',
       'src/renderer/src/components/DesktopActionPanel.tsx',
       'src/shared/agent-contracts.ts'
