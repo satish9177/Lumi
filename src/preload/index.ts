@@ -260,7 +260,9 @@ const agentApi: AgentApi = {
   continueOrchestration: (orchestrationId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.continueOrchestration, orchestrationId),
   stopOrchestration: (orchestrationId: string) => ipcRenderer.invoke(AGENT_IPC_CHANNELS.stopOrchestration, orchestrationId),
   attachApprovedDocument: (orchestrationId: string, rootId: string, relativePath: string) =>
-    ipcRenderer.invoke(AGENT_IPC_CHANNELS.attachApprovedDocument, orchestrationId, rootId, relativePath)
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.attachApprovedDocument, orchestrationId, rootId, relativePath),
+  attachApprovedAccount: (orchestrationId: string, profileId: string) =>
+    ipcRenderer.invoke(AGENT_IPC_CHANNELS.attachApprovedAccount, orchestrationId, profileId)
 }
 
 // The Gemini Live relay: fixed channels, closed message kinds, validated in

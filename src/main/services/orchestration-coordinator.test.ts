@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import type { AgentCapabilityId } from '../../shared/agent-capabilities'
-import type { AgentResult, AgentTaskSnapshot } from '../../shared/agent-contracts'
+import type { AgentBrowserProfileView, AgentResult, AgentTaskSnapshot } from '../../shared/agent-contracts'
 import type { AgentProjectRunView } from '../../shared/project-contracts'
 import type { AgentDocumentTaskView, AgentLocalComparisonView } from '../../shared/document-contracts'
 import type { AgentOrchestrationStepView, AgentOrchestrationView } from '../../shared/orchestration-contracts'
@@ -151,14 +151,20 @@ function coordinator(input: {
   startedRun?: AgentResult<AgentProjectRunView>
   extracted?: AgentResult<AgentDocumentTaskView>
   compared?: AgentResult<AgentLocalComparisonView>
+  accountReadTask?: AgentResult<AgentTaskSnapshot>
+  continuedAccountRead?: AgentResult<AgentTaskSnapshot>
+  profiles?: AgentResult<AgentBrowserProfileView[]>
 }): {
   coordinator: OrchestrationCoordinator; researchCalls: string[]; startCalls: string[]
   extractCalls: Array<{ taskId: string; fileId: string }>; compareCalls: Array<{ taskId: string; first: string; second: string }>
+  accountReadCalls: Array<{ objective: string; profileId: string }>; continueAccountReadCalls: string[]
 } {
   const researchCalls: string[] = []
   const startCalls: string[] = []
   const extractCalls: Array<{ taskId: string; fileId: string }> = []
   const compareCalls: Array<{ taskId: string; first: string; second: string }> = []
+  const accountReadCalls: Array<{ objective: string; profileId: string }> = []
+  const continueAccountReadCalls: string[] = []
   const coord = new OrchestrationCoordinator({
     orchestrations: input.graph,
     planner: input.planner,
@@ -200,9 +206,29 @@ function coordinator(input: {
     compareDocumentsLocally: async (taskId, first, second) => {
       compareCalls.push({ taskId, first, second })
       return input.compared ?? { ok: true, value: { overlap: 0.5 } as unknown as AgentLocalComparisonView }
+    },
+    createAccountReadTask: async (objective, profileId) => {
+      accountReadCalls.push({ objective, profileId })
+      return input.accountReadTask ?? {
+        ok: true,
+        value: { task: { taskId: randomUUID(), kind: 'authenticated_read', status: 'WAITING_APPROVAL' } } as unknown as AgentTaskSnapshot
+      }
+    },
+    continueAccountRead: async (taskId) => {
+      continueAccountReadCalls.push(taskId)
+      return input.continuedAccountRead ?? {
+        ok: true, value: { task: { taskId, kind: 'authenticated_read', status: 'PAUSED' } } as unknown as AgentTaskSnapshot
+      }
+    },
+    listBrowserProfiles: async () => input.profiles ?? {
+      ok: true,
+      value: [{
+        profileId: '00000000-0000-4000-8000-0000000000aa', label: 'GitHub - Personal', site: 'github.com',
+        status: 'AUTHENTICATED', revision: 1
+      }] as AgentBrowserProfileView[]
     }
   })
-  return { coordinator: coord, researchCalls, startCalls, extractCalls, compareCalls }
+  return { coordinator: coord, researchCalls, startCalls, extractCalls, compareCalls, accountReadCalls, continueAccountReadCalls }
 }
 
 describe('OrchestrationCoordinator.run', () => {
@@ -389,14 +415,97 @@ describe('OrchestrationCoordinator.run', () => {
     // Not reachable through the real Python catalog (it only ever offers composed capabilities), but the
     // coordinator's own closed dispatch must still fail closed if it ever were.
     const graph = new FakeGraph()
-    graph.view = orchestration({ availableCapabilities: ['account_read'] })
+    graph.view = orchestration({ availableCapabilities: ['desktop_observe'] })
     const { coordinator: coord } = coordinator({
-      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'account_read', reason: 'x' }])
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'desktop_observe', reason: 'x' }])
     })
     const result = await coord.run(graph.view.orchestrationId)
     expect(result.ok).toBe(false)
     if (result.ok) throw new Error('unreachable')
     expect(result.error.code).toBe('orchestration_refused')
+  })
+
+  it('dispatches account_read by resolving the cited account_context_ref, never trusting the planner’s own text', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({
+      availableCapabilities: ['account_read'],
+      resources: [{
+        ref: 'r1', kind: 'account_context_ref', privacyClass: 'private',
+        safeLabel: 'approved signed-in account context for github.com', singleUse: false,
+        backingId: '00000000-0000-4000-8000-0000000000aa'
+      }]
+    })
+    const { coordinator: coord, accountReadCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'account_read', resources: ['r1'], reason: 'x' }])
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(true)
+    expect(accountReadCalls).toEqual([{ objective: graph.view.objective, profileId: '00000000-0000-4000-8000-0000000000aa' }])
+    expect(graph.calls).toContain('advance:account_read')
+  })
+
+  it('refuses account_read when no account_context_ref was cited, before creating any task', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({ availableCapabilities: ['account_read'], resources: [] })
+    const { coordinator: coord, accountReadCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'account_read', reason: 'x' }])
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(false)
+    expect(accountReadCalls).toEqual([])
+  })
+
+  it('refuses account_read when the cited ref is the wrong kind, before creating any task', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({
+      availableCapabilities: ['account_read'],
+      resources: [{ ref: 'r1', kind: 'document_ref', privacyClass: 'private', safeLabel: 'x', singleUse: false, backingId: '00000000-0000-4000-8000-0000000000aa' }]
+    })
+    const { coordinator: coord, accountReadCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'step', capability: 'account_read', resources: ['r1'], reason: 'x' }])
+    })
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(false)
+    expect(accountReadCalls).toEqual([])
+  })
+
+  it('Milestone 12 S3: Continue on a manual_handoff_required pause re-observes through continueAccountRead before resuming, never assumes the human already acted', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({
+      status: 'PAUSED',
+      pauseReason: 'manual_handoff_required',
+      stepCount: 1,
+      availableCapabilities: [],
+      steps: [{
+        sequence: 1, capabilityId: 'account_read', status: 'AWAITING_APPROVAL',
+        childTaskId: '00000000-0000-4000-8000-0000000000cc',
+        pendingNote: 'Manual action required: sign in to the account in the Lumi browser. When finished, return here and choose Continue.'
+      }]
+    })
+    const { coordinator: coord, continueAccountReadCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'finish', reason: 'done' }])
+    })
+    const result = await coord.continueOrchestration(graph.view.orchestrationId)
+    expect(result.ok).toBe(true)
+    // The nudge ran BEFORE resume() re-read state -- Continue itself never settles anything.
+    expect(continueAccountReadCalls).toEqual(['00000000-0000-4000-8000-0000000000cc'])
+    expect(graph.calls[0]).toBe('resume')
+  })
+
+  it('never nudges continueAccountRead for a plain approval_required pause (the ordinary scope card, not a handoff)', async () => {
+    const graph = new FakeGraph()
+    graph.view = orchestration({
+      status: 'PAUSED',
+      pauseReason: 'approval_required',
+      stepCount: 1,
+      availableCapabilities: [],
+      steps: [{ sequence: 1, capabilityId: 'account_read', status: 'AWAITING_APPROVAL', childTaskId: '00000000-0000-4000-8000-0000000000cc' }]
+    })
+    const { coordinator: coord, continueAccountReadCalls } = coordinator({
+      graph, planner: new ScriptedPlanner([{ kind: 'finish', reason: 'done' }])
+    })
+    await coord.continueOrchestration(graph.view.orchestrationId)
+    expect(continueAccountReadCalls).toEqual([])
   })
 
   it('dispatches document_read by resolving the cited resource’s backing id, never trusting the planner’s own text', async () => {
@@ -502,6 +611,52 @@ describe('OrchestrationCoordinator.attachApprovedDocument', () => {
     const graph = new FakeGraph()
     const { coordinator: coord } = coordinator({ graph, planner: new FailingPlanner() })
     const result = await coord.attachApprovedDocument(42, 'root-1', 'resume.pdf')
+    expect(result.ok).toBe(false)
+  })
+})
+
+describe('OrchestrationCoordinator.attachApprovedAccount', () => {
+  it('registers an account_context_ref for a signed-in profile the user picked', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({ graph, planner: new FailingPlanner() })
+    const result = await coord.attachApprovedAccount(graph.view.orchestrationId, '00000000-0000-4000-8000-0000000000aa')
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('unreachable')
+    expect(result.value.resources?.[0]?.kind).toBe('account_context_ref')
+    expect(result.value.resources?.[0]?.backingId).toBe('00000000-0000-4000-8000-0000000000aa')
+    expect(result.value.resources?.[0]?.safeLabel).toBe('approved signed-in account context for github.com')
+    expect(graph.calls).toContain('register:account_context_ref')
+  })
+
+  it('refuses a profile that is not signed in, never registering a resource for it', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({
+      graph, planner: new FailingPlanner(),
+      profiles: {
+        ok: true,
+        value: [{
+          profileId: '00000000-0000-4000-8000-0000000000aa', label: 'GitHub - Personal', site: 'github.com',
+          status: 'NEEDS_LOGIN', revision: 1
+        }] as AgentBrowserProfileView[]
+      }
+    })
+    const result = await coord.attachApprovedAccount(graph.view.orchestrationId, '00000000-0000-4000-8000-0000000000aa')
+    expect(result.ok).toBe(false)
+    expect(graph.calls).not.toContain('register:account_context_ref')
+  })
+
+  it('refuses an unknown profile id, never registering a resource for it', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({ graph, planner: new FailingPlanner() })
+    const result = await coord.attachApprovedAccount(graph.view.orchestrationId, '00000000-0000-4000-8000-000000000000')
+    expect(result.ok).toBe(false)
+    expect(graph.calls).not.toContain('register:account_context_ref')
+  })
+
+  it('refuses a non-string argument rather than forwarding it', async () => {
+    const graph = new FakeGraph()
+    const { coordinator: coord } = coordinator({ graph, planner: new FailingPlanner() })
+    const result = await coord.attachApprovedAccount(42, '00000000-0000-4000-8000-0000000000aa')
     expect(result.ok).toBe(false)
   })
 })

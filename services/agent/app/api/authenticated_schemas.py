@@ -60,7 +60,12 @@ class RevokeAuthenticatedGrantBody(BaseModel):
 
     grant_id: uuid.UUID | None = None
     expected_revision: int | None = Field(default=None, ge=1)
-    reason: Literal["user_stopped", "user_declined", "task_cancelled"] = "user_stopped"
+    #: Milestone 12 S3: `grant_unusable` is Electron main's own orchestration Continue-time re-observe path
+    #: (`OrchestrationCoordinator`/`AgentTaskController.continueAccountRead`), used only when a fresh,
+    #: forced observation could not proceed under the existing grant (a different account now signed in, or
+    #: the grant expired) -- never chosen by a model, and never a new authority: `revoke()` itself is
+    #: unchanged, this only adds one more honest label for why it was called.
+    reason: Literal["user_stopped", "user_declined", "task_cancelled", "grant_unusable"] = "user_stopped"
 
 
 class ExecuteAuthenticatedStepBody(BaseModel):

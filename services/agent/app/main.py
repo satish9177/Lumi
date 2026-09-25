@@ -393,7 +393,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 # capability's own boundary (research or project); a synchronous step records a result the
                 # caller already read.
                 app.state.orchestration_service = OrchestrationService(
-                    engine, research=research_service, project=app.state.project_service
+                    engine, research=research_service, project=app.state.project_service,
+                    authenticated=app.state.authenticated_read_service,
                 )
                 # A research session belongs to the process that created it.
                 # Sessions a dead runtime left open describe browser contexts

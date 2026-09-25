@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { AgentApi } from '../../../shared/agent-contracts'
+import type { AgentApi, AgentBrowserProfileView } from '../../../shared/agent-contracts'
 import type {
   AgentOrchestrationPauseReason,
   AgentOrchestrationStepStatus,
@@ -49,6 +49,11 @@ export interface OrchestrationCardProps {
   onRefresh: () => void
   onContinue: () => void
   onStop: () => void
+  /** Milestone 12 S3: signed-in profiles the user may attach as an account resource. */
+  accountProfiles: AgentBrowserProfileView[]
+  accountProfile: string
+  onAccountProfileChange: (value: string) => void
+  onAttachAccount: () => void
 }
 
 /**
@@ -60,11 +65,15 @@ export interface OrchestrationCardProps {
  * project's warning card) happens on that capability's own existing surface, not here.
  */
 export function OrchestrationCard({
-  orchestration, objective, busy, message, onObjectiveChange, onCreate, onRefresh, onContinue, onStop
+  orchestration, objective, busy, message, onObjectiveChange, onCreate, onRefresh, onContinue, onStop,
+  accountProfiles, accountProfile, onAccountProfileChange, onAttachAccount
 }: OrchestrationCardProps) {
   const empty = !orchestration || orchestration.status === 'STOPPED'
   const canContinue = orchestration?.status === 'PAUSED'
   const canStop = orchestration?.status === 'RUNNING' || orchestration?.status === 'PAUSED'
+  const canAttachAccount = orchestration?.status === 'RUNNING' || orchestration?.status === 'PAUSED'
+  const isManualHandoff = orchestration?.status === 'PAUSED' && orchestration.pauseReason === 'manual_handoff_required'
+  const handoffInstruction = isManualHandoff ? orchestration?.steps.at(-1)?.pendingNote : undefined
 
   if (empty) {
     return (
@@ -97,6 +106,14 @@ export function OrchestrationCard({
           <> — <span data-testid="orchestration-pause-reason">{PAUSE_REASON_TEXT[orchestration.pauseReason]}</span></>
         )}
       </p>
+      {isManualHandoff && (
+        <div className="agent-booking-card tone-uncertain" role="status" data-testid="orchestration-manual-handoff">
+          <p className="lifelens-card-heading">Manual action required</p>
+          <p className="workspace-note">
+            {handoffInstruction ?? 'Do what the site is asking in the Lumi browser, then return here and choose Continue.'}
+          </p>
+        </div>
+      )}
       <button className="text-button" type="button" disabled={busy} onClick={onRefresh} data-testid="orchestration-refresh">Refresh</button>
       {canContinue && (
         <button className="primary-button" type="button" disabled={busy} onClick={onContinue} data-testid="orchestration-continue">
@@ -107,6 +124,37 @@ export function OrchestrationCard({
         <button className="text-button" type="button" disabled={busy} onClick={onStop} data-testid="orchestration-stop">
           Stop this task
         </button>
+      )}
+
+      {canAttachAccount && (
+        <div data-testid="orchestration-attach-account">
+          <h4>Account</h4>
+          {accountProfiles.length === 0 ? (
+            <p className="workspace-note">No signed-in account is available to attach. Sign in to one first.</p>
+          ) : (
+            <>
+              <label>Signed-in account
+                <select value={accountProfile} data-testid="orchestration-account-select"
+                  onChange={(event) => onAccountProfileChange(event.target.value)}>
+                  {accountProfiles.map((profile) => (
+                    <option key={profile.profileId} value={profile.profileId}>{profile.label} ({profile.site})</option>
+                  ))}
+                </select>
+              </label>
+              <button className="text-button" type="button" disabled={busy || !accountProfile}
+                onClick={onAttachAccount} data-testid="orchestration-attach-account-button">
+                Make this account available to this task
+              </button>
+            </>
+          )}
+          {orchestration.resources && orchestration.resources.length > 0 && (
+            <ul data-testid="orchestration-resources">
+              {orchestration.resources.map((resource) => (
+                <li key={resource.ref} data-testid="orchestration-resource"><bdi>{resource.safeLabel}</bdi></li>
+              ))}
+            </ul>
+          )}
+        </div>
       )}
 
       <h4>Steps</h4>
@@ -132,6 +180,8 @@ export function OrchestrationPanel({ agent, onClose }: OrchestrationPanelProps) 
   const [objective, setObjective] = useState('')
   const [message, setMessage] = useState<string>()
   const [busy, setBusy] = useState(false)
+  const [accountProfiles, setAccountProfiles] = useState<AgentBrowserProfileView[]>([])
+  const [accountProfile, setAccountProfile] = useState('')
   const mounted = useRef(true)
 
   useEffect(() => {
@@ -154,6 +204,19 @@ export function OrchestrationPanel({ agent, onClose }: OrchestrationPanelProps) 
 
   useEffect(() => { void run(() => agent.getLatestOrchestration(), (value) => { if (value) setOrchestration(value) }) }, [agent, run])
 
+  // Milestone 12 S3: which signed-in profiles may be attached as an `account_context_ref`. Never a
+  // renderer-invented list -- the same profiles main itself would offer for a direct account-reading task.
+  useEffect(() => {
+    let active = true
+    void agent.listBrowserProfiles().then((profiles) => {
+      if (!active || !mounted.current) return
+      const signedIn = profiles.ok ? profiles.value.filter((profile) => profile.status === 'AUTHENTICATED' && !profile.activeTakeover) : []
+      setAccountProfiles(signedIn)
+      setAccountProfile((current) => (signedIn.some((profile) => profile.profileId === current) ? current : signedIn[0]?.profileId ?? ''))
+    })
+    return () => { active = false }
+  }, [agent])
+
   return (
     <div className="agent-task-panel" data-testid="orchestration-panel">
       <header className="settings-header">
@@ -171,6 +234,14 @@ export function OrchestrationPanel({ agent, onClose }: OrchestrationPanelProps) 
           onRefresh={() => { if (orchestration) void run(() => agent.getOrchestration(orchestration.orchestrationId), setOrchestration) }}
           onContinue={() => { if (orchestration) void run(() => agent.continueOrchestration(orchestration.orchestrationId), setOrchestration) }}
           onStop={() => { if (orchestration) void run(() => agent.stopOrchestration(orchestration.orchestrationId), setOrchestration) }}
+          accountProfiles={accountProfiles}
+          accountProfile={accountProfile}
+          onAccountProfileChange={setAccountProfile}
+          onAttachAccount={() => {
+            if (orchestration && accountProfile) {
+              void run(() => agent.attachApprovedAccount(orchestration.orchestrationId, accountProfile), setOrchestration)
+            }
+          }}
         />
       </div>
     </div>

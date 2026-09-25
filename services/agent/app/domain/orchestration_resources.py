@@ -79,6 +79,11 @@ CAPABILITY_OUTPUT_RESOURCE: Final[dict[str, ResourceOutputSpec]] = {
     #: itself carries no text, only a controller-authored template label -- see `safe_label()`. Its backing
     #: id is the new `document_id` `DocumentService.extract()` produced, supplied by main.
     "document_read": ResourceOutputSpec(kind="document_result_ref", privacy_class="private", needs_backing_id=True),
+    #: Milestone 12 S3. `account_read`'s own answer is `account_private` (`app/domain/authenticated.py`); like
+    #: `document_read`, the resource itself carries no account text, only a controller-authored template
+    #: label. It needs no backing id: nothing this runtime has composed yet cites an `account_result_ref` as
+    #: input, so there is nothing for a later step to resolve it back to.
+    "account_read": ResourceOutputSpec(kind="account_result_ref", privacy_class="private"),
 }
 
 #: capability_id -> the exact ordered resource kinds it accepts as input. Absent or empty means "accepts no
@@ -95,12 +100,20 @@ CAPABILITY_RESOURCE_REQUIREMENTS: Final[dict[str, tuple[str, ...]]] = {
     #: own description says "two ALREADY-READ documents" -- `compare_local()` needs post-extraction document
     #: ids, so this requires the *result* of two `document_read` steps, not two unread file references.
     "document_compare": ("document_result_ref", "document_result_ref"),
+    #: Milestone 12 S3. The one account context this step reads under -- never chosen or minted by the
+    #: planner (see `REGISTERABLE_RESOURCE_KINDS` below). Selecting `account_read` on a real `account_context_ref`
+    #: is not itself approval: the linked `authenticated_read` task's own existing scope card still gates
+    #: every read, exactly as a direct request would.
+    "account_read": ("account_context_ref",),
 }
 
-#: Milestone 12 S2: resource kinds a trusted action outside the planner loop may register directly (never
+#: Milestone 12 S2/S3: resource kinds a trusted action outside the planner loop may register directly (never
 #: minted by a capability's own success). Each entry here needs its own review before being added -- these
-#: are the only two ways a resource may exist without ever having been produced by `_commit_step`/`resume`.
-REGISTERABLE_RESOURCE_KINDS: Final[frozenset[str]] = frozenset({"document_ref", "public_url_ref"})
+#: are the only ways a resource may exist without ever having been produced by `_commit_step`/`resume`.
+#: `account_context_ref` (S3): main registers one only after `AuthenticatedReadService.check_profile` confirms
+#: the profile is signed in, not mid-takeover and not leased elsewhere -- the same check a direct
+#: authenticated-read request already passes through; the model never creates or relabels one.
+REGISTERABLE_RESOURCE_KINDS: Final[frozenset[str]] = frozenset({"document_ref", "public_url_ref", "account_context_ref"})
 
 _REF_PATTERN: Final = re.compile(r"^r[1-9][0-9]{0,5}$")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")

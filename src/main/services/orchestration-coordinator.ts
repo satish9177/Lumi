@@ -1,5 +1,5 @@
 import type { AgentCapabilityId } from '../../shared/agent-capabilities'
-import type { AgentResult, AgentTaskSnapshot } from '../../shared/agent-contracts'
+import type { AgentBrowserProfileView, AgentResult, AgentTaskSnapshot } from '../../shared/agent-contracts'
 import type { AgentProjectRunView } from '../../shared/project-contracts'
 import type { AgentDocumentTaskView, AgentLocalComparisonView } from '../../shared/document-contracts'
 import type { AgentOrchestrationResourceView, AgentOrchestrationView } from '../../shared/orchestration-contracts'
@@ -96,6 +96,18 @@ export interface OrchestrationCoordinatorDependencies {
   compareDocumentsLocally: (
     taskId: string, firstDocumentId: string, secondDocumentId: string
   ) => Promise<AgentResult<AgentLocalComparisonView>>
+  /**
+   * Milestone 12 S3: Milestone 8a S3's own entry point for `account_read` -- the same task creation and
+   * trusted scope card a direct request already shows, over an already-authenticated profile.
+   */
+  createAccountReadTask: (objective: string, profileId: string) => Promise<AgentResult<AgentTaskSnapshot>>
+  /**
+   * Milestone 12 S3: the Continue-time re-observe nudge for a paused `account_read` step's linked task --
+   * one forced, fresh observation, never an assumption that the requested human action happened.
+   */
+  continueAccountRead: (taskId: string) => Promise<AgentResult<AgentTaskSnapshot>>
+  /** Milestone 8a S2's own entry point: every browser profile main knows about, signed-in or not. */
+  listBrowserProfiles: () => Promise<AgentResult<AgentBrowserProfileView[]>>
 }
 
 export class OrchestrationCoordinator {
@@ -141,10 +153,18 @@ export class OrchestrationCoordinator {
     // approval_required: the ordinary "waiting on a human" pause. outcome_unknown: a linked capability's
     // own effect is unresolved -- re-checking is still the right move (a person may have since looked and
     // settled it through that capability's own reconciliation path), never a reason to stop trying.
-    if (view.status === 'PAUSED' && (view.pauseReason === 'approval_required' || view.pauseReason === 'outcome_unknown')) {
+    // manual_handoff_required (Milestone 12 S3): a human was asked to act outside Lumi (sign in, clear a
+    // CAPTCHA); Continue never assumes that happened -- `progressPendingStep` forces one fresh, real
+    // re-observation of the linked task before anything here is treated as resolved.
+    if (view.status === 'PAUSED' && (
+      view.pauseReason === 'approval_required' || view.pauseReason === 'outcome_unknown' ||
+      view.pauseReason === 'manual_handoff_required'
+    )) {
       // A step-specific mechanical continuation, never a second approval: project_start's own approval is
       // the grant becoming ACTIVE through the existing warning card, and start() performs no new effect
       // beyond what that one approval already covers (ProjectService.start() is itself idempotent).
+      // account_read's own continuation is a real re-observation, never a second approval either -- see
+      // `progressPendingStep`.
       await this.progressPendingStep(view)
       const resumed = await this.deps.orchestrations.resumeOrchestration(orchestrationId, view.revision)
       if (!resumed.ok) return resumed
@@ -221,15 +241,31 @@ export class OrchestrationCoordinator {
   }
 
   /**
-   * Best-effort: for the one capability whose own approval does not by itself finish the effect
-   * (`project_start`: the grant becoming ACTIVE still needs `start()` called), nudge it forward. A refusal
-   * here (not yet approved, already started, a missing dependency) is swallowed -- the orchestration's own
-   * `resume` re-reads the real state afterward and reports it honestly either way.
+   * Best-effort: for a capability whose own approval does not by itself finish the effect, or whose pause
+   * needs a real re-observation rather than a passive re-read, nudge it forward. A refusal here (not yet
+   * approved, already started, a missing dependency) is swallowed -- the orchestration's own `resume`
+   * re-reads the real state afterward and reports it honestly either way, never assuming this call's own
+   * outcome.
+   *
+   * `project_start`: the grant becoming ACTIVE still needs `start()` called.
+   * `account_read` (Milestone 12 S3): a `manual_handoff_required` pause (login, an unrecognised or changed
+   * account, a navigation outside the approved site) is never cleared just because the user pressed
+   * Continue -- `continueAccountRead` attempts one fresh, forced observation against the linked task and
+   * reports whatever it actually finds, including "still paused" or "this account is wrong; refused".
    */
   private async progressPendingStep(view: AgentOrchestrationView): Promise<void> {
     const pending = view.steps.find((step) => step.status === 'AWAITING_APPROVAL' || step.status === 'PENDING')
-    if (!pending?.childTaskId || pending.capabilityId !== 'project_start') return
-    await this.deps.startProjectRun(pending.childTaskId)
+    if (!pending?.childTaskId) return
+    if (pending.capabilityId === 'project_start') {
+      await this.deps.startProjectRun(pending.childTaskId)
+      return
+    }
+    // Only a real manual handoff needs a fresh, forced observation: the ordinary `approval_required` wait
+    // (nobody has confirmed the scope card yet, so there is no active grant at all) has nothing to
+    // re-observe, and `outcome_unknown` is not account_read's own concern here either.
+    if (pending.capabilityId === 'account_read' && view.pauseReason === 'manual_handoff_required') {
+      await this.deps.continueAccountRead(pending.childTaskId)
+    }
   }
 
   /**
@@ -261,6 +297,31 @@ export class OrchestrationCoordinator {
     }
     return this.deps.orchestrations.registerResource(orchestrationId, current.value.revision, {
       kind: 'document_ref', safeLabel: file.displayName, backingId: file.fileId, documentTaskId: taskId
+    })
+  }
+
+  /**
+   * Milestone 12 S3: makes one already-authenticated browser profile available to this orchestration as an
+   * `account_context_ref` resource. Never reachable from the planner or the model -- this is the trusted
+   * renderer action, exactly like approving a file root or attaching a document: the user themselves picks
+   * which signed-in profile the orchestration may later choose to read under. Selecting `account_read` on
+   * the resulting ref is still not approval -- the linked `authenticated_read` task's own existing scope
+   * card gates every read, exactly as a direct request would.
+   */
+  async attachApprovedAccount(orchestrationIdValue: unknown, profileIdValue: unknown): Promise<AgentResult<AgentOrchestrationView>> {
+    if (typeof orchestrationIdValue !== 'string' || typeof profileIdValue !== 'string') {
+      return { ok: false, error: { code: 'invalid_request', message: 'That account reference is invalid.' } }
+    }
+    const profiles = await this.deps.listBrowserProfiles()
+    if (!profiles.ok) return profiles
+    const profile = profiles.value.find((item) => item.profileId === profileIdValue)
+    if (profile === undefined || profile.status !== 'AUTHENTICATED' || profile.activeTakeover) {
+      return { ok: false, error: { code: 'orchestration_refused', message: 'Choose one of your signed-in profiles.' } }
+    }
+    const current = await this.deps.orchestrations.getOrchestration(orchestrationIdValue)
+    if (!current.ok) return current
+    return this.deps.orchestrations.registerResource(orchestrationIdValue, current.value.revision, {
+      kind: 'account_context_ref', safeLabel: `approved signed-in account context for ${profile.site}`, backingId: profile.profileId
     })
   }
 
@@ -303,9 +364,33 @@ export class OrchestrationCoordinator {
     if (capability === 'document_compare') {
       return this.dispatchDocumentCompare(orchestrationId, revision, resources, availableResources, documentTaskId)
     }
+    if (capability === 'account_read') {
+      return this.dispatchAccountRead(orchestrationId, revision, objective, resources, availableResources)
+    }
     // Not reachable in the ordinary case: the runtime only ever offers a planner the capabilities it has
     // itself composed. Fail closed rather than silently doing nothing.
     return { ok: false, error: { code: 'orchestration_refused', message: 'Lumi does not yet know how to use that capability.' } }
+  }
+
+  /**
+   * `account_read`: the planner cited exactly one `account_context_ref` (the runtime itself enforces this;
+   * anything else is refused before this is ever called). Creates the linked `authenticated_read` task
+   * through `AuthenticatedReadService`'s own existing boundary -- its own scope card, grant and disclosure
+   * recipient, unchanged -- over the profile that ref resolves to. Nothing is opened, read or sent until the
+   * human confirms that task's own card, exactly as a direct request would.
+   */
+  private async dispatchAccountRead(
+    orchestrationId: string, revision: number, objective: string,
+    resources: readonly string[], availableResources: readonly AgentOrchestrationResourceView[]
+  ): Promise<AgentResult<AgentOrchestrationView>> {
+    const ref = resources[0]
+    const resource = ref === undefined ? undefined : availableResources.find((item) => item.ref === ref)
+    if (resource === undefined || resource.kind !== 'account_context_ref' || resource.backingId === undefined) {
+      return { ok: false, error: { code: 'orchestration_refused', message: 'Lumi could not resolve that account.' } }
+    }
+    const created = await this.deps.createAccountReadTask(objective, resource.backingId)
+    if (!created.ok) return created
+    return this.deps.orchestrations.advanceOrchestration(orchestrationId, revision, 'account_read', { taskId: created.value.task.taskId, resources })
   }
 
   /**

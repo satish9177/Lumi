@@ -73,6 +73,22 @@ export class FakeAuthenticatedRuntime implements RuntimeRequester {
   nextStepOutcome: 'SUCCEEDED' | 'FAILED' | 'OUTCOME_UNKNOWN' = 'SUCCEEDED'
   /** Set to make the next step refuse, as a stale ref or scope check would. */
   refuseNextStep: string | undefined
+  /**
+   * Milestone 12 S3: set to make the next step refuse as `AuthenticatedReadService.execute_step`'s own
+   * profile pre-check would (`_check_profile_readable`) -- e.g. `profile_not_authenticated` (the profile
+   * reverted to `NEEDS_LOGIN` mid-session, still just needing a person to finish, the grant itself is fine)
+   * or `profile_takeover_active` (a sign-in is literally in progress). The grant stays ACTIVE either way --
+   * only the profile check fails, before any worker dispatch.
+   */
+  refuseNextStepAsProfileUnavailable: string | undefined
+  /**
+   * Milestone 12 S3: set to make the next step refuse as `execute_step`'s own fingerprint/epoch pre-check
+   * would (`AuthenticatedGrantNotUsableError`) -- a fresh, right-now check finds the grant dead (a different
+   * account, or expired) even though an EARLIER read (e.g. `loadAuthenticated`'s own GET) still reported it
+   * ACTIVE. Deliberately independent of `grant.status` itself, to simulate that exact race rather than one
+   * where the grant was already visibly dead before the step was even attempted.
+   */
+  refuseNextStepAsGrantUnusable: string | undefined
   loseNextStepResponse = false
   /** Serve these blocks from the next observation instead of the account page. */
   nextBlocks: readonly string[] | undefined
@@ -323,6 +339,16 @@ export class FakeAuthenticatedRuntime implements RuntimeRequester {
       // route === 'steps'
       if (!grant) return error(404, 'authenticated_grant_not_found')
       if (grant.status !== 'ACTIVE') return error(409, 'authenticated_grant_not_usable', { reason: 'not active' })
+      if (this.refuseNextStepAsProfileUnavailable) {
+        const reason = this.refuseNextStepAsProfileUnavailable
+        this.refuseNextStepAsProfileUnavailable = undefined
+        return error(409, 'authenticated_profile_unavailable', { reason })
+      }
+      if (this.refuseNextStepAsGrantUnusable) {
+        const reason = this.refuseNextStepAsGrantUnusable
+        this.refuseNextStepAsGrantUnusable = undefined
+        return error(409, 'authenticated_grant_not_usable', { reason })
+      }
       const requestId = String(body.request_id ?? '')
       const step = (body.step ?? {}) as Json
       this.plannerCalls = Math.max(this.plannerCalls, Number(body.planner_calls ?? 0))

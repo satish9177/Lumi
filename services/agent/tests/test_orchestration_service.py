@@ -17,10 +17,13 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.browser.profile_paths import PROFILE_ROOT_VARIABLE, resolve_profile_paths
 from app.domain.orchestration import MAX_STEPS, OrchestrationRefusal
 from app.domain.orchestration_resources import CAPABILITY_RESOURCE_REQUIREMENTS
 from app.domain.research import ResearchAnswer, ResearchBudgets
 from app.services.actions import ActionService
+from app.services.authenticated_read import AuthenticatedReadService
+from app.services.browser_profiles import BrowserProfileService
 from app.services.orchestration import OrchestrationService
 from app.services.documents import DocumentService
 from app.services.projects import ProjectService
@@ -47,8 +50,29 @@ def project(engine: AsyncEngine, action_service: ActionService, runtime_generati
 
 
 @pytest.fixture
-def service(engine: AsyncEngine, research: ResearchService, project: ProjectService) -> OrchestrationService:
-    return OrchestrationService(engine, research=research, project=project)
+def authenticated(
+    engine: AsyncEngine, action_service: ActionService, task_service: TaskService, runtime_generation: Any, tmp_path: Path
+) -> AuthenticatedReadService:
+    """Milestone 12 S3: a real `AuthenticatedReadService`, unconfigured for any real browser step -- these
+    tests never call `execute_step`/`prepare` against it (see `test_orchestration_account_read.py` for that);
+    `OrchestrationService` only needs it for `account_read`'s task-backed reads and `register_resource`'s
+    profile check."""
+    profiles = BrowserProfileService(
+        engine, runtime_generation=runtime_generation.id, browser=object(),  # type: ignore[arg-type]
+        paths=resolve_profile_paths({PROFILE_ROOT_VARIABLE: str(tmp_path / "browser-profiles")}),
+    )
+    return AuthenticatedReadService(
+        engine, tasks=task_service, actions=action_service, runtime_generation=runtime_generation.id,
+        worker=object(),  # type: ignore[arg-type]
+        profiles=profiles, grant_ttl_seconds=600, step_ttl_seconds=120,
+    )
+
+
+@pytest.fixture
+def service(
+    engine: AsyncEngine, research: ResearchService, project: ProjectService, authenticated: AuthenticatedReadService
+) -> OrchestrationService:
+    return OrchestrationService(engine, research=research, project=project, authenticated=authenticated)
 
 
 async def _sql(engine: AsyncEngine, statement: str, **params: Any) -> Any:
@@ -69,7 +93,8 @@ class TestCreateAndRead:
         assert view.live is True
         assert view.steps == ()
         assert set(view.available_capabilities) == {
-            "public_research", "project_status", "project_start", "document_read", "document_compare"
+            "public_research", "project_status", "project_start", "document_read", "document_compare",
+            "account_read",
         }
 
     async def test_create_refuses_an_invalid_objective(self, service: OrchestrationService) -> None:

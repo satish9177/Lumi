@@ -39,6 +39,7 @@ const render = (props: Partial<Parameters<typeof OrchestrationCard>[0]> = {}): s
     <OrchestrationCard
       objective="" busy={false}
       onObjectiveChange={noop} onCreate={noop} onRefresh={noop} onContinue={noop} onStop={noop}
+      accountProfiles={[]} accountProfile="" onAccountProfileChange={noop} onAttachAccount={noop}
       {...props}
     />
   )
@@ -116,5 +117,49 @@ describe('the general task cockpit card', () => {
     const html = render({ message: 'Lumi could not complete that request.' })
     expect(html).toContain('data-testid="orchestration-message"')
     expect(html).toContain('Lumi could not complete that request.')
+  })
+
+  it('shows a real manual-handoff banner with the paused step\'s own safe instruction, and still offers Continue and Stop', () => {
+    const html = render({
+      orchestration: view({
+        status: 'PAUSED', pauseReason: 'manual_handoff_required',
+        steps: [{
+          sequence: 1, capabilityId: 'account_read', status: 'AWAITING_APPROVAL',
+          pendingNote: 'Manual action required: sign in to the account in the Lumi browser, completing any verification the site asks for (including a CAPTCHA). When finished, return here and choose Continue.'
+        }]
+      })
+    })
+    expect(html).toContain('data-testid="orchestration-manual-handoff"')
+    expect(html).toContain('Manual action required')
+    expect(html).toContain('sign in to the account in the Lumi browser')
+    expect(html).toContain('data-testid="orchestration-continue"')
+    expect(html).toContain('data-testid="orchestration-stop"')
+  })
+
+  it('never shows the manual-handoff banner outside a manual_handoff_required pause', () => {
+    expect(render({ orchestration: view({ status: 'PAUSED', pauseReason: 'approval_required' }) }))
+      .not.toContain('data-testid="orchestration-manual-handoff"')
+    expect(render({ orchestration: view({ status: 'RUNNING' }) })).not.toContain('data-testid="orchestration-manual-handoff"')
+  })
+
+  it('offers a picker of only the signed-in accounts, and disables attaching until one is chosen', () => {
+    const html = render({
+      orchestration: view({ status: 'RUNNING' }),
+      accountProfiles: [{ profileId: 'p1', label: 'GitHub - Personal', site: 'github.com', status: 'AUTHENTICATED', revision: 1 }],
+      accountProfile: ''
+    })
+    expect(html).toContain('data-testid="orchestration-account-select"')
+    expect(html).toContain('GitHub - Personal')
+    const button = html.match(/<button[^>]*data-testid="orchestration-attach-account-button"[^>]*>/)
+    expect(button).not.toBeNull()
+    expect(button![0]).toContain('disabled=""')
+  })
+
+  it('offers no account picker once the task is terminal', () => {
+    const html = render({
+      orchestration: view({ status: 'SUCCEEDED' }),
+      accountProfiles: [{ profileId: 'p1', label: 'GitHub - Personal', site: 'github.com', status: 'AUTHENTICATED', revision: 1 }]
+    })
+    expect(html).not.toContain('data-testid="orchestration-attach-account"')
   })
 })

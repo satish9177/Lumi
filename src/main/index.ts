@@ -1443,7 +1443,10 @@ At most ${card.maxExcerptBytes} bytes per document, with identifiers redacted.
       createDocumentTask: (objective) => documents.createDocumentTask(objective),
       addDocumentFromRoot: (taskId, rootId, relativePath) => documents.addDocumentFromRoot(taskId, rootId, relativePath),
       extractDocument: (taskId, fileId) => documents.extractDocument(taskId, fileId),
-      compareDocumentsLocally: (taskId, firstId, secondId) => documents.compareDocumentsLocally(taskId, firstId, secondId)
+      compareDocumentsLocally: (taskId, firstId, secondId) => documents.compareDocumentsLocally(taskId, firstId, secondId),
+      createAccountReadTask: (objective, profileId) => agentTasks.createAccountReadTask(objective, profileId),
+      continueAccountRead: (taskId) => agentTasks.continueAccountRead(taskId),
+      listBrowserProfiles: () => browserProfiles.listBrowserProfiles()
     })
     : undefined
   // Milestone 8a S2: screen capture is refused from this process's first

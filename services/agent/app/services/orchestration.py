@@ -27,6 +27,7 @@ from typing import Any, Final
 
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from app.domain.authenticated import PauseReason as AuthenticatedPauseReason
 from app.domain.errors import TaskNotFoundError
 from app.domain.orchestration import (
     COMPOSED_CAPABILITY_IDS,
@@ -58,13 +59,49 @@ from app.domain.orchestration_resources import (
 from app.repositories.orchestration import OrchestrationRecord, OrchestrationRepository, StepRecord
 from app.repositories.orchestration_resources import OrchestrationResourceRepository, ResourceRecord
 from app.repositories.tasks import TaskRepository
+from app.services.authenticated_read import AuthenticatedReadService
 from app.services.projects import ProjectService
 from app.services.research_tasks import ResearchService
 
 #: capability_id -> the label a result handle carries (`research_result:3`). Closed, spelled here.
 _OUTPUT_CLASS: dict[str, str] = {
     "public_research": "research_result", "project_status": "project_status", "project_start": "project_run_result",
-    "document_read": "document_result", "document_compare": "document_comparison",
+    "document_read": "document_result", "document_compare": "document_comparison", "account_read": "account_result",
+}
+
+#: Milestone 12 S3. `AuthenticatedReadService`'s own, already-reviewed pause reasons that mean "a human must
+#: act outside Lumi" -- mapped onto the orchestration's one coarse `manual_handoff_required` reason. Every
+#: value here is something `AuthenticatedReadService` already detects deterministically today; nothing new
+#: is invented to widen coverage (there is no separate CAPTCHA signal -- see `app/domain/orchestration.py`).
+_MANUAL_HANDOFF_REASONS: Final[frozenset[AuthenticatedPauseReason]] = frozenset(
+    {
+        AuthenticatedPauseReason.LOGIN_REQUIRED,
+        AuthenticatedPauseReason.ACCOUNT_CHANGED,
+        AuthenticatedPauseReason.ACCOUNT_IDENTITY_UNKNOWN,
+        AuthenticatedPauseReason.LEFT_SITE_SCOPE,
+    }
+)
+
+#: Controller-authored, template-only safe instructions -- never account page text, a title or a URL. Shown
+#: verbatim in the orchestration step's own bounded `result_summary`, so the cockpit can display a real
+#: instruction without opening the linked account-reading task's own panel.
+_MANUAL_HANDOFF_INSTRUCTIONS: Final[dict[AuthenticatedPauseReason, str]] = {
+    AuthenticatedPauseReason.LOGIN_REQUIRED: (
+        "Manual action required: sign in to the account in the Lumi browser, completing any verification "
+        "the site asks for (including a CAPTCHA). When finished, return here and choose Continue."
+    ),
+    AuthenticatedPauseReason.ACCOUNT_CHANGED: (
+        "Manual action required: Lumi found a different signed-in account than the one this task started "
+        "with. Check the account in the Lumi browser, then return here and choose Continue."
+    ),
+    AuthenticatedPauseReason.ACCOUNT_IDENTITY_UNKNOWN: (
+        "Manual action required: Lumi could not tell which account is signed in. Check the account in the "
+        "Lumi browser, then return here and choose Continue."
+    ),
+    AuthenticatedPauseReason.LEFT_SITE_SCOPE: (
+        "Manual action required: the page moved outside the site this task approved. If you need to browse "
+        "elsewhere yourself, do that in the Lumi browser, then return here and choose Continue."
+    ),
 }
 
 #: `RunView.phase` (`app/services/projects.py`'s own closed vocabulary) -> this step's resolution. A run
@@ -90,10 +127,14 @@ class OrchestrationView:
 
 
 class OrchestrationService:
-    def __init__(self, engine: AsyncEngine, *, research: ResearchService, project: ProjectService) -> None:
+    def __init__(
+        self, engine: AsyncEngine, *, research: ResearchService, project: ProjectService,
+        authenticated: AuthenticatedReadService,
+    ) -> None:
         self._engine = engine
         self._research = research
         self._project = project
+        self._authenticated = authenticated
 
     # ---- reads -------------------------------------------------------------------------------------
 
@@ -180,6 +221,30 @@ class OrchestrationService:
                 )
                 return await self._view(connection, orchestration_id)
 
+        if kind == "account_context_ref":
+            # Milestone 12 S3. `backing_id` is a `browser_profiles` id, not a document/file id -- reusing the
+            # same model-invisible column `document_ref` already uses, for the same reason (an opaque backing
+            # identity a capability's own dispatch resolves, never shown to the planner). Never a
+            # `document_task_id`: that column is document-only.
+            if backing_text is not None or document_task_id is not None:
+                raise OrchestrationRefusal("resources_invalid")
+            profile_id = _require_uuid(backing_id, code="resources_invalid")
+            # The same deterministic checks a direct `authenticated_read` task creation already passes
+            # through (signed in, not deleted, not mid-takeover, not leased by another runtime generation).
+            # Raises one of `AuthenticatedProfileUnavailableError`/`AuthenticatedReadNotConfiguredError` on
+            # its own, already-reviewed terms; never a new one invented here.
+            await self._authenticated.check_profile(profile_id)
+            async with self._engine.begin() as connection:
+                repository = OrchestrationRepository(connection)
+                await self._live(repository, orchestration_id, expected_revision)
+                resource_repository = OrchestrationResourceRepository(connection)
+                ref = next_ref(await resource_repository.count(orchestration_id))
+                await resource_repository.mint(
+                    orchestration_id=orchestration_id, ref=ref, kind="account_context_ref", producing_step_id=None,
+                    privacy_class="private", safe_label=label, backing_id=profile_id,
+                )
+                return await self._view(connection, orchestration_id)
+
         # public_url_ref
         if backing_id is not None:
             raise OrchestrationRefusal("resources_invalid")
@@ -254,10 +319,11 @@ class OrchestrationService:
             if resolved_summary is not None:
                 raise OrchestrationRefusal("resolved_summary_not_allowed")
             task_uuid = _require_uuid(task_id, code="task_id_required")
-            status, summary, pause_reason = await self._read_task_backed_resolution(capability, task_uuid)
+            status, summary, pause_reason, pending_note = await self._read_task_backed_resolution(capability, task_uuid)
             return await self._commit_step(
                 orchestration_id, expected_revision=expected_revision, capability=capability,
                 child_task_id=task_uuid, status=status, summary=summary, pause_reason=pause_reason,
+                pending_note=pending_note,
                 resource_refs=resource_refs, requirement=requirement, result_backing_id=result_backing_uuid,
             )
 
@@ -274,11 +340,14 @@ class OrchestrationService:
 
     async def _read_task_backed_resolution(
         self, capability: str, task_id: uuid.UUID
-    ) -> tuple[StepStatus, str | None, str | None]:
+    ) -> tuple[StepStatus, str | None, str | None, str | None]:
         """Read-only, outside any write transaction: this runtime's own current record of a task-backed
         capability's resolution. Never creates, grants or advances anything. The third element is the pause
         reason to use if the step stays unresolved (`AWAITING_APPROVAL` always -> `approval_required`;
-        `PENDING`'s reason depends on *why* it is still pending)."""
+        `PENDING`'s reason depends on *why* it is still pending). The fourth (Milestone 12 S3) is a bounded,
+        controller-authored note for a step that is STILL unresolved (`manual_handoff_required`'s safe
+        instruction) -- always `None` when `status` is `SUCCEEDED`/`FAILED`, since only the second element
+        (`summary`) ever describes a resolved step."""
         async with self._engine.connect() as connection:
             task = await TaskRepository(connection).get_task(task_id)
         if task is None:
@@ -292,39 +361,81 @@ class OrchestrationService:
                 raise OrchestrationRefusal("task_not_found") from None
             if view.answer is not None:
                 text = f"{view.answer.answer.status}: {view.answer.answer.answer}"
-                return StepStatus.SUCCEEDED, bounded_summary(text), None
+                return StepStatus.SUCCEEDED, bounded_summary(text), None, None
             if view.grant is None or view.grant.status.value == "PENDING":
-                return StepStatus.AWAITING_APPROVAL, None, "approval_required"
+                return StepStatus.AWAITING_APPROVAL, None, "approval_required", None
             if view.grant.status.value in ("REVOKED", "EXPIRED"):
                 # Declined, cancelled, or its window closed unused. Never revived; a new attempt is a new
                 # step, not a resumed one -- exactly like a fresh research grant is a new confirmation.
-                return StepStatus.FAILED, bounded_summary("The research scope was declined, expired, or the task was cancelled."), None
+                return StepStatus.FAILED, bounded_summary("The research scope was declined, expired, or the task was cancelled."), None, None
             if view.unresolved_step:
                 # A step of this task has no outcome Lumi can stand behind (interrupted mid-flight, a lost
                 # response). Distinct from "still working": a human may need to look, not just wait.
-                return StepStatus.PENDING, None, "outcome_unknown"
+                return StepStatus.PENDING, None, "outcome_unknown", None
             # ACTIVE, no answer recorded yet, and nothing unresolved: ordinary work in progress. Stay
             # unresolved; the caller's own research loop, and a later `resume`, decide when this changes.
-            return StepStatus.PENDING, None, "approval_required"
+            return StepStatus.PENDING, None, "approval_required", None
         if capability == "project_start":
             try:
                 run_view = await self._project.describe(task_id)
             except TaskNotFoundError:
                 raise OrchestrationRefusal("task_not_found") from None
             if run_view.phase == "awaiting_approval":
-                return StepStatus.AWAITING_APPROVAL, None, "approval_required"
+                return StepStatus.AWAITING_APPROVAL, None, "approval_required", None
             if run_view.phase in _PROJECT_RUN_FAILED_PHASES:
-                return StepStatus.FAILED, bounded_summary(f"The project run ended: {run_view.phase}."), None
+                return StepStatus.FAILED, bounded_summary(f"The project run ended: {run_view.phase}."), None, None
             if run_view.phase in _PROJECT_RUN_ALIVE_PHASES:
                 text = f"Project run started (phase: {run_view.phase}){', ready' if run_view.ready else ''}."
-                return StepStatus.SUCCEEDED, bounded_summary(text), None
+                return StepStatus.SUCCEEDED, bounded_summary(text), None, None
             if run_view.phase == "outcome_unknown":
-                return StepStatus.PENDING, None, "outcome_unknown"
+                return StepStatus.PENDING, None, "outcome_unknown", None
             # "approved": the grant is active but the caller has not yet called start(), or start() has not
             # finished. Stay unresolved; never guessed here. The caller (Electron main) is what actually
             # calls start() once the grant is active -- this read never does, matching "it never creates,
             # grants or advances that child task itself".
-            return StepStatus.PENDING, None, "approval_required"
+            return StepStatus.PENDING, None, "approval_required", None
+        if capability == "account_read":
+            try:
+                account_view = await self._authenticated.describe(task_id)
+            except TaskNotFoundError:
+                raise OrchestrationRefusal("task_not_found") from None
+            if account_view.answer is not None:
+                # Template-only, exactly like `document_read`'s own character-count summary: the answer's
+                # closed-vocabulary status and a quoted-evidence count, never the answer text itself. Unlike
+                # `public_research` (public web content), this is `account_private` -- the confirmed scope
+                # card's own recipient is the only provider the user approved to see it, and `result_summary`
+                # is what `resultLines` feeds back into a SEPARATE, independently-configured provider
+                # (`orchestration_planning`) on every later planner tick.
+                answer = account_view.answer.answer
+                evidence_count = len(answer.evidence)
+                text = (
+                    f"Account read finished: {answer.status} "
+                    f"({evidence_count} quoted item{'s' if evidence_count != 1 else ''} of evidence)."
+                )
+                return StepStatus.SUCCEEDED, bounded_summary(text), None, None
+            if account_view.grant is None or account_view.grant.status.value == "PENDING":
+                # The ordinary "waiting on the trusted scope card" pause -- identical in shape to
+                # `public_research`'s own first pause, never `manual_handoff_required` (nothing outside Lumi
+                # is needed yet; the person just has not clicked Confirm on this task's own card).
+                return StepStatus.AWAITING_APPROVAL, None, "approval_required", None
+            if account_view.grant.status.value in ("REVOKED", "EXPIRED"):
+                # Declined, expired, or made permanently unusable by a re-observe that found the wrong
+                # account or a dead grant (Electron main's own Continue-time nudge revokes it explicitly --
+                # see `docs/reviews/milestone-12-s3.md`). Never revived: a fresh account_read step would need
+                # a brand new scope card over a fresh `account_context_ref`, exactly like research.
+                return StepStatus.FAILED, bounded_summary(
+                    "The account-reading permission was declined, expired, or could no longer be used, and "
+                    "was not continued."
+                ), None, None
+            if account_view.pause_reason is not None and account_view.pause_reason in _MANUAL_HANDOFF_REASONS:
+                return (
+                    StepStatus.PENDING, None, "manual_handoff_required",
+                    bounded_summary(_MANUAL_HANDOFF_INSTRUCTIONS[account_view.pause_reason]),
+                )
+            if account_view.unresolved_step:
+                return StepStatus.PENDING, None, "outcome_unknown", None
+            # ACTIVE, no answer recorded yet, no pause, nothing unresolved: ordinary work in progress.
+            return StepStatus.PENDING, None, "approval_required", None
         raise AssertionError(f"unreachable: capability {capability!r} is task-backed but has no reader")  # pragma: no cover
 
     async def _commit_step(
@@ -337,6 +448,7 @@ class OrchestrationService:
         status: StepStatus,
         summary: str | None,
         pause_reason: str | None,
+        pending_note: str | None = None,
         resource_refs: tuple[str, ...] = (),
         requirement: tuple[str, ...] = (),
         result_backing_id: uuid.UUID | None = None,
@@ -390,6 +502,7 @@ class OrchestrationService:
             step = await repository.insert_step(
                 orchestration_id=orchestration_id, sequence=sequence, capability_id=capability, status=status.value,
                 child_task_id=child_task_id, result_handle=handle, result_summary=summary,
+                pending_note=pending_note if status in (StepStatus.PENDING, StepStatus.AWAITING_APPROVAL) else None,
             )
             await repository.record_step_added(orchestration_id, new_child_task=child_task_id is not None)
             if status == StepStatus.SUCCEEDED:
@@ -419,7 +532,9 @@ class OrchestrationService:
                 raise OrchestrationRefusal("orchestration_not_found")
             if record.revision != expected_revision:
                 raise OrchestrationRefusal("revision_conflict")
-            if record.status != OrchestrationStatus.PAUSED or record.pause_reason not in ("approval_required", "outcome_unknown"):
+            if record.status != OrchestrationStatus.PAUSED or record.pause_reason not in (
+                "approval_required", "outcome_unknown", "manual_handoff_required"
+            ):
                 return await self._view(connection, orchestration_id)
             # A PAUSED orchestration is never revived once its TTL has passed -- checked before any of the
             # capability reads below, matching `_live_running`'s own fail-fast shape for every other write.
@@ -428,16 +543,29 @@ class OrchestrationService:
             step = await repository.last_step(orchestration_id)
         if step is None or step.status not in ("PENDING", "AWAITING_APPROVAL") or step.child_task_id is None:
             return await self.describe(orchestration_id)
-        status, summary, pause_reason = await self._read_task_backed_resolution(step.capability_id, step.child_task_id)
+        status, summary, pause_reason, pending_note = await self._read_task_backed_resolution(step.capability_id, step.child_task_id)
         if status in (StepStatus.PENDING, StepStatus.AWAITING_APPROVAL):
             # Still unresolved. Update the pause reason if it became more (or less) specific, so a
-            # transient outcome_unknown that later needs a fresh approval is relabeled honestly.
-            if pause_reason is not None and pause_reason != record.pause_reason:
+            # transient outcome_unknown that later needs a fresh approval is relabeled honestly. Separately
+            # (Milestone 12 S3), refresh the step's OWN `pending_note` whenever the reason changed OR a note
+            # is due -- `manual_handoff_required`'s safe instruction can change (a different underlying
+            # reason, e.g. login_required -> account_identity_unknown) without the coarse orchestration-level
+            # reason changing at all, and a transition AWAY from a noted reason must clear the old note
+            # rather than leave it stale, so this always writes both together whenever either moved.
+            reason_changed = pause_reason is not None and pause_reason != record.pause_reason
+            if reason_changed or pending_note is not None:
                 async with self._engine.begin() as connection:
                     repository = OrchestrationRepository(connection)
                     current = await repository.get(orchestration_id, lock=True)
                     if current is not None and current.revision == expected_revision and current.status == OrchestrationStatus.PAUSED:
-                        await repository.relabel_pause(orchestration_id, reason=pause_reason)
+                        if reason_changed:
+                            assert pause_reason is not None
+                            await repository.relabel_pause(orchestration_id, reason=pause_reason)
+                        fresh_step = await repository.last_step(orchestration_id)
+                        if fresh_step is not None and fresh_step.id == step.id and fresh_step.status in ("PENDING", "AWAITING_APPROVAL"):
+                            await repository.update_pending_note(
+                                fresh_step.id, status=fresh_step.status, pending_note=pending_note
+                            )
                     return await self._view(connection, orchestration_id)
             return await self.describe(orchestration_id)
         async with self._engine.begin() as connection:

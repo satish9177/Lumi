@@ -1994,6 +1994,10 @@ orchestration_steps = Table(
     Column("child_task_id", Uuid(), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=True),
     Column("result_handle", String(40), nullable=True),
     Column("result_summary", String(600), nullable=True),
+    #: Milestone 12 S3: a controller-authored, bounded note for a step that is still PENDING/AWAITING_APPROVAL
+    #: (`manual_handoff_required`'s own safe instruction) -- never a step's result, and mutually exclusive
+    #: with `result_summary` by the CHECK constraints below (one requires resolved, the other requires not).
+    Column("pending_note", String(600), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=func.now()),
     UniqueConstraint("orchestration_id", "sequence", name="uq_orchestration_steps_sequence"),
@@ -2004,6 +2008,9 @@ orchestration_steps = Table(
     CheckConstraint("(status = 'SUCCEEDED') = (result_handle IS NOT NULL)", name="handle_iff_succeeded"),
     CheckConstraint(
         "result_summary IS NULL OR status IN ('SUCCEEDED', 'FAILED')", name="summary_only_when_resolved"
+    ),
+    CheckConstraint(
+        "pending_note IS NULL OR status IN ('PENDING', 'AWAITING_APPROVAL')", name="note_only_when_pending"
     ),
 )
 

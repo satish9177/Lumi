@@ -33,6 +33,12 @@ export interface AgentOrchestrationStepView {
   childTaskId?: string
   resultHandle?: string
   resultSummary?: string
+  /**
+   * Milestone 12 S3: a controller-authored, bounded note while this step is still `PENDING`/
+   * `AWAITING_APPROVAL` (e.g. `manual_handoff_required`'s own safe instruction: "sign in ... then choose
+   * Continue"). Never a step's result -- see `resultSummary`, which only ever describes a resolved step.
+   */
+  pendingNote?: string
 }
 
 /**
@@ -105,4 +111,10 @@ export interface AgentOrchestrationApi {
   attachApprovedDocument: (
     orchestrationId: string, rootId: string, relativePath: string
   ) => Promise<AgentResult<AgentOrchestrationView>>
+  /**
+   * Milestone 12 S3: makes one already-authenticated browser profile available to this orchestration as an
+   * `account_context_ref` resource. Never reachable from the planner or the model -- a trusted renderer
+   * action, exactly like attaching a document.
+   */
+  attachApprovedAccount: (orchestrationId: string, profileId: string) => Promise<AgentResult<AgentOrchestrationView>>
 }

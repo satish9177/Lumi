@@ -28,6 +28,8 @@ import unicodedata
 from enum import StrEnum
 from typing import Final
 
+from app.domain.authenticated import AUTHENTICATED_READ_TASK_TYPE
+
 MAX_OBJECTIVE_CHARS: Final = 500
 MAX_RESULT_SUMMARY_CHARS: Final = 600
 ORCHESTRATION_TTL_SECONDS: Final = 30 * 60
@@ -57,8 +59,16 @@ CATALOG_CAPABILITY_IDS: Final[frozenset[str]] = frozenset(
 #: (`app/domain/effects.py`'s `PROJECT_RUN`, a global-tier kind) and cross-executor lock apply exactly as
 #: they do to a direct request, because starting still happens through `ProjectService.start()` itself --
 #: this module never claims or checks an effect key of its own.
-TASK_BACKED_CAPABILITY_IDS: Final[frozenset[str]] = frozenset({"public_research", "project_start"})
-EXPECTED_TASK_TYPE: Final[dict[str, str]] = {"public_research": "public_research", "project_start": "project_run_task"}
+#: `account_read` (Milestone 12 S3) links an `authenticated_read` task exactly the same way `public_research`
+#: links a `public_research` one: Electron main creates it through `AuthenticatedReadService`'s own existing
+#: boundary (its own scope card, grant and disclosure recipient, unchanged), and this module only reads that
+#: task's own current resolution -- see `_read_task_backed_resolution` in `app/services/orchestration.py`.
+TASK_BACKED_CAPABILITY_IDS: Final[frozenset[str]] = frozenset({"public_research", "project_start", "account_read"})
+EXPECTED_TASK_TYPE: Final[dict[str, str]] = {
+    "public_research": "public_research",
+    "project_start": "project_run_task",
+    "account_read": AUTHENTICATED_READ_TASK_TYPE,
+}
 
 #: Synchronous: a pure read, resolved by the caller with no new task and no approval. `document_read` and
 #: `document_compare` (Milestone 12 S2) join this set: the caller (Electron main) has already extracted or
@@ -104,10 +114,14 @@ class StepStatus(StrEnum):
 UNRESOLVED_STEP_STATUSES: Final = frozenset({StepStatus.PENDING, StepStatus.AWAITING_APPROVAL})
 
 #: Closed pause-reason vocabulary. Every reason maps to a controller decision, never a model's.
-#: `manual_handoff_required`: a human must act outside Lumi (a login, a CAPTCHA, an unsupported control)
-#: before the orchestration can continue -- not yet reachable from any capability composed as of Milestone
-#: 11 S4 (none of `public_research`/`project_status`/`project_start` involves one), but first-class in the
-#: schema so a later slice composing e.g. `account_read` or `desktop_reason` needs no further migration.
+#: `manual_handoff_required`: a human must act outside Lumi (a login, a CAPTCHA-guarded login, an
+#: unsupported control) before the orchestration can continue. Milestone 12 S3 makes this reachable for the
+#: first time, through `account_read`'s linked `authenticated_read` task: its own existing
+#: `login_required`/`account_changed`/`account_identity_unknown`/`left_site_scope` pauses (all detected by
+#: `AuthenticatedReadService` already, unchanged) map onto this one orchestration-level reason. A dedicated
+#: CAPTCHA signal is deliberately not invented here: a CAPTCHA-guarded sign-in already shows a credential
+#: surface (a password field, at minimum), which `login_required` already, and over-inclusively, catches --
+#: see `app/browser/credential_signals.py`.
 #: `outcome_unknown`: a linked capability's own effect is unresolved (a research step interrupted
 #: mid-flight; a project run whose own `RunView.phase` is itself `outcome_unknown`).
 PAUSE_REASONS: Final = frozenset(

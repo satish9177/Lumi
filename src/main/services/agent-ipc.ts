@@ -114,7 +114,7 @@ export interface AgentIpcDependencies {
   orchestration?: Pick<
     OrchestrationCoordinator,
     'createOrchestration' | 'getOrchestration' | 'getLatestOrchestration' | 'continueOrchestration' | 'stopOrchestration'
-    | 'attachApprovedDocument'
+    | 'attachApprovedDocument' | 'attachApprovedAccount'
   >
 }
 
@@ -431,4 +431,6 @@ export function registerAgentIpc({
   // Milestone 12 S2: makes one already-approved document available. Never reachable from the planner.
   handle(AGENT_IPC_CHANNELS.attachApprovedDocument, (orchestrationId, rootId, relativePath) =>
     orchestration ? orchestration.attachApprovedDocument(orchestrationId, rootId, relativePath) : noOrchestration())
+  handle(AGENT_IPC_CHANNELS.attachApprovedAccount, (orchestrationId, profileId) =>
+    orchestration ? orchestration.attachApprovedAccount(orchestrationId, profileId) : noOrchestration())
 }

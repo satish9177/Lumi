@@ -82,13 +82,17 @@ function step(value: unknown): AgentOrchestrationStepView {
   const childTaskId = optional(raw.child_task_id, (v) => uuid(v, 'orchestration.step.child_task_id'))
   const resultHandle = optional(raw.result_handle, (v) => label(v, 'orchestration.step.result_handle', 40))
   const resultSummary = optional(raw.result_summary, (v) => label(v, 'orchestration.step.result_summary', MAX_SUMMARY))
+  // Milestone 12 S3: a controller-authored note while the step is still unresolved (e.g.
+  // `manual_handoff_required`'s own safe instruction). Never a step's result -- see `resultSummary`.
+  const pendingNote = optional(raw.pending_note, (v) => label(v, 'orchestration.step.pending_note', MAX_SUMMARY))
   return {
     sequence: integer(raw.sequence, 'orchestration.step.sequence', 1),
     capabilityId: capabilityId(raw.capability_id, 'orchestration.step.capability_id'),
     status: member(ORCHESTRATION_STEP_STATUSES, raw.status, 'orchestration.step.status'),
     ...(childTaskId !== undefined ? { childTaskId } : {}),
     ...(resultHandle !== undefined ? { resultHandle } : {}),
-    ...(resultSummary !== undefined ? { resultSummary } : {})
+    ...(resultSummary !== undefined ? { resultSummary } : {}),
+    ...(pendingNote !== undefined ? { pendingNote } : {})
   }
 }
 

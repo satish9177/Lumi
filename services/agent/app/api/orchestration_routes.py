@@ -73,6 +73,9 @@ class OrchestrationStepResponse(BaseModel):
     child_task_id: uuid.UUID | None
     result_handle: str | None
     result_summary: str | None
+    #: Milestone 12 S3: a controller-authored, bounded note while still PENDING/AWAITING_APPROVAL (e.g.
+    #: `manual_handoff_required`'s own safe instruction). Never a step's result -- see `result_summary`.
+    pending_note: str | None
 
 
 class OrchestrationResourceResponse(BaseModel):
@@ -150,6 +153,7 @@ class OrchestrationResponse(BaseModel):
                     child_task_id=step.child_task_id,
                     result_handle=step.result_handle,
                     result_summary=step.result_summary,
+                    pending_note=step.pending_note,
                 )
                 for step in view.steps
             ],

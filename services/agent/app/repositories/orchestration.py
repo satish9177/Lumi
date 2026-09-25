@@ -42,6 +42,8 @@ class StepRecord:
     result_summary: str | None
     created_at: datetime
     updated_at: datetime
+    #: Milestone 12 S3: a controller-authored note while still PENDING/AWAITING_APPROVAL (never a result).
+    pending_note: str | None = None
 
 
 def _orchestration(row: Row[Any]) -> OrchestrationRecord:
@@ -74,6 +76,7 @@ def _step(row: Row[Any]) -> StepRecord:
         result_summary=row.result_summary,
         created_at=row.created_at,
         updated_at=row.updated_at,
+        pending_note=row.pending_note,
     )
 
 
@@ -197,6 +200,7 @@ class OrchestrationRepository:
         child_task_id: uuid.UUID | None,
         result_handle: str | None = None,
         result_summary: str | None = None,
+        pending_note: str | None = None,
     ) -> StepRecord:
         result = await self._connection.execute(
             insert(orchestration_steps)
@@ -209,6 +213,7 @@ class OrchestrationRepository:
                 child_task_id=child_task_id,
                 result_handle=result_handle,
                 result_summary=result_summary,
+                pending_note=pending_note,
             )
             .returning(*orchestration_steps.c)
         )
@@ -240,6 +245,23 @@ class OrchestrationRepository:
         ).one_or_none()
         return _step(row) if row is not None else None
 
+    async def update_pending_note(
+        self, step_id: uuid.UUID, *, status: str, pending_note: str | None
+    ) -> StepRecord | None:
+        """Milestone 12 S3: refresh an UNRESOLVED step's own controller-authored note (e.g.
+        `manual_handoff_required`'s safe instruction) without settling it -- `status` must be the step's
+        current one (`PENDING` or `AWAITING_APPROVAL`), so this can never itself resolve a step; only
+        `resolve_step` does that, and it clears this column when it does."""
+        assert status in ("PENDING", "AWAITING_APPROVAL")
+        result = await self._connection.execute(
+            update(orchestration_steps)
+            .where(orchestration_steps.c.id == step_id, orchestration_steps.c.status == status)
+            .values(pending_note=pending_note, updated_at=func.now())
+            .returning(*orchestration_steps.c)
+        )
+        row = result.one_or_none()
+        return _step(row) if row is not None else None
+
     async def resolve_step(
         self, step_id: uuid.UUID, *, status: str, result_handle: str | None, result_summary: str | None
     ) -> StepRecord | None:
@@ -251,7 +273,10 @@ class OrchestrationRepository:
                 orchestration_steps.c.id == step_id,
                 orchestration_steps.c.status.in_(("PENDING", "AWAITING_APPROVAL")),
             )
-            .values(status=status, result_handle=result_handle, result_summary=result_summary, updated_at=func.now())
+            .values(
+                status=status, result_handle=result_handle, result_summary=result_summary,
+                pending_note=None, updated_at=func.now(),
+            )
             .returning(*orchestration_steps.c)
         )
         row = result.one_or_none()
