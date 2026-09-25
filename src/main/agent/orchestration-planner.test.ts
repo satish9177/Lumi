@@ -72,6 +72,20 @@ describe('parseOrchestrationDecision', () => {
     }
   })
 
+  it.each(['form_prepare', 'workflow_prepare'] as const)(
+    'refuses raw authority smuggled into a %s decision even if that capability is offered', (capability) => {
+      const offered: OrchestrationCapabilities = { available: [capability], availableResources: ['r1'] }
+      for (const injected of [
+        { value: 'private value' }, { url: 'https://example.test/private' },
+        { path: 'C:\\private' }, { filename: 'private.pdf' }, { overwrite: true }
+      ]) {
+        expect(() => parseOrchestrationDecision(JSON.stringify({
+          action: 'step', capability, resources: ['r1'], ...injected
+        }), offered)).toThrow(OrchestrationPlanError)
+      }
+    }
+  )
+
   it('refuses malformed JSON and a non-object reply', () => {
     expect(() => parseOrchestrationDecision('not json', TWO)).toThrow(OrchestrationPlanError)
     expect(() => parseOrchestrationDecision('[]', TWO)).toThrow(OrchestrationPlanError)

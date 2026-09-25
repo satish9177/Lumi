@@ -146,6 +146,20 @@ class ScriptedPlanner implements OrchestrationPlannerLike {
   }
 }
 
+class RecordingPlanner implements OrchestrationPlannerLike {
+  readonly requests: Array<Parameters<OrchestrationPlannerLike['next']>[0]> = []
+  private readonly scripted: ScriptedPlanner
+
+  constructor(decisions: OrchestrationDecision[]) {
+    this.scripted = new ScriptedPlanner(decisions)
+  }
+
+  async next(input: Parameters<OrchestrationPlannerLike['next']>[0]): Promise<OrchestrationPlanOutcome> {
+    this.requests.push(input)
+    return this.scripted.next()
+  }
+}
+
 class FailingPlanner implements OrchestrationPlannerLike {
   async next(): Promise<OrchestrationPlanOutcome> {
     throw new ModelRoutingError('orchestration_planning', [])
@@ -510,6 +524,28 @@ describe('OrchestrationCoordinator.run', () => {
     expect(result.error.code).toBe('orchestration_refused')
   })
 
+  it.each(['form_prepare', 'workflow_prepare'] as const)(
+    'refuses %s even if a faulty runtime offers it, with no child call or effect', async (capability) => {
+      const graph = new FakeGraph()
+      graph.view = orchestration({ availableCapabilities: [capability] })
+      const {
+        coordinator: coord, researchCalls, startCalls, extractCalls, compareCalls, accountReadCalls,
+        observeCalls, desktopReasonCalls, focusCalls, scrollCalls, launchCalls, stopProjectCalls
+      } = coordinator({
+        graph, planner: new ScriptedPlanner([{ kind: 'step', capability, reason: 'try unavailable capability' }])
+      })
+      const result = await coord.run(graph.view.orchestrationId)
+      expect(result.ok).toBe(false)
+      if (result.ok) throw new Error('unreachable')
+      expect(result.error.code).toBe('orchestration_refused')
+      expect(graph.calls).toEqual(['planner-call'])
+      expect([
+        researchCalls, startCalls, extractCalls, compareCalls, accountReadCalls, observeCalls,
+        desktopReasonCalls, focusCalls, scrollCalls, launchCalls, stopProjectCalls
+      ].every((calls) => calls.length === 0)).toBe(true)
+    }
+  )
+
   it('dispatches account_read by resolving the cited account_context_ref, never trusting the planner’s own text', async () => {
     const graph = new FakeGraph()
     graph.view = orchestration({
@@ -840,7 +876,7 @@ describe('OrchestrationCoordinator.attachApprovedDocument', () => {
     if (!result.ok) throw new Error('unreachable')
     expect(result.value.documentTaskId).toBeDefined()
     expect(result.value.resources?.[0]?.kind).toBe('document_ref')
-    expect(result.value.resources?.[0]?.safeLabel).toBe('resume.pdf')
+    expect(result.value.resources?.[0]?.safeLabel).toBe('approved document 1')
     expect(graph.calls).toContain('register:document_ref')
   })
 
@@ -853,6 +889,34 @@ describe('OrchestrationCoordinator.attachApprovedDocument', () => {
     const second = await coord.attachApprovedDocument(graph.view.orchestrationId, 'root-1', 'job.txt')
     expect(second.ok).toBe(true)
     expect(second.ok && second.value.documentTaskId).toBe(taskId)
+    expect(second.ok && second.value.resources?.[1]?.safeLabel).toBe('approved document 2')
+  })
+
+  it('keeps a private filename out of every planner request line while the opaque ref still reads the document', async () => {
+    const privateName = 'Satish_Private_Medical_Record_2026.pdf'
+    const graph = new FakeGraph()
+    graph.view = orchestration({ availableCapabilities: ['document_read'] })
+    const planner = new RecordingPlanner([
+      { kind: 'step', capability: 'document_read', resources: ['r1'], reason: 'read approved document' },
+      { kind: 'finish', reason: 'done' }
+    ])
+    const { coordinator: coord, extractCalls } = coordinator({ graph, planner })
+    const attached = await coord.attachApprovedDocument(graph.view.orchestrationId, 'root-1', privateName)
+    expect(attached.ok).toBe(true)
+    if (!attached.ok) throw new Error('unreachable')
+    expect(attached.value.resources?.[0]?.safeLabel).toBe('approved document 1')
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(true)
+    expect(extractCalls).toEqual([{
+      taskId: attached.value.documentTaskId,
+      fileId: attached.value.resources?.[0]?.backingId
+    }])
+    expect(planner.requests.length).toBe(2)
+    for (const request of planner.requests) {
+      expect(JSON.stringify(request)).not.toContain(privateName)
+      expect(request.facts.join('\n')).toContain('r1: approved document 1')
+      expect(request.resultLines.join('\n')).not.toContain(privateName)
+    }
   })
 
   it('refuses a non-string argument rather than forwarding it', async () => {
@@ -872,8 +936,27 @@ describe('OrchestrationCoordinator.attachApprovedAccount', () => {
     if (!result.ok) throw new Error('unreachable')
     expect(result.value.resources?.[0]?.kind).toBe('account_context_ref')
     expect(result.value.resources?.[0]?.backingId).toBe('00000000-0000-4000-8000-0000000000aa')
-    expect(result.value.resources?.[0]?.safeLabel).toBe('approved signed-in account context for github.com')
+    expect(result.value.resources?.[0]?.safeLabel).toBe('approved account 1')
     expect(graph.calls).toContain('register:account_context_ref')
+  })
+
+  it('keeps a private account site out of planner facts while the opaque ref still selects that profile', async () => {
+    const privateSite = 'private-medical-portal.example'
+    const profileId = '00000000-0000-4000-8000-0000000000aa'
+    const graph = new FakeGraph()
+    graph.view = orchestration({ availableCapabilities: ['account_read'] })
+    const planner = new RecordingPlanner([{ kind: 'step', capability: 'account_read', resources: ['r1'], reason: 'read account' }])
+    const { coordinator: coord, accountReadCalls } = coordinator({
+      graph, planner,
+      profiles: { ok: true, value: [{ profileId, label: 'Private account', site: privateSite, status: 'AUTHENTICATED', revision: 1 } as AgentBrowserProfileView] }
+    })
+    const attached = await coord.attachApprovedAccount(graph.view.orchestrationId, profileId)
+    expect(attached.ok).toBe(true)
+    const result = await coord.run(graph.view.orchestrationId)
+    expect(result.ok).toBe(true)
+    expect(accountReadCalls).toEqual([{ objective: graph.view.objective, profileId }])
+    expect(JSON.stringify(planner.requests)).not.toContain(privateSite)
+    expect(planner.requests[0]?.facts.join('\n')).toContain('r1: approved account 1')
   })
 
   it('refuses a profile that is not signed in, never registering a resource for it', async () => {

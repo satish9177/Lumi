@@ -353,8 +353,9 @@ export class OrchestrationCoordinator {
     if (file === undefined) {
       return { ok: false, error: { code: 'orchestration_refused', message: 'Lumi could not add that document.' } }
     }
+    const documentNumber = (current.value.resources ?? []).filter((resource) => resource.kind === 'document_ref').length + 1
     return this.deps.orchestrations.registerResource(orchestrationId, current.value.revision, {
-      kind: 'document_ref', safeLabel: file.displayName, backingId: file.fileId, documentTaskId: taskId
+      kind: 'document_ref', safeLabel: `approved document ${documentNumber}`, backingId: file.fileId, documentTaskId: taskId
     })
   }
 
@@ -378,8 +379,9 @@ export class OrchestrationCoordinator {
     }
     const current = await this.deps.orchestrations.getOrchestration(orchestrationIdValue)
     if (!current.ok) return current
+    const accountNumber = (current.value.resources ?? []).filter((resource) => resource.kind === 'account_context_ref').length + 1
     return this.deps.orchestrations.registerResource(orchestrationIdValue, current.value.revision, {
-      kind: 'account_context_ref', safeLabel: `approved signed-in account context for ${profile.site}`, backingId: profile.profileId
+      kind: 'account_context_ref', safeLabel: `approved account ${accountNumber}`, backingId: profile.profileId
     })
   }
 

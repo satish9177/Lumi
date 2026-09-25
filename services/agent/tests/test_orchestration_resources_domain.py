@@ -17,6 +17,7 @@ from app.domain.orchestration_resources import (
     PRIVACY_CLASSES,
     RESOURCE_KINDS,
     RESOURCE_STATE_CODES,
+    REGISTERABLE_RESOURCE_KINDS,
     next_ref,
     safe_label,
     validate_ref,
@@ -67,6 +68,17 @@ def test_document_capabilities_require_exactly_the_kinds_document_service_needs(
     # and exact -- never inferred from what happens to be available.
     assert CAPABILITY_RESOURCE_REQUIREMENTS["document_read"] == ("document_ref",)
     assert CAPABILITY_RESOURCE_REQUIREMENTS["document_compare"] == ("document_result_ref", "document_result_ref")
+
+
+def test_m12_s5_form_and_workflow_refs_remain_unavailable_without_trusted_lineage() -> None:
+    # M8 form planning consumes saved details or values adopted inside its own M10 workflow.
+    # A standalone M12 document_result_ref is neither source. M10 workflow creation also
+    # needs a URL/destination bundle from trusted UI, which the M12 planner cannot invent.
+    # Keep these kinds visible vocabulary only until those exact bridges are implemented.
+    assert {"form_prepare", "workflow_prepare"}.isdisjoint(COMPOSED_CAPABILITY_IDS)
+    assert {"form_prepare", "workflow_prepare"}.isdisjoint(CAPABILITY_RESOURCE_REQUIREMENTS)
+    assert {"form_prepare", "workflow_prepare"}.isdisjoint(CAPABILITY_OUTPUT_RESOURCE)
+    assert {"form_target_ref", "form_result_ref", "workflow_ref"}.isdisjoint(REGISTERABLE_RESOURCE_KINDS)
 
 
 def test_validate_ref_accepts_only_the_opaque_shape() -> None:
