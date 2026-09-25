@@ -1,12 +1,12 @@
 # Delivery status
 
-## Milestone 12 (trusted resource composition): S1 complete, in progress
+## Milestone 12 (trusted resource composition): S4 complete, in progress
 
 ```text
 M12 S1 trusted available-refs foundation        COMPLETE
 M12 S2 documents + controlled download          PARTIAL (documents composed; download/inspection deferred)
-M12 S3 account read + real manual handoff       not started
-M12 S4 desktop + app + project-stop             not started
+M12 S3 account read + real manual handoff       COMPLETE
+M12 S4 desktop + app + project-stop             COMPLETE
 M12 S5 form/workflow composition                not started
 M12 S6 completeness / eval / final audit        not started
 
@@ -38,6 +38,35 @@ gap. No renderer control yet calls the new `attachApprovedDocument` IPC method (
 cockpit slice). One fresh adversarial review found no High/Medium findings; three Informational notes were
 fixed in the same pass (a resource-kind check moved earlier, defensive-code documentation, expanded test
 coverage for one refusal check).
+
+S3 ([review](reviews/milestone-12-s3.md)) composes `account_read` as a task-backed capability over M8a S3's
+own unchanged scope card, grant and disclosure recipient, via a trusted `account_context_ref` naming which
+already-authenticated profile a step may read under. `manual_handoff_required` becomes reachable for the
+first time, through the linked task's own existing `login_required`/`account_changed`/
+`account_identity_unknown`/`left_site_scope` pauses; Continue always forces one fresh, real re-observation
+rather than assuming the human's part of a handoff happened. One fresh adversarial review found two High
+findings, both fixed in the same pass: an account-private answer leaking into the orchestration-planning
+model's own context (fixed to a template-only summary), and a premature Continue over-revoking a still-healthy
+grant.
+
+S4 ([review](reviews/milestone-12-s4.md)) composes `desktop_observe`, `desktop_reason`, `desktop_safe_action`
+(focus and one semantic scroll step only -- never M9 S4's `SetValue`/`Select`/`Invoke`), `launch_registered_app`
+and `project_stop`, each over its own existing, unchanged M9/M10 boundary, via three new trusted resources
+(`desktop_target_ref`, `app_ref`, `project_ref`). Native desktop identity never reaches the planner: a
+`desktop_target_ref`'s backing text is re-parsed into `(worker_generation, surface_ref, surface_epoch)` only,
+and every use re-validates freshness through the EXISTING M9 calls that identity is handed to -- a recreated
+or closed window fails there exactly as a direct request already would. A `desktop_action` task's own
+`operation` field is re-checked before `desktop_safe_action`/`launch_registered_app` may ever resolve as one,
+so an S4 mutation task can never impersonate either. Reused the S3 private-summary lesson for `desktop_reason`
+proactively. Cockpit reachability: `OrchestrationPanel` gained desktop-window, application and project
+attach pickers, reusing the existing surface/app/run listings the direct panels already show. One fresh
+adversarial review found two High findings and one Low finding: untrusted window-label text reaching the
+planner's trusted context with no rule against following it (fixed: a new planner rule marks resource labels
+as untrusted display text, never an instruction); `project_stop`'s full autonomous reachability with no
+human moment specific to that decision (assessed and written up as a conscious residual -- the natural fixes
+either break "start then stop in one orchestration" or require changing an M11 S1 catalog decision outside
+this slice's remit); and a `project_ref` registration missing a fresh liveness re-check (fixed, matching the
+other two resource kinds' own pattern).
 
 ## Milestone 11 (general task orchestration): engineering and final audit complete (not merged to `main`)
 

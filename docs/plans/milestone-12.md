@@ -185,6 +185,20 @@ mutations, which stay excluded per `agent-capabilities.ts`'s own documented boun
 and `project_stop`, via `desktop_target_ref`, `app_ref` and `project_ref`. Detail in
 `docs/reviews/milestone-12-s4.md`.
 
+**Shipped:** all five composed exactly as planned. `desktop_safe_action` needed one small, deliberate schema
+extension -- `OrchestrationPlanner` gained a closed, three-value `"operation"` sub-choice (`focus`/
+`scroll_down`/`scroll_up`), valid only for this capability, since the existing `{action, capability,
+resources, reason}` schema had no other way to say which of the catalog's own two safe actions was meant; the
+scroll target control itself is still chosen entirely by trusted code, never the planner. A fresh-review pass
+found and fixed two High findings (untrusted window-label text reaching the planner's trusted context with no
+rule against following it; a `project_ref` registration missing a fresh liveness re-check other resource
+kinds already had) and identified one accepted residual, written up rather than silently overridden:
+`project_stop` has no approval gate specific to the orchestrated path, matching the direct one-click Stop
+button's own `requiresApproval: false` catalog characterization from M11 S1, but reachable without any human
+moment dedicated to that decision -- fixing it cleanly would mean either relaxing the durable graph's
+one-task-one-step invariant or revisiting an M11 S1 catalog flag, neither of which this slice's reviewed scope
+covers.
+
 ## S5 -- form/workflow composition
 
 Compose `form_prepare` and `workflow_prepare` once lineage has been proven end to end. Inputs are trusted
