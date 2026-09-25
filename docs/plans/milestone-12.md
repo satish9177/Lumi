@@ -165,6 +165,18 @@ MFA, unsupported control, ambiguous target) with a controller-authored handoff o
 re-observes and revalidates rather than assuming the handoff succeeded. No CAPTCHA automation. Detail in
 `docs/reviews/milestone-12-s3.md`.
 
+**Shipped:** `account_read` composed exactly as planned; `manual_handoff_required` reachable via the
+existing, unchanged `login_required`/`account_changed`/`account_identity_unknown`/`left_site_scope` pauses
+(MFA folds into `login_required` through the existing one-time-code/WebAuthn credential-surface signals; a
+CAPTCHA-guarded sign-in likewise, since it already shows a credential surface). `unsupported_control` and
+`ambiguous_user_choice` are **not** separately implemented: nothing in the existing, already-reviewed
+authenticated-read detection distinguishes either today, and inventing new detection to manufacture coverage
+was explicitly out of scope for this slice -- only states the existing implementation can detect reliably are
+composed. Continue re-observes through one real, forced step every time (`AgentTaskController
+.continueAccountRead`), never assumes success, and a fresh-review pass found and fixed two High findings
+(an account-private answer leaking into the orchestration-planning model's own context, and a premature
+Continue over-revoking a still-healthy grant) before this closed.
+
 ## S4 -- desktop + app + project-stop composition
 
 Compose `desktop_observe`, `desktop_reason` (preserving M9's one-snapshot/one-provider/no-broadened-disclosure
