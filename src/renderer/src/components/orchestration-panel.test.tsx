@@ -60,6 +60,19 @@ describe('the general task cockpit card', () => {
     expect(html).toContain('data-testid="orchestration-stopped"')
   })
 
+  it('offers a new start form beneath a finished or failed task, never beside a live one', () => {
+    // A concluded task can be neither continued nor stopped and stays the latest one; without this the
+    // first finished task left the cockpit with only Refresh, for good.
+    for (const status of ['SUCCEEDED', 'FAILED'] as const) {
+      const html = render({ orchestration: view({ status }) })
+      expect(html).toContain('data-testid="orchestration-active"')
+      expect(html).toContain('data-testid="orchestration-start-another"')
+      expect(html).toContain('data-testid="orchestration-create"')
+    }
+    expect(render({ orchestration: view({ status: 'RUNNING' }) })).not.toContain('data-testid="orchestration-create"')
+    expect(render({ orchestration: view({ status: 'PAUSED', pauseReason: 'approval_required' }) })).not.toContain('data-testid="orchestration-create"')
+  })
+
   it('lists each step with its status and result summary, never a raw private value', () => {
     const html = render({ orchestration: view() })
     expect(html).toContain('data-testid="orchestration-active"')

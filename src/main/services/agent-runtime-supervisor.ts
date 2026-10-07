@@ -233,7 +233,14 @@ const ALLOWED_ROUTES: ReadonlyArray<{ method: RuntimeMethod; pattern: RegExp }> 
   { method: 'GET', pattern: new RegExp(`^/workflows/${UUID_PART}$`) },
   { method: 'POST', pattern: new RegExp(`^/workflows/${UUID_PART}/(download|documents|form|stop|candidates/extract|candidates/derive)$`) },
   { method: 'POST', pattern: new RegExp(`^/workflows/${UUID_PART}/candidates/${UUID_PART}/adopt$`) },
-  { method: 'POST', pattern: new RegExp(`^/workflows/adoptions/${UUID_PART}/(approve|reject)$`) }
+  { method: 'POST', pattern: new RegExp(`^/workflows/adoptions/${UUID_PART}/(approve|reject)$`) },
+  // Milestone 11/12: the durable orchestration graph. Main's `OrchestrationController` is the only caller,
+  // one route per method. Recording state only: every capability a step runs still goes through its own
+  // route above and its own approval. No route here takes a capability's input, a path, a URL or a value.
+  { method: 'POST', pattern: /^\/orchestrations$/ },
+  { method: 'GET', pattern: /^\/orchestrations\/latest$/ },
+  { method: 'GET', pattern: new RegExp(`^/orchestrations/${UUID_PART}$`) },
+  { method: 'POST', pattern: new RegExp(`^/orchestrations/${UUID_PART}/(resources|planner-call|advance|resume|finish|stop)$`) }
 ]
 
 export function isAllowedRuntimeRoute(method: RuntimeMethod, path: string): boolean {

@@ -90,6 +90,19 @@ export function OrchestrationCard({
   const canAttachAccount = orchestration?.status === 'RUNNING' || orchestration?.status === 'PAUSED'
   const isManualHandoff = orchestration?.status === 'PAUSED' && orchestration.pauseReason === 'manual_handoff_required'
   const handoffInstruction = isManualHandoff ? orchestration?.steps.at(-1)?.pendingNote : undefined
+  // A finished or failed task can be neither continued nor stopped, and it stays the latest one, so the
+  // start form must be offered beneath it too -- otherwise the first concluded task ends the cockpit for good.
+  const concluded = orchestration?.status === 'SUCCEEDED' || orchestration?.status === 'FAILED'
+  const startForm = (label: string) => (
+    <>
+      <label>{label}
+        <input value={objective} maxLength={500} onChange={(event) => onObjectiveChange(event.target.value)} data-testid="orchestration-objective" />
+      </label>
+      <button className="primary-button" type="button" disabled={busy || !objective.trim()} onClick={onCreate} data-testid="orchestration-create">
+        Start
+      </button>
+    </>
+  )
 
   if (empty) {
     return (
@@ -102,12 +115,7 @@ export function OrchestrationCard({
         {orchestration && (
           <p className="workspace-note" data-testid="orchestration-stopped">The last task was stopped. Nothing further was done.</p>
         )}
-        <label>What should Lumi work on?
-          <input value={objective} maxLength={500} onChange={(event) => onObjectiveChange(event.target.value)} data-testid="orchestration-objective" />
-        </label>
-        <button className="primary-button" type="button" disabled={busy || !objective.trim()} onClick={onCreate} data-testid="orchestration-create">
-          Start
-        </button>
+        {startForm('What should Lumi work on?')}
         {message && <p role="alert" className="workspace-note" data-testid="orchestration-message">{message}</p>}
       </div>
     )
@@ -244,6 +252,7 @@ export function OrchestrationCard({
           ))}
         </ol>
       )}
+      {concluded && <div data-testid="orchestration-start-another">{startForm('Start another task')}</div>}
       {message && <p role="alert" className="workspace-note" data-testid="orchestration-message">{message}</p>}
     </div>
   )

@@ -247,8 +247,48 @@ function describeDisclosureEvent(event: AgentEventView): string | undefined {
   }
 }
 
+/**
+ * Action events of a tool that is not a booking. Only `commit_booking` (or an older event that carries no
+ * tool) may be worded as a booking: a page inspection or a research step must never read as
+ * "Booking submitted" or "Booking confirmed by the clinic site".
+ */
+function describeToolActionEvent(event: AgentEventView): string | undefined {
+  const tool = event.toolName
+  if (tool === undefined || tool === 'commit_booking' || !event.type.startsWith('action.')) return undefined
+  const attempt = event.attemptNumber ?? 1
+  if (tool === 'inspect_public_page') {
+    switch (event.type) {
+      case 'action.proposed': return 'Page inspection prepared — nothing opened yet'
+      case 'action.approved': return 'You approved opening this page once'
+      case 'action.rejected': return event.reason === 'task_cancelled' ? 'Page inspection withdrawn: task cancelled' : 'Page inspection declined — nothing was opened'
+      case 'action.execution_started': return `Opening the approved page, read-only (attempt ${attempt})`
+      case 'action.succeeded': return 'Page read'
+      case 'action.failed': return 'The page could not be read'
+      default: break
+    }
+  }
+  const step = tool.startsWith('research_') ? 'Research step' : tool.startsWith('authenticated_') ? 'Account-reading step' : 'Action'
+  switch (event.type) {
+    case 'action.proposed': return `${step} prepared`
+    case 'action.approved': return `You approved this ${step.toLowerCase()}`
+    case 'action.authorized': return `${step} authorised by the permission you gave`
+    case 'action.rejected': return `${step} withdrawn`
+    case 'action.execution_started': return `${step} started (attempt ${attempt})`
+    case 'action.succeeded': return `${step} completed`
+    case 'action.failed': return `${step} did not complete`
+    case 'action.reconciliation_started': return 'Checking the earlier result (not retrying)'
+    case 'action.reconciled':
+      switch (event.reconciliation?.result) {
+        case 'SUCCEEDED': return 'Check complete: it had already happened'
+        case 'FAILED': return 'Check complete: it did not happen'
+        default: return 'Check complete: still uncertain'
+      }
+    default: return undefined
+  }
+}
+
 export function describeEvent(event: AgentEventView): string {
-  const disclosure = describeDisclosureEvent(event)
+  const disclosure = describeDisclosureEvent(event) ?? describeToolActionEvent(event)
   if (disclosure) return disclosure
   switch (event.type) {
     case 'task.created': return 'Task created'

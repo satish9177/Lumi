@@ -145,6 +145,32 @@ describe('voice-era task timeline', () => {
     expect(describeEvent(at(5, 'action.rejected'))).toBe('Booking rejected')
   })
 
+  it('never words a page inspection or research step as a booking', () => {
+    const inspection = (sequence: number, type: AgentEventView['type']) => at(sequence, type, { toolName: 'inspect_public_page', attemptNumber: 1 })
+    const labels = [
+      describeEvent(inspection(2, 'action.proposed')),
+      describeEvent(inspection(4, 'action.approved')),
+      describeEvent(inspection(5, 'action.execution_started')),
+      describeEvent(inspection(6, 'action.succeeded'))
+    ]
+    expect(labels).toEqual([
+      'Page inspection prepared — nothing opened yet',
+      'You approved opening this page once',
+      'Opening the approved page, read-only (attempt 1)',
+      'Page read'
+    ])
+    const research = (type: AgentEventView['type']) => describeEvent(at(7, type, { toolName: 'research_navigate', attemptNumber: 2 }))
+    expect(research('action.execution_started')).toBe('Research step started (attempt 2)')
+    expect(research('action.succeeded')).toBe('Research step completed')
+    expect(describeEvent(at(8, 'action.authorized', { toolName: 'authenticated_observe' }))).toBe('Account-reading step authorised by the permission you gave')
+    for (const label of [...labels, research('action.proposed'), research('action.failed'), research('action.reconciliation_started')]) {
+      expect(label).not.toMatch(/booking|clinic/i)
+    }
+    // A booking, and an older event recorded before events carried a tool, keep the booking words.
+    expect(describeEvent(at(9, 'action.succeeded', { toolName: 'commit_booking' }))).toBe('Booking confirmed by the clinic site')
+    expect(describeEvent(at(10, 'action.succeeded'))).toBe('Booking confirmed by the clinic site')
+  })
+
   it('shows recorded results only until the constraints change', () => {
     const searched = [at(1, 'task.created'), at(2, 'task.search_completed', { searchResults: [slot] })]
     expect(latestSearchResults(searched)).toEqual([slot])
